@@ -1,0 +1,26 @@
+{
+    "editor.codeActionsOnSave": {
+      "source.fixAll.eslint": "explicit"
+    },
+    "eslint.validate": [
+      "javascript",
+      "javascriptreact",
+      "typescript",
+      "typescriptreact"
+    ],
+    "eslint.workingDirectories": [
+      "./src"
+    ],
+		"search.exclude": {
+			"**/node_modules/": true,
+			"**/dist/": true,
+			"**/package-lock.json": true,
+			"**/.git/": true,
+    },
+    "cSpell.words": [
+      "lambder",
+      "LMBDRAUTHID",
+      "LMBDRTOKEN"
+    ],
+  }
+  

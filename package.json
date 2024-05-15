@@ -1,0 +1,38 @@
+{
+  "name": "lambder",
+  "version": "1.0.117",
+  "description": "",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "test": "exit 1",
+    "build": "tsc",
+    "lint": "eslint . --ext .ts,.tsx --fix"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.574.0",
+    "@aws-sdk/lib-dynamodb": "^3.574.0",
+    "cookie": "^0.6.0",
+    "ejs": "^3.1.9",
+    "js-cookie": "^3.0.5",
+    "mime-types": "^2.1.35",
+    "path-to-regexp": "^6.2.1",
+    "querystring": "^0.2.1"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.136",
+    "@types/cookie": "^0.6.0",
+    "@types/ejs": "^3.1.5",
+    "@types/js-cookie": "^3.0.6",
+    "@types/mime-types": "^2.1.4",
+    "@types/node": "^20.11.27",
+    "@types/path-to-regexp": "^1.7.0",
+    "@typescript-eslint/eslint-plugin": "^7.2.0",
+    "@typescript-eslint/parser": "^7.2.0",
+    "eslint": "^8.57.0",
+    "typescript": "^5.4.2"
+  }
+}
