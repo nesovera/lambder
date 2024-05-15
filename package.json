@@ -11,7 +11,11 @@
     "lint": "eslint . --ext .ts,.tsx --fix"
   },
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nesovera/lambder.git"
+  },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.574.0",
     "@aws-sdk/lib-dynamodb": "^3.574.0",
