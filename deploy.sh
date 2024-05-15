@@ -5,7 +5,7 @@ set -e
 
 # Update the version, build the project, and publish
 rm -rf ./dist/*
-npm version patch
+npm version patch --no-git-tag-version
 npm run build
 npm publish
 
