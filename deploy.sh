@@ -10,3 +10,8 @@ npm run build
 npm publish
 
 echo "All operations completed successfully"
+
+
+# git add .
+# git commit -m ""
+# git git push -u origin main

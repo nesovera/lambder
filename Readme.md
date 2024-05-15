@@ -37,8 +37,8 @@ const lambder = new Lambder({
 
 // Enable session
 lambder.enableDdbSession({
-    tableName: "website-session",
-    tableRegion: "us-east-1",
+    tableName: "website-session", // DynamoDB Table Name
+    tableRegion: "us-east-1", // DynamoDB Table Region
     sessionSalt: "8p6Vt+4b1w3N8d/dcJ47QF3DRkp9koFg0G" // Change salt
 });
 
@@ -221,13 +221,22 @@ lambder.addModule(async (lambder: Lambder): Promise<void> => {
 You can enable session tracking by:
 
 ```typescript
-// Enable session
+// Enable sessions using a dynamodb session table
 lambder.enableDdbSession({
-    tableName: "website-session",
-    tableRegion: "us-east-1",
+    tableName: "website-session", // DynamoDB Table Name
+    tableRegion: "us-east-1", // DynamoDB Table Region
     sessionSalt: "8p6Vt+4b1w3N8d/dcJ47QF3DRkp9koFg0G" // Change salt
 });
 ```
+#### DynamoDB Session Table Structure: 
+
+Session system is enabled by storing data in a DynamoDB session table.
+
+- Primary Key: "pk"
+- Sort Key: "sk"
+- TTL Key: "expiresAt" (optional)
+
+#### Session Controller
 
 After you enable the session, you can access to the session controller:
 
@@ -235,26 +244,26 @@ After you enable the session, you can access to the session controller:
     // Create session controller:
     const sessionController = lambder.getSessionController(ctx);
 
-    /*
+    // Type for sessionController 
     sessionController: {
-        async createSession(sessionKey, data, ttlInSeconds): 
+        async createSession(sessionKey, data, ttlInSeconds): session
         // Starts a new session and persists the session data to DDB.
 
-        async fetchSession(): 
+        async fetchSession(): session
         // Fetch and validate if there is an existing session
         // This is automatically done for addSessionRoute and addSessionApi
         // Throws if session not found
 
-        async fetchSessionIfExists(): 
+        async fetchSessionIfExists(): session|null 
         // Runs fetchSession and returns the session if found. Otherwise return null
 
-        async updateSessionData(updatedData): 
+        async updateSessionData(updatedData): updatedSession
         // Updates the active sessions data and persist it to ddb.
 
-        async endSession(): Start a new session
+        async endSession(): 
         // End session and delete from DDB.
 
-        async endSessionAll(): Start a new session
+        async endSessionAll(): 
         // Ends and deletes all registered sessions for this sessionKey across all devices
     }
     */
@@ -474,12 +483,7 @@ const loadPageData = async () => {
         console.error("Failed to fetch page data:", error);
     }
 };
-
 ```
-
-## Advanced Configuration
-
-Lambder is designed to be flexible and extensible, allowing for customized behaviors through hooks and custom error handling mechanisms. 
 
 ## Contributing
 
