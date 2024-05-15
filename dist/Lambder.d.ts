@@ -20,6 +20,7 @@ export type LambderRenderContext = {
     lambdaContext: Context;
     _otherInternal: {
         isApiCall: boolean;
+        sessionCookieHeader: null | Record<"Set-Cookie", string[]>;
     };
 };
 type LambderModuleFunction = (lambderInstance: Lambder) => void | Promise<void>;
