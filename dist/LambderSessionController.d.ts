@@ -4,10 +4,12 @@ import type { LambderSessionContext } from "./LambderSessionManager.js";
 export default class LambderSessionController {
     lambderSessionManager: LambderSessionManager;
     sessionTokenCookieKey: string;
+    sessionCsrfCookieKey: string;
     ctx: LambderRenderContext;
-    constructor({ lambderSessionManager, sessionTokenCookieKey, ctx, }: {
+    constructor({ lambderSessionManager, sessionTokenCookieKey, sessionCsrfCookieKey, ctx, }: {
         lambderSessionManager: LambderSessionManager;
         sessionTokenCookieKey: string;
+        sessionCsrfCookieKey: string;
         ctx: LambderRenderContext;
     });
     private areRequestSessionTokensValid;

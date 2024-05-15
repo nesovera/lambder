@@ -36,7 +36,7 @@ export const createContext = (event, lambdaContext, apiPath) => {
         get, post, cookie,
         apiName, apiPayload,
         headers, session, lambdaContext,
-        _otherInternal: { isApiCall }
+        _otherInternal: { isApiCall, sessionCookieHeader: null }
     };
 };
 export default class Lambder {
@@ -194,6 +194,7 @@ export default class Lambder {
         return new LambderSessionController({
             lambderSessionManager: this.lambderSessionManager,
             sessionTokenCookieKey: this.sessionTokenCookieKey,
+            sessionCsrfCookieKey: this.sessionCsrfCookieKey,
             ctx,
         });
     }
@@ -247,27 +248,11 @@ export default class Lambder {
                             response = hookResponse;
                         }
                         // Apply session cookie if needed.
-                        if ((ctx.session?.sessionToken ?? null) !== (ctx?.cookie?.[this.sessionTokenCookieKey] ?? null)) {
-                            // Add session cookies
-                            if (ctx.session?.sessionToken) {
-                                response.multiValueHeaders = {
-                                    ...(response.multiValueHeaders || {}),
-                                    "Set-Cookie": [
-                                        `${this.sessionTokenCookieKey}=${ctx.session.sessionToken}; Expires=${new Date(ctx.session.expiresAt * 1000).toUTCString()}; Path=/; HttpOnly; SameSite=Lax; Secure`,
-                                        `${this.sessionCsrfCookieKey}=${ctx.session.csrfToken}; Expires=${new Date(ctx.session.expiresAt * 1000).toUTCString()}; Path=/; SameSite=Lax; Secure`,
-                                    ],
-                                };
-                            }
-                            else {
-                                // Delete session cookies
-                                response.multiValueHeaders = {
-                                    ...(response.multiValueHeaders || {}),
-                                    "Set-Cookie": [
-                                        `${this.sessionTokenCookieKey}=0; Expires=${new Date(Date.now() - 100000).toUTCString()}; Path=/; HttpOnly; SameSite=Lax; Secure`,
-                                        `${this.sessionCsrfCookieKey}=0; Expires=${new Date(Date.now() - 100000).toUTCString()}; Path=/; SameSite=Lax; Secure`,
-                                    ],
-                                };
-                            }
+                        if ((ctx._otherInternal.sessionCookieHeader)) {
+                            response.multiValueHeaders = {
+                                ...(response.multiValueHeaders || {}),
+                                ...(ctx._otherInternal.sessionCookieHeader || {}),
+                            };
                         }
                         resolve(response);
                     }
