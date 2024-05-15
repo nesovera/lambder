@@ -1,0 +1,24 @@
+{
+    "compilerOptions": {
+      "target": "ESNext",             // Compile to a modern ECMAScript version that supports modules
+      "module": "ESNext",             // Use ESNext as module code generation to support ESM
+      "declaration": true,            // Generate corresponding '.d.ts' file.
+      "outDir": "./dist",             // Redirect output structure to the 'dist' directory
+      "strict": true,                 // Enable all strict type-checking options
+      "esModuleInterop": true,        // Enables compatibility with Babel imports
+      "skipLibCheck": true,           // Skip type checking of all declaration files (*.d.ts)
+      "forceConsistentCasingInFileNames": true,
+      "moduleResolution": "node",     // Module resolution strategy to use
+      "resolveJsonModule": true,      // Allow importing of '.json' files
+      "isolatedModules": true,        // Ensure each file can be safely transpiled without relying on other imports
+      "baseUrl": ".",                 // Base directory to resolve non-relative module names
+      "paths": {                      // Specify paths for imports
+        "*": ["node_modules/*"]
+      },
+      "lib": ["ESNext", "DOM"],       // Specify library files to be included in the compilation
+      "types": ["node"]               // Type definitions to be included
+    },
+    "include": ["src/**/*"],          // Include all files in the src directory
+    "exclude": ["node_modules", "dist"]  // Exclude 'node_modules' directory and 'dist' directory
+  }
+  
