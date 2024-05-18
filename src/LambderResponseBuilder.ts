@@ -3,6 +3,7 @@ import * as path from "path";
 import ejs from "ejs";
 import mimeTypeResolver from "mime-types";
 import LambderUtils from "./LambderUtils.js";
+import { LambderRenderContext } from "./Lambder.js";
 
 const convertToMultiHeader = (
     headers: Record<string, string|string[]> | undefined
@@ -29,6 +30,7 @@ export type LambderApiResponseConfig = {
     notAuthorized?: boolean; 
     message?: any; 
     errorMessage?: any;
+    logList?: any[];
 }
 
 
@@ -41,20 +43,23 @@ export default class LambderResponseBuilder {
     private publicPath: string;
     private apiVersion: string|null;
     private lambderUtils: LambderUtils;
+    private ctx?: LambderRenderContext;
 
     constructor(
-        { isCorsEnabled, publicPath, apiVersion, lambderUtils }: 
+        { isCorsEnabled, publicPath, apiVersion, lambderUtils, ctx }: 
         { 
             isCorsEnabled: boolean, 
             publicPath: string,
             apiVersion?: string|null,
-            lambderUtils: LambderUtils
+            lambderUtils: LambderUtils,
+            ctx?: LambderRenderContext,
         }
     ){
         this.isCorsEnabled = isCorsEnabled;
         this.publicPath = publicPath;
         this.apiVersion = apiVersion ?? null;
         this.lambderUtils = lambderUtils;
+        this.ctx = ctx;
     };
 
     private readPublicFileSync(filePath: string){
@@ -71,6 +76,29 @@ export default class LambderResponseBuilder {
         console.log("checkPublicFileExist", { filePath, publicPath, absolutePath });
         if(!absolutePath.includes(publicPath)){ return false; }
         return fs.existsSync(absolutePath) && fs.statSync(absolutePath).isFile();
+    };
+
+    addHeader(key: string, value: string){
+        if(!this.ctx) throw new Error(".addHeader function is not available within this hook"); 
+        else{
+            this.ctx._otherInternal.addHeaderFnAccumulator.push({ key, value });
+        }
+    };
+
+    setHeader(key: string, value: string|string[]){
+        if(!this.ctx) throw new Error(".setHeader function is not available within this hook"); 
+        else{
+            this.ctx._otherInternal.addHeaderFnAccumulator = this.ctx._otherInternal.addHeaderFnAccumulator
+                .filter(header=>header.key !== key);
+            this.ctx._otherInternal.setHeaderFnAccumulator.push({ key, value });
+        }
+    };
+    
+    logToApiResponse(input:any){
+        if(!this.ctx) throw new Error(".logToResponse function is not available within this hook"); 
+        else{
+            this.ctx._otherInternal.logToApiResponseAccumulator.push(input);
+        }
     };
 
 
@@ -210,13 +238,14 @@ export default class LambderResponseBuilder {
         payload: T | null, 
         {
             versionExpired, sessionExpired, notAuthorized, 
-            message = null, errorMessage = null, 
+            message, errorMessage, logList,
         }: LambderApiResponseConfig = {
             versionExpired: undefined, sessionExpired: undefined, notAuthorized: undefined, 
-            message: null, errorMessage: null, 
+            message: null, errorMessage: null, logList: undefined
         }, 
         headers?: Record<string, string|string[]>,
     ): LambderResolverResponse {
+        const finalLogList = logList || this.ctx?._otherInternal?.logToApiResponseAccumulator;
         return this.json({ 
             apiVersion: this.apiVersion,
             payload,
@@ -225,6 +254,7 @@ export default class LambderResponseBuilder {
             ...(notAuthorized ? {notAuthorized} : {}),
             ...(message ? {message} : {}),
             ...(errorMessage ? {errorMessage} : {}),
+            ...(finalLogList?.length ? {logList: finalLogList} : {}),
         }, headers);
     };
 

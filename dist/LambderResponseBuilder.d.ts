@@ -1,4 +1,5 @@
 import LambderUtils from "./LambderUtils.js";
+import { LambderRenderContext } from "./Lambder.js";
 export type LambderResolverResponse = {
     statusCode: number;
     multiValueHeaders?: Record<string, string[]>;
@@ -11,6 +12,7 @@ export type LambderApiResponseConfig = {
     notAuthorized?: boolean;
     message?: any;
     errorMessage?: any;
+    logList?: any[];
 };
 export type LambderApiResponse<T> = LambderApiResponseConfig & {
     payload?: T | null;
@@ -20,14 +22,19 @@ export default class LambderResponseBuilder {
     private publicPath;
     private apiVersion;
     private lambderUtils;
-    constructor({ isCorsEnabled, publicPath, apiVersion, lambderUtils }: {
+    private ctx?;
+    constructor({ isCorsEnabled, publicPath, apiVersion, lambderUtils, ctx }: {
         isCorsEnabled: boolean;
         publicPath: string;
         apiVersion?: string | null;
         lambderUtils: LambderUtils;
+        ctx?: LambderRenderContext;
     });
     private readPublicFileSync;
     private checkPublicFileExist;
+    addHeader(key: string, value: string): void;
+    setHeader(key: string, value: string | string[]): void;
+    logToApiResponse(input: any): void;
     raw(param: LambderResolverResponse): LambderResolverResponse;
     json(data: Record<string, any>, headers?: Record<string, string | string[]>): LambderResolverResponse;
     xml(data: string): LambderResolverResponse;
@@ -39,5 +46,5 @@ export default class LambderResponseBuilder {
     file(filePath: string, headers?: Record<string, string | string[]>, fallbackFilePath?: string): LambderResolverResponse;
     ejsTemplate(template: string, pageData: Record<string, any>, headers?: Record<string, string | string[]>): Promise<LambderResolverResponse>;
     ejsFile(filePath: string, pageData: Record<string, any>, headers?: Record<string, string | string[]>): Promise<LambderResolverResponse>;
-    api<T = any>(payload: T | null, { versionExpired, sessionExpired, notAuthorized, message, errorMessage, }?: LambderApiResponseConfig, headers?: Record<string, string | string[]>): LambderResolverResponse;
+    api<T = any>(payload: T | null, { versionExpired, sessionExpired, notAuthorized, message, errorMessage, logList, }?: LambderApiResponseConfig, headers?: Record<string, string | string[]>): LambderResolverResponse;
 }

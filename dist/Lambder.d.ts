@@ -20,7 +20,15 @@ export type LambderRenderContext = {
     lambdaContext: Context;
     _otherInternal: {
         isApiCall: boolean;
-        sessionCookieHeader: null | Record<"Set-Cookie", string[]>;
+        setHeaderFnAccumulator: {
+            key: string;
+            value: string | string[];
+        }[];
+        addHeaderFnAccumulator: {
+            key: string;
+            value: string;
+        }[];
+        logToApiResponseAccumulator: any[];
     };
 };
 type LambderModuleFunction = (lambderInstance: Lambder) => void | Promise<void>;
@@ -30,7 +38,7 @@ type HookCreatedFunction = (lambderInstance: Lambder) => Promise<void>;
 type HookBeforeRenderFunction = (ctx: LambderRenderContext, resolver: LambderResolver) => LambderRenderContext | Error | Promise<LambderRenderContext | Error>;
 type HookAfterRenderFunction = (ctx: LambderRenderContext, resolver: LambderResolver, response: LambderResolverResponse) => LambderResolverResponse | Error | Promise<LambderResolverResponse | Error>;
 type HookFallbackFunction = (ctx: LambderRenderContext, resolver: LambderResolver) => void | Promise<void>;
-type GlobalErrorHandlerFunction = (err: Error, ctx: LambderRenderContext | null, response: LambderResponseBuilder) => LambderResolverResponse | Promise<LambderResolverResponse>;
+type GlobalErrorHandlerFunction = (err: Error, ctx: LambderRenderContext | null, response: LambderResponseBuilder, logListToApiResponse?: any[]) => LambderResolverResponse | Promise<LambderResolverResponse>;
 type RouteFallbackHandlerFunction = (ctx: LambderRenderContext, resolver: LambderResolver) => LambderResolverResponse;
 type ApiFallbackHandlerFunction = (ctx: LambderRenderContext, resolver: LambderResolver) => LambderResolverResponse;
 export declare const createContext: (event: APIGatewayProxyEvent, lambdaContext: Context, apiPath: string) => LambderRenderContext;
