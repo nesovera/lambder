@@ -42,12 +42,8 @@ export default class LambderSessionController {
 
     async createSession (sessionKey: string, data?: any, ttlInSeconds?: number): Promise<LambderSessionContext> {
         const session = await this.lambderSessionManager.createSession(sessionKey, data, ttlInSeconds);
-        this.ctx._otherInternal.sessionCookieHeader = {
-            "Set-Cookie": [
-                `${this.sessionTokenCookieKey}=${session.sessionToken}; Expires=${new Date(session.expiresAt * 1000).toUTCString()}; Path=/; HttpOnly; SameSite=Lax; Secure`,
-                `${this.sessionCsrfCookieKey}=${session.csrfToken}; Expires=${new Date(session.expiresAt * 1000).toUTCString()}; Path=/; SameSite=Lax; Secure`,
-            ],
-        };
+        this.ctx._otherInternal.addHeaderFnAccumulator.push({ key: "Set-Cookie", value: `${this.sessionTokenCookieKey}=${session.sessionToken}; Expires=${new Date(session.expiresAt * 1000).toUTCString()}; Path=/; HttpOnly; SameSite=Lax; Secure` });
+        this.ctx._otherInternal.addHeaderFnAccumulator.push({ key: "Set-Cookie", value: `${this.sessionCsrfCookieKey}=${session.csrfToken}; Expires=${new Date(session.expiresAt * 1000).toUTCString()}; Path=/; SameSite=Lax; Secure` });
         this.ctx.session = session;
         return this.ctx.session;
     };
@@ -94,24 +90,16 @@ export default class LambderSessionController {
     async endSession (){
         if(!this.ctx.session) throw new Error("Session not found.");
         await this.lambderSessionManager.deleteSession(this.ctx.session);
-        this.ctx._otherInternal.sessionCookieHeader = {
-            "Set-Cookie": [
-                `${this.sessionTokenCookieKey}=0; Expires=${new Date(Date.now() - 100000).toUTCString()}; Path=/; HttpOnly; SameSite=Lax; Secure`,
-                `${this.sessionCsrfCookieKey}=0; Expires=${new Date(Date.now() - 100000).toUTCString()}; Path=/; SameSite=Lax; Secure`,
-            ],
-        };
+        this.ctx._otherInternal.addHeaderFnAccumulator.push({ key: "Set-Cookie", value: `${this.sessionTokenCookieKey}=0; Expires=${new Date(Date.now() - 100000).toUTCString()}; Path=/; HttpOnly; SameSite=Lax; Secure` });
+        this.ctx._otherInternal.addHeaderFnAccumulator.push({ key: "Set-Cookie", value: `${this.sessionCsrfCookieKey}=0; Expires=${new Date(Date.now() - 100000).toUTCString()}; Path=/; SameSite=Lax; Secure` });
         this.ctx.session = null
     };
 
     async endSessionAll (){
         if(!this.ctx.session) throw new Error("Session not found.");
         await this.lambderSessionManager.deleteSessionAll(this.ctx.session);
-        this.ctx._otherInternal.sessionCookieHeader = {
-            "Set-Cookie": [
-                `${this.sessionTokenCookieKey}=0; Expires=${new Date(Date.now() - 100000).toUTCString()}; Path=/; HttpOnly; SameSite=Lax; Secure`,
-                `${this.sessionCsrfCookieKey}=0; Expires=${new Date(Date.now() - 100000).toUTCString()}; Path=/; SameSite=Lax; Secure`,
-            ],
-        };
+        this.ctx._otherInternal.addHeaderFnAccumulator.push({ key: "Set-Cookie", value: `${this.sessionTokenCookieKey}=0; Expires=${new Date(Date.now() - 100000).toUTCString()}; Path=/; HttpOnly; SameSite=Lax; Secure` });
+        this.ctx._otherInternal.addHeaderFnAccumulator.push({ key: "Set-Cookie", value: `${this.sessionCsrfCookieKey}=0; Expires=${new Date(Date.now() - 100000).toUTCString()}; Path=/; SameSite=Lax; Secure` });
         this.ctx.session = null
     };
 };

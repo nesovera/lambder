@@ -130,6 +130,11 @@ export default class LambderCaller {
                     activeFetchList: this.fetchTrackerList.filter(v=>!v.done),
                 });
             }
+            if(data && data.logList?.length){
+                for(const record of data.logList){
+                    console.log("LogToApiResponse:", record);
+                }
+            }
             if(data && data.versionExpired){
                 if(this.versionExpiredHandler){
                     await this.versionExpiredHandler();

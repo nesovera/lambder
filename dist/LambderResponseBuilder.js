@@ -13,11 +13,13 @@ export default class LambderResponseBuilder {
     publicPath;
     apiVersion;
     lambderUtils;
-    constructor({ isCorsEnabled, publicPath, apiVersion, lambderUtils }) {
+    ctx;
+    constructor({ isCorsEnabled, publicPath, apiVersion, lambderUtils, ctx }) {
         this.isCorsEnabled = isCorsEnabled;
         this.publicPath = publicPath;
         this.apiVersion = apiVersion ?? null;
         this.lambderUtils = lambderUtils;
+        this.ctx = ctx;
     }
     ;
     readPublicFileSync(filePath) {
@@ -38,6 +40,32 @@ export default class LambderResponseBuilder {
             return false;
         }
         return fs.existsSync(absolutePath) && fs.statSync(absolutePath).isFile();
+    }
+    ;
+    addHeader(key, value) {
+        if (!this.ctx)
+            throw new Error(".addHeader function is not available within this hook");
+        else {
+            this.ctx._otherInternal.addHeaderFnAccumulator.push({ key, value });
+        }
+    }
+    ;
+    setHeader(key, value) {
+        if (!this.ctx)
+            throw new Error(".setHeader function is not available within this hook");
+        else {
+            this.ctx._otherInternal.addHeaderFnAccumulator = this.ctx._otherInternal.addHeaderFnAccumulator
+                .filter(header => header.key !== key);
+            this.ctx._otherInternal.setHeaderFnAccumulator.push({ key, value });
+        }
+    }
+    ;
+    logToApiResponse(input) {
+        if (!this.ctx)
+            throw new Error(".logToResponse function is not available within this hook");
+        else {
+            this.ctx._otherInternal.logToApiResponseAccumulator.push(input);
+        }
     }
     ;
     raw(param) {
@@ -141,10 +169,11 @@ export default class LambderResponseBuilder {
         });
     }
     ;
-    api(payload, { versionExpired, sessionExpired, notAuthorized, message = null, errorMessage = null, } = {
+    api(payload, { versionExpired, sessionExpired, notAuthorized, message, errorMessage, logList, } = {
         versionExpired: undefined, sessionExpired: undefined, notAuthorized: undefined,
-        message: null, errorMessage: null,
+        message: null, errorMessage: null, logList: undefined
     }, headers) {
+        const finalLogList = logList || this.ctx?._otherInternal?.logToApiResponseAccumulator;
         return this.json({
             apiVersion: this.apiVersion,
             payload,
@@ -153,6 +182,7 @@ export default class LambderResponseBuilder {
             ...(notAuthorized ? { notAuthorized } : {}),
             ...(message ? { message } : {}),
             ...(errorMessage ? { errorMessage } : {}),
+            ...(finalLogList?.length ? { logList: finalLogList } : {}),
         }, headers);
     }
     ;
