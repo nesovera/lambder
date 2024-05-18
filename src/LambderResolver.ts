@@ -1,3 +1,4 @@
+import type { LambderRenderContext } from "./Lambder.js";
 import LambderResponseBuilder, { LambderResolverResponse } from "./LambderResponseBuilder.js";
 import LambderUtils from "./LambderUtils.js";
 
@@ -24,17 +25,18 @@ export default class LambderResolver extends LambderResponseBuilder {
     public die: DieResolverMethods;
 
     constructor(
-        { isCorsEnabled, publicPath, apiVersion, lambderUtils, resolve, reject }: 
+        { isCorsEnabled, publicPath, apiVersion, lambderUtils, ctx, resolve, reject }: 
         { 
             isCorsEnabled: boolean, 
             publicPath: string,
             apiVersion?: string|null,
-            lambderUtils: LambderUtils
+            lambderUtils: LambderUtils,
+            ctx: LambderRenderContext,
             resolve: (response: LambderResolverResponse) => void,
             reject: (err: Error) => void,
         }
     ){
-        super({ isCorsEnabled, publicPath, apiVersion, lambderUtils });
+        super({ isCorsEnabled, publicPath, apiVersion, lambderUtils, ctx, });
         this.resolve = resolve;
         this.reject = reject;
 

@@ -36,7 +36,12 @@ export const createContext = (event, lambdaContext, apiPath) => {
         get, post, cookie,
         apiName, apiPayload,
         headers, session, lambdaContext,
-        _otherInternal: { isApiCall, sessionCookieHeader: null }
+        _otherInternal: {
+            isApiCall,
+            setHeaderFnAccumulator: [],
+            addHeaderFnAccumulator: [],
+            logToApiResponseAccumulator: [],
+        }
     };
 };
 export default class Lambder {
@@ -207,13 +212,13 @@ export default class Lambder {
         });
     }
     ;
-    getResolver(resolve, reject) {
+    getResolver(ctx, resolve, reject) {
         return new LambderResolver({
             isCorsEnabled: this.isCorsEnabled,
             publicPath: this.publicPath,
             apiVersion: this.apiVersion,
             lambderUtils: this.utils,
-            resolve, reject
+            ctx, resolve, reject
         });
     }
     ;
@@ -224,7 +229,7 @@ export default class Lambder {
             eventRenderContext = ctx;
             return await new Promise(async (resolve, reject) => {
                 try {
-                    const resolver = this.getResolver(resolve, reject);
+                    const resolver = this.getResolver(ctx, resolve, reject);
                     if (ctx.method === "OPTIONS")
                         return resolver.cors();
                     const firstMatchedAction = this.actionList.find(action => action.conditionFn(ctx));
@@ -247,12 +252,14 @@ export default class Lambder {
                             }
                             response = hookResponse;
                         }
-                        // Apply session cookie if needed.
-                        if ((ctx._otherInternal.sessionCookieHeader)) {
-                            response.multiValueHeaders = {
-                                ...(response.multiValueHeaders || {}),
-                                ...(ctx._otherInternal.sessionCookieHeader || {}),
-                            };
+                        // Apply setHeader, addHeader values.
+                        response.multiValueHeaders = response.multiValueHeaders || {};
+                        for (const header of ctx._otherInternal.setHeaderFnAccumulator) {
+                            response.multiValueHeaders[header.key] = Array.isArray(header.value) ? header.value : [header.value];
+                        }
+                        for (const header of ctx._otherInternal.addHeaderFnAccumulator) {
+                            response.multiValueHeaders[header.key] = response.multiValueHeaders[header.key] || [];
+                            response.multiValueHeaders[header.key].push(header.value);
                         }
                         resolve(response);
                     }
@@ -270,7 +277,7 @@ export default class Lambder {
             if (this.globalErrorHandler) {
                 const wrappedError = err instanceof Error ? err : new Error("Error: " + String(err));
                 const responseBuilder = this.getResponseBuilder();
-                return this.globalErrorHandler(wrappedError, eventRenderContext, responseBuilder);
+                return this.globalErrorHandler(wrappedError, eventRenderContext, responseBuilder, eventRenderContext?._otherInternal.logToApiResponseAccumulator);
             }
             return { statusCode: 500, body: "Internal Server Error.", };
         }

@@ -3,8 +3,8 @@ export default class LambderResolver extends LambderResponseBuilder {
     resolve;
     reject;
     die;
-    constructor({ isCorsEnabled, publicPath, apiVersion, lambderUtils, resolve, reject }) {
-        super({ isCorsEnabled, publicPath, apiVersion, lambderUtils });
+    constructor({ isCorsEnabled, publicPath, apiVersion, lambderUtils, ctx, resolve, reject }) {
+        super({ isCorsEnabled, publicPath, apiVersion, lambderUtils, ctx, });
         this.resolve = resolve;
         this.reject = reject;
         this.die = {
