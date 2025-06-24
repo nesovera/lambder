@@ -199,7 +199,11 @@ export default class LambderResponseBuilder {
         }
         const mimeType = mimeTypeResolver.lookup(filePath);
         const body = this.readPublicFileSync(filePath);
-        const bodyBase64 = Buffer.from(body).toString("base64");
+        if (body === "forbidden-public-path") {
+            throw { error: "Forbidden public path: " + filePath };
+        }
+        const bodyBuffer: Buffer =  Buffer.isBuffer(body) ? body : Buffer.from(body);
+        const bodyBase64 = bodyBuffer.toString("base64");
         console.log("bodyBase64.length",bodyBase64.length);
         return this.fileBase64(bodyBase64, mimeType || "", headers);
     };
@@ -256,6 +260,41 @@ export default class LambderResponseBuilder {
             ...(errorMessage ? {errorMessage} : {}),
             ...(finalLogList?.length ? {logList: finalLogList} : {}),
         }, headers);
+    };
+
+    private apiBinary<T=any>(
+        payload: T | null, 
+        {
+            versionExpired, sessionExpired, notAuthorized, 
+            message, errorMessage, logList,
+        }: LambderApiResponseConfig = {
+            versionExpired: undefined, sessionExpired: undefined, notAuthorized: undefined, 
+            message: null, errorMessage: null, logList: undefined
+        }, 
+        headers?: Record<string, string|string[]>,
+    ): LambderResolverResponse {
+        const finalLogList = logList || this.ctx?._otherInternal?.logToApiResponseAccumulator;
+        const result = { 
+            apiVersion: this.apiVersion,
+            payload,
+            ...(versionExpired ? {versionExpired} : {}),
+            ...(sessionExpired ? {sessionExpired} : {}),
+            ...(notAuthorized ? {notAuthorized} : {}),
+            ...(message ? {message} : {}),
+            ...(errorMessage ? {errorMessage} : {}),
+            ...(finalLogList?.length ? {logList: finalLogList} : {}),
+        };
+
+        return this.raw({ 
+            statusCode: 200, 
+            isBase64Encoded: true, 
+            multiValueHeaders: { 
+                "Content-Type": ["application/lambder-json-stream"],
+                "Content-Encoding": ["gzip"],
+                ...convertToMultiHeader(headers) 
+            }, 
+            body: Buffer.from(JSON.stringify(result)).toString("base64"), 
+        });
     };
 
 };

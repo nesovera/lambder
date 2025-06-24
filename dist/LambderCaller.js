@@ -51,10 +51,16 @@ export default class LambderCaller {
                 credentials: 'same-origin', redirect: 'follow', referrerPolicy: 'origin',
                 headers: { 'Content-Type': 'application/json', ...(headers || {}) },
                 body: JSON.stringify({ apiName, version, token, siteHost, payload, }),
-            }).then(res => {
+            }).then(async (res) => {
                 if (res.status >= 500)
                     throw new Error("Request failed: " + res.status + " - " + res.statusText);
-                return res.json();
+                if (res.headers.get("Content-Type")?.includes("application/lambder-json-stream")) {
+                    const decompressed = res.json();
+                    return decompressed;
+                }
+                else {
+                    return res.json();
+                }
             });
             fetchTracker.done = true;
             if (this.fetchEndedHandler) {
@@ -95,7 +101,7 @@ export default class LambderCaller {
                     await this.notAuthorizedHandler();
                 }
                 else if (this.errorHandler) {
-                    await this.errorHandler(new Error("Version Expired; Please refresh;"));
+                    await this.errorHandler(new Error("Not Authorized;"));
                 }
                 return null;
             }
