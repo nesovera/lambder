@@ -33,7 +33,7 @@ export const createContext = (event, lambdaContext, apiPath) => {
     const apiPayload = isApiCall ? post.payload : null;
     return {
         host, path, pathParams, method,
-        get, post, cookie,
+        get, post, cookie, event,
         apiName, apiPayload,
         headers, session, lambdaContext,
         _otherInternal: {
@@ -72,7 +72,7 @@ export default class Lambder {
         };
         this.utils = new LambderUtils({ ejsPath });
     }
-    setIsCorsEnabled(isCorsEnabled) {
+    enableCors(isCorsEnabled) {
         this.isCorsEnabled = isCorsEnabled;
     }
     enableDdbSession({ tableName, tableRegion, sessionSalt }, { partitionKey, sortKey } = { partitionKey: "pk", sortKey: "sk" }) {

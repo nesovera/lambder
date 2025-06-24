@@ -17,6 +17,7 @@ export type LambderRenderContext = {
     apiPayload: any;
     headers: APIGatewayProxyEventHeaders;
     session: LambderSessionContext | null;
+    event: APIGatewayProxyEvent;
     lambdaContext: Context;
     _otherInternal: {
         isApiCall: boolean;
@@ -63,7 +64,7 @@ export default class Lambder {
         ejsPath?: string;
         apiVersion?: string;
     });
-    setIsCorsEnabled(isCorsEnabled: boolean): void;
+    enableCors(isCorsEnabled: boolean): void;
     enableDdbSession({ tableName, tableRegion, sessionSalt }: {
         tableName: string;
         tableRegion: string;

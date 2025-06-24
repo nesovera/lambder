@@ -43,7 +43,7 @@ lambder.enableDdbSession({
 });
 
 // Enable Cors
-lambder.setIsCorsEnabled(true);
+lambder.enableCors(true);
 
 // Define a simple api
 lambder.addApi("getCompanyPage", async ({ apiPayload }, res) => {

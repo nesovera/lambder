@@ -47,4 +47,5 @@ export default class LambderResponseBuilder {
     ejsTemplate(template: string, pageData: Record<string, any>, headers?: Record<string, string | string[]>): Promise<LambderResolverResponse>;
     ejsFile(filePath: string, pageData: Record<string, any>, headers?: Record<string, string | string[]>): Promise<LambderResolverResponse>;
     api<T = any>(payload: T | null, { versionExpired, sessionExpired, notAuthorized, message, errorMessage, logList, }?: LambderApiResponseConfig, headers?: Record<string, string | string[]>): LambderResolverResponse;
+    private apiBinary;
 }
