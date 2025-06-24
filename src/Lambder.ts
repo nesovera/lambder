@@ -23,6 +23,7 @@ export type LambderRenderContext = {
     apiPayload: any;
     headers: APIGatewayProxyEventHeaders;
     session: LambderSessionContext|null;
+    event: APIGatewayProxyEvent;
     lambdaContext: Context;
     _otherInternal: { 
         isApiCall: boolean,
@@ -78,7 +79,7 @@ export const createContext = (
 
     return { 
         host, path, pathParams, method, 
-        get, post, cookie, 
+        get, post, cookie, event,
         apiName, apiPayload, 
         headers, session, lambdaContext, 
         _otherInternal: { 
@@ -133,7 +134,7 @@ export default class Lambder {
         this.utils = new LambderUtils({ ejsPath });
     }
 
-    setIsCorsEnabled(isCorsEnabled: boolean){
+    enableCors(isCorsEnabled: boolean){
         this.isCorsEnabled = isCorsEnabled;
     }
 
