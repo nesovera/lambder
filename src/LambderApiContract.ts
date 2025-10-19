@@ -26,19 +26,31 @@
 
 /**
  * Base type for API contracts
+ * 
+ * Use this as a constraint when defining your API contract:
+ * 
+ * export type MyApiContract = {
+ *     echo: { input: { message: string }, output: { echo: string } }
+ * } satisfies ApiContract;
+ * 
+ * Or for backward compatibility without satisfies:
+ * 
+ * export type MyApiContract = ApiContract & {
+ *     echo: { input: { message: string }, output: { echo: string } }
+ * }
  */
-export type ApiContract = {
-    [apiName: string]: {
-        input: any;
-        output: any;
-    }
-}
+export type ApiContractShape = Record<string, {
+    input: any;
+    output: any;
+}>
+
+export type ApiContract<T extends ApiContractShape> = T;
 
 /**
  * Extract input type from contract for a specific API
  */
 export type ApiInput<
-    TContract extends ApiContract,
+    TContract extends ApiContractShape,
     TApiName extends keyof TContract
 > = TContract[TApiName]['input'];
 
@@ -46,6 +58,6 @@ export type ApiInput<
  * Extract output type from contract for a specific API
  */
 export type ApiOutput<
-    TContract extends ApiContract,
+    TContract extends ApiContractShape,
     TApiName extends keyof TContract
 > = TContract[TApiName]['output'];

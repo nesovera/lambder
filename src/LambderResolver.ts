@@ -1,28 +1,36 @@
 import type { LambderRenderContext } from "./Lambder.js";
 import LambderResponseBuilder, { LambderResolverResponse } from "./LambderResponseBuilder.js";
 import LambderUtils from "./LambderUtils.js";
+import type { ApiContractShape, ApiOutput } from "./LambderApiContract.js";
 
 type MethodType<T, M extends keyof T> = T[M] extends (...args: any[]) => any ? T[M] : never;
 
-interface DieResolverMethods {
-    raw: MethodType<LambderResponseBuilder, 'raw'>;
-    json: MethodType<LambderResponseBuilder, 'json'>;
-    xml: MethodType<LambderResponseBuilder, 'xml'>;
-    html: MethodType<LambderResponseBuilder, 'html'>;
-    status301: MethodType<LambderResponseBuilder, 'status301'>;
-    status404: MethodType<LambderResponseBuilder, 'status404'>;
-    cors: MethodType<LambderResponseBuilder, 'cors'>;
-    fileBase64: MethodType<LambderResponseBuilder, 'fileBase64'>;
-    file: MethodType<LambderResponseBuilder, 'file'>;
-    ejsFile: MethodType<LambderResponseBuilder, 'ejsFile'>;
-    ejsTemplate: MethodType<LambderResponseBuilder, 'ejsTemplate'>;
-    api: MethodType<LambderResponseBuilder, 'api'>;
+interface DieResolverMethods<TContract extends ApiContractShape, TApiName extends keyof TContract & string> {
+    raw: MethodType<LambderResponseBuilder<TContract>, 'raw'>;
+    json: MethodType<LambderResponseBuilder<TContract>, 'json'>;
+    xml: MethodType<LambderResponseBuilder<TContract>, 'xml'>;
+    html: MethodType<LambderResponseBuilder<TContract>, 'html'>;
+    status301: MethodType<LambderResponseBuilder<TContract>, 'status301'>;
+    status404: MethodType<LambderResponseBuilder<TContract>, 'status404'>;
+    cors: MethodType<LambderResponseBuilder<TContract>, 'cors'>;
+    fileBase64: MethodType<LambderResponseBuilder<TContract>, 'fileBase64'>;
+    file: MethodType<LambderResponseBuilder<TContract>, 'file'>;
+    ejsFile: MethodType<LambderResponseBuilder<TContract>, 'ejsFile'>;
+    ejsTemplate: MethodType<LambderResponseBuilder<TContract>, 'ejsTemplate'>;
+    api: (
+        payload: ApiOutput<TContract, TApiName> | null,
+        config?: Parameters<LambderResponseBuilder<TContract>['api']>[1],
+        headers?: Parameters<LambderResponseBuilder<TContract>['api']>[2]
+    ) => LambderResolverResponse;
 }
 
-export default class LambderResolver extends LambderResponseBuilder {
+export default class LambderResolver<
+    TContract extends ApiContractShape = any,
+    TApiName extends keyof TContract & string = any
+> extends LambderResponseBuilder<TContract> {
     public resolve: (response: LambderResolverResponse) => void;
     public reject: (err: Error) => void;
-    public die: DieResolverMethods;
+    public die: DieResolverMethods<TContract, TApiName>;
 
     constructor(
         { isCorsEnabled, publicPath, apiVersion, lambderUtils, ctx, resolve, reject }: 
@@ -31,7 +39,7 @@ export default class LambderResolver extends LambderResponseBuilder {
             publicPath: string,
             apiVersion?: string|null,
             lambderUtils: LambderUtils,
-            ctx: LambderRenderContext,
+            ctx: LambderRenderContext<any>,
             resolve: (response: LambderResolverResponse) => void,
             reject: (err: Error) => void,
         }
@@ -54,6 +62,15 @@ export default class LambderResolver extends LambderResponseBuilder {
             ejsTemplate: this.autoResolvePromise(this.ejsTemplate),
             api: this.autoResolve(this.api),
         };
+    }
+
+    // Override api method with proper typing
+    api(
+        payload: ApiOutput<TContract, TApiName> | null,
+        config?: Parameters<LambderResponseBuilder<TContract>['api']>[1],
+        headers?: Parameters<LambderResponseBuilder<TContract>['api']>[2]
+    ): LambderResolverResponse {
+        return super.api(payload, config, headers);
     }
 
     private autoResolve<

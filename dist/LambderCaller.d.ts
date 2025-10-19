@@ -1,5 +1,5 @@
 import { LambderApiResponse } from './LambderResponseBuilder';
-import type { ApiContract } from './LambderApiContract';
+import type { ApiContractShape } from './LambderApiContract';
 type VoidFunction = () => void | Promise<void>;
 type FetchTracker = {
     apiName: string;
@@ -22,7 +22,7 @@ type FetchEndEventHandler = (params: {
 }) => void | Promise<void>;
 type ErrorHandler = (err: Error) => void | Promise<void>;
 type MessageHandler = (message: any) => void | Promise<void>;
-export default class LambderCaller<TContract extends ApiContract = any> {
+export default class LambderCaller<TContract extends ApiContractShape = any> {
     private isCorsEnabled;
     private apiPath;
     private apiVersion?;
