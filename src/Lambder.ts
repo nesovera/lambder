@@ -8,6 +8,7 @@ import LambderResponseBuilder, { LambderResolverResponse } from "./LambderRespon
 import LambderUtils from "./LambderUtils.js";
 import LambderSessionManager, { type LambderSessionContext } from "./LambderSessionManager.js";
 import LambderSessionController from "./LambderSessionController.js";
+import type { ApiContract } from "./LambderApiContract.js";
 
 type Path = `/${string}`;
 
@@ -92,7 +93,7 @@ export const createContext = (
 }
 
 
-export default class Lambder {
+export default class Lambder<TContract extends ApiContract = any> {
     public apiPath: string;
     public apiVersion: null|string;
     public isCorsEnabled: boolean = false;
@@ -238,6 +239,25 @@ export default class Lambder {
         });
     };
     
+    // Overload for untyped API with RegExp or function
+    addApi(
+        apiName: ConditionFunction|RegExp,
+        actionFn: ActionFunction
+    ):void;
+    // Overload for typed API with string name (must come before untyped string overload)
+    addApi<TApiName extends keyof TContract & string>(
+        apiName: TApiName,
+        actionFn: (
+            ctx: LambderRenderContext & { apiPayload: TContract[TApiName]['input'] },
+            resolver: LambderResolver
+        ) => LambderResolverResponse|Promise<LambderResolverResponse>
+    ):void;
+    // Overload for untyped API with string (backward compatibility, must be last)
+    addApi(
+        apiName: string,
+        actionFn: ActionFunction
+    ):void;
+    // Implementation
     addApi(apiName: string|ConditionFunction|RegExp, actionFn: ActionFunction):void{
         this.actionList.push({ 
             conditionFn: (ctx:LambderRenderContext) =>  (
@@ -251,6 +271,25 @@ export default class Lambder {
         });
     };
 
+    // Overload for untyped session API with RegExp or function
+    addSessionApi(
+        apiName: ConditionFunction|RegExp,
+        actionFn: ActionFunction
+    ):void;
+    // Overload for typed session API with string name (must come before untyped string overload)
+    addSessionApi<TApiName extends keyof TContract & string>(
+        apiName: TApiName,
+        actionFn: (
+            ctx: LambderRenderContext & { apiPayload: TContract[TApiName]['input'] },
+            resolver: LambderResolver
+        ) => LambderResolverResponse|Promise<LambderResolverResponse>
+    ):void;
+    // Overload for untyped session API with string (backward compatibility, must be last)
+    addSessionApi(
+        apiName: string,
+        actionFn: ActionFunction
+    ):void;
+    // Implementation
     addSessionApi(apiName: string|ConditionFunction|RegExp, actionFn: ActionFunction):void{
         this.actionList.push({ 
             conditionFn: (ctx:LambderRenderContext) =>  (

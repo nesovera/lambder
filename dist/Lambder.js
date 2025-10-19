@@ -163,6 +163,7 @@ export default class Lambder {
         });
     }
     ;
+    // Implementation
     addApi(apiName, actionFn) {
         this.actionList.push({
             conditionFn: (ctx) => (!!ctx.apiName && ((typeof apiName === "string" && ctx.apiName === apiName) ||
@@ -172,6 +173,7 @@ export default class Lambder {
         });
     }
     ;
+    // Implementation
     addSessionApi(apiName, actionFn) {
         this.actionList.push({
             conditionFn: (ctx) => (!!ctx.apiName && ((typeof apiName === "string" && ctx.apiName === apiName) ||
