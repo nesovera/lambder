@@ -1,5 +1,6 @@
 import Cookies from 'js-cookie';
 import { LambderApiResponse } from './LambderResponseBuilder';
+import type { ApiContract } from './LambderApiContract';
 
 type VoidFunction = ()=>void|Promise<void>;
 type FetchTracker = { apiName: string, done: boolean, fetchEndCalled: boolean };
@@ -23,7 +24,7 @@ type FetchEndEventHandler = (params: {
 type ErrorHandler = (err: Error) => void|Promise<void>;
 type MessageHandler = (message:any) => void|Promise<void>;
 
-export default class LambderCaller {
+export default class LambderCaller<TContract extends ApiContract = any> {
     private isCorsEnabled: boolean;
     private apiPath: string;
     private apiVersion?: string; 
@@ -90,17 +91,24 @@ export default class LambderCaller {
         this.sessionCsrfCookieKey = sessionCsrfCookieKey;
     }
     
-    async apiRaw<T=any>(apiName: string, payload?: any, options?: {
-        headers?: Record<string, any>
-        versionExpiredHandler?: VoidFunction, 
-        sessionExpiredHandler?: VoidFunction, 
-        messageHandler?: MessageHandler,
-        errorMessageHandler?: MessageHandler,
-        notAuthorizedHandler?: VoidFunction, 
-        errorHandler?: ErrorHandler, 
-        fetchStartedHandler?: FetchStartEventHandler, 
-        fetchEndedHandler?: FetchEndEventHandler,
-    }): Promise<LambderApiResponse<T>|null|undefined>{
+    async apiRaw<
+        TApiName extends keyof TContract & string = string,
+        TOutput = TApiName extends keyof TContract ? TContract[TApiName]['output'] : any
+    >(
+        apiName: TApiName,
+        payload?: TApiName extends keyof TContract ? TContract[TApiName]['input'] : any,
+        options?: {
+            headers?: Record<string, any>
+            versionExpiredHandler?: VoidFunction, 
+            sessionExpiredHandler?: VoidFunction, 
+            messageHandler?: MessageHandler,
+            errorMessageHandler?: MessageHandler,
+            notAuthorizedHandler?: VoidFunction, 
+            errorHandler?: ErrorHandler, 
+            fetchStartedHandler?: FetchStartEventHandler, 
+            fetchEndedHandler?: FetchEndEventHandler,
+        }
+    ): Promise<LambderApiResponse<TOutput>|null|undefined>{
         const headers = options?.headers;
         const fetchTracker: FetchTracker = { apiName, done: false, fetchEndCalled: false };
         try {
@@ -125,7 +133,7 @@ export default class LambderCaller {
                 }else{
                     return res.json();
                 }
-            }) as LambderApiResponse<T>;
+            }) as LambderApiResponse<TOutput>;
             fetchTracker.done = true;
             if(this.fetchEndedHandler){
                 fetchTracker.fetchEndCalled = true;
@@ -189,8 +197,25 @@ export default class LambderCaller {
     };
     
     // Use the same type for api but adjust the return type
-    async api<T=any>(...params: Parameters<typeof LambderCaller.prototype.apiRaw>): Promise<T|null|undefined> {
-        const result = await this.apiRaw<T>(...params);
+    async api<
+        TApiName extends keyof TContract & string = string,
+        TOutput = TApiName extends keyof TContract ? TContract[TApiName]['output'] : any
+    >(
+        apiName: TApiName,
+        payload?: TApiName extends keyof TContract ? TContract[TApiName]['input'] : any,
+        options?: {
+            headers?: Record<string, any>
+            versionExpiredHandler?: VoidFunction, 
+            sessionExpiredHandler?: VoidFunction, 
+            messageHandler?: MessageHandler,
+            errorMessageHandler?: MessageHandler,
+            notAuthorizedHandler?: VoidFunction, 
+            errorHandler?: ErrorHandler, 
+            fetchStartedHandler?: FetchStartEventHandler, 
+            fetchEndedHandler?: FetchEndEventHandler,
+        }
+    ): Promise<TOutput|null|undefined> {
+        const result = await this.apiRaw<TApiName, TOutput>(apiName, payload, options);
         return result?.payload;
     }
 

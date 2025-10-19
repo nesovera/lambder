@@ -131,8 +131,8 @@ export default class LambderCaller {
     }
     ;
     // Use the same type for api but adjust the return type
-    async api(...params) {
-        const result = await this.apiRaw(...params);
+    async api(apiName, payload, options) {
+        const result = await this.apiRaw(apiName, payload, options);
         return result?.payload;
     }
 }
