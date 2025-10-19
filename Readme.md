@@ -495,11 +495,11 @@ Want compile-time type checking for your APIs? It's incredibly simple!
 // shared/apiContract.ts
 import type { ApiContract } from 'lambder';
 
-export type MyApiContract = {
+export type MyApiContract = ApiContract<{
     getUserById: { input: { userId: string }, output: User },
     createUser: { input: CreateUserInput, output: User },
     listUsers: { input: void, output: User[] }
-} satisfies ApiContract;
+}>;
 ```
 
 ### 2. Backend - Pass Type to Constructor

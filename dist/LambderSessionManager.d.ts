@@ -6,6 +6,7 @@ export type LambderSessionContext = {
     data: any;
     createdAt: number;
     expiresAt: number;
+    lastAccessedAt: number;
     ttlInSeconds: number;
 };
 export default class LambderSessionManager {
@@ -14,14 +15,17 @@ export default class LambderSessionManager {
     private partitionKey;
     private sortKey;
     private ddbDocumentClient;
-    constructor({ tableName, tableRegion, partitionKey, sortKey, sessionSalt, }: {
+    private enableSlidingExpiration;
+    constructor({ tableName, tableRegion, partitionKey, sortKey, sessionSalt, enableSlidingExpiration, }: {
         tableName: string;
         tableRegion: string;
         partitionKey: string;
         sortKey: string;
         sessionSalt: string;
+        enableSlidingExpiration?: boolean;
     });
     private sessionUserKeyHasher;
+    private constantTimeCompare;
     private ddbGetItem;
     private ddbPutItem;
     private ddbDeleteItem;
@@ -33,4 +37,5 @@ export default class LambderSessionManager {
     isSessionValid(session: any, sessionToken: any, csrfToken: any, skipCsrfTokenCheck?: boolean): boolean;
     deleteSession(session: Record<string, any>): Promise<boolean>;
     deleteSessionAll(session: Record<string, any>): Promise<boolean>;
+    regenerateSession(session: LambderSessionContext): Promise<LambderSessionContext>;
 }

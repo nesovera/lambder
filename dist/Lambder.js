@@ -75,9 +75,9 @@ export default class Lambder {
     enableCors(isCorsEnabled) {
         this.isCorsEnabled = isCorsEnabled;
     }
-    enableDdbSession({ tableName, tableRegion, sessionSalt }, { partitionKey, sortKey } = { partitionKey: "pk", sortKey: "sk" }) {
+    enableDdbSession({ tableName, tableRegion, sessionSalt, enableSlidingExpiration }, { partitionKey, sortKey } = { partitionKey: "pk", sortKey: "sk" }) {
         this.lambderSessionManager = new LambderSessionManager({
-            tableName, tableRegion, partitionKey, sortKey, sessionSalt
+            tableName, tableRegion, partitionKey, sortKey, sessionSalt, enableSlidingExpiration
         });
     }
     setSessionCookieKey(sessionTokenCookieKey, sessionCsrfCookieKey) {

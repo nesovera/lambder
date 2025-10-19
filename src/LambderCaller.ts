@@ -1,6 +1,6 @@
 import Cookies from 'js-cookie';
 import { LambderApiResponse } from './LambderResponseBuilder';
-import type { ApiContract } from './LambderApiContract';
+import type { ApiContractShape } from './LambderApiContract';
 
 type VoidFunction = ()=>void|Promise<void>;
 type FetchTracker = { apiName: string, done: boolean, fetchEndCalled: boolean };
@@ -24,7 +24,7 @@ type FetchEndEventHandler = (params: {
 type ErrorHandler = (err: Error) => void|Promise<void>;
 type MessageHandler = (message:any) => void|Promise<void>;
 
-export default class LambderCaller<TContract extends ApiContract = any> {
+export default class LambderCaller<TContract extends ApiContractShape = any> {
     private isCorsEnabled: boolean;
     private apiPath: string;
     private apiVersion?: string; 

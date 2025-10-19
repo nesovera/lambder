@@ -31,6 +31,16 @@ export default class LambderSessionController {
         return this.ctx.session;
     }
     ;
+    async regenerateSession() {
+        if (!this.ctx.session)
+            throw new Error("Session not found.");
+        const newSession = await this.lambderSessionManager.regenerateSession(this.ctx.session);
+        this.ctx._otherInternal.addHeaderFnAccumulator.push({ key: "Set-Cookie", value: `${this.sessionTokenCookieKey}=${newSession.sessionToken}; Expires=${new Date(newSession.expiresAt * 1000).toUTCString()}; Path=/; HttpOnly; SameSite=Lax; Secure` });
+        this.ctx._otherInternal.addHeaderFnAccumulator.push({ key: "Set-Cookie", value: `${this.sessionCsrfCookieKey}=${newSession.csrfToken}; Expires=${new Date(newSession.expiresAt * 1000).toUTCString()}; Path=/; SameSite=Lax; Secure` });
+        this.ctx.session = newSession;
+        return this.ctx.session;
+    }
+    ;
     async fetchSession() {
         if (!this.areRequestSessionTokensValid()) {
             throw new Error("Session tokens are invalid");

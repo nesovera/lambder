@@ -22,6 +22,10 @@ export default class LambderResolver extends LambderResponseBuilder {
             api: this.autoResolve(this.api),
         };
     }
+    // Override api method with proper typing
+    api(payload, config, headers) {
+        return super.api(payload, config, headers);
+    }
     autoResolve(method) {
         return (...args) => {
             const result = method.apply(this, args);

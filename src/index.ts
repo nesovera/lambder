@@ -8,6 +8,7 @@ export { default as LambderSessionManager } from "./LambderSessionManager.js";
 
 // Type-safe API contract utilities
 export { 
+    type ApiContractShape,
     type ApiContract,
     type ApiInput,
     type ApiOutput,

@@ -1,5 +1,6 @@
 import LambderUtils from "./LambderUtils.js";
 import { LambderRenderContext } from "./Lambder.js";
+import type { ApiContractShape } from "./LambderApiContract.js";
 export type LambderResolverResponse = {
     statusCode: number;
     multiValueHeaders?: Record<string, string[]>;
@@ -17,7 +18,7 @@ export type LambderApiResponseConfig = {
 export type LambderApiResponse<T> = LambderApiResponseConfig & {
     payload?: T | null;
 };
-export default class LambderResponseBuilder {
+export default class LambderResponseBuilder<TContract extends ApiContractShape = any> {
     private isCorsEnabled;
     private publicPath;
     private apiVersion;
@@ -28,7 +29,7 @@ export default class LambderResponseBuilder {
         publicPath: string;
         apiVersion?: string | null;
         lambderUtils: LambderUtils;
-        ctx?: LambderRenderContext;
+        ctx?: LambderRenderContext<any>;
     });
     private readPublicFileSync;
     private checkPublicFileExist;

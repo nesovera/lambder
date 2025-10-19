@@ -3,6 +3,11 @@
 # Exit immediately if a command exits with a non-zero status.
 set -e
 
+echo "Running tests..."
+npm run test
+
+echo "Tests passed! Proceeding with deployment..."
+
 # Update the version, build the project, and publish
 rm -rf ./dist/*
 npm version patch --no-git-tag-version
