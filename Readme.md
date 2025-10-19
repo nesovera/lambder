@@ -485,6 +485,65 @@ const loadPageData = async () => {
 };
 ```
 
+## Type-Safe APIs (Optional)
+
+Want compile-time type checking for your APIs? It's incredibly simple!
+
+### 1. Define Your API Contract
+
+```typescript
+// shared/apiContract.ts
+import type { ApiContract } from 'lambder';
+
+export type MyApiContract = {
+    getUserById: { input: { userId: string }, output: User },
+    createUser: { input: CreateUserInput, output: User },
+    listUsers: { input: void, output: User[] }
+} satisfies ApiContract;
+```
+
+### 2. Backend - Pass Type to Constructor
+
+```typescript
+import Lambder from 'lambder';
+import type { MyApiContract } from './shared/apiContract';
+
+const lambder = new Lambder<MyApiContract>({ publicPath: './public', apiPath: '/api' });
+
+// Now addApi is type-safe!
+lambder.addApi('getUserById', async (ctx, resolver) => {
+    // ctx.apiPayload is automatically typed as { userId: string } ✨
+    const user = await db.getUser(ctx.apiPayload.userId);
+    return resolver.api(user);
+});
+```
+
+### 3. Frontend - Pass Type to Constructor
+
+```typescript
+import { LambderCaller } from 'lambder';
+import type { MyApiContract } from './shared/apiContract';
+
+const caller = new LambderCaller<MyApiContract>({ apiPath: '/api', isCorsEnabled: false });
+
+// Now api() is type-safe with full autocomplete! ✨
+const user = await caller.api('getUserById', { userId: '123' });
+//                             ↑ IDE shows all available APIs
+//                                            ↑ Type-checked input
+// user is typed as User | null | undefined
+```
+
+### Benefits
+
+✅ **Simple** - Just pass type to constructor, that's it!  
+✅ **Autocomplete** - IDE suggests available APIs as you type  
+✅ **Type Safety** - Inputs and outputs are fully typed  
+✅ **No Wrappers** - Use existing `api()` and `addApi()` methods  
+✅ **Opt-In** - Add when you want, skip when you don't  
+✅ **Zero Overhead** - Pure TypeScript types, no runtime code  
+
+📖 **[Read the Quick Start Guide](docs/TYPE_SAFE_QUICK_START.md)** for more details and examples!
+
 ## Contributing
 
 Contributions are welcome! Especially for documentation. If you have an idea for an improvement or have found a bug, please open an issue or submit a pull request.
