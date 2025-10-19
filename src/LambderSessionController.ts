@@ -6,7 +6,7 @@ export default class LambderSessionController {
     lambderSessionManager: LambderSessionManager;
     sessionTokenCookieKey: string;
     sessionCsrfCookieKey: string;
-    ctx: LambderRenderContext;
+    ctx: LambderRenderContext<any>;
 
     constructor(
         { 
@@ -18,7 +18,7 @@ export default class LambderSessionController {
             lambderSessionManager: LambderSessionManager,
             sessionTokenCookieKey: string,
             sessionCsrfCookieKey: string,
-            ctx: LambderRenderContext,
+            ctx: LambderRenderContext<any>,
         }
     ){
         this.lambderSessionManager = lambderSessionManager;
@@ -45,6 +45,15 @@ export default class LambderSessionController {
         this.ctx._otherInternal.addHeaderFnAccumulator.push({ key: "Set-Cookie", value: `${this.sessionTokenCookieKey}=${session.sessionToken}; Expires=${new Date(session.expiresAt * 1000).toUTCString()}; Path=/; HttpOnly; SameSite=Lax; Secure` });
         this.ctx._otherInternal.addHeaderFnAccumulator.push({ key: "Set-Cookie", value: `${this.sessionCsrfCookieKey}=${session.csrfToken}; Expires=${new Date(session.expiresAt * 1000).toUTCString()}; Path=/; SameSite=Lax; Secure` });
         this.ctx.session = session;
+        return this.ctx.session;
+    };
+
+    async regenerateSession (): Promise<LambderSessionContext> {
+        if(!this.ctx.session) throw new Error("Session not found.");
+        const newSession = await this.lambderSessionManager.regenerateSession(this.ctx.session);
+        this.ctx._otherInternal.addHeaderFnAccumulator.push({ key: "Set-Cookie", value: `${this.sessionTokenCookieKey}=${newSession.sessionToken}; Expires=${new Date(newSession.expiresAt * 1000).toUTCString()}; Path=/; HttpOnly; SameSite=Lax; Secure` });
+        this.ctx._otherInternal.addHeaderFnAccumulator.push({ key: "Set-Cookie", value: `${this.sessionCsrfCookieKey}=${newSession.csrfToken}; Expires=${new Date(newSession.expiresAt * 1000).toUTCString()}; Path=/; SameSite=Lax; Secure` });
+        this.ctx.session = newSession;
         return this.ctx.session;
     };
 

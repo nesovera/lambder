@@ -10,6 +10,7 @@ export type LambderSessionContext = {
     data: any;
     createdAt: number;
     expiresAt: number;
+    lastAccessedAt: number;
     ttlInSeconds: number;
 };
 
@@ -20,22 +21,26 @@ export default class LambderSessionManager{
     private partitionKey: string;
     private sortKey: string;
     private ddbDocumentClient: DynamoDBDocumentClient;
+    private enableSlidingExpiration: boolean;
 
     constructor(
         {
             tableName, tableRegion,
             partitionKey, sortKey,
             sessionSalt,
+            enableSlidingExpiration = true,
         }: {
             tableName: string, tableRegion: string,
             partitionKey: string, sortKey: string,
             sessionSalt: string,
+            enableSlidingExpiration?: boolean,
         }
     ){
         this.tableName = tableName;
         this.sessionSalt = sessionSalt;
         this.partitionKey = partitionKey;
         this.sortKey = sortKey;
+        this.enableSlidingExpiration = enableSlidingExpiration;
 
         const ddbClient = new DynamoDBClient({ region: tableRegion });
         this.ddbDocumentClient = DynamoDBDocumentClient.from(ddbClient);
@@ -45,6 +50,13 @@ export default class LambderSessionManager{
         return crypto.createHash("sha256")
                      .update(`${password}${this.sessionSalt}`)
                      .digest("hex");
+    }
+
+    private constantTimeCompare(a: string, b: string): boolean {
+        if (a.length !== b.length) return false;
+        const bufferA = Buffer.from(a, 'utf8');
+        const bufferB = Buffer.from(b, 'utf8');
+        return crypto.timingSafeEqual(new Uint8Array(bufferA), new Uint8Array(bufferB));
     }
 
     private async ddbGetItem<T=any>(key:Record<string,string|number>){
@@ -101,8 +113,9 @@ export default class LambderSessionManager{
         const sessionKeyHash = this.sessionUserKeyHasher(sessionKey);
         const sessionSortKey = crypto.randomBytes(32).toString("hex");
         const sessionToken = `${sessionKeyHash}:${sessionSortKey}`;
-        const csrfToken = crypto.randomBytes(8).toString("hex");
+        const csrfToken = crypto.randomBytes(32).toString("hex");
         const createdAt = Math.floor(Date.now()/1000);
+        const lastAccessedAt = createdAt;
         const expiresAt = Number(createdAt) + Number(ttlInSeconds);
     
         const session = {
@@ -110,7 +123,7 @@ export default class LambderSessionManager{
             [this.sortKey]: sessionSortKey,
             sessionToken, csrfToken,
             sessionKey, data, 
-            createdAt, expiresAt, ttlInSeconds
+            createdAt, lastAccessedAt, expiresAt, ttlInSeconds
         };
         await this.ddbPutItem(session);
         return session;
@@ -122,6 +135,13 @@ export default class LambderSessionManager{
     ): Promise<LambderSessionContext> {
         if(!session) throw new Error("Invalid session");
         session.data = newData;
+        session.lastAccessedAt = Math.floor(Date.now()/1000);
+        
+        // Update expiration if sliding expiration is enabled
+        if(this.enableSlidingExpiration){
+            session.expiresAt = session.lastAccessedAt + session.ttlInSeconds;
+        }
+        
         await this.ddbPutItem(session);
         return session;
     }
@@ -134,12 +154,23 @@ export default class LambderSessionManager{
                 [this.partitionKey]: sessionKeyHash, 
                 [this.sortKey]: sessionSortKey
             });
-            if(!session) throw new Error("Session not found");
-            if(!session.sessionToken || session.sessionToken !== sessionToken) throw new Error("Not found: session.sessionToken");
-            if(!session.csrfToken) throw new Error("Not found: session.csrfToken");
-            if(!session.sessionKey) throw new Error("Not found: session.sessionKey");
-            if(!session.createdAt) throw new Error("Not found: session.createdAt");
-            if(!session.expiresAt || session.expiresAt < Date.now()/1000) throw new Error("Not found: session.expiresAt");
+            
+            // Use constant error response to prevent timing attacks
+            if(!session) return null;
+            if(!session.sessionToken || !this.constantTimeCompare(session.sessionToken, sessionToken)) return null;
+            if(!session.csrfToken) return null;
+            if(!session.sessionKey) return null;
+            if(!session.createdAt) return null;
+            if(!session.expiresAt || session.expiresAt < Date.now()/1000) return null;
+            
+            // Update last accessed time if sliding expiration is enabled
+            if(this.enableSlidingExpiration){
+                session.lastAccessedAt = Math.floor(Date.now()/1000);
+                session.expiresAt = session.lastAccessedAt + session.ttlInSeconds;
+                // Fire and forget - don't wait for the update
+                this.ddbPutItem(session).catch(() => {});
+            }
+            
             return session;
         }catch(err){
             return null;
@@ -149,14 +180,14 @@ export default class LambderSessionManager{
     public isSessionValid(session: any, sessionToken: any, csrfToken: any, skipCsrfTokenCheck = false){
         if(!session) return false;
         if(!sessionToken || typeof sessionToken !== "string") return false;
-        if(session.sessionToken !== sessionToken) return false;
+        if(!this.constantTimeCompare(session.sessionToken, sessionToken)) return false;
         if(!session.csrfToken) return false;
         if(!session.sessionKey) return false;
         if(!session.createdAt) return false;
         if(!session.expiresAt || session.expiresAt < Date.now()/1000) return false;
         if(!skipCsrfTokenCheck){
             if(!csrfToken || typeof csrfToken !== "string") return false;
-            if(session.csrfToken !== csrfToken) return false;
+            if(!this.constantTimeCompare(session.csrfToken, csrfToken)) return false;
         }
         return true;
     }
@@ -173,4 +204,14 @@ export default class LambderSessionManager{
         await this.ddbDeleteAllByPartitionKey(session[this.partitionKey])
         return true;
     };
+
+    public async regenerateSession(session: LambderSessionContext): Promise<LambderSessionContext> {
+        if(!session) throw new Error("Invalid session");
+        
+        // Delete old session
+        await this.deleteSession(session);
+        
+        // Create new session with same sessionKey and data but new tokens
+        return await this.createSession(session.sessionKey, session.data, session.ttlInSeconds);
+    }
 };

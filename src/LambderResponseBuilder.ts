@@ -4,6 +4,7 @@ import ejs from "ejs";
 import mimeTypeResolver from "mime-types";
 import LambderUtils from "./LambderUtils.js";
 import { LambderRenderContext } from "./Lambder.js";
+import type { ApiContractShape } from "./LambderApiContract.js";
 
 const convertToMultiHeader = (
     headers: Record<string, string|string[]> | undefined
@@ -38,12 +39,12 @@ export type LambderApiResponse<T> = LambderApiResponseConfig & {
     payload?: T | null; 
 }
 
-export default class LambderResponseBuilder {
+export default class LambderResponseBuilder<TContract extends ApiContractShape = any> {
     private isCorsEnabled: boolean;
     private publicPath: string;
     private apiVersion: string|null;
     private lambderUtils: LambderUtils;
-    private ctx?: LambderRenderContext;
+    private ctx?: LambderRenderContext<any>;
 
     constructor(
         { isCorsEnabled, publicPath, apiVersion, lambderUtils, ctx }: 
@@ -52,7 +53,7 @@ export default class LambderResponseBuilder {
             publicPath: string,
             apiVersion?: string|null,
             lambderUtils: LambderUtils,
-            ctx?: LambderRenderContext,
+            ctx?: LambderRenderContext<any>,
         }
     ){
         this.isCorsEnabled = isCorsEnabled;

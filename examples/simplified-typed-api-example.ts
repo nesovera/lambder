@@ -50,7 +50,7 @@ type LoginOutput = {
 // Step 2: Define your API contract (shared between frontend and backend)
 // ============================================================================
 
-export type MyApiContract = {
+export type MyApiContract = ApiContract<{
     // API with input and output
     getUserById: { input: { userId: string }, output: User },
     
@@ -68,7 +68,7 @@ export type MyApiContract = {
     // API with primitive output
     getUserCount: { input: void, output: number },
     deleteUser: { input: { userId: string }, output: boolean },
-}
+}>;
 
 // ============================================================================
 // Step 3: Backend - Pass contract type to Lambder

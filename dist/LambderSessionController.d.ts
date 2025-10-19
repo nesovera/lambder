@@ -5,15 +5,16 @@ export default class LambderSessionController {
     lambderSessionManager: LambderSessionManager;
     sessionTokenCookieKey: string;
     sessionCsrfCookieKey: string;
-    ctx: LambderRenderContext;
+    ctx: LambderRenderContext<any>;
     constructor({ lambderSessionManager, sessionTokenCookieKey, sessionCsrfCookieKey, ctx, }: {
         lambderSessionManager: LambderSessionManager;
         sessionTokenCookieKey: string;
         sessionCsrfCookieKey: string;
-        ctx: LambderRenderContext;
+        ctx: LambderRenderContext<any>;
     });
     private areRequestSessionTokensValid;
     createSession(sessionKey: string, data?: any, ttlInSeconds?: number): Promise<LambderSessionContext>;
+    regenerateSession(): Promise<LambderSessionContext>;
     fetchSession(): Promise<LambderSessionContext>;
     fetchSessionIfExists(): Promise<LambderSessionContext | null>;
     isSessionValid(session: any): boolean;

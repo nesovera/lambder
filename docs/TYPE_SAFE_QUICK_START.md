@@ -8,11 +8,11 @@
 // shared/apiContract.ts
 import type { ApiContract } from 'lambder';
 
-export type MyApiContract = {
+export type MyApiContract = ApiContract<{
     getUserById: { input: { userId: string }, output: User },
     createUser: { input: CreateUserInput, output: User },
     listUsers: { input: void, output: User[] }
-} satisfies ApiContract;
+}>;
 ```
 
 ### 2. Backend - Pass Type to Lambder
@@ -26,11 +26,13 @@ const lambder = new Lambder<MyApiContract>({
     apiPath: '/api'
 });
 
-// Now addApi is type-safe!
+// Now addApi is type-safe for both inputs AND outputs!
 lambder.addApi('getUserById', async (ctx, resolver) => {
-    // ctx.apiPayload is automatically typed as { userId: string }
+    // ✅ ctx.apiPayload is automatically typed as { userId: string }
     const user = await db.getUser(ctx.apiPayload.userId);
-    return resolver.api(user);
+    
+    // ✅ resolver.api() enforces the output type (User)
+    return resolver.api(user); // TypeScript checks that user matches User type!
 });
 ```
 
@@ -55,7 +57,8 @@ const user = await caller.api('getUserById', { userId: '123' });
 - ✅ **No wrapper functions needed**
 - ✅ **Use existing `api()` and `addApi()` methods**
 - ✅ **Full autocomplete in IDE**
-- ✅ **Type-safe inputs and outputs**
+- ✅ **Type-safe inputs AND outputs**
+- ✅ **Compile-time validation**
 - ✅ **Backward compatible**
 
 ## Contract Type Format
@@ -94,6 +97,45 @@ login: {
 }
 ```
 
+## Output Type Enforcement
+
+The type system now enforces that `resolver.api()` returns data matching your contract's output type:
+
+```typescript
+type MyContract = ApiContract<{
+    getNumber: { input: void, output: number },
+    getUser: { input: { id: string }, output: User }
+}>;
+
+const lambder = new Lambder<MyContract>({ ... });
+
+// ✅ CORRECT
+lambder.addApi('getNumber', async (ctx, resolver) => {
+    return resolver.api(42); // number - matches output type
+});
+
+// ❌ ERROR: Type 'string' is not assignable to type 'number'
+lambder.addApi('getNumber', async (ctx, resolver) => {
+    return resolver.api("wrong"); // TypeScript error!
+});
+
+// ✅ CORRECT
+lambder.addApi('getUser', async (ctx, resolver) => {
+    return resolver.api({ id: "123", name: "John", ... }); // User object
+});
+
+// ❌ ERROR: Missing required properties
+lambder.addApi('getUser', async (ctx, resolver) => {
+    return resolver.api({ id: "123" }); // TypeScript error - incomplete User!
+});
+```
+
+This works with:
+- `resolver.api()` - typed return value
+- `resolver.die.api()` - typed return value
+- `addApi()` - typed for regular APIs
+- `addSessionApi()` - typed for session APIs
+
 ## Without Type Safety (Still Works!)
 
 Don't want type safety? Just don't pass the generic type:
@@ -118,6 +160,8 @@ See [simplified-typed-api-example.ts](../examples/simplified-typed-api-example.t
 
 - **Contract is just a TypeScript type** - No runtime code!
 - **Zero overhead** - All type checking happens at compile time
+- **Input AND output validation** - Both sides of your API are type-safe
+- **Compile-time safety** - Catch type mismatches before deployment
 - **Opt-in** - Use types when you want them
 - **Simple** - Just pass type to constructor
 - **Autocomplete** - IDE shows available APIs as you type
