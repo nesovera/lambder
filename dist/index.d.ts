@@ -4,4 +4,5 @@ export { default as LambderCaller } from "./LambderCaller.js";
 export { default as LambderResponseBuilder } from "./LambderResponseBuilder.js";
 export { default as LambderResolver } from "./LambderResolver.js";
 export { default as LambderSessionManager } from "./LambderSessionManager.js";
+export { default as LambderMSW } from "./LambderMSW.js";
 export { type ApiContractShape, type ApiContract, type ApiInput, type ApiOutput, } from "./LambderApiContract.js";
