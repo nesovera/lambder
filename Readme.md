@@ -544,6 +544,42 @@ const user = await caller.api('getUserById', { userId: '123' });
 
 📖 **[Read the Quick Start Guide](docs/TYPE_SAFE_QUICK_START.md)** for more details and examples!
 
+## Testing with LambderMSW
+
+LambderMSW provides seamless integration with [MSW (Mock Service Worker)](https://mswjs.io/) for testing your APIs. It works perfectly with type-safe API contracts!
+
+```typescript
+import { LambderMSW } from 'lambder';
+import { setupServer } from 'msw/node';
+import type { MyApiContract } from './shared/apiContract';
+
+const lambderMSW = new LambderMSW<MyApiContract>({
+    apiPath: '/api',
+});
+
+const handlers = [
+    // Mock API with full type safety! ✨
+    lambderMSW.mockApi('getUserById', async (payload) => {
+        return {
+            id: payload.userId,
+            name: 'John Doe',
+            email: 'john@example.com'
+        };
+    }),
+    
+    // Mock errors, delays, and more
+    lambderMSW.mockApi('createUser', async (payload) => {
+        return { id: '123', ...payload };
+    }, { delay: 500 }),
+    
+    lambderMSW.mockSessionExpired('protectedApi'),
+];
+
+const server = setupServer(...handlers);
+```
+
+📖 **[Read the LambderMSW Guide](docs/LAMBDER_MSW.md)** for complete testing documentation!
+
 ## Contributing
 
 Contributions are welcome! Especially for documentation. If you have an idea for an improvement or have found a bug, please open an issue or submit a pull request.

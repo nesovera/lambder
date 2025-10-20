@@ -156,6 +156,38 @@ lambder.addApi('anyApi', async (ctx, resolver) => {
 
 See [simplified-typed-api-example.ts](../examples/simplified-typed-api-example.ts) for a complete working example.
 
+## Testing Your Type-Safe APIs
+
+LambderMSW provides full type safety for testing your APIs with MSW (Mock Service Worker):
+
+```typescript
+import { LambderMSW } from 'lambder';
+import { setupServer } from 'msw/node';
+import type { MyApiContract } from './shared/apiContract';
+
+// Create type-safe MSW instance
+const lambderMSW = new LambderMSW<MyApiContract>({
+    apiPath: '/api'
+});
+
+// Mock with full type safety! ✨
+const handlers = [
+    lambderMSW.mockApi('getUserById', async (payload) => {
+        // payload is typed as { userId: string }
+        // Return value is type-checked against output
+        return {
+            id: payload.userId,
+            name: 'John Doe',
+            email: 'john@example.com'
+        };
+    })
+];
+
+const server = setupServer(...handlers);
+```
+
+📖 See [LAMBDER_MSW.md](./LAMBDER_MSW.md) for complete testing documentation.
+
 ## Key Points
 
 - **Contract is just a TypeScript type** - No runtime code!
@@ -165,3 +197,4 @@ See [simplified-typed-api-example.ts](../examples/simplified-typed-api-example.t
 - **Opt-in** - Use types when you want them
 - **Simple** - Just pass type to constructor
 - **Autocomplete** - IDE shows available APIs as you type
+- **Testing support** - LambderMSW provides type-safe mocking
