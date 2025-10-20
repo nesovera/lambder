@@ -1,6 +1,5 @@
-import fs from "fs";
-import * as path from "path";
 import ejs from "ejs";
+import { getFS, getPath } from "./node-polyfills.js";
 
 export default class LambderUtils {
     private ejsPath?: string;
@@ -14,6 +13,12 @@ export default class LambderUtils {
     };
 
     private readEjsFileSync(filePath: string){
+        const fs = getFS();
+        const path = getPath();
+        
+        if (!fs || !path) {
+            throw new Error("File system operations are not available in browser environment");
+        }
         if(!this.ejsPath){ return "EJS PATH NOT SET!"; }
         const ejsPath = path.resolve(this.ejsPath);
         const absolutePath = path.join(ejsPath, filePath);
@@ -23,6 +28,12 @@ export default class LambderUtils {
     };
 
     private checkEjsFileExist(filePath: string){
+        const fs = getFS();
+        const path = getPath();
+        
+        if (!fs || !path) {
+            return false;
+        }
         if(!this.ejsPath){ return "EJS PATH NOT SET!"; }
         const ejsPath = path.resolve(this.ejsPath);
         const absolutePath = path.join(this.ejsPath, filePath);

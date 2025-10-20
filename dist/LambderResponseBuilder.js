@@ -1,6 +1,5 @@
-import fs from "fs";
-import * as path from "path";
 import mimeTypeResolver from "mime-types";
+import { getFS, getPath } from "./node-polyfills.js";
 const convertToMultiHeader = (headers) => Object.fromEntries(Object.entries(headers || {}).map(([k, v]) => [k, Array.isArray(v) ? v : [v]]));
 const CORS_HEADERS = convertToMultiHeader({
     "Access-Control-Allow-Credentials": "true",
@@ -23,6 +22,11 @@ export default class LambderResponseBuilder {
     }
     ;
     readPublicFileSync(filePath) {
+        const fs = getFS();
+        const path = getPath();
+        if (!fs || !path) {
+            throw new Error("File system operations are not available in browser environment");
+        }
         const publicPath = path.resolve(this.publicPath);
         const absolutePath = path.join(publicPath, filePath);
         console.log("readPublicFileSync", { filePath, publicPath, absolutePath });
@@ -33,6 +37,11 @@ export default class LambderResponseBuilder {
     }
     ;
     checkPublicFileExist(filePath) {
+        const fs = getFS();
+        const path = getPath();
+        if (!fs || !path) {
+            return false;
+        }
         const publicPath = path.resolve(this.publicPath);
         const absolutePath = path.join(this.publicPath, filePath);
         console.log("checkPublicFileExist", { filePath, publicPath, absolutePath });
