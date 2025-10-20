@@ -1,6 +1,6 @@
 {
   "name": "lambder",
-  "version": "1.0.134",
+  "version": "1.0.135",
   "description": "",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -41,7 +41,7 @@
     "@types/ejs": "^3.1.5",
     "@types/js-cookie": "^3.0.6",
     "@types/mime-types": "^2.1.4",
-    "@types/node": "^20.11.27",
+    "@types/node": "^20.19.22",
     "@types/path-to-regexp": "^1.7.0",
     "@typescript-eslint/eslint-plugin": "^7.2.0",
     "@typescript-eslint/parser": "^7.2.0",
