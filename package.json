@@ -1,10 +1,20 @@
 {
   "name": "lambder",
-  "version": "1.0.135",
+  "version": "1.0.138",
   "description": "",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "browser": {
+    "fs": false,
+    "path": false
+  },
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
@@ -20,7 +30,7 @@
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.574.0",
     "@aws-sdk/lib-dynamodb": "^3.574.0",
-    "cookie": "^0.6.0",
+    "cookie": "^1.0.2",
     "ejs": "^3.1.9",
     "js-cookie": "^3.0.5",
     "mime-types": "^2.1.35",

@@ -455,7 +455,7 @@ LambderCaller is included in the same `lambder` package. Ensure you have `lambde
 Begin by initializing LambderCaller with your API configuration. This setup assumes your project structure accommodates a place for initiating and configuring API handlers, possibly within a dedicated JavaScript module or directly in your main application file.
 
 ```javascript
-import LambderCaller from "lambder/dist/LambderCaller";
+import { LambderCaller } from "lambder";
 
 const lambderCaller = new LambderCaller({
     isCorsEnabled: false,

@@ -1,10 +1,8 @@
-import fs from "fs";
-import * as path from "path";
-import ejs from "ejs";
 import mimeTypeResolver from "mime-types";
 import LambderUtils from "./LambderUtils.js";
 import { LambderRenderContext } from "./Lambder.js";
 import type { ApiContractShape } from "./LambderApiContract.js";
+import { getFS, getPath } from "./node-polyfills.js";
 
 const convertToMultiHeader = (
     headers: Record<string, string|string[]> | undefined
@@ -64,6 +62,13 @@ export default class LambderResponseBuilder<TContract extends ApiContractShape =
     };
 
     private readPublicFileSync(filePath: string){
+        const fs = getFS();
+        const path = getPath();
+        
+        if (!fs || !path) {
+            throw new Error("File system operations are not available in browser environment");
+        }
+        
         const publicPath = path.resolve(this.publicPath);
         const absolutePath = path.join(publicPath, filePath);
         console.log("readPublicFileSync", { filePath, publicPath, absolutePath });
@@ -72,6 +77,13 @@ export default class LambderResponseBuilder<TContract extends ApiContractShape =
     };
 
     private checkPublicFileExist(filePath: string){
+        const fs = getFS();
+        const path = getPath();
+        
+        if (!fs || !path) {
+            return false;
+        }
+        
         const publicPath = path.resolve(this.publicPath);
         const absolutePath = path.join(this.publicPath, filePath);
         console.log("checkPublicFileExist", { filePath, publicPath, absolutePath });
