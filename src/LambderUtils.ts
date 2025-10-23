@@ -12,9 +12,9 @@ export default class LambderUtils {
         this.ejsPath = ejsPath;
     };
 
-    private readEjsFileSync(filePath: string){
-        const fs = getFS();
-        const path = getPath();
+    private async readEjsFileSync(filePath: string){
+        const fs = await getFS();
+        const path = await getPath();
         
         if (!fs || !path) {
             throw new Error("File system operations are not available in browser environment");
@@ -27,9 +27,9 @@ export default class LambderUtils {
         return String(fs.readFileSync(absolutePath));
     };
 
-    private checkEjsFileExist(filePath: string){
-        const fs = getFS();
-        const path = getPath();
+    private async checkEjsFileExist(filePath: string){
+        const fs = await getFS();
+        const path = await getPath();
         
         if (!fs || !path) {
             return false;
@@ -59,10 +59,11 @@ export default class LambderUtils {
         filePath: string, 
         pageData: Record<string, any>,
     ):Promise<string>{
-        if(!this.checkEjsFileExist(filePath)){
+        const doesFileExist = await this.checkEjsFileExist(filePath);
+        if(!doesFileExist){
             return "File not found: " + filePath;
         }
-        const template = this.readEjsFileSync(filePath);
+        const template = await this.readEjsFileSync(filePath);
         return this.renderEjs(template, pageData);
     };
 

@@ -1,2 +1,2 @@
-export declare function getFS(): any;
-export declare function getPath(): any;
+export declare function getFS(): Promise<any>;
+export declare function getPath(): Promise<any>;

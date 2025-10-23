@@ -435,7 +435,7 @@ lambder.addApi("getCompanyName", async (ctx, res) => {
     return res.die.status404(data, headers); 
     return res.die.cors(); 
     return res.die.fileBase64(fileBase64, mimeType, headers); 
-    return res.die.file(filePath, headers, fallbackFilePath); 
+    return await res.die.file(filePath, headers, fallbackFilePath); 
     return await res.die.ejsFile(filePath, pageData, headers); 
     return await res.die.ejsTemplate(template, pageData, headers); 
     return res.die.api(payload, { versionExpired, sessionExpired, notAuthorized, message, errorMessage }, headers); 

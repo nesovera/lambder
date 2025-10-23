@@ -21,9 +21,9 @@ export default class LambderResponseBuilder {
         this.ctx = ctx;
     }
     ;
-    readPublicFileSync(filePath) {
-        const fs = getFS();
-        const path = getPath();
+    async readPublicFileSync(filePath) {
+        const fs = await getFS();
+        const path = await getPath();
         if (!fs || !path) {
             throw new Error("File system operations are not available in browser environment");
         }
@@ -36,9 +36,9 @@ export default class LambderResponseBuilder {
         return fs.readFileSync(absolutePath);
     }
     ;
-    checkPublicFileExist(filePath) {
-        const fs = getFS();
-        const path = getPath();
+    async checkPublicFileExist(filePath) {
+        const fs = await getFS();
+        const path = await getPath();
         if (!fs || !path) {
             return false;
         }
@@ -144,15 +144,17 @@ export default class LambderResponseBuilder {
         });
     }
     ;
-    file(filePath, headers, fallbackFilePath) {
-        if (!this.checkPublicFileExist(filePath)) {
-            if (fallbackFilePath && this.checkPublicFileExist(fallbackFilePath)) {
-                return this.file(fallbackFilePath, headers);
+    async file(filePath, headers, fallbackFilePath) {
+        const doesFileExist = await this.checkPublicFileExist(filePath);
+        if (!doesFileExist && fallbackFilePath) {
+            const doesFallbackExist = await this.checkPublicFileExist(fallbackFilePath);
+            if (doesFallbackExist) {
+                return await this.file(fallbackFilePath, headers);
             }
             return this.json({ error: "File not found: " + filePath });
         }
         const mimeType = mimeTypeResolver.lookup(filePath);
-        const body = this.readPublicFileSync(filePath);
+        const body = await this.readPublicFileSync(filePath);
         if (body === "forbidden-public-path") {
             throw { error: "Forbidden public path: " + filePath };
         }

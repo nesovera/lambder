@@ -16,7 +16,7 @@ export default class LambderResolver extends LambderResponseBuilder {
             status404: this.autoResolve(this.status404),
             cors: this.autoResolve(this.cors),
             fileBase64: this.autoResolve(this.fileBase64),
-            file: this.autoResolve(this.file),
+            file: this.autoResolvePromise(this.file),
             ejsFile: this.autoResolvePromise(this.ejsFile),
             ejsTemplate: this.autoResolvePromise(this.ejsTemplate),
             api: this.autoResolve(this.api),
