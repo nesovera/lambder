@@ -31,7 +31,8 @@ export default class LambderMSW {
         return this.http.post(this.apiPath, async ({ request }) => {
             let body;
             try {
-                body = await request.json();
+                const clonedRequest = request.clone();
+                body = await clonedRequest.json();
             }
             catch (parseErr) {
                 // If JSON parsing fails, return undefined to let other handlers try
@@ -40,15 +41,12 @@ export default class LambderMSW {
             }
             // Check if body is valid and has apiName
             if (!body || typeof body.apiName !== 'string') {
-                // Invalid request format, let other handlers try
                 return;
             }
-            console.log("LambderMSW called for:", body.apiName, "matching against:", apiName);
-            // Check if this is the API we're mocking
             if (body.apiName !== apiName) {
-                // If this handler doesn't match, return undefined to let MSW try other handlers
                 return;
             }
+            console.log("LambderMSW called for:", body.apiName);
             try {
                 // Add artificial delay if specified
                 if (options?.delay) {
