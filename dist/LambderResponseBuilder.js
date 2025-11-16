@@ -127,6 +127,10 @@ export default class LambderResponseBuilder {
         });
     }
     ;
+    versionExpired(headers) {
+        return this.api(null, { versionExpired: true }, headers);
+    }
+    ;
     cors() {
         return this.raw({
             statusCode: 200,

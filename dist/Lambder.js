@@ -31,13 +31,14 @@ export const createContext = (event, lambdaContext, apiPath) => {
     const isApiCall = method === "POST" && apiPath && path === apiPath && post.apiName;
     const apiName = isApiCall ? post.apiName : null;
     const apiPayload = isApiCall ? post.payload : null;
+    const requestVersion = isApiCall ? post.version : null;
     return {
         host, path, pathParams, method,
         get, post, cookie, event,
         apiName, apiPayload,
         headers, session, lambdaContext,
         _otherInternal: {
-            isApiCall,
+            isApiCall, requestVersion,
             setHeaderFnAccumulator: [],
             addHeaderFnAccumulator: [],
             logToApiResponseAccumulator: [],
@@ -236,6 +237,14 @@ export default class Lambder {
                         return resolver.cors();
                     const firstMatchedAction = this.actionList.find(action => action.conditionFn(ctx));
                     if (firstMatchedAction) {
+                        // Check version if provided by the client and the server
+                        if (this.apiVersion && ctx._otherInternal.requestVersion) {
+                            if (ctx._otherInternal.requestVersion !== this.apiVersion) {
+                                const responseBuilder = this.getResponseBuilder();
+                                return resolve(responseBuilder.versionExpired());
+                            }
+                        }
+                        ;
                         // Run beforeRender hooks
                         for (const hook of this.hookList["beforeRender"]) {
                             const hookCtx = await hook.hookFn(ctx, resolver);

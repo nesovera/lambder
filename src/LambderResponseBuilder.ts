@@ -176,6 +176,12 @@ export default class LambderResponseBuilder<TContract extends ApiContractShape =
         });
     };
 
+	versionExpired(
+        headers?: Record<string, string|string[]>,
+    ):LambderResolverResponse{
+        return this.api(null, { versionExpired: true }, headers);
+    };
+
 	cors():LambderResolverResponse{
         return this.raw({ 
             statusCode: 200,
@@ -275,7 +281,7 @@ export default class LambderResponseBuilder<TContract extends ApiContractShape =
         }, headers);
     };
 
-    private apiBinary<T=any>(
+    apiBinary<T=any>(
         payload: T | null, 
         {
             versionExpired, sessionExpired, notAuthorized, 
