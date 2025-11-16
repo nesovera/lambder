@@ -28,6 +28,7 @@ export type LambderRenderContext<TApiPayload = any> = {
     lambdaContext: Context;
     _otherInternal: { 
         isApiCall: boolean,
+        requestVersion: string|null;
         setHeaderFnAccumulator: { key:string, value:string|string[] }[];
         addHeaderFnAccumulator: { key:string, value:string }[];
         logToApiResponseAccumulator: any[];
@@ -77,6 +78,7 @@ export const createContext = (
     const isApiCall = method === "POST" && apiPath && path === apiPath && post.apiName;
     const apiName:string = isApiCall ? post.apiName : null;
     const apiPayload:string = isApiCall ? post.payload : null;
+    const requestVersion:string = isApiCall ? post.version : null;
 
     return { 
         host, path, pathParams, method, 
@@ -84,7 +86,7 @@ export const createContext = (
         apiName, apiPayload, 
         headers, session, lambdaContext, 
         _otherInternal: { 
-            isApiCall, 
+            isApiCall, requestVersion,
             setHeaderFnAccumulator: [], 
             addHeaderFnAccumulator: [], 
             logToApiResponseAccumulator: [], 
@@ -377,6 +379,13 @@ export default class Lambder<TContract extends ApiContractShape = any> {
         
                     const firstMatchedAction = this.actionList.find(action => action.conditionFn(ctx));
                     if(firstMatchedAction){
+                        // Check version if provided by the client and the server
+                        if(this.apiVersion && ctx._otherInternal.requestVersion){
+                            if(ctx._otherInternal.requestVersion !== this.apiVersion){
+                                const responseBuilder = this.getResponseBuilder();
+                                return resolve(responseBuilder.versionExpired());
+                            }
+                        };
                         // Run beforeRender hooks
                         for(const hook of this.hookList["beforeRender"]){ 
                             const hookCtx = await hook.hookFn(ctx, resolver);

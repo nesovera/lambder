@@ -42,11 +42,12 @@ export default class LambderResponseBuilder<TContract extends ApiContractShape =
     html(data: string, headers?: Record<string, string | string[]>): LambderResolverResponse;
     status301(url: string, headers?: Record<string, string | string[]>): LambderResolverResponse;
     status404(data: string, headers?: Record<string, string | string[]>): LambderResolverResponse;
+    versionExpired(headers?: Record<string, string | string[]>): LambderResolverResponse;
     cors(): LambderResolverResponse;
     fileBase64(fileBase64: string, mimeType: string, headers?: Record<string, string | string[]>): LambderResolverResponse;
     file(filePath: string, headers?: Record<string, string | string[]>, fallbackFilePath?: string): Promise<LambderResolverResponse>;
     ejsTemplate(template: string, pageData: Record<string, any>, headers?: Record<string, string | string[]>): Promise<LambderResolverResponse>;
     ejsFile(filePath: string, pageData: Record<string, any>, headers?: Record<string, string | string[]>): Promise<LambderResolverResponse>;
     api<T = any>(payload: T | null, { versionExpired, sessionExpired, notAuthorized, message, errorMessage, logList, }?: LambderApiResponseConfig, headers?: Record<string, string | string[]>): LambderResolverResponse;
-    private apiBinary;
+    apiBinary<T = any>(payload: T | null, { versionExpired, sessionExpired, notAuthorized, message, errorMessage, logList, }?: LambderApiResponseConfig, headers?: Record<string, string | string[]>): LambderResolverResponse;
 }

@@ -22,6 +22,7 @@ export type LambderRenderContext<TApiPayload = any> = {
     lambdaContext: Context;
     _otherInternal: {
         isApiCall: boolean;
+        requestVersion: string | null;
         setHeaderFnAccumulator: {
             key: string;
             value: string | string[];
