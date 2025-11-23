@@ -56,23 +56,32 @@ afterAll(() => server.close());
 When using TypeScript API contracts, LambderMSW provides full type safety:
 
 ```typescript
-// shared/apiContract.ts
-import type { ApiContract } from 'lambder';
+// backend/index.ts (define your APIs with Lambder)
+import { z } from 'zod';
+import Lambder from 'lambder';
 
-export type MyApiContract = ApiContract<{
-    getUserById: { 
-        input: { userId: string }, 
-        output: { id: string, name: string, email: string } 
-    },
-    createUser: { 
-        input: { name: string, email: string }, 
-        output: { id: string, name: string, email: string } 
-    }
-}>;
+const lambder = new Lambder({ apiPath: '/secure' })
+    .addApi('getUserById', {
+        input: z.object({ userId: z.string() }),
+        output: z.object({ id: z.string(), name: z.string(), email: z.string() })
+    }, async (ctx, resolver) => {
+        // Implementation...
+        return resolver.api({ id: ctx.apiPayload.userId, name: 'John', email: 'john@example.com' });
+    })
+    .addApi('createUser', {
+        input: z.object({ name: z.string(), email: z.string() }),
+        output: z.object({ id: z.string(), name: z.string(), email: z.string() })
+    }, async (ctx, resolver) => {
+        // Implementation...
+        return resolver.api({ id: '123', ...ctx.apiPayload });
+    });
+
+// Export the inferred contract type
+export type MyApiContract = typeof lambder.ApiContract;
 
 // test/setup.ts
 import { LambderMSW } from 'lambder';
-import type { MyApiContract } from '../shared/apiContract';
+import type { MyApiContract } from '../backend';
 
 const lambderMSW = new LambderMSW<MyApiContract>({
     apiPath: '/secure',
@@ -208,7 +217,7 @@ import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { setupServer } from 'msw/node';
 import { LambderMSW } from 'lambder';
 import { LambderCaller } from 'lambder';
-import type { MyApiContract } from '../shared/apiContract';
+import type { MyApiContract } from '../backend'; // Type-only import from your backend
 
 // Setup MSW
 const lambderMSW = new LambderMSW<MyApiContract>({
@@ -248,14 +257,14 @@ afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
 
 // Setup LambderCaller
-const caller = new LambderCaller<MyApiContract>({
+const lambderCaller = new LambderCaller<MyApiContract>({
     apiPath: '/secure',
     isCorsEnabled: false
 });
 
 describe('User APIs', () => {
     it('should fetch user by id', async () => {
-        const result = await caller.api('getUserById', { userId: '123' });
+        const result = await lambderCaller.api('getUserById', { userId: '123' });
         
         expect(result).toEqual({
             id: '123',
@@ -265,7 +274,7 @@ describe('User APIs', () => {
     });
     
     it('should create a new user', async () => {
-        const result = await caller.api('createUser', {
+        const result = await lambderCaller.api('createUser', {
             name: 'Jane Smith',
             email: 'jane@example.com'
         });
@@ -277,7 +286,7 @@ describe('User APIs', () => {
     
     it('should handle session expired', async () => {
         try {
-            await caller.api('getProtectedData', {});
+            await lambderCaller.api('getProtectedData', {});
             // Should not reach here
             expect(true).toBe(false);
         } catch (error: any) {
@@ -287,7 +296,7 @@ describe('User APIs', () => {
     
     it('should handle errors', async () => {
         try {
-            await caller.api('failingApi', {});
+            await lambderCaller.api('failingApi', {});
             // Should not reach here
             expect(true).toBe(false);
         } catch (error: any) {
@@ -305,7 +314,7 @@ LambderMSW also works in browser environments with MSW's browser integration:
 // test/browser-setup.ts
 import { setupWorker } from 'msw/browser';
 import { LambderMSW } from 'lambder';
-import type { MyApiContract } from '../shared/apiContract';
+import type { MyApiContract } from '../backend'; // Type-only import from your backend
 
 const lambderMSW = new LambderMSW<MyApiContract>({
     apiPath: '/secure'
@@ -386,7 +395,7 @@ it('should handle specific user', async () => {
         })
     );
     
-    const result = await caller.api('getUserById', { userId: '999' });
+    const result = await lambderCaller.api('getUserById', { userId: '999' });
     expect(result?.name).toBe('Special User');
 });
 ```

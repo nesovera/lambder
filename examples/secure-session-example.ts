@@ -1,3 +1,4 @@
+import { z } from "zod";
 import Lambder from "../src/Lambder.js";
 
 // Example: Secure session handling with all security fixes applied
@@ -6,10 +7,9 @@ const lambder = new Lambder({
     publicPath: "/public",
     apiPath: "/api",
     ejsPath: "/views",
-});
-
+})
 // Enable session management with sliding expiration
-lambder.enableDdbSession(
+.enableDdbSession(
     {
         tableName: process.env.SESSION_TABLE || "sessions",
         tableRegion: process.env.AWS_REGION || "us-east-1",
@@ -17,10 +17,12 @@ lambder.enableDdbSession(
         enableSlidingExpiration: true, // Sessions extend on each access
     },
     { partitionKey: "pk", sortKey: "sk" }
-);
-
+)
 // Example: Login API with session regeneration
-lambder.addApi("user.login", async (ctx, resolver) => {
+.addApi("user.login", {
+    input: z.object({ username: z.string(), password: z.string() }),
+    output: z.object({ success: z.boolean(), csrfToken: z.string().optional(), error: z.string().optional() })
+}, async (ctx, resolver) => {
     const { username, password } = ctx.apiPayload;
 
     // Validate credentials (implement your own logic)
@@ -41,10 +43,12 @@ lambder.addApi("user.login", async (ctx, resolver) => {
         success: true,
         csrfToken: session.csrfToken,
     });
-});
-
+})
 // Example: Protected API that requires session
-lambder.addSessionApi("user.profile", async (ctx, resolver) => {
+.addSessionApi("user.profile", {
+    input: z.void(),
+    output: z.object({ userId: z.string(), username: z.string(), role: z.string() })
+}, async (ctx, resolver) => {
     // Session is automatically fetched and validated
     const sessionData = ctx.session.data;
 
@@ -53,10 +57,12 @@ lambder.addSessionApi("user.profile", async (ctx, resolver) => {
         username: sessionData.username,
         role: sessionData.role,
     });
-});
-
+})
 // Example: Sensitive operation that regenerates session
-lambder.addSessionApi("user.changePassword", async (ctx, resolver) => {
+.addSessionApi("user.changePassword", {
+    input: z.object({ oldPassword: z.string(), newPassword: z.string() }),
+    output: z.object({ success: z.boolean(), message: z.string().optional(), csrfToken: z.string().optional(), error: z.string().optional() })
+}, async (ctx, resolver) => {
     const { oldPassword, newPassword } = ctx.apiPayload;
     const sessionController = lambder.getSessionController(ctx);
 
@@ -83,10 +89,12 @@ lambder.addSessionApi("user.changePassword", async (ctx, resolver) => {
         message: "Password changed successfully",
         csrfToken: newSession.csrfToken, // Send new CSRF token
     });
-});
-
+})
 // Example: Update session data
-lambder.addSessionApi("user.updatePreferences", async (ctx, resolver) => {
+.addSessionApi("user.updatePreferences", {
+    input: z.object({ theme: z.string(), language: z.string() }),
+    output: z.object({ success: z.boolean(), message: z.string() })
+}, async (ctx, resolver) => {
     const { theme, language } = ctx.apiPayload;
     const sessionController = lambder.getSessionController(ctx);
 
@@ -100,10 +108,12 @@ lambder.addSessionApi("user.updatePreferences", async (ctx, resolver) => {
         success: true,
         message: "Preferences updated",
     });
-});
-
+})
 // Example: Logout
-lambder.addSessionApi("user.logout", async (ctx, resolver) => {
+.addSessionApi("user.logout", {
+    input: z.void(),
+    output: z.object({ success: z.boolean(), message: z.string() })
+}, async (ctx, resolver) => {
     const sessionController = lambder.getSessionController(ctx);
 
     // End current session
@@ -113,10 +123,12 @@ lambder.addSessionApi("user.logout", async (ctx, resolver) => {
         success: true,
         message: "Logged out successfully",
     });
-});
-
+})
 // Example: Logout from all devices
-lambder.addSessionApi("user.logoutAll", async (ctx, resolver) => {
+.addSessionApi("user.logoutAll", {
+    input: z.void(),
+    output: z.object({ success: z.boolean(), message: z.string() })
+}, async (ctx, resolver) => {
     const sessionController = lambder.getSessionController(ctx);
 
     // End all sessions for this user (same sessionKey)
@@ -126,10 +138,16 @@ lambder.addSessionApi("user.logoutAll", async (ctx, resolver) => {
         success: true,
         message: "Logged out from all devices",
     });
-});
-
+})
 // Example: Optional session (check if logged in)
-lambder.addApi("user.checkAuth", async (ctx, resolver) => {
+.addApi("user.checkAuth", {
+    input: z.object({}),
+    output: z.object({
+        authenticated: z.boolean(),
+        userId: z.string().optional(),
+        username: z.string().optional(),
+    })
+}, async (ctx, resolver) => {
     const sessionController = lambder.getSessionController(ctx);
 
     // Try to fetch session without throwing error
@@ -141,15 +159,14 @@ lambder.addApi("user.checkAuth", async (ctx, resolver) => {
             userId: session.data.userId,
             username: session.data.username,
         });
+    } else {
+        return resolver.api({
+            authenticated: false,
+        });
     }
-
-    return resolver.api({
-        authenticated: false,
-    });
-});
-
+})
 // Example: Route with session
-lambder.addSessionRoute("/dashboard", async (ctx, resolver) => {
+.addSessionRoute("/dashboard", async (ctx, resolver) => {
     // Session is automatically fetched and validated
     const userData = ctx.session.data;
 
@@ -157,10 +174,9 @@ lambder.addSessionRoute("/dashboard", async (ctx, resolver) => {
         user: userData,
         csrfToken: ctx.session.csrfToken,
     });
-});
-
+})
 // Example: Route with optional session
-lambder.addRoute("/", async (ctx, resolver) => {
+.addRoute("/", async (ctx, resolver) => {
     const sessionController = lambder.getSessionController(ctx);
     const session = await sessionController.fetchSessionIfExists();
 

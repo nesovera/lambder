@@ -10,7 +10,8 @@ export { default as LambderMSW } from "./LambderMSW.js";
 // Type-safe API contract utilities
 export { 
     type ApiContractShape,
-    type ApiContract,
-    type ApiInput,
-    type ApiOutput,
 } from "./LambderApiContract.js";
+
+// Context types and utilities
+export type { LambderRenderContext, LambderSessionRenderContext } from "./LambderContext.js";
+export { createContext } from "./LambderContext.js";

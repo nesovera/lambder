@@ -1,43 +1,12 @@
-import type { APIGatewayProxyEvent, APIGatewayProxyEventHeaders, Context } from "aws-lambda";
+import { z } from "zod";
+import type { APIGatewayProxyEvent, Context } from "aws-lambda";
 import LambderResolver from "./LambderResolver.js";
 import LambderResponseBuilder, { LambderResolverResponse } from "./LambderResponseBuilder.js";
 import LambderUtils from "./LambderUtils.js";
-import { type LambderSessionContext } from "./LambderSessionManager.js";
 import LambderSessionController from "./LambderSessionController.js";
-import type { ApiContractShape } from "./LambderApiContract.js";
+import type { MergeContract } from "./LambderApiContract.js";
+import { type LambderRenderContext, type LambderSessionRenderContext } from "./LambderContext.js";
 type Path = `/${string}`;
-export type LambderRenderContext<TApiPayload = any> = {
-    host: string;
-    path: string;
-    pathParams: Record<string, any> | null;
-    method: string;
-    get: Record<string, any>;
-    post: Record<string, any>;
-    cookie: Record<string, any>;
-    session: null;
-    apiName: string;
-    apiPayload: TApiPayload;
-    headers: APIGatewayProxyEventHeaders;
-    event: APIGatewayProxyEvent;
-    lambdaContext: Context;
-    _otherInternal: {
-        isApiCall: boolean;
-        requestVersion: string | null;
-        setHeaderFnAccumulator: {
-            key: string;
-            value: string | string[];
-        }[];
-        addHeaderFnAccumulator: {
-            key: string;
-            value: string;
-        }[];
-        logToApiResponseAccumulator: any[];
-    };
-};
-export type LambderSessionRenderContext<TApiPayload = any, SessionData = any> = Omit<LambderRenderContext<TApiPayload>, 'session'> & {
-    session: LambderSessionContext<SessionData>;
-};
-type LambderModuleFunction = (lambderInstance: Lambder) => void | Promise<void>;
 type ConditionFunction = (ctx: LambderRenderContext<any>) => boolean;
 type ActionFunction = (ctx: LambderRenderContext<any>, resolver: LambderResolver) => LambderResolverResponse | Promise<LambderResolverResponse>;
 type SessionActionFunction<SessionData = any> = (ctx: LambderSessionRenderContext<any, SessionData>, resolver: LambderResolver) => LambderResolverResponse | Promise<LambderResolverResponse>;
@@ -48,18 +17,45 @@ type HookFallbackFunction = (ctx: LambderRenderContext<any>, resolver: LambderRe
 type GlobalErrorHandlerFunction = (err: Error, ctx: LambderRenderContext<any> | null, response: LambderResponseBuilder, logListToApiResponse?: any[]) => LambderResolverResponse | Promise<LambderResolverResponse>;
 type RouteFallbackHandlerFunction = (ctx: LambderRenderContext<any>, resolver: LambderResolver) => LambderResolverResponse;
 type ApiFallbackHandlerFunction = (ctx: LambderRenderContext<any>, resolver: LambderResolver) => LambderResolverResponse;
-export declare const createContext: (event: APIGatewayProxyEvent, lambdaContext: Context, apiPath: string) => LambderRenderContext<any>;
-export default class Lambder<TContract extends ApiContractShape = any, TSessionData = any> {
+type ApiInputValidationErrorHandlerFunction = (ctx: LambderRenderContext<any>, resolver: LambderResolver, zodError: z.ZodError) => LambderResolverResponse | Promise<LambderResolverResponse>;
+/**
+ * Main Lambder class for building type-safe serverless APIs
+ *
+ * @typeParam TSessionData - Type of session data stored in DynamoDB
+ * @typeParam _TContract - @internal Accumulates API contract during chaining (do not pass manually)
+ *
+ * @example
+ * ```typescript
+ * interface SessionData { userId: string; role: string; }
+ *
+ * const lambder = new Lambder<SessionData>({ apiPath: '/api' })
+ *   .addApi('getUser', { input: z.object({...}), output: z.object({...}) }, handler)
+ *   .addApi('createUser', { input: z.object({...}), output: z.object({...}) }, handler);
+ * ```
+ */
+export default class Lambder<TSessionData = any, _TContract extends Record<string, any> = {}> {
     apiPath: string;
     apiVersion: null | string;
     isCorsEnabled: boolean;
     publicPath: string;
     ejsPath: string;
+    /**
+     * Type property for extracting the API contract
+     * Use this to export your API types to the frontend
+     *
+     * @example
+     * ```typescript
+     * const lambder = new Lambder().addApi(...).addApi(...);
+     * export type AppContract = typeof lambder.ApiContract;
+     * ```
+     */
+    readonly ApiContract: _TContract;
     private actionList;
     private hookList;
     private globalErrorHandler;
     private routeFallbackHandler;
     private apiFallbackHandler;
+    private apiInputValidationErrorHandler;
     utils: LambderUtils;
     private lambderSessionManager?;
     private sessionTokenCookieKey;
@@ -70,7 +66,7 @@ export default class Lambder<TContract extends ApiContractShape = any, TSessionD
         ejsPath?: string;
         apiVersion?: string;
     });
-    enableCors(isCorsEnabled: boolean): void;
+    enableCors(isCorsEnabled: boolean): this;
     enableDdbSession({ tableName, tableRegion, sessionSalt, enableSlidingExpiration }: {
         tableName: string;
         tableRegion: string;
@@ -79,33 +75,34 @@ export default class Lambder<TContract extends ApiContractShape = any, TSessionD
     }, { partitionKey, sortKey }?: {
         partitionKey: string;
         sortKey: string;
-    }): void;
-    setSessionCookieKey(sessionTokenCookieKey: string, sessionCsrfCookieKey: string): void;
-    setRouteFallbackHandler(routeFallbackHandler: RouteFallbackHandlerFunction): void;
-    setApiFallbackHandler(apiFallbackHandler: ApiFallbackHandlerFunction): void;
-    setGlobalErrorHandler(globalErrorHandler: GlobalErrorHandlerFunction): void;
+    }): this;
+    setSessionCookieKey(sessionTokenCookieKey: string, sessionCsrfCookieKey: string): this;
+    setRouteFallbackHandler(routeFallbackHandler: RouteFallbackHandlerFunction): this;
+    setApiFallbackHandler(apiFallbackHandler: ApiFallbackHandlerFunction): this;
+    setApiInputValidationErrorHandler(apiInputValidationErrorHandler: ApiInputValidationErrorHandlerFunction): this;
+    setGlobalErrorHandler(globalErrorHandler: GlobalErrorHandlerFunction): this;
     private getPatternMatch;
     private testPatternMatch;
     private handleNoMatchedAction;
-    addModule(moduleFn: LambderModuleFunction): Promise<void>;
-    importModule(moduleImport: Promise<{
-        default: LambderModuleFunction;
-    }>): Promise<void>;
-    addRoute(condition: Path | ConditionFunction | RegExp, actionFn: ActionFunction): void;
-    addSessionRoute(condition: Path | ConditionFunction | RegExp, actionFn: SessionActionFunction<TSessionData>): void;
-    addApi(apiName: ConditionFunction | RegExp, actionFn: ActionFunction): void;
-    addApi<TApiName extends keyof TContract & string>(apiName: TApiName, actionFn: (ctx: LambderRenderContext<TContract[TApiName]['input']>, resolver: LambderResolver<TContract, TApiName>) => LambderResolverResponse | Promise<LambderResolverResponse>): void;
-    addApi(apiName: string, actionFn: ActionFunction): void;
-    addSessionApi(apiName: ConditionFunction | RegExp, actionFn: SessionActionFunction<TSessionData>): void;
-    addSessionApi<TApiName extends keyof TContract & string>(apiName: TApiName, actionFn: (ctx: LambderSessionRenderContext<TContract[TApiName]['input'], TSessionData>, resolver: LambderResolver<TContract, TApiName>) => LambderResolverResponse | Promise<LambderResolverResponse>): void;
-    addSessionApi(apiName: string, actionFn: SessionActionFunction<TSessionData>): void;
-    addHook(hookEvent: 'created', hookFn: HookCreatedFunction, priority?: number): Promise<void>;
-    addHook(hookEvent: 'beforeRender', hookFn: HookBeforeRenderFunction, priority?: number): Promise<void>;
-    addHook(hookEvent: 'afterRender', hookFn: HookAfterRenderFunction, priority?: number): Promise<void>;
-    addHook(hookEvent: 'fallback', hookFn: HookFallbackFunction, priority?: number): Promise<void>;
+    addRoute(condition: Path | ConditionFunction | RegExp, actionFn: ActionFunction): this;
+    addSessionRoute(condition: Path | ConditionFunction | RegExp, actionFn: SessionActionFunction<TSessionData>): this;
+    use<_TNewContract extends Record<string, any>>(plugin: (lambder: Lambder<TSessionData, _TContract>) => Lambder<TSessionData, _TNewContract>): Lambder<TSessionData, _TNewContract extends _TContract ? _TNewContract : (_TContract & _TNewContract)>;
+    addApi<TName extends string, TInput extends z.ZodTypeAny, TOutput extends z.ZodTypeAny>(name: TName, schema: {
+        input: TInput;
+        output: TOutput;
+    }, handler: (ctx: LambderRenderContext<z.infer<TInput>>, resolver: LambderResolver<z.infer<TOutput>>) => LambderResolverResponse | Promise<LambderResolverResponse>): Lambder<TSessionData, MergeContract<_TContract, TName, z.infer<TInput>, z.infer<TOutput>>>;
+    addSessionApi<TName extends string, TInput extends z.ZodTypeAny, TOutput extends z.ZodTypeAny>(name: TName, schema: {
+        input: TInput;
+        output: TOutput;
+    }, handler: (ctx: LambderSessionRenderContext<z.infer<TInput>, TSessionData>, resolver: LambderResolver<z.infer<TOutput>>) => LambderResolverResponse | Promise<LambderResolverResponse>): Lambder<TSessionData, MergeContract<_TContract, TName, z.infer<TInput>, z.infer<TOutput>>>;
+    addHook(hookEvent: 'created', hookFn: HookCreatedFunction, priority?: number): Promise<this>;
+    addHook(hookEvent: 'beforeRender', hookFn: HookBeforeRenderFunction, priority?: number): this;
+    addHook(hookEvent: 'afterRender', hookFn: HookAfterRenderFunction, priority?: number): this;
+    addHook(hookEvent: 'fallback', hookFn: HookFallbackFunction, priority?: number): this;
     getSessionController(ctx: LambderRenderContext<any> | LambderSessionRenderContext<any, TSessionData>): LambderSessionController<TSessionData>;
     getResponseBuilder(): LambderResponseBuilder<any>;
     private getResolver;
+    getHandler(): (event: APIGatewayProxyEvent, context: Context) => Promise<LambderResolverResponse>;
     render(event: APIGatewayProxyEvent, lambdaContext: Context): Promise<LambderResolverResponse>;
 }
 export {};

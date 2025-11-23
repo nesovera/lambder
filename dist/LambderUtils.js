@@ -16,12 +16,12 @@ export default class LambderUtils {
             return "EJS PATH NOT SET!";
         }
         const ejsPath = path.resolve(this.ejsPath);
-        const absolutePath = path.resolve(ejsPath, filePath);
-        console.log("readEjsFileSync", { filePath, ejsPath, absolutePath });
+        const normalizedFilePath = filePath.startsWith('/') ? filePath.slice(1) : filePath;
+        const absolutePath = path.resolve(ejsPath, normalizedFilePath);
         if (!absolutePath.startsWith(ejsPath)) {
             return "forbidden-ejs-path";
         }
-        return String(await fs.promises.readFile(absolutePath));
+        return await fs.promises.readFile(absolutePath, 'utf-8');
     }
     ;
     async checkEjsFileExist(filePath) {
@@ -34,8 +34,8 @@ export default class LambderUtils {
             return "EJS PATH NOT SET!";
         }
         const ejsPath = path.resolve(this.ejsPath);
-        const absolutePath = path.resolve(ejsPath, filePath);
-        console.log("checkEjsFileExist", { filePath, ejsPath, absolutePath });
+        const normalizedFilePath = filePath.startsWith('/') ? filePath.slice(1) : filePath;
+        const absolutePath = path.resolve(ejsPath, normalizedFilePath);
         if (!absolutePath.startsWith(ejsPath)) {
             return false;
         }
