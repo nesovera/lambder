@@ -167,4 +167,28 @@ describe('File Serving with Fallback', () => {
         const fallbackBody = Buffer.from(fallbackResult.body || '', 'base64').toString();
         expect(fallbackBody).toContain('<h1>Test HTML</h1>');
     });
+
+    it('should serve CSS file with correct text/css MIME type', async () => {
+        const lambder = new Lambder({
+            publicPath: path.resolve('./tests/fixtures/public'),
+            apiPath: '/api'
+        })
+            .addRoute('/(.*)', (ctx, res) => {
+                return res.file(ctx.path);
+            });
+
+        const handler = lambder.getHandler();
+        const event = createMockEvent('/main.css');
+        const result = await handler(event, createMockContext());
+
+        expect(result.statusCode).toBe(200);
+        
+        // Verify Content-Type header is exactly text/css
+        expect(result.multiValueHeaders?.['Content-Type']).toBeDefined();
+        expect(result.multiValueHeaders?.['Content-Type']?.[0]).toBe('text/css');
+        
+        // Verify body contains CSS content
+        const body = Buffer.from(result.body || '', 'base64').toString();
+        expect(body).toContain('body { margin: 0; }');
+    });
 });
