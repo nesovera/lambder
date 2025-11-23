@@ -1,4 +1,3 @@
-import querystring from "querystring";
 import cookieParser from "cookie";
 import { match } from "path-to-regexp";
 import LambderResolver from "./LambderResolver.js";
@@ -14,7 +13,6 @@ export const createContext = (event, lambdaContext, apiPath) => {
     const method = event.httpMethod;
     const cookie = cookieParser.parse(event.headers.Cookie || event.headers.cookie || "");
     const headers = event.headers;
-    const session = null;
     // Decode body for the post
     let post = {};
     try {
@@ -23,7 +21,11 @@ export const createContext = (event, lambdaContext, apiPath) => {
             post = JSON.parse(decodedBody) || {};
         }
         catch (e) {
-            post = querystring.parse(decodedBody) || {};
+            const params = new URLSearchParams(decodedBody);
+            post = {};
+            for (const [key, value] of params.entries()) {
+                post[key] = value;
+            }
         }
     }
     catch (e) { }
@@ -35,8 +37,9 @@ export const createContext = (event, lambdaContext, apiPath) => {
     return {
         host, path, pathParams, method,
         get, post, cookie, event,
+        session: null,
         apiName, apiPayload,
-        headers, session, lambdaContext,
+        headers, lambdaContext,
         _otherInternal: {
             isApiCall, requestVersion,
             setHeaderFnAccumulator: [],
@@ -152,14 +155,18 @@ export default class Lambder {
                     (typeof condition === "function" && condition(ctx)) ||
                     (condition?.constructor == RegExp && condition.test(ctx.path)))),
             actionFn: async (ctx, resolver) => {
-                await this.getSessionController(ctx).fetchSession();
                 if (typeof condition === "string") {
                     ctx.pathParams = this.getPatternMatch(condition, ctx.path);
                 }
                 else if (condition?.constructor == RegExp) {
                     ctx.pathParams = ctx.path.match(condition);
                 }
-                return await actionFn(ctx, resolver);
+                const sessionCtx = ctx;
+                await this.getSessionController(ctx).fetchSession();
+                if (!sessionCtx.session) {
+                    throw new Error("Session not found.");
+                }
+                return await actionFn(sessionCtx, resolver);
             }
         });
     }
@@ -181,8 +188,12 @@ export default class Lambder {
                 (typeof apiName === "function" && apiName(ctx)) ||
                 (apiName?.constructor == RegExp && apiName.test(ctx.apiName)))),
             actionFn: async (ctx, resolver) => {
+                const sessionCtx = ctx;
                 await this.getSessionController(ctx).fetchSession();
-                return await actionFn(ctx, resolver);
+                if (!sessionCtx.session) {
+                    throw new Error("Session not found.");
+                }
+                return await actionFn(sessionCtx, resolver);
             }
         });
     }

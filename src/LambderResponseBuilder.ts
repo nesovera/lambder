@@ -70,10 +70,10 @@ export default class LambderResponseBuilder<TContract extends ApiContractShape =
         }
         
         const publicPath = path.resolve(this.publicPath);
-        const absolutePath = path.join(publicPath, filePath);
+        const absolutePath = path.resolve(publicPath, filePath);
         console.log("readPublicFileSync", { filePath, publicPath, absolutePath });
-        if(!absolutePath.includes(publicPath)){ return "forbidden-public-path"; }
-        return fs.readFileSync(absolutePath);
+        if(!absolutePath.startsWith(publicPath)){ return "forbidden-public-path"; }
+        return await fs.promises.readFile(absolutePath);
     };
 
     private async checkPublicFileExist(filePath: string){
@@ -83,10 +83,15 @@ export default class LambderResponseBuilder<TContract extends ApiContractShape =
         if (!fs || !path) { return false; }
         
         const publicPath = path.resolve(this.publicPath);
-        const absolutePath = path.join(this.publicPath, filePath);
+        const absolutePath = path.resolve(publicPath, filePath);
         console.log("checkPublicFileExist", { filePath, publicPath, absolutePath });
-        if(!absolutePath.includes(publicPath)){ return false; }
-        return fs.existsSync(absolutePath) && fs.statSync(absolutePath).isFile();
+        if(!absolutePath.startsWith(publicPath)){ return false; }
+        try {
+            const stat = await fs.promises.stat(absolutePath);
+            return stat.isFile();
+        } catch {
+            return false;
+        }
     };
 
     addHeader(key: string, value: string){

@@ -31,7 +31,7 @@ lambder.addApi("user.login", async (ctx, resolver) => {
 
     // Create new session
     const sessionController = lambder.getSessionController(ctx);
-    await sessionController.createSession(user.id, {
+    const session = await sessionController.createSession(user.id, {
         userId: user.id,
         username: user.username,
         role: user.role,
@@ -39,14 +39,14 @@ lambder.addApi("user.login", async (ctx, resolver) => {
 
     return resolver.api({
         success: true,
-        csrfToken: ctx.session?.csrfToken,
+        csrfToken: session.csrfToken,
     });
 });
 
 // Example: Protected API that requires session
 lambder.addSessionApi("user.profile", async (ctx, resolver) => {
     // Session is automatically fetched and validated
-    const sessionData = ctx.session?.data;
+    const sessionData = ctx.session.data;
 
     return resolver.api({
         userId: sessionData.userId,
@@ -62,7 +62,7 @@ lambder.addSessionApi("user.changePassword", async (ctx, resolver) => {
 
     // Validate old password
     const isValid = await validatePassword(
-        ctx.session?.data.userId,
+        ctx.session.data.userId,
         oldPassword
     );
     if (!isValid) {
@@ -70,10 +70,10 @@ lambder.addSessionApi("user.changePassword", async (ctx, resolver) => {
     }
 
     // Update password
-    await updatePassword(ctx.session?.data.userId, newPassword);
+    await updatePassword(ctx.session.data.userId, newPassword);
 
     // IMPORTANT: Regenerate session after password change to prevent session fixation
-    await sessionController.regenerateSession();
+    const newSession = await sessionController.regenerateSession();
 
     // OPTIONAL: End all other sessions for this user
     await sessionController.endSessionAll();
@@ -81,7 +81,7 @@ lambder.addSessionApi("user.changePassword", async (ctx, resolver) => {
     return resolver.api({
         success: true,
         message: "Password changed successfully",
-        csrfToken: ctx.session?.csrfToken, // Send new CSRF token
+        csrfToken: newSession.csrfToken, // Send new CSRF token
     });
 });
 
@@ -92,7 +92,7 @@ lambder.addSessionApi("user.updatePreferences", async (ctx, resolver) => {
 
     // Update session data (also extends expiration if sliding is enabled)
     await sessionController.updateSessionData({
-        ...ctx.session?.data,
+        ...ctx.session.data,
         preferences: { theme, language },
     });
 
@@ -151,11 +151,11 @@ lambder.addApi("user.checkAuth", async (ctx, resolver) => {
 // Example: Route with session
 lambder.addSessionRoute("/dashboard", async (ctx, resolver) => {
     // Session is automatically fetched and validated
-    const userData = ctx.session?.data;
+    const userData = ctx.session.data;
 
     return resolver.ejsFile("dashboard.ejs", {
         user: userData,
-        csrfToken: ctx.session?.csrfToken,
+        csrfToken: ctx.session.csrfToken,
     });
 });
 

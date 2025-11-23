@@ -2,7 +2,7 @@ export default class LambderSessionController {
     lambderSessionManager;
     sessionTokenCookieKey;
     sessionCsrfCookieKey;
-    ctx;
+    ctx; // Internal context with mutable session property
     constructor({ lambderSessionManager, sessionTokenCookieKey, sessionCsrfCookieKey, ctx, }) {
         this.lambderSessionManager = lambderSessionManager;
         this.sessionTokenCookieKey = sessionTokenCookieKey;
