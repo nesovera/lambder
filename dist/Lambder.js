@@ -1,64 +1,48 @@
-import cookieParser from "cookie";
 import { match } from "path-to-regexp";
 import LambderResolver from "./LambderResolver.js";
 import LambderResponseBuilder from "./LambderResponseBuilder.js";
 import LambderUtils from "./LambderUtils.js";
 import LambderSessionManager from "./LambderSessionManager.js";
 import LambderSessionController from "./LambderSessionController.js";
-export const createContext = (event, lambdaContext, apiPath) => {
-    const host = event.headers.Host || event.headers.host || "";
-    const path = event.path;
-    const pathParams = null;
-    const get = event.queryStringParameters || {};
-    const method = event.httpMethod;
-    const cookie = cookieParser.parse(event.headers.Cookie || event.headers.cookie || "");
-    const headers = event.headers;
-    // Decode body for the post
-    let post = {};
-    try {
-        const decodedBody = event.isBase64Encoded ? (event.body ? Buffer.from(event.body, "base64").toString() : "{}") : (event.body || "{}");
-        try {
-            post = JSON.parse(decodedBody) || {};
-        }
-        catch (e) {
-            const params = new URLSearchParams(decodedBody);
-            post = {};
-            for (const [key, value] of params.entries()) {
-                post[key] = value;
-            }
-        }
-    }
-    catch (e) { }
-    // Parse api variables
-    const isApiCall = method === "POST" && apiPath && path === apiPath && post.apiName;
-    const apiName = isApiCall ? post.apiName : null;
-    const apiPayload = isApiCall ? post.payload : null;
-    const requestVersion = isApiCall ? post.version : null;
-    return {
-        host, path, pathParams, method,
-        get, post, cookie, event,
-        session: null,
-        apiName, apiPayload,
-        headers, lambdaContext,
-        _otherInternal: {
-            isApiCall, requestVersion,
-            setHeaderFnAccumulator: [],
-            addHeaderFnAccumulator: [],
-            logToApiResponseAccumulator: [],
-        }
-    };
-};
+import { createContext } from "./LambderContext.js";
+/**
+ * Main Lambder class for building type-safe serverless APIs
+ *
+ * @typeParam TSessionData - Type of session data stored in DynamoDB
+ * @typeParam _TContract - @internal Accumulates API contract during chaining (do not pass manually)
+ *
+ * @example
+ * ```typescript
+ * interface SessionData { userId: string; role: string; }
+ *
+ * const lambder = new Lambder<SessionData>({ apiPath: '/api' })
+ *   .addApi('getUser', { input: z.object({...}), output: z.object({...}) }, handler)
+ *   .addApi('createUser', { input: z.object({...}), output: z.object({...}) }, handler);
+ * ```
+ */
 export default class Lambder {
     apiPath;
     apiVersion;
     isCorsEnabled = false;
     publicPath;
     ejsPath;
+    /**
+     * Type property for extracting the API contract
+     * Use this to export your API types to the frontend
+     *
+     * @example
+     * ```typescript
+     * const lambder = new Lambder().addApi(...).addApi(...);
+     * export type AppContract = typeof lambder.ApiContract;
+     * ```
+     */
+    ApiContract;
     actionList;
     hookList;
     globalErrorHandler = null;
     routeFallbackHandler = null;
     apiFallbackHandler = null;
+    apiInputValidationErrorHandler = null;
     utils;
     lambderSessionManager;
     sessionTokenCookieKey = "LMDRSESSIONTKID";
@@ -78,24 +62,34 @@ export default class Lambder {
     }
     enableCors(isCorsEnabled) {
         this.isCorsEnabled = isCorsEnabled;
+        return this;
     }
     enableDdbSession({ tableName, tableRegion, sessionSalt, enableSlidingExpiration }, { partitionKey, sortKey } = { partitionKey: "pk", sortKey: "sk" }) {
         this.lambderSessionManager = new LambderSessionManager({
             tableName, tableRegion, partitionKey, sortKey, sessionSalt, enableSlidingExpiration
         });
+        return this;
     }
     setSessionCookieKey(sessionTokenCookieKey, sessionCsrfCookieKey) {
         this.sessionTokenCookieKey = sessionTokenCookieKey;
         this.sessionCsrfCookieKey = sessionCsrfCookieKey;
+        return this;
     }
     setRouteFallbackHandler(routeFallbackHandler) {
         this.routeFallbackHandler = routeFallbackHandler;
+        return this;
     }
     setApiFallbackHandler(apiFallbackHandler) {
         this.apiFallbackHandler = apiFallbackHandler;
+        return this;
+    }
+    setApiInputValidationErrorHandler(apiInputValidationErrorHandler) {
+        this.apiInputValidationErrorHandler = apiInputValidationErrorHandler;
+        return this;
     }
     setGlobalErrorHandler(globalErrorHandler) {
         this.globalErrorHandler = globalErrorHandler;
+        return this;
     }
     getPatternMatch(pattern, path) {
         const result = (match(pattern, { decode: decodeURIComponent }))(path);
@@ -124,12 +118,6 @@ export default class Lambder {
             resolver.resolve({ statusCode: 204, body: "Route handler not set.", });
         }
     }
-    async addModule(moduleFn) {
-        await moduleFn(this);
-    }
-    async importModule(moduleImport) {
-        await this.addModule((await moduleImport).default);
-    }
     addRoute(condition, actionFn) {
         this.actionList.push({
             conditionFn: (ctx) => (ctx.method === "GET" &&
@@ -141,13 +129,14 @@ export default class Lambder {
                     ctx.pathParams = this.getPatternMatch(condition, ctx.path);
                 }
                 else if (condition?.constructor == RegExp) {
-                    ctx.pathParams = ctx.path.match(condition);
+                    const match = ctx.path.match(condition);
+                    ctx.pathParams = match ? (match.groups || match) : {};
                 }
                 return await actionFn(ctx, resolver);
             }
         });
+        return this;
     }
-    ;
     addSessionRoute(condition, actionFn) {
         this.actionList.push({
             conditionFn: (ctx) => (ctx.method === "GET" &&
@@ -159,7 +148,8 @@ export default class Lambder {
                     ctx.pathParams = this.getPatternMatch(condition, ctx.path);
                 }
                 else if (condition?.constructor == RegExp) {
-                    ctx.pathParams = ctx.path.match(condition);
+                    const match = ctx.path.match(condition);
+                    ctx.pathParams = match ? (match.groups || match) : {};
                 }
                 const sessionCtx = ctx;
                 await this.getSessionController(ctx).fetchSession();
@@ -169,42 +159,73 @@ export default class Lambder {
                 return await actionFn(sessionCtx, resolver);
             }
         });
+        return this;
     }
-    ;
-    // Implementation
-    addApi(apiName, actionFn) {
+    // Plugin system
+    use(plugin) {
+        return plugin(this);
+    }
+    // Typed API with Zod
+    addApi(name, schema, handler) {
         this.actionList.push({
-            conditionFn: (ctx) => (!!ctx.apiName && ((typeof apiName === "string" && ctx.apiName === apiName) ||
-                (typeof apiName === "function" && apiName(ctx)) ||
-                (apiName?.constructor == RegExp && apiName.test(ctx.apiName)))),
-            actionFn: async (ctx, resolver) => await actionFn(ctx, resolver),
+            conditionFn: (ctx) => ctx.apiName === name,
+            actionFn: async (ctx, resolver) => {
+                // Validate Input
+                const inputResult = schema.input.safeParse(ctx.apiPayload);
+                if (!inputResult.success) {
+                    if (this.apiInputValidationErrorHandler) {
+                        return await this.apiInputValidationErrorHandler(ctx, resolver, inputResult.error);
+                    }
+                    return resolver.raw({
+                        statusCode: 400,
+                        body: JSON.stringify({ error: "Input validation failed", zodError: inputResult.error }),
+                        multiValueHeaders: { "Content-Type": ["application/json"] }
+                    });
+                }
+                // Run Handler with validated data
+                ctx.apiPayload = inputResult.data;
+                return await handler(ctx, resolver);
+            },
         });
+        return this;
     }
-    ;
-    // Implementation
-    addSessionApi(apiName, actionFn) {
+    // Typed Session API with Zod
+    addSessionApi(name, schema, handler) {
         this.actionList.push({
-            conditionFn: (ctx) => (!!ctx.apiName && ((typeof apiName === "string" && ctx.apiName === apiName) ||
-                (typeof apiName === "function" && apiName(ctx)) ||
-                (apiName?.constructor == RegExp && apiName.test(ctx.apiName)))),
+            conditionFn: (ctx) => ctx.apiName === name,
             actionFn: async (ctx, resolver) => {
                 const sessionCtx = ctx;
                 await this.getSessionController(ctx).fetchSession();
                 if (!sessionCtx.session) {
                     throw new Error("Session not found.");
                 }
-                return await actionFn(sessionCtx, resolver);
+                // Validate Input
+                const inputResult = schema.input.safeParse(ctx.apiPayload);
+                if (!inputResult.success) {
+                    if (this.apiInputValidationErrorHandler) {
+                        return await this.apiInputValidationErrorHandler(ctx, resolver, inputResult.error);
+                    }
+                    return resolver.raw({
+                        statusCode: 400,
+                        body: JSON.stringify({ error: "Input validation failed", zodError: inputResult.error }),
+                        multiValueHeaders: { "Content-Type": ["application/json"] }
+                    });
+                }
+                // Run Handler with validated data
+                ctx.apiPayload = inputResult.data;
+                return await handler(sessionCtx, resolver);
             }
         });
+        return this;
     }
-    ;
-    async addHook(hookEvent, hookFn, priority = 0) {
+    addHook(hookEvent, hookFn, priority = 0) {
         if (hookEvent === "created") {
-            await hookFn(this);
+            return hookFn(this).then(() => this);
         }
         else {
             this.hookList[hookEvent].push({ priority, hookFn });
             this.hookList[hookEvent].sort((a, b) => a.priority - b.priority);
+            return this;
         }
     }
     getSessionController(ctx) {
@@ -236,6 +257,9 @@ export default class Lambder {
         });
     }
     ;
+    getHandler() {
+        return (event, context) => this.render(event, context);
+    }
     async render(event, lambdaContext) {
         let eventRenderContext = null;
         try {

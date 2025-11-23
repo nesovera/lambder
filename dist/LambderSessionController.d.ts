@@ -1,4 +1,4 @@
-import { LambderRenderContext, LambderSessionRenderContext } from "./Lambder.js";
+import { LambderRenderContext, LambderSessionRenderContext } from "./LambderContext.js";
 import type LambderSessionManager from "./LambderSessionManager.js";
 import type { LambderSessionContext } from "./LambderSessionManager.js";
 export default class LambderSessionController<TSessionData = any> {

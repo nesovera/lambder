@@ -1,6 +1,5 @@
 import LambderUtils from "./LambderUtils.js";
-import { LambderRenderContext } from "./Lambder.js";
-import type { ApiContractShape } from "./LambderApiContract.js";
+import { LambderRenderContext } from "./LambderContext.js";
 export type LambderResolverResponse = {
     statusCode: number;
     multiValueHeaders?: Record<string, string[]>;
@@ -18,7 +17,7 @@ export type LambderApiResponseConfig = {
 export type LambderApiResponse<T> = LambderApiResponseConfig & {
     payload?: T | null;
 };
-export default class LambderResponseBuilder<TContract extends ApiContractShape = any> {
+export default class LambderResponseBuilder<TResponse = any> {
     private isCorsEnabled;
     private publicPath;
     private apiVersion;
@@ -48,6 +47,6 @@ export default class LambderResponseBuilder<TContract extends ApiContractShape =
     file(filePath: string, headers?: Record<string, string | string[]>, fallbackFilePath?: string): Promise<LambderResolverResponse>;
     ejsTemplate(template: string, pageData: Record<string, any>, headers?: Record<string, string | string[]>): Promise<LambderResolverResponse>;
     ejsFile(filePath: string, pageData: Record<string, any>, headers?: Record<string, string | string[]>): Promise<LambderResolverResponse>;
-    api<T = any>(payload: T | null, { versionExpired, sessionExpired, notAuthorized, message, errorMessage, logList, }?: LambderApiResponseConfig, headers?: Record<string, string | string[]>): LambderResolverResponse;
+    api(payload: TResponse | null, { versionExpired, sessionExpired, notAuthorized, message, errorMessage, logList, }?: LambderApiResponseConfig, headers?: Record<string, string | string[]>): LambderResolverResponse;
     apiBinary<T = any>(payload: T | null, { versionExpired, sessionExpired, notAuthorized, message, errorMessage, logList, }?: LambderApiResponseConfig, headers?: Record<string, string | string[]>): LambderResolverResponse;
 }

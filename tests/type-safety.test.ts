@@ -6,17 +6,9 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { z } from 'zod';
 import Lambder from '../src/Lambder.js';
 import LambderCaller from '../src/LambderCaller.js';
-import type { ApiContract } from '../src/index.js';
-
-// Test contract
-type TestApiContract = ApiContract<{
-    getUser: { input: { userId: string }, output: { id: string, name: string } },
-    createUser: { input: { name: string, email: string }, output: { id: string, name: string, email: string } },
-    listUsers: { input: void, output: Array<{ id: string, name: string }> },
-    deleteUser: { input: { userId: string }, output: boolean }
-}>;
 
 // ============================================================================
 // Test 1: LambderCaller Type Safety
@@ -24,6 +16,26 @@ type TestApiContract = ApiContract<{
 
 describe('LambderCaller Type Safety', () => {
     it('should have correct types', () => {
+        // Define contract via chaining
+        const lambder = new Lambder({
+            publicPath: './public',
+            apiPath: '/api'
+        })
+        .addApi('getUser', {
+            input: z.object({ userId: z.string() }),
+            output: z.object({ id: z.string(), name: z.string() })
+        }, async (ctx, resolver) => {
+            return resolver.api({ id: ctx.apiPayload.userId, name: 'Test' });
+        })
+        .addApi('createUser', {
+            input: z.object({ name: z.string(), email: z.string() }),
+            output: z.object({ id: z.string(), name: z.string(), email: z.string() })
+        }, async (ctx, resolver) => {
+            return resolver.api({ id: '1', ...ctx.apiPayload });
+        });
+
+        type TestApiContract = typeof lambder.ApiContract;
+
         const caller = new LambderCaller<TestApiContract>({
             apiPath: '/api',
             isCorsEnabled: false
@@ -55,13 +67,16 @@ describe('LambderCaller Type Safety', () => {
 
 describe('Lambder Type Safety', () => {
     it('should have correct types', () => {
-        const lambder = new Lambder<TestApiContract>({
+        const lambder = new Lambder({
             publicPath: './public',
             apiPath: '/api'
         });
 
         // ✅ Should work: Typed API
-        lambder.addApi('getUser', async (ctx, resolver) => {
+        lambder.addApi('getUser', {
+            input: z.object({ userId: z.string() }),
+            output: z.object({ id: z.string(), name: z.string() })
+        }, async (ctx, resolver) => {
             // ctx.apiPayload should be typed as { userId: string }
             const userId: string = ctx.apiPayload.userId; // Should work
             
@@ -70,7 +85,10 @@ describe('Lambder Type Safety', () => {
         });
 
         // ✅ Should work: Typed session API
-        lambder.addSessionApi('createUser', async (ctx, resolver) => {
+        lambder.addSessionApi('createUser', {
+            input: z.object({ name: z.string(), email: z.string() }),
+            output: z.object({ id: z.string(), name: z.string(), email: z.string() })
+        }, async (ctx, resolver) => {
             // ctx.apiPayload should be typed as { name: string, email: string }
             const name: string = ctx.apiPayload.name;
             const email: string = ctx.apiPayload.email;
@@ -79,7 +97,10 @@ describe('Lambder Type Safety', () => {
         });
 
         // ✅ Should work: Void input API
-        lambder.addApi('listUsers', async (ctx, resolver) => {
+        lambder.addApi('listUsers', {
+            input: z.void(),
+            output: z.array(z.object({ id: z.string(), name: z.string() }))
+        }, async (ctx, resolver) => {
             // ctx.apiPayload should be void/undefined
             return resolver.api([
                 { id: '1', name: 'User 1' },
@@ -88,7 +109,10 @@ describe('Lambder Type Safety', () => {
         });
 
         // ✅ Should work: RegExp (untyped)
-        lambder.addApi(/^admin\./, async (ctx, resolver) => {
+        lambder.addApi('admin.anyAction', {
+            input: z.any(),
+            output: z.any()
+        }, async (ctx, resolver) => {
             // ctx.apiPayload is any (untyped)
             return resolver.api({});
         });
@@ -126,7 +150,10 @@ describe('Backward Compatibility (No Contract)', () => {
         });
 
         // Should work - untyped
-        lambder.addApi('anyApi', async (ctx, resolver) => {
+        lambder.addApi('anyApi', {
+            input: z.any(),
+            output: z.any()
+        }, async (ctx, resolver) => {
             // ctx.apiPayload is any
             return resolver.api({ anything: ctx.apiPayload });
         });
@@ -143,6 +170,19 @@ describe('Backward Compatibility (No Contract)', () => {
 
 describe('apiRaw Method Type Safety', () => {
     it('should have correct types for apiRaw', () => {
+        const lambder = new Lambder({
+            publicPath: './public',
+            apiPath: '/api'
+        })
+        .addApi('getUser', {
+            input: z.object({ userId: z.string() }),
+            output: z.object({ id: z.string(), name: z.string() })
+        }, async (ctx, resolver) => {
+            return resolver.api({ id: ctx.apiPayload.userId, name: 'Test' });
+        });
+
+        type TestApiContract = typeof lambder.ApiContract;
+
         const caller = new LambderCaller<TestApiContract>({
             apiPath: '/api',
             isCorsEnabled: false
@@ -203,38 +243,31 @@ describe('Complex Types', () => {
 
 describe('Output Type Enforcement', () => {
     it('should enforce output types in resolver.api()', () => {
-        const lambder = new Lambder<TestApiContract>({
+        const lambder = new Lambder({
             publicPath: './public',
             apiPath: '/api'
-        });
-
-        // ✅ CORRECT: Return correct output type
-        lambder.addApi('getUser', async (ctx, resolver) => {
+        })
+        .addApi('getUser', {
+            input: z.object({ userId: z.string() }),
+            output: z.object({ id: z.string(), name: z.string() }).nullable()
+        }, async (ctx, resolver) => {
             const userId = ctx.apiPayload.userId;
             return resolver.api({ id: userId, name: 'John Doe' });
-        });
-
-        // ✅ CORRECT: Return null is allowed
-        lambder.addApi('getUser', async (ctx, resolver) => {
-            return resolver.api(null);
-        });
-
-        // ✅ CORRECT: Boolean output
-        lambder.addApi('deleteUser', async (ctx, resolver) => {
+        })
+        .addApi('deleteUser', {
+            input: z.object({ userId: z.string() }),
+            output: z.boolean()
+        }, async (ctx, resolver) => {
             return resolver.api(true);
-        });
-
-        // ✅ CORRECT: Array output
-        lambder.addApi('listUsers', async (ctx, resolver) => {
+        })
+        .addApi('listUsers', {
+            input: z.void(),
+            output: z.array(z.object({ id: z.string(), name: z.string() }))
+        }, async (ctx, resolver) => {
             return resolver.api([
                 { id: '1', name: 'User 1' },
                 { id: '2', name: 'User 2' }
             ]);
-        });
-
-        // ✅ CORRECT: Empty array
-        lambder.addApi('listUsers', async (ctx, resolver) => {
-            return resolver.api([]);
         });
 
         expect(lambder).toBeDefined();
@@ -268,18 +301,20 @@ describe('Output Type Enforcement', () => {
     });
 
     it('should enforce output types in resolver.die.api()', () => {
-        const lambder = new Lambder<TestApiContract>({
+        const lambder = new Lambder({
             publicPath: './public',
             apiPath: '/api'
-        });
-
-        // ✅ CORRECT: die.api also enforces types
-        lambder.addApi('getUser', async (ctx, resolver) => {
+        })
+        .addApi('getUser', {
+            input: z.object({ userId: z.string() }),
+            output: z.object({ id: z.string(), name: z.string() })
+        }, async (ctx, resolver) => {
             return resolver.die.api({ id: ctx.apiPayload.userId, name: 'Test' });
-        });
-
-        // ✅ CORRECT: die.api with null
-        lambder.addApi('deleteUser', async (ctx, resolver) => {
+        })
+        .addApi('deleteUser', {
+            input: z.object({ userId: z.string() }),
+            output: z.boolean()
+        }, async (ctx, resolver) => {
             return resolver.die.api(true);
         });
 
@@ -292,19 +327,21 @@ describe('Output Type Enforcement', () => {
     });
 
     it('should enforce output types in addSessionApi()', () => {
-        const lambder = new Lambder<TestApiContract>({
+        const lambder = new Lambder({
             publicPath: './public',
             apiPath: '/api'
-        });
-
-        // ✅ CORRECT: Session APIs also enforce output types
-        lambder.addSessionApi('createUser', async (ctx, resolver) => {
+        })
+        .addSessionApi('createUser', {
+            input: z.object({ name: z.string(), email: z.string() }),
+            output: z.object({ id: z.string(), name: z.string(), email: z.string() })
+        }, async (ctx, resolver) => {
             const { name, email } = ctx.apiPayload;
             return resolver.api({ id: '1', name, email });
-        });
-
-        // ✅ CORRECT: Session API with null
-        lambder.addSessionApi('deleteUser', async (ctx, resolver) => {
+        })
+        .addSessionApi('deleteUser', {
+            input: z.object({ userId: z.string() }),
+            output: z.boolean()
+        }, async (ctx, resolver) => {
             return resolver.api(true);
         });
 
@@ -321,7 +358,7 @@ describe('Output Type Enforcement', () => {
 // Test 7: Complex Output Types
 // ============================================================================
 
-type ComplexOutputContract = ApiContract<{
+type ComplexOutputContract = {
     // Primitive outputs
     getCount: { input: void, output: number },
     getMessage: { input: void, output: string },
@@ -351,25 +388,30 @@ type ComplexOutputContract = ApiContract<{
             total: number 
         }> 
     }
-}>;
+};
 
 describe('Complex Output Types', () => {
     it('should enforce primitive output types', () => {
-        const lambder = new Lambder<ComplexOutputContract>({
+        const lambder = new Lambder({
             publicPath: './public',
             apiPath: '/api'
-        });
-
-        // ✅ CORRECT: Primitive outputs
-        lambder.addApi('getCount', async (ctx, resolver) => {
+        })
+        .addApi('getCount', {
+            input: z.void(),
+            output: z.number()
+        }, async (ctx, resolver) => {
             return resolver.api(42);
-        });
-
-        lambder.addApi('getMessage', async (ctx, resolver) => {
+        })
+        .addApi('getMessage', {
+            input: z.void(),
+            output: z.string()
+        }, async (ctx, resolver) => {
             return resolver.api("Hello World");
-        });
-
-        lambder.addApi('isActive', async (ctx, resolver) => {
+        })
+        .addApi('isActive', {
+            input: z.void(),
+            output: z.boolean()
+        }, async (ctx, resolver) => {
             return resolver.api(true);
         });
 
@@ -382,13 +424,17 @@ describe('Complex Output Types', () => {
     });
 
     it('should enforce nested object types', () => {
-        const lambder = new Lambder<ComplexOutputContract>({
+        const lambder = new Lambder({
             publicPath: './public',
             apiPath: '/api'
-        });
-
-        // ✅ CORRECT: Nested structure
-        lambder.addApi('getStats', async (ctx, resolver) => {
+        })
+        .addApi('getStats', {
+            input: z.void(),
+            output: z.object({
+                users: z.object({ total: z.number(), active: z.number() }),
+                products: z.object({ total: z.number(), inStock: z.number() })
+            })
+        }, async (ctx, resolver) => {
             return resolver.api({
                 users: { total: 100, active: 75 },
                 products: { total: 50, inStock: 40 }
@@ -406,19 +452,15 @@ describe('Complex Output Types', () => {
     });
 
     it('should enforce union types correctly', () => {
-        const lambder = new Lambder<ComplexOutputContract>({
+        const lambder = new Lambder({
             publicPath: './public',
             apiPath: '/api'
-        });
-
-        // ✅ CORRECT: Return object
-        lambder.addApi('findUser', async (ctx, resolver) => {
+        })
+        .addApi('findUser', {
+            input: z.object({ email: z.string() }),
+            output: z.object({ id: z.string(), name: z.string() }).nullable()
+        }, async (ctx, resolver) => {
             return resolver.api({ id: '123', name: 'John' });
-        });
-
-        // ✅ CORRECT: Return null (part of union)
-        lambder.addApi('findUser', async (ctx, resolver) => {
-            return resolver.api(null);
         });
 
         expect(lambder).toBeDefined();
@@ -430,13 +472,18 @@ describe('Complex Output Types', () => {
     });
 
     it('should enforce complex nested array types', () => {
-        const lambder = new Lambder<ComplexOutputContract>({
+        const lambder = new Lambder({
             publicPath: './public',
             apiPath: '/api'
-        });
-
-        // ✅ CORRECT: Complex nested array
-        lambder.addApi('getOrders', async (ctx, resolver) => {
+        })
+        .addApi('getOrders', {
+            input: z.object({ userId: z.string() }),
+            output: z.array(z.object({
+                id: z.string(),
+                items: z.array(z.object({ name: z.string(), price: z.number() })),
+                total: z.number()
+            }))
+        }, async (ctx, resolver) => {
             return resolver.api([
                 {
                     id: '1',
@@ -470,13 +517,14 @@ describe('Complex Output Types', () => {
 
 describe('Type Inference', () => {
     it('should infer types correctly from contract', () => {
-        const lambder = new Lambder<TestApiContract>({
+        const lambder = new Lambder({
             publicPath: './public',
             apiPath: '/api'
-        });
-
-        // Test that TypeScript correctly infers the types
-        lambder.addApi('getUser', async (ctx, resolver) => {
+        })
+        .addApi('getUser', {
+            input: z.object({ userId: z.string() }),
+            output: z.object({ id: z.string(), name: z.string() })
+        }, async (ctx, resolver) => {
             // ctx.apiPayload type should be inferred as { userId: string }
             const userId: string = ctx.apiPayload.userId;
             
@@ -488,9 +536,11 @@ describe('Type Inference', () => {
             
             // Should accept the correctly typed variable
             return resolver.api(user);
-        });
-
-        lambder.addApi('createUser', async (ctx, resolver) => {
+        })
+        .addApi('createUser', {
+            input: z.object({ name: z.string(), email: z.string() }),
+            output: z.object({ id: z.string(), name: z.string(), email: z.string() })
+        }, async (ctx, resolver) => {
             // Input type inference
             const name: string = ctx.apiPayload.name;
             const email: string = ctx.apiPayload.email;

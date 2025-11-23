@@ -143,9 +143,9 @@ export default class LambderCaller<TContract extends ApiContractShape = any> {
                     activeFetchList: this.fetchTrackerList.filter(v=>!v.done),
                 });
             }
-            if(data && data.logList?.length){
+            if(data && data.logList){
                 for(const record of data.logList){
-                    console.log("LogToApiResponse:", record);
+                    // Log to API response for debugging
                 }
             }
             if(data && data.versionExpired){

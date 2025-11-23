@@ -1,7 +1,6 @@
 import mimeTypeResolver from "mime-types";
 import LambderUtils from "./LambderUtils.js";
-import { LambderRenderContext } from "./Lambder.js";
-import type { ApiContractShape } from "./LambderApiContract.js";
+import { LambderRenderContext } from "./LambderContext.js";
 import { getFS, getPath } from "./node-polyfills.js";
 
 const convertToMultiHeader = (
@@ -37,7 +36,7 @@ export type LambderApiResponse<T> = LambderApiResponseConfig & {
     payload?: T | null; 
 }
 
-export default class LambderResponseBuilder<TContract extends ApiContractShape = any> {
+export default class LambderResponseBuilder<TResponse = any> {
     private isCorsEnabled: boolean;
     private publicPath: string;
     private apiVersion: string|null;
@@ -70,8 +69,8 @@ export default class LambderResponseBuilder<TContract extends ApiContractShape =
         }
         
         const publicPath = path.resolve(this.publicPath);
-        const absolutePath = path.resolve(publicPath, filePath);
-        console.log("readPublicFileSync", { filePath, publicPath, absolutePath });
+        const normalizedFilePath = filePath.startsWith('/') ? filePath.slice(1) : filePath;
+        const absolutePath = path.resolve(publicPath, normalizedFilePath);
         if(!absolutePath.startsWith(publicPath)){ return "forbidden-public-path"; }
         return await fs.promises.readFile(absolutePath);
     };
@@ -83,8 +82,8 @@ export default class LambderResponseBuilder<TContract extends ApiContractShape =
         if (!fs || !path) { return false; }
         
         const publicPath = path.resolve(this.publicPath);
-        const absolutePath = path.resolve(publicPath, filePath);
-        console.log("checkPublicFileExist", { filePath, publicPath, absolutePath });
+        const normalizedFilePath = filePath.startsWith('/') ? filePath.slice(1) : filePath;
+        const absolutePath = path.resolve(publicPath, normalizedFilePath);
         if(!absolutePath.startsWith(publicPath)){ return false; }
         try {
             const stat = await fs.promises.stat(absolutePath);
@@ -105,7 +104,7 @@ export default class LambderResponseBuilder<TContract extends ApiContractShape =
         if(!this.ctx) throw new Error(".setHeader function is not available within this hook"); 
         else{
             this.ctx._otherInternal.addHeaderFnAccumulator = this.ctx._otherInternal.addHeaderFnAccumulator
-                .filter(header=>header.key !== key);
+                .filter((header: { key: string, value: string }) => header.key !== key);
             this.ctx._otherInternal.setHeaderFnAccumulator.push({ key, value });
         }
     };
@@ -214,17 +213,19 @@ export default class LambderResponseBuilder<TContract extends ApiContractShape =
         fallbackFilePath?: string,
     ):Promise<LambderResolverResponse>{
         const doesFileExist = await this.checkPublicFileExist(filePath);
-        if(!doesFileExist && fallbackFilePath){
-            const doesFallbackExist = await this.checkPublicFileExist(fallbackFilePath);
-            if(doesFallbackExist){
-                return await this.file(fallbackFilePath, headers);
+        if(!doesFileExist){
+            if(fallbackFilePath){
+                const doesFallbackExist = await this.checkPublicFileExist(fallbackFilePath);
+                if(doesFallbackExist){
+                    return await this.file(fallbackFilePath, headers);
+                }
             }
             return this.json({ error: "File not found: " + filePath })
         }
         const mimeType = mimeTypeResolver.lookup(filePath);
         const body = await this.readPublicFileSync(filePath);
         if (body === "forbidden-public-path") {
-            throw { error: "Forbidden public path: " + filePath };
+            throw new Error("Forbidden public path: " + filePath);
         }
         const bodyBuffer: Buffer =  Buffer.isBuffer(body) ? body : Buffer.from(body);
         const bodyBase64 = bodyBuffer.toString("base64");
@@ -262,8 +263,8 @@ export default class LambderResponseBuilder<TContract extends ApiContractShape =
         });
     };
 
-    api<T=any>(
-        payload: T | null, 
+    api(
+        payload: TResponse | null, 
         {
             versionExpired, sessionExpired, notAuthorized, 
             message, errorMessage, logList,

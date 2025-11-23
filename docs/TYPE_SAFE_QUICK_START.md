@@ -1,200 +1,77 @@
-# Type-Safe API Quick Start
+# Type-Safe API Quick Start (v2.0)
 
 ## In 3 Simple Steps
 
-### 1. Define Your Contract Type
+### 1. Define & Implement APIs (Backend)
+
+Use Zod schemas to define your API contract inline. Lambder will automatically validate inputs at runtime and infer types for compile-time safety.
 
 ```typescript
-// shared/apiContract.ts
-import type { ApiContract } from 'lambder';
+import { z } from "zod";
+import Lambder from "lambder";
 
-export type MyApiContract = ApiContract<{
-    getUserById: { input: { userId: string }, output: User },
-    createUser: { input: CreateUserInput, output: User },
-    listUsers: { input: void, output: User[] }
-}>;
-```
-
-### 2. Backend - Pass Type to Lambder
-
-```typescript
-import Lambder from 'lambder';
-import type { MyApiContract } from './shared/apiContract';
-
-const lambder = new Lambder<MyApiContract>({
-    publicPath: './public',
-    apiPath: '/api'
+// Initialize
+const lambder = new Lambder({
+    publicPath: "./public",
+    apiPath: "/api"
+})
+// Chain APIs
+.addApi("getUser", {
+    input: z.object({ userId: z.string() }),
+    output: z.object({ id: z.string(), name: z.string() })
+}, async (ctx, resolver) => {
+    // ctx.apiPayload is typed as { userId: string }
+    // Runtime validation is already performed!
+    return resolver.api({ 
+        id: ctx.apiPayload.userId, 
+        name: "John Doe" 
+    });
 });
 
-// Now addApi is type-safe for both inputs AND outputs!
-lambder.addApi('getUserById', async (ctx, resolver) => {
-    // ✅ ctx.apiPayload is automatically typed as { userId: string }
-    const user = await db.getUser(ctx.apiPayload.userId);
-    
-    // ✅ resolver.api() enforces the output type (User)
-    return resolver.api(user); // TypeScript checks that user matches User type!
-});
+// Export the inferred contract type
+export type AppContract = typeof lambder.ApiContract;
+
+export const handler = lambder.getHandler();
 ```
 
-### 3. Frontend - Pass Type to LambderCaller
+### 2. Use in Frontend
+
+Import the type (not the code) and use `LambderCaller`.
 
 ```typescript
-import { LambderCaller } from 'lambder';
-import type { MyApiContract } from './shared/apiContract';
+import { LambderCaller } from "lambder";
+import type { AppContract } from "./backend"; // Type-only import
 
-const caller = new LambderCaller<MyApiContract>({
-    apiPath: '/api',
-    isCorsEnabled: false
+const lambderCaller = new LambderCaller<AppContract>({
+    apiPath: "/api"
 });
 
-// Now api() is type-safe!
-const user = await caller.api('getUserById', { userId: '123' });
-// user is typed as User | null | undefined
+// Fully typed!
+// TypeScript knows 'getUser' takes { userId: string } and returns { id: string, name: string }
+const user = await lambderCaller.api("getUser", { userId: "123" });
 ```
 
-## That's It!
+### 3. Modular APIs (Optional)
 
-- ✅ **No wrapper functions needed**
-- ✅ **Use existing `api()` and `addApi()` methods**
-- ✅ **Full autocomplete in IDE**
-- ✅ **Type-safe inputs AND outputs**
-- ✅ **Compile-time validation**
-- ✅ **Backward compatible**
-
-## Contract Type Format
+For larger apps, split your APIs into modules using `.use()`.
 
 ```typescript
-type MyApiContract = {
-    apiName: { input: InputType, output: OutputType }
-}
+// api.user.ts
+import { z } from "zod";
+import Lambder from "lambder";
+
+export const userApi = <T>(l: Lambder<T>) => {
+    return l.addApi("login", {
+        input: z.object({ email: z.string() }),
+        output: z.boolean()
+    }, async (ctx, resolver) => {
+        return resolver.api(true);
+    });
+};
+
+// index.ts
+import { userApi } from "./api.user";
+
+const lambder = new Lambder()
+    .use(userApi); // Types are preserved!
 ```
-
-## Examples
-
-### API with parameters
-```typescript
-getUserById: { input: { userId: string }, output: User }
-```
-
-### API with no input
-```typescript
-listAll: { input: void, output: Item[] }
-```
-
-### API with complex types
-```typescript
-updateUser: { 
-    input: { id: string } & Partial<User>, 
-    output: User 
-}
-```
-
-### API with conditional output
-```typescript
-login: { 
-    input: { email: string, password: string },
-    output: { success: boolean, user?: User, error?: string }
-}
-```
-
-## Output Type Enforcement
-
-The type system now enforces that `resolver.api()` returns data matching your contract's output type:
-
-```typescript
-type MyContract = ApiContract<{
-    getNumber: { input: void, output: number },
-    getUser: { input: { id: string }, output: User }
-}>;
-
-const lambder = new Lambder<MyContract>({ ... });
-
-// ✅ CORRECT
-lambder.addApi('getNumber', async (ctx, resolver) => {
-    return resolver.api(42); // number - matches output type
-});
-
-// ❌ ERROR: Type 'string' is not assignable to type 'number'
-lambder.addApi('getNumber', async (ctx, resolver) => {
-    return resolver.api("wrong"); // TypeScript error!
-});
-
-// ✅ CORRECT
-lambder.addApi('getUser', async (ctx, resolver) => {
-    return resolver.api({ id: "123", name: "John", ... }); // User object
-});
-
-// ❌ ERROR: Missing required properties
-lambder.addApi('getUser', async (ctx, resolver) => {
-    return resolver.api({ id: "123" }); // TypeScript error - incomplete User!
-});
-```
-
-This works with:
-- `resolver.api()` - typed return value
-- `resolver.die.api()` - typed return value
-- `addApi()` - typed for regular APIs
-- `addSessionApi()` - typed for session APIs
-
-## Without Type Safety (Still Works!)
-
-Don't want type safety? Just don't pass the generic type:
-
-```typescript
-// Frontend
-const caller = new LambderCaller({ ... }); // No generic
-await caller.api('anyApi', { anything: true }); // Works, but untyped
-
-// Backend
-const lambder = new Lambder({ ... }); // No generic
-lambder.addApi('anyApi', async (ctx, resolver) => {
-    // ctx.apiPayload is any
-});
-```
-
-## Full Example
-
-See [simplified-typed-api-example.ts](../examples/simplified-typed-api-example.ts) for a complete working example.
-
-## Testing Your Type-Safe APIs
-
-LambderMSW provides full type safety for testing your APIs with MSW (Mock Service Worker):
-
-```typescript
-import { LambderMSW } from 'lambder';
-import { setupServer } from 'msw/node';
-import type { MyApiContract } from './shared/apiContract';
-
-// Create type-safe MSW instance
-const lambderMSW = new LambderMSW<MyApiContract>({
-    apiPath: '/api'
-});
-
-// Mock with full type safety! ✨
-const handlers = [
-    lambderMSW.mockApi('getUserById', async (payload) => {
-        // payload is typed as { userId: string }
-        // Return value is type-checked against output
-        return {
-            id: payload.userId,
-            name: 'John Doe',
-            email: 'john@example.com'
-        };
-    })
-];
-
-const server = setupServer(...handlers);
-```
-
-📖 See [LAMBDER_MSW.md](./LAMBDER_MSW.md) for complete testing documentation.
-
-## Key Points
-
-- **Contract is just a TypeScript type** - No runtime code!
-- **Zero overhead** - All type checking happens at compile time
-- **Input AND output validation** - Both sides of your API are type-safe
-- **Compile-time safety** - Catch type mismatches before deployment
-- **Opt-in** - Use types when you want them
-- **Simple** - Just pass type to constructor
-- **Autocomplete** - IDE shows available APIs as you type
-- **Testing support** - LambderMSW provides type-safe mocking

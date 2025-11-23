@@ -5,3 +5,4 @@ export { default as LambderResponseBuilder } from "./LambderResponseBuilder.js";
 export { default as LambderResolver } from "./LambderResolver.js";
 export { default as LambderSessionManager } from "./LambderSessionManager.js";
 export { default as LambderMSW } from "./LambderMSW.js";
+export { createContext } from "./LambderContext.js";

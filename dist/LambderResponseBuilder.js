@@ -28,8 +28,8 @@ export default class LambderResponseBuilder {
             throw new Error("File system operations are not available in browser environment");
         }
         const publicPath = path.resolve(this.publicPath);
-        const absolutePath = path.resolve(publicPath, filePath);
-        console.log("readPublicFileSync", { filePath, publicPath, absolutePath });
+        const normalizedFilePath = filePath.startsWith('/') ? filePath.slice(1) : filePath;
+        const absolutePath = path.resolve(publicPath, normalizedFilePath);
         if (!absolutePath.startsWith(publicPath)) {
             return "forbidden-public-path";
         }
@@ -43,8 +43,8 @@ export default class LambderResponseBuilder {
             return false;
         }
         const publicPath = path.resolve(this.publicPath);
-        const absolutePath = path.resolve(publicPath, filePath);
-        console.log("checkPublicFileExist", { filePath, publicPath, absolutePath });
+        const normalizedFilePath = filePath.startsWith('/') ? filePath.slice(1) : filePath;
+        const absolutePath = path.resolve(publicPath, normalizedFilePath);
         if (!absolutePath.startsWith(publicPath)) {
             return false;
         }
@@ -70,7 +70,7 @@ export default class LambderResponseBuilder {
             throw new Error(".setHeader function is not available within this hook");
         else {
             this.ctx._otherInternal.addHeaderFnAccumulator = this.ctx._otherInternal.addHeaderFnAccumulator
-                .filter(header => header.key !== key);
+                .filter((header) => header.key !== key);
             this.ctx._otherInternal.setHeaderFnAccumulator.push({ key, value });
         }
     }
@@ -156,17 +156,19 @@ export default class LambderResponseBuilder {
     ;
     async file(filePath, headers, fallbackFilePath) {
         const doesFileExist = await this.checkPublicFileExist(filePath);
-        if (!doesFileExist && fallbackFilePath) {
-            const doesFallbackExist = await this.checkPublicFileExist(fallbackFilePath);
-            if (doesFallbackExist) {
-                return await this.file(fallbackFilePath, headers);
+        if (!doesFileExist) {
+            if (fallbackFilePath) {
+                const doesFallbackExist = await this.checkPublicFileExist(fallbackFilePath);
+                if (doesFallbackExist) {
+                    return await this.file(fallbackFilePath, headers);
+                }
             }
             return this.json({ error: "File not found: " + filePath });
         }
         const mimeType = mimeTypeResolver.lookup(filePath);
         const body = await this.readPublicFileSync(filePath);
         if (body === "forbidden-public-path") {
-            throw { error: "Forbidden public path: " + filePath };
+            throw new Error("Forbidden public path: " + filePath);
         }
         const bodyBuffer = Buffer.isBuffer(body) ? body : Buffer.from(body);
         const bodyBase64 = bodyBuffer.toString("base64");
