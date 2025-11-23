@@ -1,4 +1,3 @@
-import querystring from "querystring";
 import cookieParser from "cookie";
 import { match } from "path-to-regexp";
 
@@ -20,10 +19,10 @@ export type LambderRenderContext<TApiPayload = any> = {
     get: Record<string, any>;
     post: Record<string, any>;
     cookie: Record<string, any>;
+    session: null;
     apiName: string;
     apiPayload: TApiPayload;
     headers: APIGatewayProxyEventHeaders;
-    session: LambderSessionContext|null;
     event: APIGatewayProxyEvent;
     lambdaContext: Context;
     _otherInternal: { 
@@ -35,11 +34,17 @@ export type LambderRenderContext<TApiPayload = any> = {
     };
 };
 
+export type LambderSessionRenderContext<
+    TApiPayload = any, SessionData = any
+> = Omit<LambderRenderContext<TApiPayload>, 'session'> & { session: LambderSessionContext<SessionData> };
+
 type LambderModuleFunction = (lambderInstance: Lambder) => void | Promise<void>;
 
 type ConditionFunction = (ctx: LambderRenderContext<any>) => boolean;
 type ActionFunction = (ctx: LambderRenderContext<any>, resolver: LambderResolver) => LambderResolverResponse|Promise<LambderResolverResponse>;
-type ActionObject = { conditionFn: ConditionFunction, actionFn: ActionFunction };
+type SessionActionFunction<SessionData = any> = (ctx: LambderSessionRenderContext<any, SessionData>, resolver: LambderResolver) => LambderResolverResponse|Promise<LambderResolverResponse>;
+
+type ActionObject = { conditionFn: ConditionFunction, actionFn: ActionFunction | SessionActionFunction };
 
 type HookEventType = "created"|"beforeRender"|"afterRender"|"fallback";
 type HookCreatedFunction = (lambderInstance: Lambder) => Promise<void>;
@@ -64,14 +69,19 @@ export const createContext = (
     const method = event.httpMethod;
     const cookie = cookieParser.parse(event.headers.Cookie || event.headers.cookie || "");
     const headers = event.headers;
-    const session = null;
     
     // Decode body for the post
     let post: Record<string, any> = {};
     try {
         const decodedBody = event.isBase64Encoded ? ( event.body ? Buffer.from(event.body,"base64").toString() : "{}" ) : ( event.body || "{}" );
         try { post = JSON.parse(decodedBody) || {}; }
-        catch(e){ post = querystring.parse(decodedBody) || {}; }
+        catch(e){ 
+            const params = new URLSearchParams(decodedBody);
+            post = {};
+            for(const [key, value] of params.entries()){
+                post[key] = value;
+            }
+        }
     }catch(e){}
     // Parse api variables
 
@@ -83,8 +93,9 @@ export const createContext = (
     return { 
         host, path, pathParams, method, 
         get, post, cookie, event,
+        session: null,
         apiName, apiPayload, 
-        headers, session, lambdaContext, 
+        headers, lambdaContext, 
         _otherInternal: { 
             isApiCall, requestVersion,
             setHeaderFnAccumulator: [], 
@@ -95,7 +106,7 @@ export const createContext = (
 }
 
 
-export default class Lambder<TContract extends ApiContractShape = any> {
+export default class Lambder<TContract extends ApiContractShape = any, TSessionData = any> {
     public apiPath: string;
     public apiVersion: null|string;
     public isCorsEnabled: boolean = false;
@@ -218,7 +229,7 @@ export default class Lambder<TContract extends ApiContractShape = any> {
         });
     };
 
-    addSessionRoute(condition: Path|ConditionFunction|RegExp, actionFn: ActionFunction):void{
+    addSessionRoute(condition: Path|ConditionFunction|RegExp, actionFn: SessionActionFunction<TSessionData>):void{
         this.actionList.push({ 
             conditionFn: (ctx:LambderRenderContext<any>) => (
                 ctx.method === "GET" &&
@@ -229,14 +240,17 @@ export default class Lambder<TContract extends ApiContractShape = any> {
                 )
             ), 
             actionFn: async (ctx:LambderRenderContext<any>, resolver: LambderResolver) => {
-                await this.getSessionController(ctx).fetchSession();
-
                 if(typeof condition === "string"){
                     ctx.pathParams = this.getPatternMatch(condition, ctx.path);
                 }else if(condition?.constructor == RegExp){
                     ctx.pathParams = ctx.path.match(condition);
                 }
-                return await actionFn(ctx, resolver);
+
+                const sessionCtx = ctx as unknown as LambderSessionRenderContext<any, TSessionData>;
+                await this.getSessionController(ctx).fetchSession();
+                if(!sessionCtx.session){ throw new Error("Session not found."); }
+
+                return await actionFn(sessionCtx, resolver);
             }
         });
     };
@@ -276,23 +290,23 @@ export default class Lambder<TContract extends ApiContractShape = any> {
     // Overload for untyped session API with RegExp or function
     addSessionApi(
         apiName: ConditionFunction|RegExp,
-        actionFn: ActionFunction
+        actionFn: SessionActionFunction<TSessionData>
     ):void;
     // Overload for typed session API with string name (must come before untyped string overload)
     addSessionApi<TApiName extends keyof TContract & string>(
         apiName: TApiName,
         actionFn: (
-            ctx: LambderRenderContext<TContract[TApiName]['input']>,
+            ctx: LambderSessionRenderContext<TContract[TApiName]['input'], TSessionData>,
             resolver: LambderResolver<TContract, TApiName>
         ) => LambderResolverResponse|Promise<LambderResolverResponse>
     ):void;
     // Overload for untyped session API with string (backward compatibility, must be last)
     addSessionApi(
         apiName: string,
-        actionFn: ActionFunction
+        actionFn: SessionActionFunction<TSessionData>
     ):void;
     // Implementation
-    addSessionApi(apiName: string|ConditionFunction|RegExp, actionFn: ActionFunction):void{
+    addSessionApi(apiName: string|ConditionFunction|RegExp, actionFn: SessionActionFunction<TSessionData>):void{
         this.actionList.push({ 
             conditionFn: (ctx:LambderRenderContext<any>) =>  (
                 !!ctx.apiName && (
@@ -302,8 +316,10 @@ export default class Lambder<TContract extends ApiContractShape = any> {
                 )
             ), 
             actionFn: async (ctx:LambderRenderContext<any>, resolver: LambderResolver) => {
+                const sessionCtx = ctx as unknown as LambderSessionRenderContext<any, TSessionData>;
                 await this.getSessionController(ctx).fetchSession();
-                return await actionFn(ctx, resolver);
+                if(!sessionCtx.session){ throw new Error("Session not found."); }
+                return await actionFn(sessionCtx, resolver);
             }
         });
     };
@@ -325,10 +341,10 @@ export default class Lambder<TContract extends ApiContractShape = any> {
         }
     }
 
-    getSessionController(ctx: LambderRenderContext<any>): LambderSessionController{
+    getSessionController(ctx: LambderRenderContext<any> | LambderSessionRenderContext<any, TSessionData>): LambderSessionController<TSessionData>{
         if(!this.lambderSessionManager) throw new Error("Session is not enabled. Use lambder.enableDdbSession(...) to enable.");
 
-        return new LambderSessionController({
+        return new LambderSessionController<TSessionData>({
             lambderSessionManager: this.lambderSessionManager,
             sessionTokenCookieKey: this.sessionTokenCookieKey,
             sessionCsrfCookieKey: this.sessionCsrfCookieKey,
@@ -393,7 +409,7 @@ export default class Lambder<TContract extends ApiContractShape = any> {
                             ctx = hookCtx;
                         }
                         // Run matched action
-                        let response = await firstMatchedAction.actionFn(ctx, resolver);
+                        let response = await firstMatchedAction.actionFn(ctx as any, resolver);
                         // Run afterRender hooks
                         for(const hook of this.hookList["afterRender"]){ 
                             const hookResponse = await hook.hookFn(ctx, resolver, response);

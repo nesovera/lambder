@@ -1,9 +1,9 @@
-export type LambderSessionContext = {
+export type LambderSessionContext<SessionData = any> = {
     [x: string]: any;
     sessionToken: string;
     csrfToken: string;
     sessionKey: string;
-    data: any;
+    data: SessionData;
     createdAt: number;
     expiresAt: number;
     lastAccessedAt: number;

@@ -28,12 +28,12 @@ export default class LambderResponseBuilder {
             throw new Error("File system operations are not available in browser environment");
         }
         const publicPath = path.resolve(this.publicPath);
-        const absolutePath = path.join(publicPath, filePath);
+        const absolutePath = path.resolve(publicPath, filePath);
         console.log("readPublicFileSync", { filePath, publicPath, absolutePath });
-        if (!absolutePath.includes(publicPath)) {
+        if (!absolutePath.startsWith(publicPath)) {
             return "forbidden-public-path";
         }
-        return fs.readFileSync(absolutePath);
+        return await fs.promises.readFile(absolutePath);
     }
     ;
     async checkPublicFileExist(filePath) {
@@ -43,12 +43,18 @@ export default class LambderResponseBuilder {
             return false;
         }
         const publicPath = path.resolve(this.publicPath);
-        const absolutePath = path.join(this.publicPath, filePath);
+        const absolutePath = path.resolve(publicPath, filePath);
         console.log("checkPublicFileExist", { filePath, publicPath, absolutePath });
-        if (!absolutePath.includes(publicPath)) {
+        if (!absolutePath.startsWith(publicPath)) {
             return false;
         }
-        return fs.existsSync(absolutePath) && fs.statSync(absolutePath).isFile();
+        try {
+            const stat = await fs.promises.stat(absolutePath);
+            return stat.isFile();
+        }
+        catch {
+            return false;
+        }
     }
     ;
     addHeader(key, value) {
