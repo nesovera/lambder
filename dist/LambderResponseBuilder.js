@@ -149,7 +149,7 @@ export default class LambderResponseBuilder {
         return this.raw({
             statusCode: 200,
             isBase64Encoded: true,
-            multiValueHeaders: { "Content-Type": [mimeType || "text/html"], ...convertToMultiHeader(headers) },
+            multiValueHeaders: { "Content-Type": [mimeType || "application/octet-stream"], ...convertToMultiHeader(headers) },
             body: fileBase64,
         });
     }
@@ -173,7 +173,7 @@ export default class LambderResponseBuilder {
         const bodyBuffer = Buffer.isBuffer(body) ? body : Buffer.from(body);
         const bodyBase64 = bodyBuffer.toString("base64");
         console.log("bodyBase64.length", bodyBase64.length);
-        return this.fileBase64(bodyBase64, mimeType || "", headers);
+        return this.fileBase64(bodyBase64, mimeType || "application/octet-stream", headers);
     }
     ;
     async ejsTemplate(template, pageData, headers) {
