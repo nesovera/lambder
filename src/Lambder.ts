@@ -1,44 +1,16 @@
-import cookieParser from "cookie";
 import { match } from "path-to-regexp";
+import { z } from "zod";
 
-import type { APIGatewayProxyEvent, APIGatewayProxyEventHeaders, Context } from "aws-lambda";
+import type { APIGatewayProxyEvent, Context } from "aws-lambda";
 import LambderResolver from "./LambderResolver.js";
 import LambderResponseBuilder, { LambderResolverResponse } from "./LambderResponseBuilder.js";
 import LambderUtils from "./LambderUtils.js";
-import LambderSessionManager, { type LambderSessionContext } from "./LambderSessionManager.js";
+import LambderSessionManager from "./LambderSessionManager.js";
 import LambderSessionController from "./LambderSessionController.js";
-import type { ApiContractShape } from "./LambderApiContract.js";
+import type { MergeContract } from "./LambderApiContract.js";
+import { createContext, type LambderRenderContext, type LambderSessionRenderContext } from "./LambderContext.js";
 
 type Path = `/${string}`;
-
-export type LambderRenderContext<TApiPayload = any> = {
-    host: string;
-    path: string;
-    pathParams: Record<string, any> | null;
-    method: string;
-    get: Record<string, any>;
-    post: Record<string, any>;
-    cookie: Record<string, any>;
-    session: null;
-    apiName: string;
-    apiPayload: TApiPayload;
-    headers: APIGatewayProxyEventHeaders;
-    event: APIGatewayProxyEvent;
-    lambdaContext: Context;
-    _otherInternal: { 
-        isApiCall: boolean,
-        requestVersion: string|null;
-        setHeaderFnAccumulator: { key:string, value:string|string[] }[];
-        addHeaderFnAccumulator: { key:string, value:string }[];
-        logToApiResponseAccumulator: any[];
-    };
-};
-
-export type LambderSessionRenderContext<
-    TApiPayload = any, SessionData = any
-> = Omit<LambderRenderContext<TApiPayload>, 'session'> & { session: LambderSessionContext<SessionData> };
-
-type LambderModuleFunction = (lambderInstance: Lambder) => void | Promise<void>;
 
 type ConditionFunction = (ctx: LambderRenderContext<any>) => boolean;
 type ActionFunction = (ctx: LambderRenderContext<any>, resolver: LambderResolver) => LambderResolverResponse|Promise<LambderResolverResponse>;
@@ -55,63 +27,41 @@ type HookFallbackFunction = (ctx: LambderRenderContext<any>, resolver: LambderRe
 type GlobalErrorHandlerFunction = (err: Error, ctx: LambderRenderContext<any>|null, response: LambderResponseBuilder, logListToApiResponse?: any[]) => LambderResolverResponse|Promise<LambderResolverResponse>;
 type RouteFallbackHandlerFunction = (ctx:LambderRenderContext<any>, resolver: LambderResolver) => LambderResolverResponse;
 type ApiFallbackHandlerFunction = (ctx:LambderRenderContext<any>, resolver: LambderResolver) => LambderResolverResponse;
+type ApiInputValidationErrorHandlerFunction = (ctx: LambderRenderContext<any>, resolver: LambderResolver, zodError: z.ZodError) => LambderResolverResponse|Promise<LambderResolverResponse>;
 
-
-export const createContext = (
-    event: APIGatewayProxyEvent, 
-    lambdaContext: Context,
-    apiPath: string,
-):LambderRenderContext<any> => {
-    const host = event.headers.Host || event.headers.host || "";
-    const path = event.path;
-    const pathParams = null;
-    const get: Record<string, any> = event.queryStringParameters || {};
-    const method = event.httpMethod;
-    const cookie = cookieParser.parse(event.headers.Cookie || event.headers.cookie || "");
-    const headers = event.headers;
-    
-    // Decode body for the post
-    let post: Record<string, any> = {};
-    try {
-        const decodedBody = event.isBase64Encoded ? ( event.body ? Buffer.from(event.body,"base64").toString() : "{}" ) : ( event.body || "{}" );
-        try { post = JSON.parse(decodedBody) || {}; }
-        catch(e){ 
-            const params = new URLSearchParams(decodedBody);
-            post = {};
-            for(const [key, value] of params.entries()){
-                post[key] = value;
-            }
-        }
-    }catch(e){}
-    // Parse api variables
-
-    const isApiCall = method === "POST" && apiPath && path === apiPath && post.apiName;
-    const apiName:string = isApiCall ? post.apiName : null;
-    const apiPayload:string = isApiCall ? post.payload : null;
-    const requestVersion:string = isApiCall ? post.version : null;
-
-    return { 
-        host, path, pathParams, method, 
-        get, post, cookie, event,
-        session: null,
-        apiName, apiPayload, 
-        headers, lambdaContext, 
-        _otherInternal: { 
-            isApiCall, requestVersion,
-            setHeaderFnAccumulator: [], 
-            addHeaderFnAccumulator: [], 
-            logToApiResponseAccumulator: [], 
-        } 
-    };
-}
-
-
-export default class Lambder<TContract extends ApiContractShape = any, TSessionData = any> {
+/**
+ * Main Lambder class for building type-safe serverless APIs
+ * 
+ * @typeParam TSessionData - Type of session data stored in DynamoDB
+ * @typeParam _TContract - @internal Accumulates API contract during chaining (do not pass manually)
+ * 
+ * @example
+ * ```typescript
+ * interface SessionData { userId: string; role: string; }
+ * 
+ * const lambder = new Lambder<SessionData>({ apiPath: '/api' })
+ *   .addApi('getUser', { input: z.object({...}), output: z.object({...}) }, handler)
+ *   .addApi('createUser', { input: z.object({...}), output: z.object({...}) }, handler);
+ * ```
+ */
+export default class Lambder<TSessionData = any, _TContract extends Record<string, any> = {}> {
     public apiPath: string;
     public apiVersion: null|string;
     public isCorsEnabled: boolean = false;
     public publicPath: string;
     public ejsPath: string;
+    
+    /**
+     * Type property for extracting the API contract
+     * Use this to export your API types to the frontend
+     * 
+     * @example
+     * ```typescript
+     * const lambder = new Lambder().addApi(...).addApi(...);
+     * export type AppContract = typeof lambder.ApiContract;
+     * ```
+     */
+    public readonly ApiContract!: _TContract;
     
     private actionList: ActionObject[];
     private hookList: { 
@@ -122,6 +72,7 @@ export default class Lambder<TContract extends ApiContractShape = any, TSessionD
     private globalErrorHandler: GlobalErrorHandlerFunction|null = null;
     private routeFallbackHandler: RouteFallbackHandlerFunction|null = null;
     private apiFallbackHandler: ApiFallbackHandlerFunction|null = null;
+    private apiInputValidationErrorHandler: ApiInputValidationErrorHandlerFunction|null = null;
 
     public utils: LambderUtils;
 
@@ -148,32 +99,42 @@ export default class Lambder<TContract extends ApiContractShape = any, TSessionD
         this.utils = new LambderUtils({ ejsPath });
     }
 
-    enableCors(isCorsEnabled: boolean){
+    enableCors(isCorsEnabled: boolean): this {
         this.isCorsEnabled = isCorsEnabled;
+        return this;
     }
 
     enableDdbSession(
         { tableName, tableRegion, sessionSalt, enableSlidingExpiration }: { tableName: string; tableRegion: string; sessionSalt: string; enableSlidingExpiration?: boolean; }, 
         { partitionKey, sortKey }: { partitionKey: string, sortKey: string } = { partitionKey: "pk", sortKey: "sk" }
-    ){
+    ): this {
         this.lambderSessionManager = new LambderSessionManager({
             tableName, tableRegion, partitionKey, sortKey, sessionSalt, enableSlidingExpiration
         });
+        return this;
     }
 
-    setSessionCookieKey(sessionTokenCookieKey: string, sessionCsrfCookieKey: string){
+    setSessionCookieKey(sessionTokenCookieKey: string, sessionCsrfCookieKey: string): this {
         this.sessionTokenCookieKey = sessionTokenCookieKey;
         this.sessionCsrfCookieKey = sessionCsrfCookieKey;
+        return this;
     }
 
-    setRouteFallbackHandler(routeFallbackHandler: RouteFallbackHandlerFunction){
+    setRouteFallbackHandler(routeFallbackHandler: RouteFallbackHandlerFunction): this {
         this.routeFallbackHandler = routeFallbackHandler;
+        return this;
     }
-    setApiFallbackHandler(apiFallbackHandler: ApiFallbackHandlerFunction){
+    setApiFallbackHandler(apiFallbackHandler: ApiFallbackHandlerFunction): this {
         this.apiFallbackHandler = apiFallbackHandler;
+        return this;
     }
-    setGlobalErrorHandler(globalErrorHandler: GlobalErrorHandlerFunction){
+    setApiInputValidationErrorHandler(apiInputValidationErrorHandler: ApiInputValidationErrorHandlerFunction): this {
+        this.apiInputValidationErrorHandler = apiInputValidationErrorHandler;
+        return this;
+    }
+    setGlobalErrorHandler(globalErrorHandler: GlobalErrorHandlerFunction): this {
         this.globalErrorHandler = globalErrorHandler;
+        return this;
     }
     private getPatternMatch(pattern: string, path: string): Record<string, any> {
         const result = (match(pattern, { decode: decodeURIComponent }))(path);
@@ -199,15 +160,7 @@ export default class Lambder<TContract extends ApiContractShape = any, TSessionD
         }
     }
 
-    async addModule(moduleFn: LambderModuleFunction): Promise<void>{
-        await moduleFn(this);
-    }
-
-    async importModule(moduleImport: Promise<{ default: LambderModuleFunction }>): Promise<void>{
-        await this.addModule((await moduleImport).default);
-    }
-
-    addRoute(condition: Path|ConditionFunction|RegExp, actionFn: ActionFunction):void{
+    addRoute(condition: Path|ConditionFunction|RegExp, actionFn: ActionFunction): this {
         this.actionList.push({ 
             conditionFn: (ctx:LambderRenderContext<any>) => (
                 ctx.method === "GET" && 
@@ -221,15 +174,17 @@ export default class Lambder<TContract extends ApiContractShape = any, TSessionD
                 if(typeof condition === "string"){
                     ctx.pathParams = this.getPatternMatch(condition, ctx.path);
                 }else if(condition?.constructor == RegExp){
-                    ctx.pathParams = ctx.path.match(condition);
+                    const match = ctx.path.match(condition);
+                    ctx.pathParams = match ? (match.groups || (match as unknown as Record<string, any>)) : {};
                 }
                 
                 return await actionFn(ctx, resolver);
             }
         });
-    };
+        return this;
+    }
 
-    addSessionRoute(condition: Path|ConditionFunction|RegExp, actionFn: SessionActionFunction<TSessionData>):void{
+    addSessionRoute(condition: Path|ConditionFunction|RegExp, actionFn: SessionActionFunction<TSessionData>): this {
         this.actionList.push({ 
             conditionFn: (ctx:LambderRenderContext<any>) => (
                 ctx.method === "GET" &&
@@ -243,7 +198,8 @@ export default class Lambder<TContract extends ApiContractShape = any, TSessionD
                 if(typeof condition === "string"){
                     ctx.pathParams = this.getPatternMatch(condition, ctx.path);
                 }else if(condition?.constructor == RegExp){
-                    ctx.pathParams = ctx.path.match(condition);
+                    const match = ctx.path.match(condition);
+                    ctx.pathParams = match ? (match.groups || (match as unknown as Record<string, any>)) : {};
                 }
 
                 const sessionCtx = ctx as unknown as LambderSessionRenderContext<any, TSessionData>;
@@ -253,91 +209,109 @@ export default class Lambder<TContract extends ApiContractShape = any, TSessionD
                 return await actionFn(sessionCtx, resolver);
             }
         });
-    };
+        return this;
+    }
     
-    // Overload for untyped API with RegExp or function
-    addApi(
-        apiName: ConditionFunction|RegExp,
-        actionFn: ActionFunction
-    ):void;
-    // Overload for typed API with string name (must come before untyped string overload)
-    addApi<TApiName extends keyof TContract & string>(
-        apiName: TApiName,
-        actionFn: (
-            ctx: LambderRenderContext<TContract[TApiName]['input']>,
-            resolver: LambderResolver<TContract, TApiName>
-        ) => LambderResolverResponse|Promise<LambderResolverResponse>
-    ):void;
-    // Overload for untyped API with string (backward compatibility, must be last)
-    addApi(
-        apiName: string,
-        actionFn: ActionFunction
-    ):void;
-    // Implementation
-    addApi(apiName: string|ConditionFunction|RegExp, actionFn: ActionFunction):void{
-        this.actionList.push({ 
-            conditionFn: (ctx:LambderRenderContext<any>) =>  (
-                !!ctx.apiName && (
-                    (typeof apiName === "string" && ctx.apiName === apiName) ||
-                    (typeof apiName === "function" && apiName(ctx)) ||
-                    (apiName?.constructor == RegExp && apiName.test(ctx.apiName))
-                )
-            ), 
-            actionFn: async (ctx:LambderRenderContext<any>, resolver: LambderResolver) => await actionFn(ctx, resolver),
-        });
-    };
+    // Plugin system
+    public use<_TNewContract extends Record<string, any>>(
+        plugin: (lambder: Lambder<TSessionData, _TContract>) => Lambder<TSessionData, _TNewContract>
+    ): Lambder<TSessionData, _TNewContract extends _TContract ? _TNewContract : (_TContract & _TNewContract)> {
+        return plugin(this) as any;
+    }
 
-    // Overload for untyped session API with RegExp or function
-    addSessionApi(
-        apiName: ConditionFunction|RegExp,
-        actionFn: SessionActionFunction<TSessionData>
-    ):void;
-    // Overload for typed session API with string name (must come before untyped string overload)
-    addSessionApi<TApiName extends keyof TContract & string>(
-        apiName: TApiName,
-        actionFn: (
-            ctx: LambderSessionRenderContext<TContract[TApiName]['input'], TSessionData>,
-            resolver: LambderResolver<TContract, TApiName>
-        ) => LambderResolverResponse|Promise<LambderResolverResponse>
-    ):void;
-    // Overload for untyped session API with string (backward compatibility, must be last)
-    addSessionApi(
-        apiName: string,
-        actionFn: SessionActionFunction<TSessionData>
-    ):void;
-    // Implementation
-    addSessionApi(apiName: string|ConditionFunction|RegExp, actionFn: SessionActionFunction<TSessionData>):void{
+    // Typed API with Zod
+    public addApi<
+        TName extends string,
+        TInput extends z.ZodTypeAny,
+        TOutput extends z.ZodTypeAny
+    >(
+        name: TName,
+        schema: { input: TInput, output: TOutput },
+        handler: (
+            ctx: LambderRenderContext<z.infer<TInput>>, 
+            resolver: LambderResolver<z.infer<TOutput>>
+        ) => LambderResolverResponse | Promise<LambderResolverResponse>
+    ): Lambder<TSessionData, MergeContract<_TContract, TName, z.infer<TInput>, z.infer<TOutput>>> {
         this.actionList.push({ 
-            conditionFn: (ctx:LambderRenderContext<any>) =>  (
-                !!ctx.apiName && (
-                    (typeof apiName === "string" && ctx.apiName === apiName) ||
-                    (typeof apiName === "function" && apiName(ctx)) ||
-                    (apiName?.constructor == RegExp && apiName.test(ctx.apiName))
-                )
-            ), 
+            conditionFn: (ctx:LambderRenderContext<any>) => ctx.apiName === name,
+            actionFn: async (ctx:LambderRenderContext<any>, resolver: LambderResolver) => {
+                // Validate Input
+                const inputResult = schema.input.safeParse(ctx.apiPayload);
+                if (!inputResult.success) {
+                    if (this.apiInputValidationErrorHandler) {
+                        return await this.apiInputValidationErrorHandler(ctx, resolver, inputResult.error);
+                    }
+                    return resolver.raw({
+                        statusCode: 400,
+                        body: JSON.stringify({ error: "Input validation failed", zodError: inputResult.error }),
+                        multiValueHeaders: { "Content-Type": ["application/json"] }
+                    });
+                }
+                
+                // Run Handler with validated data
+                ctx.apiPayload = inputResult.data;
+                return await handler(ctx, resolver);
+            },
+        });
+        return this as any;
+    }
+
+    // Typed Session API with Zod
+    public addSessionApi<
+        TName extends string,
+        TInput extends z.ZodTypeAny,
+        TOutput extends z.ZodTypeAny
+    >(
+        name: TName,
+        schema: { input: TInput, output: TOutput },
+        handler: (
+            ctx: LambderSessionRenderContext<z.infer<TInput>, TSessionData>, 
+            resolver: LambderResolver<z.infer<TOutput>>
+        ) => LambderResolverResponse | Promise<LambderResolverResponse>
+    ): Lambder<TSessionData, MergeContract<_TContract, TName, z.infer<TInput>, z.infer<TOutput>>> {
+        this.actionList.push({ 
+            conditionFn: (ctx:LambderRenderContext<any>) => ctx.apiName === name,
             actionFn: async (ctx:LambderRenderContext<any>, resolver: LambderResolver) => {
                 const sessionCtx = ctx as unknown as LambderSessionRenderContext<any, TSessionData>;
                 await this.getSessionController(ctx).fetchSession();
                 if(!sessionCtx.session){ throw new Error("Session not found."); }
-                return await actionFn(sessionCtx, resolver);
+
+                // Validate Input
+                const inputResult = schema.input.safeParse(ctx.apiPayload);
+                if (!inputResult.success) {
+                    if (this.apiInputValidationErrorHandler) {
+                        return await this.apiInputValidationErrorHandler(ctx, resolver, inputResult.error);
+                    }
+                    return resolver.raw({
+                        statusCode: 400,
+                        body: JSON.stringify({ error: "Input validation failed", zodError: inputResult.error }),
+                        multiValueHeaders: { "Content-Type": ["application/json"] }
+                    });
+                }
+                
+                // Run Handler with validated data
+                ctx.apiPayload = inputResult.data;
+                return await handler(sessionCtx, resolver);
             }
         });
-    };
+        return this as any;
+    }
 
-    async addHook(hookEvent: 'created', hookFn: HookCreatedFunction, priority?: number): Promise<void>;
-    async addHook(hookEvent: 'beforeRender', hookFn: HookBeforeRenderFunction, priority?: number): Promise<void>;
-    async addHook(hookEvent: 'afterRender', hookFn: HookAfterRenderFunction, priority?: number): Promise<void>;
-    async addHook(hookEvent: 'fallback', hookFn: HookFallbackFunction, priority?: number): Promise<void>;
-    async addHook(
+    addHook(hookEvent: 'created', hookFn: HookCreatedFunction, priority?: number): Promise<this>;
+    addHook(hookEvent: 'beforeRender', hookFn: HookBeforeRenderFunction, priority?: number): this;
+    addHook(hookEvent: 'afterRender', hookFn: HookAfterRenderFunction, priority?: number): this;
+    addHook(hookEvent: 'fallback', hookFn: HookFallbackFunction, priority?: number): this;
+    addHook(
         hookEvent:HookEventType, 
         hookFn: HookCreatedFunction & HookBeforeRenderFunction & HookAfterRenderFunction & HookFallbackFunction,
         priority = 0
-    ): Promise<void> {
+    ): this | Promise<this> {
         if(hookEvent === "created"){
-            await hookFn(this);
+            return hookFn(this).then(() => this);
         }else{
             this.hookList[hookEvent].push({ priority, hookFn });
             this.hookList[hookEvent].sort((a, b) => a.priority - b.priority);
+            return this;
         }
     }
 
@@ -374,6 +348,10 @@ export default class Lambder<TContract extends ApiContractShape = any, TSessionD
             ctx, resolve, reject
         });
     };
+
+    getHandler() {
+        return (event: APIGatewayProxyEvent, context: Context) => this.render(event, context);
+    }
 
     async render(
         event: APIGatewayProxyEvent,

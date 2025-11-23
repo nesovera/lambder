@@ -11,6 +11,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { mockClient } from 'aws-sdk-client-mock';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, DeleteCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { z } from 'zod';
 import LambderSessionManager, { type LambderSessionContext } from '../src/LambderSessionManager.js';
 import LambderSessionController from '../src/LambderSessionController.js';
 import Lambder from '../src/Lambder.js';
@@ -738,7 +739,7 @@ describe('LambderSessionController', () => {
 });
 
 describe('Session Endpoint Protection', () => {
-    let lambder: Lambder<any, UserSessionData>;
+    let lambder: Lambder<UserSessionData>;
     
     const createMockEvent = (path: string, method: string, sessionToken?: string, apiName?: string, payload?: any, csrfToken?: string): APIGatewayProxyEvent => {
         const cookieHeader = sessionToken ? `sessionToken=${sessionToken}` : '';
@@ -787,24 +788,22 @@ describe('Session Endpoint Protection', () => {
             publicPath: '/public',
             apiPath: '/api',
             ejsPath: '/views',
-        });
-
-        lambder.enableDdbSession(
-            {
-                tableName: 'test-sessions',
-                tableRegion: 'us-east-1',
-                sessionSalt: 'test-salt',
-            },
-            { partitionKey: 'pk', sortKey: 'sk' }
-        );
-
-        // Set up error handler to expose actual error messages for testing
-        lambder.setGlobalErrorHandler((err, ctx, responseBuilder) => {
-            if (ctx?._otherInternal.isApiCall) {
-                return responseBuilder.api({ error: err.message });
-            }
-            return responseBuilder.html(`<h1>Error: ${err.message}</h1>`);
-        });
+        })
+            .enableDdbSession(
+                {
+                    tableName: 'test-sessions',
+                    tableRegion: 'us-east-1',
+                    sessionSalt: 'test-salt',
+                },
+                { partitionKey: 'pk', sortKey: 'sk' }
+            )
+            // Set up error handler to expose actual error messages for testing
+            .setGlobalErrorHandler((err, ctx, responseBuilder) => {
+                if (ctx?._otherInternal.isApiCall) {
+                    return responseBuilder.api({ error: err.message });
+                }
+                return responseBuilder.html(`<h1>Error: ${err.message}</h1>`);
+            });
     });
 
     describe('addSessionRoute', () => {
@@ -904,7 +903,10 @@ describe('Session Endpoint Protection', () => {
         it('should throw error when no session exists', async () => {
             ddbMock.on(GetCommand).resolves({}); // No session found
 
-            lambder.addSessionApi('user.profile', async (ctx, resolver) => {
+            lambder.addSessionApi('user.profile', {
+                input: z.any(),
+                output: z.any()
+            }, async (ctx, resolver) => {
                 return resolver.api({ userId: ctx.session.data.userId });
             });
 
@@ -937,7 +939,10 @@ describe('Session Endpoint Protection', () => {
             ddbMock.on(GetCommand).resolves({ Item: mockSession });
             ddbMock.on(PutCommand).resolves({});
 
-            lambder.addSessionApi('user.profile', async (ctx, resolver) => {
+            lambder.addSessionApi('user.profile', {
+                input: z.any(),
+                output: z.any()
+            }, async (ctx, resolver) => {
                 return resolver.api({ userId: ctx.session.data.userId });
             });
 
@@ -973,7 +978,10 @@ describe('Session Endpoint Protection', () => {
 
             ddbMock.on(GetCommand).resolves({ Item: mockSession });
 
-            lambder.addSessionApi('user.profile', async (ctx, resolver) => {
+            lambder.addSessionApi('user.profile', {
+                input: z.any(),
+                output: z.any()
+            }, async (ctx, resolver) => {
                 return resolver.api({ userId: ctx.session.data.userId });
             });
 
@@ -1005,7 +1013,10 @@ describe('Session Endpoint Protection', () => {
 
             ddbMock.on(GetCommand).resolves({ Item: mockSession });
 
-            lambder.addSessionApi('user.profile', async (ctx, resolver) => {
+            lambder.addSessionApi('user.profile', {
+                input: z.any(),
+                output: z.any()
+            }, async (ctx, resolver) => {
                 return resolver.api({ userId: ctx.session.data.userId });
             });
 
@@ -1038,7 +1049,10 @@ describe('Session Endpoint Protection', () => {
             ddbMock.on(GetCommand).resolves({ Item: mockSession });
             ddbMock.on(PutCommand).resolves({});
 
-            lambder.addSessionApi('user.profile', async (ctx, resolver) => {
+            lambder.addSessionApi('user.profile', {
+                input: z.any(),
+                output: z.any()
+            }, async (ctx, resolver) => {
                 // Type test: ctx.session.data should have UserSessionData type
                 const userId: string = ctx.session.data.userId;
                 const username: string = ctx.session.data.username;

@@ -46,7 +46,6 @@ export default class LambderMSW {
             if (body.apiName !== apiName) {
                 return;
             }
-            console.log("LambderMSW called for:", body.apiName);
             try {
                 // Add artificial delay if specified
                 if (options?.delay) {
@@ -54,7 +53,6 @@ export default class LambderMSW {
                 }
                 // Call the handler with the payload from the request
                 const payload = await handler(body.payload);
-                console.log("Matched! Returning payload for:", apiName);
                 const response = {
                     apiVersion: this.apiVersion,
                     payload,

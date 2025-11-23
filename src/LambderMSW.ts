@@ -77,8 +77,6 @@ export default class LambderMSW<TContract extends ApiContractShape = any> {
             if (!body || typeof body.apiName !== 'string') { return; }
             if (body.apiName !== apiName) { return; }
             
-            console.log("LambderMSW called for:", body.apiName);
-            
             try {
                 // Add artificial delay if specified
                 if (options?.delay) {
@@ -88,8 +86,6 @@ export default class LambderMSW<TContract extends ApiContractShape = any> {
                 // Call the handler with the payload from the request
                 const payload = await handler(body.payload as TContract[TApiName]['input']);
                 
-                console.log("Matched! Returning payload for:", apiName);
-
                 const response: MockApiResponse<TContract[TApiName]['output']> = {
                     apiVersion: this.apiVersion,
                     payload,

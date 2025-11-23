@@ -7,8 +7,8 @@
 
 import { describe, it, expect } from 'vitest';
 import { APIGatewayProxyEvent, Context } from 'aws-lambda';
+import { z } from 'zod';
 import Lambder from '../src/Lambder.js';
-import type { ApiContract } from '../src/index.js';
 
 // Mock AWS Lambda event and context
 const createMockEvent = (apiName: string, payload: any): APIGatewayProxyEvent => ({
@@ -41,28 +41,20 @@ const createMockContext = (): Context => ({
     succeed: () => {},
 });
 
-// Test contract
-type TestContract = ApiContract<{
-    echo: { input: { message: string }, output: { echo: string } },
-    add: { input: { a: number, b: number }, output: number },
-    getUser: { input: { userId: string }, output: { id: string, name: string, age: number } },
-    listUsers: { input: void, output: Array<{ id: string, name: string }> },
-    findUser: { input: { email: string }, output: { id: string, name: string } | null },
-    deleteUser: { input: { userId: string }, output: boolean },
-}>;
-
 // ============================================================================
 // Runtime Tests
 // ============================================================================
 
 describe('Output Type Enforcement - Runtime', () => {
     it('should return correct primitive types', async () => {
-        const lambder = new Lambder<TestContract>({
+        const lambder = new Lambder({
             publicPath: './public',
             apiPath: '/api',
-        });
-
-        lambder.addApi('add', async (ctx, resolver) => {
+        })
+        .addApi('add', {
+            input: z.object({ a: z.number(), b: z.number() }),
+            output: z.number()
+        }, async (ctx, resolver) => {
             const { a, b } = ctx.apiPayload;
             const sum = a + b;
             return resolver.api(sum);
@@ -78,12 +70,14 @@ describe('Output Type Enforcement - Runtime', () => {
     });
 
     it('should return correct object types', async () => {
-        const lambder = new Lambder<TestContract>({
+        const lambder = new Lambder({
             publicPath: './public',
             apiPath: '/api',
-        });
-
-        lambder.addApi('getUser', async (ctx, resolver) => {
+        })
+        .addApi('getUser', {
+            input: z.object({ userId: z.string() }),
+            output: z.object({ id: z.string(), name: z.string(), age: z.number() })
+        }, async (ctx, resolver) => {
             const userId = ctx.apiPayload.userId;
             return resolver.api({
                 id: userId,
@@ -98,6 +92,7 @@ describe('Output Type Enforcement - Runtime', () => {
 
         expect(response.statusCode).toBe(200);
         const body = JSON.parse(response.body || '{}');
+
         expect(body.payload).toEqual({
             id: '123',
             name: 'John Doe',
@@ -106,12 +101,14 @@ describe('Output Type Enforcement - Runtime', () => {
     });
 
     it('should return correct array types', async () => {
-        const lambder = new Lambder<TestContract>({
+        const lambder = new Lambder({
             publicPath: './public',
             apiPath: '/api',
-        });
-
-        lambder.addApi('listUsers', async (ctx, resolver) => {
+        })
+        .addApi('listUsers', {
+            input: z.void(),
+            output: z.array(z.object({ id: z.string(), name: z.string() }))
+        }, async (ctx, resolver) => {
             return resolver.api([
                 { id: '1', name: 'Alice' },
                 { id: '2', name: 'Bob' }
@@ -131,12 +128,14 @@ describe('Output Type Enforcement - Runtime', () => {
     });
 
     it('should handle null returns correctly', async () => {
-        const lambder = new Lambder<TestContract>({
+        const lambder = new Lambder({
             publicPath: './public',
             apiPath: '/api',
-        });
-
-        lambder.addApi('findUser', async (ctx, resolver) => {
+        })
+        .addApi('findUser', {
+            input: z.object({ email: z.string() }),
+            output: z.object({ id: z.string(), name: z.string() }).nullable()
+        }, async (ctx, resolver) => {
             const email = ctx.apiPayload.email;
             if (email === 'notfound@example.com') {
                 return resolver.api(null);
@@ -164,12 +163,14 @@ describe('Output Type Enforcement - Runtime', () => {
     });
 
     it('should return boolean types correctly', async () => {
-        const lambder = new Lambder<TestContract>({
+        const lambder = new Lambder({
             publicPath: './public',
             apiPath: '/api',
-        });
-
-        lambder.addApi('deleteUser', async (ctx, resolver) => {
+        })
+        .addApi('deleteUser', {
+            input: z.object({ userId: z.string() }),
+            output: z.boolean()
+        }, async (ctx, resolver) => {
             const userId = ctx.apiPayload.userId;
             // Mock deletion
             const success = userId !== '';
@@ -186,12 +187,14 @@ describe('Output Type Enforcement - Runtime', () => {
     });
 
     it('should work with die.api()', async () => {
-        const lambder = new Lambder<TestContract>({
+        const lambder = new Lambder({
             publicPath: './public',
             apiPath: '/api',
-        });
-
-        lambder.addApi('echo', async (ctx, resolver) => {
+        })
+        .addApi('echo', {
+            input: z.object({ message: z.string() }),
+            output: z.object({ echo: z.string() })
+        }, async (ctx, resolver) => {
             return resolver.die.api({ echo: ctx.apiPayload.message });
         });
 
@@ -205,13 +208,14 @@ describe('Output Type Enforcement - Runtime', () => {
     });
 
     it('should work with session APIs', async () => {
-        const lambder = new Lambder<TestContract>({
+        const lambder = new Lambder({
             publicPath: './public',
             apiPath: '/api',
-        });
-
-        // Note: Session will fail without DynamoDB setup, but we're testing type enforcement
-        lambder.addSessionApi('getUser', async (ctx, resolver) => {
+        })
+        .addSessionApi('getUser', {
+            input: z.object({ userId: z.string() }),
+            output: z.object({ id: z.string(), name: z.string(), age: z.number() })
+        }, async (ctx, resolver) => {
             return resolver.api({
                 id: ctx.apiPayload.userId,
                 name: 'Session User',
@@ -237,12 +241,14 @@ describe('Output Type Enforcement - Runtime', () => {
 
 describe('Input Type Enforcement - Runtime', () => {
     it('should receive correctly typed input', async () => {
-        const lambder = new Lambder<TestContract>({
+        const lambder = new Lambder({
             publicPath: './public',
             apiPath: '/api',
-        });
-
-        lambder.addApi('echo', async (ctx, resolver) => {
+        })
+        .addApi('echo', {
+            input: z.object({ message: z.string() }),
+            output: z.object({ echo: z.string() })
+        }, async (ctx, resolver) => {
             // Verify input is correctly typed at runtime
             const message: string = ctx.apiPayload.message;
             expect(typeof message).toBe('string');
@@ -255,12 +261,14 @@ describe('Input Type Enforcement - Runtime', () => {
     });
 
     it('should handle void input correctly', async () => {
-        const lambder = new Lambder<TestContract>({
+        const lambder = new Lambder({
             publicPath: './public',
             apiPath: '/api',
-        });
-
-        lambder.addApi('listUsers', async (ctx, resolver) => {
+        })
+        .addApi('listUsers', {
+            input: z.void(),
+            output: z.array(z.any())
+        }, async (ctx, resolver) => {
             // apiPayload should be undefined for void input
             expect(ctx.apiPayload).toBeUndefined();
             return resolver.api([]);
@@ -272,12 +280,14 @@ describe('Input Type Enforcement - Runtime', () => {
     });
 
     it('should handle complex input objects', async () => {
-        const lambder = new Lambder<TestContract>({
+        const lambder = new Lambder({
             publicPath: './public',
             apiPath: '/api',
-        });
-
-        lambder.addApi('add', async (ctx, resolver) => {
+        })
+        .addApi('add', {
+            input: z.object({ a: z.number(), b: z.number() }),
+            output: z.number()
+        }, async (ctx, resolver) => {
             const { a, b } = ctx.apiPayload;
             expect(typeof a).toBe('number');
             expect(typeof b).toBe('number');
@@ -299,12 +309,14 @@ describe('Input Type Enforcement - Runtime', () => {
 
 describe('Edge Cases', () => {
     it('should handle empty arrays', async () => {
-        const lambder = new Lambder<TestContract>({
+        const lambder = new Lambder({
             publicPath: './public',
             apiPath: '/api',
-        });
-
-        lambder.addApi('listUsers', async (ctx, resolver) => {
+        })
+        .addApi('listUsers', {
+            input: z.void(),
+            output: z.array(z.any())
+        }, async (ctx, resolver) => {
             return resolver.api([]);
         });
 
@@ -318,12 +330,14 @@ describe('Edge Cases', () => {
     });
 
     it('should handle zero as a valid number', async () => {
-        const lambder = new Lambder<TestContract>({
+        const lambder = new Lambder({
             publicPath: './public',
             apiPath: '/api',
-        });
-
-        lambder.addApi('add', async (ctx, resolver) => {
+        })
+        .addApi('add', {
+            input: z.object({ a: z.number(), b: z.number() }),
+            output: z.number()
+        }, async (ctx, resolver) => {
             return resolver.api(0);
         });
 
@@ -337,12 +351,14 @@ describe('Edge Cases', () => {
     });
 
     it('should handle empty strings in objects', async () => {
-        const lambder = new Lambder<TestContract>({
+        const lambder = new Lambder({
             publicPath: './public',
             apiPath: '/api',
-        });
-
-        lambder.addApi('getUser', async (ctx, resolver) => {
+        })
+        .addApi('getUser', {
+            input: z.object({ userId: z.string() }),
+            output: z.object({ id: z.string(), name: z.string(), age: z.number() })
+        }, async (ctx, resolver) => {
             return resolver.api({
                 id: '',
                 name: '',

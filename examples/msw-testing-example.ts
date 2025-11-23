@@ -17,27 +17,30 @@
 // @ts-nocheck - Example file, types may not be available
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { setupServer } from 'msw/node';
-import { LambderMSW, LambderCaller, type ApiContract } from '../src/index.ts';
+import { z } from 'zod';
+import { LambderMSW, LambderCaller } from '../src/index.ts';
+import Lambder from '../src/Lambder.js';
 
-// Define your API contract
-type TestApiContract = ApiContract<{
-    getUserById: {
-        input: { userId: string };
-        output: { id: string; name: string; email: string } | null;
-    };
-    createUser: {
-        input: { name: string; email: string };
-        output: { id: string; name: string; email: string };
-    };
-    getUsers: {
-        input: { limit?: number };
-        output: Array<{ id: string; name: string; email: string }>;
-    };
-    deleteUser: {
-        input: { userId: string };
-        output: { success: boolean };
-    };
-}>;
+// Define your API contract using Lambder chaining
+const lambder = new Lambder()
+    .addApi('getUserById', {
+        input: z.object({ userId: z.string() }),
+        output: z.object({ id: z.string(), name: z.string(), email: z.string() }).nullable()
+    }, async () => ({} as any)) // Dummy handler for type inference
+    .addApi('createUser', {
+        input: z.object({ name: z.string(), email: z.string() }),
+        output: z.object({ id: z.string(), name: z.string(), email: z.string() })
+    }, async () => ({} as any))
+    .addApi('getUsers', {
+        input: z.object({ limit: z.number().optional() }),
+        output: z.array(z.object({ id: z.string(), name: z.string(), email: z.string() }))
+    }, async () => ({} as any))
+    .addApi('deleteUser', {
+        input: z.object({ userId: z.string() }),
+        output: z.object({ success: z.boolean() })
+    }, async () => ({} as any));
+
+type TestApiContract = typeof lambder.ApiContract;
 
 // Setup LambderMSW with type safety
 const lambderMSW = new LambderMSW<TestApiContract>({
@@ -89,7 +92,7 @@ const handlers = [
 const server = setupServer(...handlers);
 
 // Setup LambderCaller
-const caller = new LambderCaller<TestApiContract>({
+const lambderCaller = new LambderCaller<TestApiContract>({
     apiPath: '/secure',
     isCorsEnabled: false,
 });
@@ -109,7 +112,7 @@ describe('LambderMSW Testing Example', () => {
     });
 
     it('should fetch user by id', async () => {
-        const user = await caller.api('getUserById', { userId: '1' });
+        const user = await lambderCaller.api('getUserById', { userId: '1' });
         
         expect(user).toEqual({
             id: '1',
@@ -119,7 +122,7 @@ describe('LambderMSW Testing Example', () => {
     });
 
     it('should return null for non-existent user', async () => {
-        const user = await caller.api('getUserById', { userId: '999' });
+        const user = await lambderCaller.api('getUserById', { userId: '999' });
         
         expect(user).toBeNull();
     });
@@ -127,7 +130,7 @@ describe('LambderMSW Testing Example', () => {
     it('should create a new user with delay', async () => {
         const startTime = Date.now();
         
-        const newUser = await caller.api('createUser', {
+        const newUser = await lambderCaller.api('createUser', {
             name: 'Alice Wonder',
             email: 'alice@example.com',
         });
@@ -143,7 +146,7 @@ describe('LambderMSW Testing Example', () => {
     });
 
     it('should fetch list of users', async () => {
-        const users = await caller.api('getUsers', { limit: 2 });
+        const users = await lambderCaller.api('getUsers', { limit: 2 });
         
         expect(users).toHaveLength(2);
         expect(users?.[0]?.name).toBe('John Doe');
@@ -154,7 +157,7 @@ describe('LambderMSW Testing Example', () => {
         let errorCaught = false;
         
         try {
-            await caller.api('deleteUser', { userId: '1' });
+            await lambderCaller.api('deleteUser', { userId: '1' });
         } catch (error: any) {
             errorCaught = true;
             expect(error.notAuthorized).toBe(true);
@@ -175,7 +178,7 @@ describe('LambderMSW Testing Example', () => {
             })
         );
 
-        const user = await caller.api('getUserById', { userId: '999' });
+        const user = await lambderCaller.api('getUserById', { userId: '999' });
         
         expect(user?.name).toBe('Override User');
     });
@@ -189,7 +192,7 @@ describe('LambderMSW Testing Example', () => {
         let errorCaught = false;
         
         try {
-            await caller.api('getUserById', { userId: '1' });
+            await lambderCaller.api('getUserById', { userId: '1' });
         } catch (error: any) {
             errorCaught = true;
             expect(error.sessionExpired).toBe(true);
@@ -206,7 +209,7 @@ describe('LambderMSW Testing Example', () => {
         let errorCaught = false;
         
         try {
-            await caller.api('createUser', {
+            await lambderCaller.api('createUser', {
                 name: 'Duplicate',
                 email: 'john@example.com',
             });
@@ -239,10 +242,10 @@ describe('Dynamic Response Testing', () => {
             })
         );
 
-        const users3 = await caller.api('getUsers', { limit: 3 });
+        const users3 = await lambderCaller.api('getUsers', { limit: 3 });
         expect(users3).toHaveLength(3);
 
-        const users5 = await caller.api('getUsers', { limit: 5 });
+        const users5 = await lambderCaller.api('getUsers', { limit: 5 });
         expect(users5).toHaveLength(5);
     });
 });
@@ -263,7 +266,7 @@ describe('Error Handling', () => {
         let errorCaught = false;
         
         try {
-            await caller.api('getUserById', { userId: '1' });
+            await lambderCaller.api('getUserById', { userId: '1' });
         } catch (error: any) {
             errorCaught = true;
             expect(error.errorMessage).toBe('Database connection failed');
