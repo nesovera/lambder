@@ -14,10 +14,10 @@ export type LambderRenderContext<TApiPayload = any> = {
     get: Record<string, any>;
     post: Record<string, any>;
     cookie: Record<string, any>;
+    session: null;
     apiName: string;
     apiPayload: TApiPayload;
     headers: APIGatewayProxyEventHeaders;
-    session: LambderSessionContext | null;
     event: APIGatewayProxyEvent;
     lambdaContext: Context;
     _otherInternal: {
@@ -34,9 +34,13 @@ export type LambderRenderContext<TApiPayload = any> = {
         logToApiResponseAccumulator: any[];
     };
 };
+export type LambderSessionRenderContext<TApiPayload = any, SessionData = any> = Omit<LambderRenderContext<TApiPayload>, 'session'> & {
+    session: LambderSessionContext<SessionData>;
+};
 type LambderModuleFunction = (lambderInstance: Lambder) => void | Promise<void>;
 type ConditionFunction = (ctx: LambderRenderContext<any>) => boolean;
 type ActionFunction = (ctx: LambderRenderContext<any>, resolver: LambderResolver) => LambderResolverResponse | Promise<LambderResolverResponse>;
+type SessionActionFunction<SessionData = any> = (ctx: LambderSessionRenderContext<any, SessionData>, resolver: LambderResolver) => LambderResolverResponse | Promise<LambderResolverResponse>;
 type HookCreatedFunction = (lambderInstance: Lambder) => Promise<void>;
 type HookBeforeRenderFunction = (ctx: LambderRenderContext<any>, resolver: LambderResolver) => LambderRenderContext<any> | Error | Promise<LambderRenderContext<any> | Error>;
 type HookAfterRenderFunction = (ctx: LambderRenderContext<any>, resolver: LambderResolver, response: LambderResolverResponse) => LambderResolverResponse | Error | Promise<LambderResolverResponse | Error>;
@@ -45,7 +49,7 @@ type GlobalErrorHandlerFunction = (err: Error, ctx: LambderRenderContext<any> | 
 type RouteFallbackHandlerFunction = (ctx: LambderRenderContext<any>, resolver: LambderResolver) => LambderResolverResponse;
 type ApiFallbackHandlerFunction = (ctx: LambderRenderContext<any>, resolver: LambderResolver) => LambderResolverResponse;
 export declare const createContext: (event: APIGatewayProxyEvent, lambdaContext: Context, apiPath: string) => LambderRenderContext<any>;
-export default class Lambder<TContract extends ApiContractShape = any> {
+export default class Lambder<TContract extends ApiContractShape = any, TSessionData = any> {
     apiPath: string;
     apiVersion: null | string;
     isCorsEnabled: boolean;
@@ -88,18 +92,18 @@ export default class Lambder<TContract extends ApiContractShape = any> {
         default: LambderModuleFunction;
     }>): Promise<void>;
     addRoute(condition: Path | ConditionFunction | RegExp, actionFn: ActionFunction): void;
-    addSessionRoute(condition: Path | ConditionFunction | RegExp, actionFn: ActionFunction): void;
+    addSessionRoute(condition: Path | ConditionFunction | RegExp, actionFn: SessionActionFunction<TSessionData>): void;
     addApi(apiName: ConditionFunction | RegExp, actionFn: ActionFunction): void;
     addApi<TApiName extends keyof TContract & string>(apiName: TApiName, actionFn: (ctx: LambderRenderContext<TContract[TApiName]['input']>, resolver: LambderResolver<TContract, TApiName>) => LambderResolverResponse | Promise<LambderResolverResponse>): void;
     addApi(apiName: string, actionFn: ActionFunction): void;
-    addSessionApi(apiName: ConditionFunction | RegExp, actionFn: ActionFunction): void;
-    addSessionApi<TApiName extends keyof TContract & string>(apiName: TApiName, actionFn: (ctx: LambderRenderContext<TContract[TApiName]['input']>, resolver: LambderResolver<TContract, TApiName>) => LambderResolverResponse | Promise<LambderResolverResponse>): void;
-    addSessionApi(apiName: string, actionFn: ActionFunction): void;
+    addSessionApi(apiName: ConditionFunction | RegExp, actionFn: SessionActionFunction<TSessionData>): void;
+    addSessionApi<TApiName extends keyof TContract & string>(apiName: TApiName, actionFn: (ctx: LambderSessionRenderContext<TContract[TApiName]['input'], TSessionData>, resolver: LambderResolver<TContract, TApiName>) => LambderResolverResponse | Promise<LambderResolverResponse>): void;
+    addSessionApi(apiName: string, actionFn: SessionActionFunction<TSessionData>): void;
     addHook(hookEvent: 'created', hookFn: HookCreatedFunction, priority?: number): Promise<void>;
     addHook(hookEvent: 'beforeRender', hookFn: HookBeforeRenderFunction, priority?: number): Promise<void>;
     addHook(hookEvent: 'afterRender', hookFn: HookAfterRenderFunction, priority?: number): Promise<void>;
     addHook(hookEvent: 'fallback', hookFn: HookFallbackFunction, priority?: number): Promise<void>;
-    getSessionController(ctx: LambderRenderContext<any>): LambderSessionController;
+    getSessionController(ctx: LambderRenderContext<any> | LambderSessionRenderContext<any, TSessionData>): LambderSessionController<TSessionData>;
     getResponseBuilder(): LambderResponseBuilder<any>;
     private getResolver;
     render(event: APIGatewayProxyEvent, lambdaContext: Context): Promise<LambderResolverResponse>;

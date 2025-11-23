@@ -1,12 +1,12 @@
-import { LambderRenderContext } from "./Lambder.js";
+import { LambderRenderContext, LambderSessionRenderContext } from "./Lambder.js";
 import type LambderSessionManager from "./LambderSessionManager.js";
 import type { LambderSessionContext } from "./LambderSessionManager.js";
 
-export default class LambderSessionController {
+export default class LambderSessionController<TSessionData = any> {
     lambderSessionManager: LambderSessionManager;
     sessionTokenCookieKey: string;
     sessionCsrfCookieKey: string;
-    ctx: LambderRenderContext<any>;
+    ctx: LambderRenderContext<any> | LambderSessionRenderContext<any, TSessionData>; // Internal context with mutable session property
 
     constructor(
         { 
@@ -18,7 +18,7 @@ export default class LambderSessionController {
             lambderSessionManager: LambderSessionManager,
             sessionTokenCookieKey: string,
             sessionCsrfCookieKey: string,
-            ctx: LambderRenderContext<any>,
+            ctx: LambderRenderContext<any> | LambderSessionRenderContext<any, TSessionData>,
         }
     ){
         this.lambderSessionManager = lambderSessionManager;
@@ -40,7 +40,7 @@ export default class LambderSessionController {
         }
     };
 
-    async createSession (sessionKey: string, data?: any, ttlInSeconds?: number): Promise<LambderSessionContext> {
+    async createSession (sessionKey: string, data?: TSessionData, ttlInSeconds?: number): Promise<LambderSessionContext<TSessionData>> {
         const session = await this.lambderSessionManager.createSession(sessionKey, data, ttlInSeconds);
         this.ctx._otherInternal.addHeaderFnAccumulator.push({ key: "Set-Cookie", value: `${this.sessionTokenCookieKey}=${session.sessionToken}; Expires=${new Date(session.expiresAt * 1000).toUTCString()}; Path=/; HttpOnly; SameSite=Lax; Secure` });
         this.ctx._otherInternal.addHeaderFnAccumulator.push({ key: "Set-Cookie", value: `${this.sessionCsrfCookieKey}=${session.csrfToken}; Expires=${new Date(session.expiresAt * 1000).toUTCString()}; Path=/; SameSite=Lax; Secure` });
@@ -48,7 +48,7 @@ export default class LambderSessionController {
         return this.ctx.session;
     };
 
-    async regenerateSession (): Promise<LambderSessionContext> {
+    async regenerateSession (): Promise<LambderSessionContext<TSessionData>> {
         if(!this.ctx.session) throw new Error("Session not found.");
         const newSession = await this.lambderSessionManager.regenerateSession(this.ctx.session);
         this.ctx._otherInternal.addHeaderFnAccumulator.push({ key: "Set-Cookie", value: `${this.sessionTokenCookieKey}=${newSession.sessionToken}; Expires=${new Date(newSession.expiresAt * 1000).toUTCString()}; Path=/; HttpOnly; SameSite=Lax; Secure` });
@@ -57,7 +57,7 @@ export default class LambderSessionController {
         return this.ctx.session;
     };
 
-    async fetchSession (): Promise<LambderSessionContext>{
+    async fetchSession (): Promise<LambderSessionContext<TSessionData>>{
         if(!this.areRequestSessionTokensValid()){ throw new Error("Session tokens are invalid"); }
 
         const sessionToken = this.ctx.cookie?.[this.sessionTokenCookieKey];
@@ -101,7 +101,7 @@ export default class LambderSessionController {
         await this.lambderSessionManager.deleteSession(this.ctx.session);
         this.ctx._otherInternal.addHeaderFnAccumulator.push({ key: "Set-Cookie", value: `${this.sessionTokenCookieKey}=0; Expires=${new Date(Date.now() - 100000).toUTCString()}; Path=/; HttpOnly; SameSite=Lax; Secure` });
         this.ctx._otherInternal.addHeaderFnAccumulator.push({ key: "Set-Cookie", value: `${this.sessionCsrfCookieKey}=0; Expires=${new Date(Date.now() - 100000).toUTCString()}; Path=/; SameSite=Lax; Secure` });
-        this.ctx.session = null
+        (this.ctx as any).session = null;
     };
 
     async endSessionAll (){
@@ -109,6 +109,6 @@ export default class LambderSessionController {
         await this.lambderSessionManager.deleteSessionAll(this.ctx.session);
         this.ctx._otherInternal.addHeaderFnAccumulator.push({ key: "Set-Cookie", value: `${this.sessionTokenCookieKey}=0; Expires=${new Date(Date.now() - 100000).toUTCString()}; Path=/; HttpOnly; SameSite=Lax; Secure` });
         this.ctx._otherInternal.addHeaderFnAccumulator.push({ key: "Set-Cookie", value: `${this.sessionCsrfCookieKey}=0; Expires=${new Date(Date.now() - 100000).toUTCString()}; Path=/; SameSite=Lax; Secure` });
-        this.ctx.session = null
+        (this.ctx as any).session = null;
     };
 };

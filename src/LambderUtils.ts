@@ -21,10 +21,10 @@ export default class LambderUtils {
         }
         if(!this.ejsPath){ return "EJS PATH NOT SET!"; }
         const ejsPath = path.resolve(this.ejsPath);
-        const absolutePath = path.join(ejsPath, filePath);
+        const absolutePath = path.resolve(ejsPath, filePath);
         console.log("readEjsFileSync", { filePath, ejsPath, absolutePath });
-        if(!absolutePath.includes(ejsPath)){ return "forbidden-ejs-path"; }
-        return String(fs.readFileSync(absolutePath));
+        if(!absolutePath.startsWith(ejsPath)){ return "forbidden-ejs-path"; }
+        return String(await fs.promises.readFile(absolutePath));
     };
 
     private async checkEjsFileExist(filePath: string){
@@ -36,10 +36,15 @@ export default class LambderUtils {
         }
         if(!this.ejsPath){ return "EJS PATH NOT SET!"; }
         const ejsPath = path.resolve(this.ejsPath);
-        const absolutePath = path.join(this.ejsPath, filePath);
+        const absolutePath = path.resolve(ejsPath, filePath);
         console.log("checkEjsFileExist", { filePath, ejsPath, absolutePath });
-        if(!absolutePath.includes(ejsPath)){ return false; }
-        return fs.existsSync(absolutePath) && fs.statSync(absolutePath).isFile();
+        if(!absolutePath.startsWith(ejsPath)){ return false; }
+        try {
+            const stat = await fs.promises.stat(absolutePath);
+            return stat.isFile();
+        } catch {
+            return false;
+        }
     };
 
 	async renderEjs(

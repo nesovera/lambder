@@ -128,8 +128,8 @@ export default class LambderSessionManager {
             if (this.enableSlidingExpiration) {
                 session.lastAccessedAt = Math.floor(Date.now() / 1000);
                 session.expiresAt = session.lastAccessedAt + session.ttlInSeconds;
-                // Fire and forget - don't wait for the update
-                this.ddbPutItem(session).catch(() => { });
+                // Wait for the update to ensure it persists before Lambda freezes
+                await this.ddbPutItem(session).catch(() => { });
             }
             return session;
         }
