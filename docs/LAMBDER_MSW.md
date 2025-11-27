@@ -31,14 +31,6 @@ const handlers = [
             name: 'John Doe',
             email: 'john@example.com'
         };
-    }),
-    
-    lambderMSW.mockApi('createUser', async (payload) => {
-        return {
-            id: '123',
-            name: payload.name,
-            email: payload.email
-        };
     })
 ];
 
@@ -60,7 +52,7 @@ When using TypeScript API contracts, LambderMSW provides full type safety:
 import { z } from 'zod';
 import Lambder from 'lambder';
 
-const lambder = new Lambder({ apiPath: '/secure' })
+const lambder = new Lambder({ apiPath: '/secure', publicPath: './public' })
     .addApi('getUserById', {
         input: z.object({ userId: z.string() }),
         output: z.object({ id: z.string(), name: z.string(), email: z.string() })
@@ -77,13 +69,13 @@ const lambder = new Lambder({ apiPath: '/secure' })
     });
 
 // Export the inferred contract type
-export type MyApiContract = typeof lambder.ApiContract;
+export type ApiContractType = typeof lambder.ApiContract;
 
 // test/setup.ts
 import { LambderMSW } from 'lambder';
-import type { MyApiContract } from '../backend';
+import type { ApiContractType } from '../backend';
 
-const lambderMSW = new LambderMSW<MyApiContract>({
+const lambderMSW = new LambderMSW<ApiContractType>({
     apiPath: '/secure',
     apiVersion: '1.0.0'
 });
@@ -215,12 +207,11 @@ lambderMSW.mockWithMessage('updateProfile', async (payload) => {
 // test/api.test.ts
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { setupServer } from 'msw/node';
-import { LambderMSW } from 'lambder';
-import { LambderCaller } from 'lambder';
-import type { MyApiContract } from '../backend'; // Type-only import from your backend
+import { LambderMSW, LambderCaller } from 'lambder';
+import type { ApiContractType } from '../backend'; // Type-only import from your backend
 
 // Setup MSW
-const lambderMSW = new LambderMSW<MyApiContract>({
+const lambderMSW = new LambderMSW<ApiContractType>({
     apiPath: '/secure',
     apiVersion: '1.0.0'
 });
@@ -257,7 +248,7 @@ afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
 
 // Setup LambderCaller
-const lambderCaller = new LambderCaller<MyApiContract>({
+const lambderCaller = new LambderCaller<ApiContractType>({
     apiPath: '/secure',
     isCorsEnabled: false
 });
@@ -314,9 +305,9 @@ LambderMSW also works in browser environments with MSW's browser integration:
 // test/browser-setup.ts
 import { setupWorker } from 'msw/browser';
 import { LambderMSW } from 'lambder';
-import type { MyApiContract } from '../backend'; // Type-only import from your backend
+import type { ApiContractType } from '../backend'; // Type-only import from your backend
 
-const lambderMSW = new LambderMSW<MyApiContract>({
+const lambderMSW = new LambderMSW<ApiContractType>({
     apiPath: '/secure'
 });
 
@@ -361,25 +352,6 @@ lambderMSW.mockApi('searchUsers', async (payload) => {
 });
 ```
 
-### Simulating Network Conditions
-
-```typescript
-// Slow network
-lambderMSW.mockApi('slowApi', async () => {
-    return { data: 'slow response' };
-}, { delay: 3000 });  // 3 second delay
-
-// Intermittent failures
-let callCount = 0;
-lambderMSW.mockApi('flakeyApi', async () => {
-    callCount++;
-    if (callCount % 3 === 0) {
-        throw new Error('Random failure');
-    }
-    return { success: true };
-});
-```
-
 ### Override Handlers Per Test
 
 ```typescript
@@ -402,12 +374,10 @@ it('should handle specific user', async () => {
 
 ## Benefits
 
-✅ **Type Safety** - Full TypeScript support with API contracts  
-✅ **Simple API** - Intuitive methods matching Lambder's API structure  
-✅ **Flexible** - Mock success, errors, delays, and custom responses  
-✅ **Isolated** - Tests run without real backend dependencies  
-✅ **Fast** - No network calls, instant test execution  
-✅ **Realistic** - Simulate real-world scenarios (delays, errors, etc.)  
+- Full TypeScript support with API contracts
+- Intuitive methods matching Lambder's API structure
+- Test isolation without real backend dependencies
+- Simulate real-world scenarios (delays, errors, etc.)
 
 ## Troubleshooting
 

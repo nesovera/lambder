@@ -116,9 +116,9 @@ export default class LambderResponseBuilder {
         });
     }
     ;
-    status301(url, headers) {
+    redirect(url, statusCode = 302, headers) {
         return this.raw({
-            statusCode: 301,
+            statusCode: statusCode,
             multiValueHeaders: { "Location": [url], ...convertToMultiHeader(headers) },
             body: null
         });

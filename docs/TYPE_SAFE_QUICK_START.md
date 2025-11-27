@@ -29,7 +29,7 @@ const lambder = new Lambder({
 });
 
 // Export the inferred contract type
-export type AppContract = typeof lambder.ApiContract;
+export type ApiContractType = typeof lambder.ApiContract;
 
 export const handler = lambder.getHandler();
 ```
@@ -40,9 +40,9 @@ Import the type (not the code) and use `LambderCaller`.
 
 ```typescript
 import { LambderCaller } from "lambder";
-import type { AppContract } from "./backend"; // Type-only import
+import type { ApiContractType } from "./backend"; // Type-only import
 
-const lambderCaller = new LambderCaller<AppContract>({
+const lambderCaller = new LambderCaller<ApiContractType>({
     apiPath: "/api"
 });
 
@@ -72,6 +72,6 @@ export const userApi = <T>(l: Lambder<T>) => {
 // index.ts
 import { userApi } from "./api.user";
 
-const lambder = new Lambder()
+const lambder = new Lambder({ publicPath: './public' })
     .use(userApi); // Types are preserved!
 ```

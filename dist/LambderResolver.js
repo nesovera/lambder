@@ -12,7 +12,7 @@ export default class LambderResolver extends LambderResponseBuilder {
             json: this.autoResolve(this.json),
             xml: this.autoResolve(this.xml),
             html: this.autoResolve(this.html),
-            status301: this.autoResolve(this.status301),
+            redirect: this.autoResolve(this.redirect),
             status404: this.autoResolve(this.status404),
             cors: this.autoResolve(this.cors),
             fileBase64: this.autoResolve(this.fileBase64),
