@@ -22,7 +22,7 @@ import { LambderMSW, LambderCaller } from '../src/index.ts';
 import Lambder from '../src/Lambder.js';
 
 // Define your API contract using Lambder chaining
-const lambder = new Lambder()
+const lambder = new Lambder({ publicPath: './public' })
     .addApi('getUserById', {
         input: z.object({ userId: z.string() }),
         output: z.object({ id: z.string(), name: z.string(), email: z.string() }).nullable()
@@ -40,10 +40,10 @@ const lambder = new Lambder()
         output: z.object({ success: z.boolean() })
     }, async () => ({} as any));
 
-type TestApiContract = typeof lambder.ApiContract;
+type ApiContractType = typeof lambder.ApiContract;
 
 // Setup LambderMSW with type safety
-const lambderMSW = new LambderMSW<TestApiContract>({
+const lambderMSW = new LambderMSW<ApiContractType>({
     apiPath: '/secure',
     apiVersion: '1.0.0',
 });
@@ -92,7 +92,7 @@ const handlers = [
 const server = setupServer(...handlers);
 
 // Setup LambderCaller
-const lambderCaller = new LambderCaller<TestApiContract>({
+const lambderCaller = new LambderCaller<ApiContractType>({
     apiPath: '/secure',
     isCorsEnabled: false,
 });

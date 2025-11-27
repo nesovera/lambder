@@ -33,7 +33,7 @@ export default class Lambder {
      * @example
      * ```typescript
      * const lambder = new Lambder().addApi(...).addApi(...);
-     * export type AppContract = typeof lambder.ApiContract;
+     * export type ApiContractType = typeof lambder.ApiContract;
      * ```
      */
     ApiContract;

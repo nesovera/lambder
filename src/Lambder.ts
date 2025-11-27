@@ -58,7 +58,7 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
      * @example
      * ```typescript
      * const lambder = new Lambder().addApi(...).addApi(...);
-     * export type AppContract = typeof lambder.ApiContract;
+     * export type ApiContractType = typeof lambder.ApiContract;
      * ```
      */
     public readonly ApiContract!: _TContract;

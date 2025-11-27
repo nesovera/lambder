@@ -7,7 +7,7 @@ interface DieResolverMethods<TOutput> {
     json: MethodType<LambderResponseBuilder, 'json'>;
     xml: MethodType<LambderResponseBuilder, 'xml'>;
     html: MethodType<LambderResponseBuilder, 'html'>;
-    status301: MethodType<LambderResponseBuilder, 'status301'>;
+    redirect: MethodType<LambderResponseBuilder, 'redirect'>;
     status404: MethodType<LambderResponseBuilder, 'status404'>;
     cors: MethodType<LambderResponseBuilder, 'cors'>;
     fileBase64: MethodType<LambderResponseBuilder, 'fileBase64'>;
