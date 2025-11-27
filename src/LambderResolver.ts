@@ -9,7 +9,7 @@ interface DieResolverMethods<TOutput> {
     json: MethodType<LambderResponseBuilder, 'json'>;
     xml: MethodType<LambderResponseBuilder, 'xml'>;
     html: MethodType<LambderResponseBuilder, 'html'>;
-    status301: MethodType<LambderResponseBuilder, 'status301'>;
+    redirect: MethodType<LambderResponseBuilder, 'redirect'>;
     status404: MethodType<LambderResponseBuilder, 'status404'>;
     cors: MethodType<LambderResponseBuilder, 'cors'>;
     fileBase64: MethodType<LambderResponseBuilder, 'fileBase64'>;
@@ -49,7 +49,7 @@ export default class LambderResolver<TOutput = any> extends LambderResponseBuild
             json: this.autoResolve(this.json),
             xml: this.autoResolve(this.xml),
             html: this.autoResolve(this.html),
-            status301: this.autoResolve(this.status301),
+            redirect: this.autoResolve(this.redirect),
             status404: this.autoResolve(this.status404),
             cors: this.autoResolve(this.cors),
             fileBase64: this.autoResolve(this.fileBase64),

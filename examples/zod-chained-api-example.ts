@@ -45,8 +45,8 @@ const lambder = new Lambder({
         });
     });
 
-// 3. Export the inferred contract type for Frontend
-export type AppContract = typeof lambder.ApiContract;
+// 3. Export the inferred contract type for frontend use
+export type ApiContractType = typeof lambder.ApiContract;
 
 // 4. Modular example using .use()
 const authApi = <T>(l: Lambder<T>) => {

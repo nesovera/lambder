@@ -15,8 +15,14 @@ const CORS_HEADERS = convertToMultiHeader({
     "Access-Control-Allow-Methods": "OPTIONS,POST",
 });
 
+export type HttpStatusCode = 
+    | 200 | 201 | 202 | 204
+    | 300 | 301 | 302 | 303 | 304 | 307 | 308
+    | 400 | 401 | 403 | 404 | 405 | 409 | 410 | 413 | 415 | 422 | 429
+    | 500 | 501 | 502 | 503 | 504;
+
 export type LambderResolverResponse = { 
-    statusCode: number, 
+    statusCode: HttpStatusCode, 
     multiValueHeaders?: Record<string, string[]>, 
     body: string | null,
     isBase64Encoded?: boolean,
@@ -157,12 +163,13 @@ export default class LambderResponseBuilder<TResponse = any> {
         });
     };
 
-	status301(
+    redirect(
         url: string, 
+        statusCode: HttpStatusCode = 302,
         headers?: Record<string, string|string[]>,
     ):LambderResolverResponse{
         return this.raw({
-            statusCode: 301, 
+            statusCode: statusCode, 
             multiValueHeaders: { "Location" : [url], ...convertToMultiHeader(headers) },
             body:null
         });

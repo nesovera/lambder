@@ -27,17 +27,16 @@ yarn add lambder zod
 ### Basic Setup
 
 ```typescript
-import Lambder, { InferLambderContract } from 'lambder';
+import Lambder from 'lambder';
 import { z } from 'zod';
 import * as path from 'path';
 
 const lambder = new Lambder({
     apiPath: "/api",
     publicPath: path.resolve(`./public`),
-    // ejsPath: path.resolve(`./ejs-templates`), // Optional
 });
 
-// Enable session and CORS - all chainable!
+// Enable session and CORS
 lambder
     .enableDdbSession({
         tableName: "website-session",
@@ -47,7 +46,7 @@ lambder
     .enableCors(true);
 
 // Define type-safe APIs with Zod schemas
-const app = lambder
+lambder
     .addApi("getCompanyPage", {
         input: z.object({ companyName: z.string() }),
         output: z.object({ id: z.string(), name: z.string(), description: z.string() })
@@ -70,15 +69,13 @@ const app = lambder
     });
 
 // Export the inferred contract for the frontend
-export type AppContract = typeof lambder.ApiContract;
+export type ApiContractType = typeof lambder.ApiContract;
 
 // Export the handler
 export const handler = lambder.getHandler();
 ```
 
 ### Adding Routes
-
-Routes are fully chainable for a fluent interface.
 
 ```typescript
 lambder
@@ -100,25 +97,6 @@ lambder
     .addRoute((ctx)=>ctx.path === '/hello-fn-route', (ctx, res) => {
         return res.html("Hello from a function route");
     })
-    // Define a simple route that serves an EJS template file
-    .addRoute("/product/:productId", async (ctx, res) => {
-        const product = await getProduct(ctx.pathParams.productId);
-        // Serve the file from ejsPath defined above.
-        return await res.ejsFile("productPage.html.ejs", { product });
-    })
-    // Serve sitemap using an ejs template
-    .addRoute("/sitemap", async (ctx, res) => {
-        const templateString = `
-            <?xml version="1.0" encoding="UTF-8"?>
-            <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-            <%~
-                page.urlList.map(url => \`<url><loc>\${url}</loc></url>\`).join("")
-            %>
-            </urlset>
-        `.trim();
-        const urlList = await getUrlList();
-        return await res.ejsTemplate(templateString, { urlList }, { "Content-Type": ["application/xml; charset=utf-8"]});
-    })
     // Match all other paths and serve static files from publicPath
     .addRoute("/(.*)", (ctx, res)=>{
         return res.file(ctx.path, {}, "index.html");
@@ -127,6 +105,14 @@ lambder
     .setRouteFallbackHandler((ctx, res) => {
         return res.status404("Not Found");
     })
+    // Set a fallback handler for unmatched APIs
+    .setApiFallbackHandler((ctx, res) => {
+        return res.api(null, { errorMessage: "API not found" });
+    })
+    // Handle Zod validation errors for API inputs
+    .setApiInputValidationErrorHandler((ctx, res, zodError) => {
+        return res.api(null, { errorMessage: zodError.errors });
+    })
     // Global error handler
     .setGlobalErrorHandler((err, ctx, res) => {
         console.error("Error:", err);
@@ -134,35 +120,21 @@ lambder
     });
 ```
 
-### Adding APIs
+### Session-Protected APIs
 
-All APIs in v2.0 must use Zod schemas for type safety and runtime validation. Use method chaining for a clean API definition.
+Use `addSessionApi` for endpoints that require authentication:
 
 ```typescript
-import { z } from 'zod';
-
-lambder
-    // Add a typed API
-    .addApi("getUserById", {
-        input: z.object({ userId: z.string() }),
-        output: z.object({ id: z.string(), name: z.string(), email: z.string() })
-    }, async (ctx, res) => {
-        // ctx.apiPayload is typed as { userId: string }
-        const user = await db.getUser(ctx.apiPayload.userId);
-        return res.api(user); // Type-checked against output schema
-    })
-    // Session-protected API
-    .addSessionApi("getProfile", {
-        input: z.void(),
-        output: z.object({ userId: z.string(), username: z.string() })
-    }, async (ctx, res) => {
-        // Session is automatically fetched and validated
-        // ctx.session.data contains your session data
-        return res.api({
-            userId: ctx.session.data.userId,
-            username: ctx.session.data.username
-        });
+lambder.addSessionApi("getProfile", {
+    input: z.void(),
+    output: z.object({ userId: z.string(), username: z.string() })
+}, async (ctx, res) => {
+    // Session is automatically fetched and validated
+    return res.api({
+        userId: ctx.session.data.userId,
+        username: ctx.session.data.username
     });
+});
 ```
 
 ### Modular APIs with .use()
@@ -193,10 +165,10 @@ export const userApi = <T>(l: Lambder<T>) => {
 // index.ts
 import { userApi } from "./user-api";
 
-const lambder = new Lambder()
+const lambder = new Lambder({ publicPath: './public' })
     .use(userApi);
 
-export type AppContract = typeof lambder.ApiContract;
+export type ApiContractType = typeof lambder.ApiContract;
 ```
 
 
@@ -217,24 +189,28 @@ lambder
         // Modify response before sending
         console.log("Response status:", response.statusCode);
         return response;
+    })
+    // Fallback hook - runs when no route/API matches
+    .addHook("fallback", async (ctx, res) => {
+        // Perform cleanup or logging for unmatched requests
+        console.log("No handler matched for:", ctx.path);
     });
 ```
 
 ### Session Management
 
-Enable DynamoDB-based session management - fully chainable:
+Enable DynamoDB-based sessions with `enableDdbSession()`. Optional configuration:
 
 ```typescript
-// Enable sessions using a DynamoDB session table - chainable!
-const lambder = new Lambder({ apiPath: '/api', publicPath: './public' })
+lambder
     .enableDdbSession({
         tableName: "website-session",
         tableRegion: "us-east-1",
         sessionSalt: "CHANGE-THIS-TO-A-SECURE-RANDOM-STRING",
         enableSlidingExpiration: true // Optional: extend session on each access
     })
-    .enableCors(true)
-    .addApi(...);
+    // Optionally customize session cookie names (defaults: LMDRSESSIONTKID, LMDRSESSIONCSTK)
+    .setSessionCookieKey("MY_SESSION_TOKEN", "MY_CSRF_TOKEN");
 ```
 
 #### DynamoDB Session Table Structure
@@ -247,71 +223,17 @@ See [docs/DYNAMODB_SETUP.md](docs/DYNAMODB_SETUP.md) for detailed setup instruct
 
 #### Session Controller
 
-After enabling sessions, you can access the session controller:
+Access the session controller with `lambder.getSessionController(ctx)`:
 
-```typescript
-const sessionController = lambder.getSessionController(ctx);
-
-// Available methods:
-await sessionController.createSession(sessionKey, data, ttlInSeconds);
-// Starts a new session and persists the session data to DDB.
-
-await sessionController.fetchSession();
-// Fetch and validate if there is an existing session
-// This is automatically done for addSessionRoute and addSessionApi
-// Throws if session not found
-
-await sessionController.fetchSessionIfExists();
-// Returns session if found, otherwise null
-
-await sessionController.updateSessionData(updatedData);
-// Updates the active session's data and persists it to DDB
-
-await sessionController.endSession();
-// End session and delete from DDB
-
-await sessionController.endSessionAll();
-// Ends and deletes all sessions for this sessionKey across all devices
-
-await sessionController.regenerateSession();
-// Regenerates session token (use after password change, etc.)
-```
-
-#### Session Examples
-
-```typescript
-lambder
-    .addApi("createSession", {
-        input: z.object({ userId: z.string() }),
-        output: z.object({ success: z.boolean() })
-    }, async (ctx, res) => {
-        // Create a new session
-        const userId = ctx.apiPayload.userId;
-        await lambder.getSessionController(ctx)
-            .createSession(userId, { business: "Session data goes here" });
-        
-        console.log(ctx.session?.sessionKey); // userId
-        console.log(ctx.session?.data?.business); // "Session data goes here"
-        
-        return res.api({ success: true });
-    })
-    .addSessionApi("updateSession", {
-        input: z.object({ newData: z.string() }),
-        output: z.object({ success: z.boolean() })
-    }, async (ctx, res) => {
-        // Session is automatically fetched
-        console.log(ctx.session.sessionKey); // userId
-        
-        // Update session data
-        await lambder.getSessionController(ctx)
-            .updateSessionData({ business2: ctx.apiPayload.newData });
-        
-        console.log(ctx.session.data.business); // undefined
-        console.log(ctx.session.data.business2); // newData value
-        
-        return res.api({ success: true });
-    });
-```
+| Method | Description |
+|--------|-------------|
+| `createSession(sessionKey, data?, ttlInSeconds?)` | Start new session, persist to DDB |
+| `fetchSession()` | Fetch & validate existing session (throws if not found) |
+| `fetchSessionIfExists()` | Returns session or null |
+| `updateSessionData(newData)` | Update session data in DDB |
+| `endSession()` | End session, delete from DDB |
+| `endSessionAll()` | End all sessions for this sessionKey (all devices) |
+| `regenerateSession()` | Regenerate token (use after password change) |
 
 ### EJS Templates
 
@@ -339,75 +261,52 @@ Example partial:
 
 ### Render Context (ctx) Variables
 
-```typescript
-lambder
-    .addApi("exampleApi", {
-        input: z.object({ value: z.string() }),
-        output: z.object({ result: z.string() })
-    }, async (ctx, res) => {
-        const { 
-            host,        // Request host: "www.example.com"
-            path,        // Request path: "/api"
-            get,         // GET query parameters: { userId: "342" }
-            post,        // POST body (parsed): { userId: "342" }
-            cookie,      // Cookies: { "rememberMe": "true" }
-            headers,     // Request headers
-            apiName,     // API name: "exampleApi"
-            apiPayload,  // Validated input (same as post.payload)
-            session,     // Session (null for addApi, available for addSessionApi)
-        } = ctx;
-        
-        return res.api({ result: ctx.apiPayload.value });
-    });
-```
+The `ctx` object provides access to request data:
+
+| Property | Description | Example |
+|----------|-------------|----------|
+| `host` | Request host | `"www.example.com"` |
+| `path` | Request path | `"/api"` |
+| `pathParams` | Path parameters (routes) | `{ userId: "123" }` |
+| `method` | HTTP method | `"GET"`, `"POST"` |
+| `get` | Query parameters | `{ page: "1" }` |
+| `post` | POST body (parsed) | `{ name: "John" }` |
+| `cookie` | Cookies | `{ rememberMe: "true" }` |
+| `headers` | Request headers | `{ "Content-Type": "..." }` |
+| `event` | Raw APIGatewayProxyEvent | - |
+| `lambdaContext` | AWS Lambda Context | - |
+| `apiName` | API name (for API calls) | `"getUser"` |
+| `apiPayload` | Validated input | `{ userId: "123" }` |
+| `session` | Session data | Available in `addSessionApi` |
 
 ### Resolver Methods
 
-Available response methods:
+**Header Manipulation** (call before returning response):
+- `res.addHeader(key, value)` - Adds a header value (can be called multiple times for same key)
+- `res.setHeader(key, value)` - Sets a header (replaces existing values)
+- `res.logToApiResponse(data)` - Adds data to logList in API responses (debugging)
 
-```typescript
-return res.raw(param);
-// Sends a custom HTTP response. Useful for non-standard responses.
+**Response Methods**:
 
-return res.json(data, headers);
-// Sends a JSON response with optional headers.
+| Method | Description |
+|--------|-------------|
+| `res.raw(param)` | Custom HTTP response |
+| `res.json(data, headers?)` | JSON response |
+| `res.xml(data)` | XML response (base64 encoded) |
+| `res.html(data, headers?)` | HTML response (base64 encoded) |
+| `res.redirect(url, statusCode?, headers?)` | Redirect (default: 302) |
+| `res.status404(data, headers?)` | 404 Not Found response |
+| `res.cors()` | 200 OK with CORS headers (preflight) |
+| `res.fileBase64(base64, mimeType, headers?)` | File from base64 content |
+| `res.file(path, headers?, fallbackPath?)` | Serve file from public directory |
+| `await res.ejsFile(path, pageData, headers?)` | Render EJS file |
+| `await res.ejsTemplate(template, pageData, headers?)` | Render EJS template string |
+| `res.api(payload, config?, headers?)` | Standardized API response |
+| `res.apiBinary(payload, config?, headers?)` | Gzip-compressed API response |
 
-return res.xml(data);
-// Sends an XML response (base64 encoded).
+**API Config Options**: `{ notAuthorized, message, errorMessage, versionExpired, sessionExpired, logList }`
 
-return res.html(data, headers); 
-// Sends an HTML response (base64 encoded).
-
-return res.status301(url, headers); 
-// Redirects to the specified URL with a 301 status code.
-
-return res.status404(data, headers); 
-// Sends a 404 Not Found response.
-
-return res.cors(); 
-// Sends a 200 OK response with CORS headers (for preflight requests).
-
-return res.fileBase64(fileBase64, mimeType, headers); 
-// Sends a file response from base64 content.
-
-return res.file(filePath, headers, fallbackFilePath); 
-// Serves a file from the public directory.
-
-return await res.ejsFile(filePath, pageData, headers); 
-// Renders and serves an EJS file.
-
-return await res.ejsTemplate(template, pageData, headers); 
-// Renders and serves an EJS template string.
-
-return res.api(payload, config, headers); 
-// Sends a standardized API response for use with LambderCaller.
-// Config: { notAuthorized, message, errorMessage, versionExpired, sessionExpired }
-
-// res.die.* - Same as res.* but immediately returns and skips afterRender hooks
-return res.die.json(data, headers); 
-return res.die.api(payload, config, headers);
-// ... etc
-```
+**Die Methods**: `res.die.*` - Same as above but immediately returns, skipping `afterRender` hooks.
 
 ## Frontend Usage with LambderCaller
 
@@ -417,9 +316,9 @@ LambderCaller is a frontend companion library for Lambder (only 2kb compressed) 
 
 ```typescript
 import { LambderCaller } from "lambder";
-import type { AppContract } from "./backend/handler"; // Import the inferred contract type
+import type { ApiContractType } from "./backend/handler"; // Import the inferred contract type
 
-const lambderCaller = new LambderCaller<AppContract>({
+const lambderCaller = new LambderCaller<ApiContractType>({
     apiPath: "/api",
     isCorsEnabled: false,
     fetchStartedHandler: ({ fetchParams, activeFetchList }) => {
@@ -441,38 +340,6 @@ const user = await lambderCaller.api("getCompanyPage", { companyName: "Acme" });
 // - Expected output type
 ```
 
-### How Type Safety Works
-
-1. **Backend**: Chain your APIs and export the inferred contract
-```typescript
-// backend/handler.ts
-import Lambder from 'lambder';
-import { z } from 'zod';
-
-const lambder = new Lambder({ apiPath: '/api' })
-    .addApi('getUser', {
-        input: z.object({ userId: z.string() }),
-        output: z.object({ id: z.string(), name: z.string() })
-    }, async (ctx, res) => {
-        return res.api({ id: ctx.apiPayload.userId, name: "John" });
-    });
-
-export type AppContract = typeof lambder.ApiContract;
-export const handler = lambder.getHandler();
-```
-
-2. **Frontend**: Import the **type** (not the code) and use it
-```typescript
-// frontend/api.ts
-import { LambderCaller } from 'lambder';
-import type { AppContract } from '../backend/handler'; // Type-only import
-
-const lambderCaller = new LambderCaller<AppContract>({ apiPath: '/api' });
-
-// ✅ Fully typed - TypeScript knows all APIs and their input/output types
-const user = await lambderCaller.api('getUser', { userId: '123' });
-```
-
 ### Benefits
 
 ✅ **No Manual Type Definitions** - Types are inferred from your Zod schemas  
@@ -491,9 +358,9 @@ LambderMSW provides seamless integration with [MSW (Mock Service Worker)](https:
 ```typescript
 import { LambderMSW } from 'lambder';
 import { setupServer } from 'msw/node';
-import type { AppContract } from './backend/handler';
+import type { ApiContractType } from './backend/handler';
 
-const lambderMSW = new LambderMSW<AppContract>({
+const lambderMSW = new LambderMSW<ApiContractType>({
     apiPath: '/api',
 });
 
