@@ -11,11 +11,12 @@ export default class LambderCaller {
     errorMessageHandler;
     notAuthorizedHandler;
     errorHandler;
+    apiInputValidationErrorHandler;
     fetchStartedHandler;
     fetchEndedHandler;
     sessionTokenCookieKey = "LMDRSESSIONTKID";
     sessionCsrfCookieKey = "LMDRSESSIONCSTK";
-    constructor({ apiPath, apiVersion, isCorsEnabled = false, versionExpiredHandler, sessionExpiredHandler, messageHandler, errorMessageHandler, notAuthorizedHandler, errorHandler, fetchStartedHandler, fetchEndedHandler, }) {
+    constructor({ apiPath, apiVersion, isCorsEnabled = false, versionExpiredHandler, sessionExpiredHandler, messageHandler, errorMessageHandler, notAuthorizedHandler, errorHandler, fetchStartedHandler, fetchEndedHandler, apiInputValidationErrorHandler, }) {
         this.apiPath = apiPath ?? "/api";
         this.apiVersion = apiVersion;
         this.isCorsEnabled = isCorsEnabled;
@@ -25,6 +26,7 @@ export default class LambderCaller {
         this.errorMessageHandler = errorMessageHandler;
         this.notAuthorizedHandler = notAuthorizedHandler;
         this.errorHandler = errorHandler;
+        this.apiInputValidationErrorHandler = apiInputValidationErrorHandler;
         this.fetchStartedHandler = fetchStartedHandler;
         this.fetchEndedHandler = fetchEndedHandler;
     }
@@ -54,6 +56,17 @@ export default class LambderCaller {
             }).then(async (res) => {
                 if (res.status >= 500)
                     throw new Error("Request failed: " + res.status + " - " + res.statusText);
+                if (res.status === 422) {
+                    const errorData = await res.json();
+                    if (this.apiInputValidationErrorHandler) {
+                        await this.apiInputValidationErrorHandler(errorData.zodError);
+                    }
+                    else if (this.errorHandler) {
+                        await this.errorHandler(new Error("API Input Validation Error", { cause: errorData.zodError }));
+                    }
+                    return null;
+                }
+                ;
                 if (res.headers.get("Content-Type")?.includes("application/lambder-json-stream")) {
                     const decompressed = res.json();
                     return decompressed;
@@ -114,7 +127,7 @@ export default class LambderCaller {
             return data;
         }
         catch (err) {
-            const wrappedError = err instanceof Error ? err : new Error("Error: " + String(err));
+            const wrappedError = err instanceof Error ? err : new Error("Error: ", { cause: err });
             fetchTracker.done = true;
             if (!fetchTracker.fetchEndCalled && this.fetchEndedHandler) {
                 await this.fetchEndedHandler({
