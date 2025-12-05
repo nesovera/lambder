@@ -1,6 +1,7 @@
 import Cookies from 'js-cookie';
 import { LambderApiResponse } from './LambderResponseBuilder';
 import type { ApiContractShape } from './LambderApiContract';
+import type { z } from "zod";
 
 type VoidFunction = ()=>void|Promise<void>;
 type FetchTracker = { apiName: string, done: boolean, fetchEndCalled: boolean };
@@ -22,6 +23,7 @@ type FetchEndEventHandler = (params: {
 })=>void|Promise<void>;
 
 type ErrorHandler = (err: Error) => void|Promise<void>;
+type ValidationErrorHandler = (zodError: z.ZodError) => (void|false)|Promise<(void|false)>;
 type MessageHandler = (message:any) => void|Promise<void>;
 
 export default class LambderCaller<TContract extends ApiContractShape = any> {
@@ -39,6 +41,7 @@ export default class LambderCaller<TContract extends ApiContractShape = any> {
     private errorMessageHandler?: MessageHandler;
     private notAuthorizedHandler?: VoidFunction;
     private errorHandler?: ErrorHandler;
+    private apiInputValidationErrorHandler?: ValidationErrorHandler;
     
     private fetchStartedHandler?: FetchStartEventHandler;
     private fetchEndedHandler?: FetchEndEventHandler;
@@ -54,6 +57,7 @@ export default class LambderCaller<TContract extends ApiContractShape = any> {
             messageHandler, errorMessageHandler,
             notAuthorizedHandler, errorHandler,
             fetchStartedHandler, fetchEndedHandler,
+            apiInputValidationErrorHandler,
         }: 
         { 
             apiPath: string,
@@ -67,6 +71,7 @@ export default class LambderCaller<TContract extends ApiContractShape = any> {
             errorHandler?: ErrorHandler, 
             fetchStartedHandler?: FetchStartEventHandler, 
             fetchEndedHandler?: FetchEndEventHandler,
+            apiInputValidationErrorHandler?: ValidationErrorHandler,
         }
     ){
         this.apiPath = apiPath ?? "/api";
@@ -80,6 +85,7 @@ export default class LambderCaller<TContract extends ApiContractShape = any> {
         this.errorMessageHandler = errorMessageHandler;
         this.notAuthorizedHandler = notAuthorizedHandler;
         this.errorHandler = errorHandler;
+        this.apiInputValidationErrorHandler = apiInputValidationErrorHandler;
         
         this.fetchStartedHandler = fetchStartedHandler; 
         this.fetchEndedHandler = fetchEndedHandler;
@@ -103,6 +109,7 @@ export default class LambderCaller<TContract extends ApiContractShape = any> {
             sessionExpiredHandler?: VoidFunction, 
             messageHandler?: MessageHandler,
             errorMessageHandler?: MessageHandler,
+            apiInputValidationErrorHandler?: ValidationErrorHandler,
             notAuthorizedHandler?: VoidFunction, 
             errorHandler?: ErrorHandler, 
             fetchStartedHandler?: FetchStartEventHandler, 
@@ -127,6 +134,15 @@ export default class LambderCaller<TContract extends ApiContractShape = any> {
                 body: JSON.stringify({ apiName, version, token, siteHost, payload, }),
             }).then(async (res)=>{
                 if(res.status >= 500) throw new Error("Request failed: " + res.status + " - " + res.statusText);
+                if(res.status === 422){
+                    const errorData: { error: string, zodError: z.ZodError } = await res.json();
+                    if(this.apiInputValidationErrorHandler){
+                        await this.apiInputValidationErrorHandler(errorData.zodError);                        
+                    }else if(this.errorHandler){
+                        await this.errorHandler(new Error("API Input Validation Error", { cause: errorData.zodError }));
+                    }
+                    return null;
+                };
                 if(res.headers.get("Content-Type")?.includes("application/lambder-json-stream")){ 
                     const decompressed = res.json();
                     return decompressed;
@@ -182,7 +198,7 @@ export default class LambderCaller<TContract extends ApiContractShape = any> {
             }
             return data;
         }catch(err){
-            const wrappedError = err instanceof Error ? err : new Error("Error: " + String(err));
+            const wrappedError = err instanceof Error ? err : new Error("Error: ", { cause: err });
             fetchTracker.done = true;
             if(!fetchTracker.fetchEndCalled && this.fetchEndedHandler){
                 await this.fetchEndedHandler({

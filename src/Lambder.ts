@@ -163,7 +163,6 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
     addRoute(condition: Path|ConditionFunction|RegExp, actionFn: ActionFunction): this {
         this.actionList.push({ 
             conditionFn: (ctx:LambderRenderContext<any>) => (
-                ctx.method === "GET" && 
                 (
                     (typeof condition === "string" && this.testPatternMatch(condition, ctx.path)) ||
                     (typeof condition === "function" && condition(ctx)) ||
@@ -187,7 +186,6 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
     addSessionRoute(condition: Path|ConditionFunction|RegExp, actionFn: SessionActionFunction<TSessionData>): this {
         this.actionList.push({ 
             conditionFn: (ctx:LambderRenderContext<any>) => (
-                ctx.method === "GET" &&
                 (
                     (typeof condition === "string" && this.testPatternMatch(condition, ctx.path)) ||
                     (typeof condition === "function" && condition(ctx)) ||
@@ -242,7 +240,7 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
                         return await this.apiInputValidationErrorHandler(ctx, resolver, inputResult.error);
                     }
                     return resolver.raw({
-                        statusCode: 400,
+                        statusCode: 422,
                         body: JSON.stringify({ error: "Input validation failed", zodError: inputResult.error }),
                         multiValueHeaders: { "Content-Type": ["application/json"] }
                     });

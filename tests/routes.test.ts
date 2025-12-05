@@ -518,13 +518,13 @@ describe('Routes - Wildcard and Catch-all Routes', () => {
 });
 
 describe('Routes - Method Filtering', () => {
-    it('should only match GET requests', async () => {
+    it('should match all HTTP methods when no method is specified', async () => {
         const lambder = new Lambder({
             publicPath: './public',
             apiPath: '/api'
         })
             .addRoute('/resource', (ctx, res) => {
-                return res.html('GET Response');
+                return res.html(`${ctx.method} Response`);
             });
 
         const handler = lambder.getHandler();
@@ -534,9 +534,10 @@ describe('Routes - Method Filtering', () => {
         const getResult = await handler(getEvent, createMockContext());
         expect(Buffer.from(getResult.body || '', 'base64').toString()).toBe('GET Response');
 
-        // POST should not match routes (should hit fallback)
+        // POST should also work (no method restriction)
         const postEvent = createMockEvent('/resource', 'POST');
         const postResult = await handler(postEvent, createMockContext());
-        expect(postResult.statusCode).toBe(204); // Default fallback
+        expect(postResult.statusCode).toBe(200);
+        expect(Buffer.from(postResult.body || '', 'base64').toString()).toBe('POST Response');
     });
 });

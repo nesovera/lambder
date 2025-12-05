@@ -120,10 +120,9 @@ export default class Lambder {
     }
     addRoute(condition, actionFn) {
         this.actionList.push({
-            conditionFn: (ctx) => (ctx.method === "GET" &&
-                ((typeof condition === "string" && this.testPatternMatch(condition, ctx.path)) ||
-                    (typeof condition === "function" && condition(ctx)) ||
-                    (condition?.constructor == RegExp && condition.test(ctx.path)))),
+            conditionFn: (ctx) => (((typeof condition === "string" && this.testPatternMatch(condition, ctx.path)) ||
+                (typeof condition === "function" && condition(ctx)) ||
+                (condition?.constructor == RegExp && condition.test(ctx.path)))),
             actionFn: async (ctx, resolver) => {
                 if (typeof condition === "string") {
                     ctx.pathParams = this.getPatternMatch(condition, ctx.path);
@@ -139,10 +138,9 @@ export default class Lambder {
     }
     addSessionRoute(condition, actionFn) {
         this.actionList.push({
-            conditionFn: (ctx) => (ctx.method === "GET" &&
-                ((typeof condition === "string" && this.testPatternMatch(condition, ctx.path)) ||
-                    (typeof condition === "function" && condition(ctx)) ||
-                    (condition?.constructor == RegExp && condition.test(ctx.path)))),
+            conditionFn: (ctx) => (((typeof condition === "string" && this.testPatternMatch(condition, ctx.path)) ||
+                (typeof condition === "function" && condition(ctx)) ||
+                (condition?.constructor == RegExp && condition.test(ctx.path)))),
             actionFn: async (ctx, resolver) => {
                 if (typeof condition === "string") {
                     ctx.pathParams = this.getPatternMatch(condition, ctx.path);
@@ -177,7 +175,7 @@ export default class Lambder {
                         return await this.apiInputValidationErrorHandler(ctx, resolver, inputResult.error);
                     }
                     return resolver.raw({
-                        statusCode: 400,
+                        statusCode: 422,
                         body: JSON.stringify({ error: "Input validation failed", zodError: inputResult.error }),
                         multiValueHeaders: { "Content-Type": ["application/json"] }
                     });

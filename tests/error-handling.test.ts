@@ -441,7 +441,7 @@ describe('Error Handling - Input Validation Errors', () => {
         });
         const result = await handler(event, createMockContext());
 
-        expect(result.statusCode).toBe(400);
+        expect(result.statusCode).toBe(422);
         const body = JSON.parse(result.body || '{}');
         expect(body.error).toBe('Input validation failed');
         expect(body.zodError).toBeDefined();
@@ -467,7 +467,7 @@ describe('Error Handling - Input Validation Errors', () => {
         const event = createMockEvent('/api', 'POST', 'testApi', { value: 'abc' }); // Too short
         const result = await handler(event, createMockContext());
 
-        expect(result.statusCode).toBe(400);
+        expect(result.statusCode).toBe(422);
     });
 });
 
