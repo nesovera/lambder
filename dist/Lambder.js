@@ -267,7 +267,7 @@ export default class Lambder {
                 try {
                     const resolver = this.getResolver(ctx, resolve, reject);
                     if (ctx.method === "OPTIONS")
-                        return resolver.cors();
+                        return resolve(resolver.cors());
                     const firstMatchedAction = this.actionList.find(action => action.conditionFn(ctx));
                     if (firstMatchedAction) {
                         // Check version if provided by the client and the server
