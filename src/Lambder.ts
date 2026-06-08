@@ -367,7 +367,7 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
             )=> {
                 try{
                     const resolver = this.getResolver(ctx, resolve, reject);
-                    if(ctx.method === "OPTIONS") return resolver.cors();
+                    if(ctx.method === "OPTIONS") return resolve(resolver.cors());
         
                     const firstMatchedAction = this.actionList.find(action => action.conditionFn(ctx));
                     if(firstMatchedAction){
