@@ -16,13 +16,15 @@ export default class LambderSessionManager {
     private sortKey;
     private ddbDocumentClient;
     private enableSlidingExpiration;
-    constructor({ tableName, tableRegion, partitionKey, sortKey, sessionSalt, enableSlidingExpiration, }: {
+    private slidingWriteIntervalSeconds;
+    constructor({ tableName, tableRegion, partitionKey, sortKey, sessionSalt, enableSlidingExpiration, slidingWriteIntervalSeconds, }: {
         tableName: string;
         tableRegion: string;
         partitionKey: string;
         sortKey: string;
         sessionSalt: string;
         enableSlidingExpiration?: boolean;
+        slidingWriteIntervalSeconds?: number;
     });
     private sessionUserKeyHasher;
     private constantTimeCompare;

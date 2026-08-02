@@ -1,11 +1,16 @@
-import LambderUtils from "./LambderUtils.js";
-import { LambderRenderContext } from "./LambderContext.js";
-export type HttpStatusCode = 200 | 201 | 202 | 204 | 300 | 301 | 302 | 303 | 304 | 307 | 308 | 400 | 401 | 403 | 404 | 405 | 409 | 410 | 413 | 415 | 422 | 429 | 500 | 501 | 502 | 503 | 504;
-export type LambderResolverResponse = {
-    statusCode: HttpStatusCode;
-    multiValueHeaders?: Record<string, string[]>;
-    body: string | null;
-    isBase64Encoded?: boolean;
+import type { LambderRenderContext } from "./LambderContext.js";
+import { LambderResponse, type HttpStatusCode, type LambderHeadersInput } from "./LambderResponse.js";
+import { LambderSafeHtml } from "./LambderHtml.js";
+import { type LambderTemplateData } from "./LambderTemplatingEngine.js";
+export type LambderResponseOptions = {
+    statusCode?: HttpStatusCode;
+    headers?: LambderHeadersInput;
+    /** Shorthand for the Cache-Control header. */
+    cacheControl?: string;
+    /** "auto" (default): gzip when compressible/large enough. true: force. false: never. */
+    compress?: boolean | "auto";
+    /** "auto" (default): ETag on GET/HEAD 200 when globally enabled. true: force. false: never. */
+    etag?: boolean | "auto";
 };
 export type LambderApiResponseConfig = {
     versionExpired?: boolean;
@@ -16,38 +21,58 @@ export type LambderApiResponseConfig = {
     logList?: any[];
 };
 export type LambderApiResponse<T> = LambderApiResponseConfig & {
+    apiVersion?: string | null;
     payload?: T | null;
 };
+export type LambderRawResponseInit = {
+    statusCode: HttpStatusCode;
+    headers?: LambderHeadersInput;
+    /** Legacy alias for headers (API Gateway naming). */
+    multiValueHeaders?: Record<string, string[]>;
+    body: string | Buffer | null;
+    /** True when body is already a base64-encoded string. */
+    isBase64Encoded?: boolean;
+    compress?: boolean | "auto";
+    etag?: boolean | "auto";
+};
 export default class LambderResponseBuilder<TResponse = any> {
-    private isCorsEnabled;
-    private publicPath;
-    private apiVersion;
-    private lambderUtils;
-    private ctx?;
-    constructor({ isCorsEnabled, publicPath, apiVersion, lambderUtils, ctx }: {
-        isCorsEnabled: boolean;
+    protected publicPath: string;
+    protected apiVersion: string | null;
+    protected ctx?: LambderRenderContext;
+    constructor({ publicPath, apiVersion, ctx }: {
         publicPath: string;
         apiVersion?: string | null;
-        lambderUtils: LambderUtils;
-        ctx?: LambderRenderContext<any>;
+        ctx?: LambderRenderContext;
     });
-    private readPublicFileSync;
-    private checkPublicFileExist;
+    private buildResponse;
+    private resolvePublicFilePath;
     addHeader(key: string, value: string): void;
     setHeader(key: string, value: string | string[]): void;
     logToApiResponse(input: any): void;
-    raw(param: LambderResolverResponse): LambderResolverResponse;
-    json(data: Record<string, any>, headers?: Record<string, string | string[]>): LambderResolverResponse;
-    xml(data: string): LambderResolverResponse;
-    html(data: string, headers?: Record<string, string | string[]>): LambderResolverResponse;
-    redirect(url: string, statusCode?: HttpStatusCode, headers?: Record<string, string | string[]>): LambderResolverResponse;
-    status404(data: string, headers?: Record<string, string | string[]>): LambderResolverResponse;
-    versionExpired(headers?: Record<string, string | string[]>): LambderResolverResponse;
-    cors(): LambderResolverResponse;
-    fileBase64(fileBase64: string, mimeType: string, headers?: Record<string, string | string[]>): LambderResolverResponse;
-    file(filePath: string, headers?: Record<string, string | string[]>, fallbackFilePath?: string): Promise<LambderResolverResponse>;
-    ejsTemplate(template: string, pageData: Record<string, any>, headers?: Record<string, string | string[]>): Promise<LambderResolverResponse>;
-    ejsFile(filePath: string, pageData: Record<string, any>, headers?: Record<string, string | string[]>): Promise<LambderResolverResponse>;
-    api(payload: TResponse | null, { versionExpired, sessionExpired, notAuthorized, message, errorMessage, logList, }?: LambderApiResponseConfig, headers?: Record<string, string | string[]>): LambderResolverResponse;
-    apiBinary<T = any>(payload: T | null, { versionExpired, sessionExpired, notAuthorized, message, errorMessage, logList, }?: LambderApiResponseConfig, headers?: Record<string, string | string[]>): LambderResolverResponse;
+    raw(init: LambderRawResponseInit): LambderResponse;
+    json(data: Record<string, any>, options?: LambderResponseOptions): LambderResponse;
+    text(data: string, options?: LambderResponseOptions): LambderResponse;
+    xml(data: string | LambderSafeHtml, options?: LambderResponseOptions): LambderResponse;
+    html(data: string | LambderSafeHtml, options?: LambderResponseOptions): LambderResponse;
+    status(statusCode: HttpStatusCode, body?: string, options?: LambderResponseOptions): LambderResponse;
+    status404(data: string, options?: LambderResponseOptions): LambderResponse;
+    redirect(url: string, statusCode?: HttpStatusCode, options?: LambderResponseOptions): LambderResponse;
+    versionExpired(options?: LambderResponseOptions): LambderResponse;
+    fileBase64(fileBase64: string, mimeType: string, options?: LambderResponseOptions): LambderResponse;
+    file(filePath: string, options?: LambderResponseOptions & {
+        fallback?: string;
+    }): Promise<LambderResponse>;
+    /**
+     * Render an HTML file under publicPath through LambderTemplatingEngine
+     * (comment-based slots/conditionals) and return it as an HTML response.
+     * The compiled template is cached across warm invocations; a missing file
+     * throws (it is a server-side configuration error, not a client 404).
+     * Set htmlVirtualSlots to expose "title"/"head" slots on marker-less files.
+     */
+    templateFile(filePath: string, data?: LambderTemplateData, options?: LambderResponseOptions & {
+        htmlVirtualSlots?: boolean;
+    }): Promise<LambderResponse>;
+    api(payload: TResponse | null, { versionExpired, sessionExpired, notAuthorized, message, errorMessage, logList, }?: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
+    /** Same as api() but forces gzip compression of the response body. */
+    apiBinary(payload: TResponse | null, config?: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
 }

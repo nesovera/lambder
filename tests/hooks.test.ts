@@ -14,6 +14,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { decodeBody } from './helpers.js';
 import { z } from 'zod';
 import Lambder from '../src/Lambder.js';
 import type { APIGatewayProxyEvent, Context } from 'aws-lambda';
@@ -193,7 +194,7 @@ describe('Hooks - afterRender Hook', () => {
 
         await lambder.addHook('afterRender', async (ctx, res, response) => {
             // Modify response body
-            const body = JSON.parse(response.body || '{}');
+            const body = JSON.parse(String(response.body || '{}'));
             body.modified = true;
             response.body = JSON.stringify(body);
             return response;
@@ -247,8 +248,7 @@ describe('Hooks - afterRender Hook', () => {
         lambder.addRoute('/test', (ctx, res) => res.json({ data: 'test' }));
 
         await lambder.addHook('afterRender', async (ctx, res, response) => {
-            response.multiValueHeaders = response.multiValueHeaders || {};
-            response.multiValueHeaders['X-Custom-Header'] = ['CustomValue'];
+            response.setHeader('X-Custom-Header', 'CustomValue');
             return response;
         });
 
@@ -352,7 +352,7 @@ describe('Hooks - fallback Hook', () => {
 });
 
 describe('Hooks - created Hook', () => {
-    it('should execute created hook immediately', async () => {
+    it('should execute created hook lazily at first render', async () => {
         let createdCalled = false;
         let lambderInstance: Lambder | null = null;
 
@@ -361,10 +361,17 @@ describe('Hooks - created Hook', () => {
             apiPath: '/api'
         });
 
-        await lambder.addHook('created', async (instance) => {
+        lambder.addHook('created', async (instance) => {
             createdCalled = true;
             lambderInstance = instance;
         });
+
+        // Lazy: runs once at the first render, keeping addHook chainable.
+        expect(createdCalled).toBe(false);
+
+        lambder.addRoute('/test', (ctx, res) => res.html('Test'));
+        const handler = lambder.getHandler();
+        await handler(createMockEvent('/test'), createMockContext());
 
         expect(createdCalled).toBe(true);
         expect(lambderInstance).toBe(lambder);
@@ -376,11 +383,13 @@ describe('Hooks - created Hook', () => {
             apiPath: '/api'
         });
 
-        await lambder.addHook('created', async (instance) => {
-            instance.enableCors(true);
+        lambder.addHook('created', async (instance) => {
+            instance.addRoute('/from-created', (ctx, res) => res.html('Configured'));
         });
 
-        expect(lambder.isCorsEnabled).toBe(true);
+        const handler = lambder.getHandler();
+        const result = await handler(createMockEvent('/from-created'), createMockContext());
+        expect(decodeBody(result)).toBe('Configured');
     });
 });
 

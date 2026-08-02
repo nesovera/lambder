@@ -1,332 +1,256 @@
 import mimeTypeResolver from "mime-types";
-import LambderUtils from "./LambderUtils.js";
-import { LambderRenderContext } from "./LambderContext.js";
+import type { LambderRenderContext } from "./LambderContext.js";
 import { getFS, getPath } from "./node-polyfills.js";
+import { LambderResponse, type HttpStatusCode, type LambderHeadersInput } from "./LambderResponse.js";
+import { LambderSafeHtml } from "./LambderHtml.js";
+import { LambderTemplatingEngine, type LambderTemplateData } from "./LambderTemplatingEngine.js";
 
-const convertToMultiHeader = (
-    headers: Record<string, string|string[]> | undefined
-):Record<string, string[]>  =>
-    Object.fromEntries(Object.entries(headers||{}).map(([k,v])=>[ k, Array.isArray(v) ? v : [v] ]));
+// Compiled templates survive across requests (builder instances are per-request).
+const templateFileCache = new Map<string, LambderTemplatingEngine>();
 
-const CORS_HEADERS = convertToMultiHeader({
-    "Access-Control-Allow-Credentials": "true",
-    "Access-Control-Allow-Headers" : "Origin, X-Requested-With, Content-Type, Accept",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "OPTIONS,POST",
-});
-
-export type HttpStatusCode = 
-    | 200 | 201 | 202 | 204
-    | 300 | 301 | 302 | 303 | 304 | 307 | 308
-    | 400 | 401 | 403 | 404 | 405 | 409 | 410 | 413 | 415 | 422 | 429
-    | 500 | 501 | 502 | 503 | 504;
-
-export type LambderResolverResponse = { 
-    statusCode: HttpStatusCode, 
-    multiValueHeaders?: Record<string, string[]>, 
-    body: string | null,
-    isBase64Encoded?: boolean,
+export type LambderResponseOptions = {
+    statusCode?: HttpStatusCode;
+    headers?: LambderHeadersInput;
+    /** Shorthand for the Cache-Control header. */
+    cacheControl?: string;
+    /** "auto" (default): gzip when compressible/large enough. true: force. false: never. */
+    compress?: boolean | "auto";
+    /** "auto" (default): ETag on GET/HEAD 200 when globally enabled. true: force. false: never. */
+    etag?: boolean | "auto";
 };
 
 export type LambderApiResponseConfig = {
-    versionExpired?: boolean; 
-    sessionExpired?: boolean; 
-    notAuthorized?: boolean; 
-    message?: any; 
+    versionExpired?: boolean;
+    sessionExpired?: boolean;
+    notAuthorized?: boolean;
+    message?: any;
     errorMessage?: any;
     logList?: any[];
 }
 
-
 export type LambderApiResponse<T> = LambderApiResponseConfig & {
-    payload?: T | null; 
+    apiVersion?: string | null;
+    payload?: T | null;
 }
 
+export type LambderRawResponseInit = {
+    statusCode: HttpStatusCode;
+    headers?: LambderHeadersInput;
+    /** Legacy alias for headers (API Gateway naming). */
+    multiValueHeaders?: Record<string, string[]>;
+    body: string | Buffer | null;
+    /** True when body is already a base64-encoded string. */
+    isBase64Encoded?: boolean;
+    compress?: boolean | "auto";
+    etag?: boolean | "auto";
+};
+
 export default class LambderResponseBuilder<TResponse = any> {
-    private isCorsEnabled: boolean;
-    private publicPath: string;
-    private apiVersion: string|null;
-    private lambderUtils: LambderUtils;
-    private ctx?: LambderRenderContext<any>;
+    protected publicPath: string;
+    protected apiVersion: string | null;
+    protected ctx?: LambderRenderContext;
 
     constructor(
-        { isCorsEnabled, publicPath, apiVersion, lambderUtils, ctx }: 
-        { 
-            isCorsEnabled: boolean, 
+        { publicPath, apiVersion, ctx }:
+        {
             publicPath: string,
-            apiVersion?: string|null,
-            lambderUtils: LambderUtils,
-            ctx?: LambderRenderContext<any>,
+            apiVersion?: string | null,
+            ctx?: LambderRenderContext,
         }
     ){
-        this.isCorsEnabled = isCorsEnabled;
         this.publicPath = publicPath;
         this.apiVersion = apiVersion ?? null;
-        this.lambderUtils = lambderUtils;
         this.ctx = ctx;
     };
 
-    private async readPublicFileSync(filePath: string){
-        const fs = await getFS();
-        const path = await getPath();
-        
-        if (!fs || !path) {
-            throw new Error("File system operations are not available in browser environment");
+    private buildResponse(
+        statusCode: HttpStatusCode,
+        contentType: string | null,
+        body: string | Buffer | null,
+        options?: LambderResponseOptions,
+        defaults?: { compress?: boolean | "auto", etag?: boolean | "auto" },
+    ): LambderResponse {
+        const response = new LambderResponse({
+            statusCode: options?.statusCode ?? statusCode,
+            headers: contentType ? { "Content-Type": contentType } : {},
+            body,
+            compress: options?.compress ?? defaults?.compress ?? "auto",
+            etag: options?.etag ?? defaults?.etag ?? "auto",
+        });
+        if(options?.headers){
+            for(const [key, value] of Object.entries(options.headers)) response.setHeader(key, value);
         }
-        
-        const publicPath = path.resolve(this.publicPath);
-        const normalizedFilePath = filePath.startsWith('/') ? filePath.slice(1) : filePath;
-        const absolutePath = path.resolve(publicPath, normalizedFilePath);
-        if(!absolutePath.startsWith(publicPath)){ return "forbidden-public-path"; }
-        return await fs.promises.readFile(absolutePath);
-    };
+        if(options?.cacheControl) response.setHeader("Cache-Control", options.cacheControl);
+        return response;
+    }
 
-    private async checkPublicFileExist(filePath: string){
+    private async resolvePublicFilePath(filePath: string): Promise<string | null> {
         const fs = await getFS();
         const path = await getPath();
-        
-        if (!fs || !path) { return false; }
-        
+        if (!fs || !path) return null;
+
         const publicPath = path.resolve(this.publicPath);
         const normalizedFilePath = filePath.startsWith('/') ? filePath.slice(1) : filePath;
         const absolutePath = path.resolve(publicPath, normalizedFilePath);
-        if(!absolutePath.startsWith(publicPath)){ return false; }
+        if(absolutePath !== publicPath && !absolutePath.startsWith(publicPath + path.sep)) return null;
         try {
             const stat = await fs.promises.stat(absolutePath);
-            return stat.isFile();
+            return stat.isFile() ? absolutePath : null;
         } catch {
-            return false;
+            return null;
         }
     };
 
     addHeader(key: string, value: string){
-        if(!this.ctx) throw new Error(".addHeader function is not available within this hook"); 
-        else{
-            this.ctx._otherInternal.addHeaderFnAccumulator.push({ key, value });
-        }
+        if(!this.ctx) throw new Error(".addHeader function is not available within this hook");
+        this.ctx._otherInternal.addHeaderFnAccumulator.push({ key, value });
     };
 
-    setHeader(key: string, value: string|string[]){
-        if(!this.ctx) throw new Error(".setHeader function is not available within this hook"); 
-        else{
-            this.ctx._otherInternal.addHeaderFnAccumulator = this.ctx._otherInternal.addHeaderFnAccumulator
-                .filter((header: { key: string, value: string }) => header.key !== key);
-            this.ctx._otherInternal.setHeaderFnAccumulator.push({ key, value });
-        }
-    };
-    
-    logToApiResponse(input:any){
-        if(!this.ctx) throw new Error(".logToResponse function is not available within this hook"); 
-        else{
-            this.ctx._otherInternal.logToApiResponseAccumulator.push(input);
-        }
+    setHeader(key: string, value: string | string[]){
+        if(!this.ctx) throw new Error(".setHeader function is not available within this hook");
+        this.ctx._otherInternal.addHeaderFnAccumulator = this.ctx._otherInternal.addHeaderFnAccumulator
+            .filter((header) => header.key !== key);
+        this.ctx._otherInternal.setHeaderFnAccumulator.push({ key, value });
     };
 
-
-    raw(param: LambderResolverResponse){
-        return param;
+    logToApiResponse(input: any){
+        if(!this.ctx) throw new Error(".logToApiResponse function is not available within this hook");
+        this.ctx._otherInternal.logToApiResponseAccumulator.push(input);
     };
 
-	json(
-        data: Record<string, any>, 
-        headers?: Record<string, string|string[]>
-    ):LambderResolverResponse{
-        return this.raw({
-            statusCode: 200,
-            multiValueHeaders: { 
-                "Content-Type": ["application/json; charset=utf-8"],
-                 ...(this.isCorsEnabled ? CORS_HEADERS : {}), 
-                 ...convertToMultiHeader(headers)
-            },
-            body: JSON.stringify(data),
+    raw(init: LambderRawResponseInit): LambderResponse {
+        return new LambderResponse({
+            statusCode: init.statusCode,
+            headers: init.headers ?? init.multiValueHeaders,
+            body: init.body,
+            isBodyBase64: init.isBase64Encoded ?? false,
+            compress: init.compress ?? (init.isBase64Encoded ? false : "auto"),
+            etag: init.etag ?? "auto",
         });
+    };
+
+    json(data: Record<string, any>, options?: LambderResponseOptions): LambderResponse {
+        return this.buildResponse(200, "application/json; charset=utf-8", JSON.stringify(data), options);
     }
 
-	xml(data: string):LambderResolverResponse{
-        return this.raw({
-            statusCode: 200,
-            isBase64Encoded: true,
-            multiValueHeaders: { "Content-Type": ["application/xml; charset=utf-8"]}, 
-            body: Buffer.from(data).toString("base64"),
+    text(data: string, options?: LambderResponseOptions): LambderResponse {
+        return this.buildResponse(200, "text/plain; charset=utf-8", data, options);
+    }
+
+    xml(data: string | LambderSafeHtml, options?: LambderResponseOptions): LambderResponse {
+        return this.buildResponse(200, "application/xml; charset=utf-8", String(data), options);
+    };
+
+    html(data: string | LambderSafeHtml, options?: LambderResponseOptions): LambderResponse {
+        return this.buildResponse(200, "text/html; charset=utf-8", String(data), options);
+    };
+
+    status(statusCode: HttpStatusCode, body?: string, options?: LambderResponseOptions): LambderResponse {
+        return this.buildResponse(statusCode, "text/html; charset=utf-8", body ?? "", options);
+    };
+
+    status404(data: string, options?: LambderResponseOptions): LambderResponse {
+        return this.buildResponse(404, "text/html; charset=utf-8", data, options);
+    };
+
+    redirect(url: string, statusCode: HttpStatusCode = 302, options?: LambderResponseOptions): LambderResponse {
+        const response = this.buildResponse(statusCode, null, null, options);
+        response.setHeader("Location", url);
+        return response;
+    };
+
+    versionExpired(options?: LambderResponseOptions): LambderResponse {
+        return this.api(null, { versionExpired: true }, options);
+    };
+
+    fileBase64(fileBase64: string, mimeType: string, options?: LambderResponseOptions): LambderResponse {
+        const response = new LambderResponse({
+            statusCode: options?.statusCode ?? 200,
+            headers: { "Content-Type": mimeType || "application/octet-stream" },
+            body: fileBase64,
+            isBodyBase64: true,
+            compress: false,
+            etag: options?.etag ?? "auto",
         });
-    };
-
-	html(
-        data: string, 
-        headers?: Record<string, string|string[]>,
-    ):LambderResolverResponse{
-        return this.raw({
-            statusCode: 200,
-            isBase64Encoded: true,
-            multiValueHeaders: {"Content-Type": ["text/html; charset=utf-8"], ...convertToMultiHeader(headers)},
-            body: Buffer.from(data).toString("base64"),
-        });
-    };
-
-    redirect(
-        url: string, 
-        statusCode: HttpStatusCode = 302,
-        headers?: Record<string, string|string[]>,
-    ):LambderResolverResponse{
-        return this.raw({
-            statusCode: statusCode, 
-            multiValueHeaders: { "Location" : [url], ...convertToMultiHeader(headers) },
-            body:null
-        });
-    };
-
-	status404(
-        data: string,
-        headers?: Record<string, string|string[]>,
-    ):LambderResolverResponse{
-        return this.raw({
-            statusCode: 404,
-            isBase64Encoded: true,
-            multiValueHeaders: {"Content-Type": ["text/html; charset=utf-8"], ...convertToMultiHeader(headers)},
-            body: Buffer.from(data).toString("base64"),
-        });
-    };
-
-	versionExpired(
-        headers?: Record<string, string|string[]>,
-    ):LambderResolverResponse{
-        return this.api(null, { versionExpired: true }, headers);
-    };
-
-	cors():LambderResolverResponse{
-        return this.raw({ 
-            statusCode: 200,
-            multiValueHeaders: this.isCorsEnabled ? CORS_HEADERS: {},
-            body: JSON.stringify(""),
-        });
-    };
-
-	fileBase64 (
-        fileBase64: string, 
-        mimeType: string, 
-        headers?: Record<string, string|string[]>,
-    ):LambderResolverResponse{
-        return this.raw({ 
-            statusCode: 200, 
-            isBase64Encoded: true, 
-            multiValueHeaders: { "Content-Type": [mimeType || "application/octet-stream"], ...convertToMultiHeader(headers) }, 
-            body: fileBase64, 
-        });
-    };
-
-	async file(
-        filePath: string, 
-        headers?: Record<string, string|string[]>,
-        fallbackFilePath?: string,
-    ):Promise<LambderResolverResponse>{
-        const doesFileExist = await this.checkPublicFileExist(filePath);
-        if(!doesFileExist){
-            if(fallbackFilePath){
-                const doesFallbackExist = await this.checkPublicFileExist(fallbackFilePath);
-                if(doesFallbackExist){
-                    return await this.file(fallbackFilePath, headers);
-                }
-            }
-            return this.json({ error: "File not found: " + filePath })
+        if(options?.headers){
+            for(const [key, value] of Object.entries(options.headers)) response.setHeader(key, value);
         }
-        const mimeType = mimeTypeResolver.lookup(filePath);
-        const body = await this.readPublicFileSync(filePath);
-        if (body === "forbidden-public-path") {
-            throw new Error("Forbidden public path: " + filePath);
+        if(options?.cacheControl) response.setHeader("Cache-Control", options.cacheControl);
+        return response;
+    };
+
+    async file(
+        filePath: string,
+        options?: LambderResponseOptions & { fallback?: string },
+    ): Promise<LambderResponse> {
+        let resolvedPath = await this.resolvePublicFilePath(filePath);
+        let effectivePath = filePath;
+        if(!resolvedPath && options?.fallback){
+            resolvedPath = await this.resolvePublicFilePath(options.fallback);
+            effectivePath = options.fallback;
         }
-        const bodyBuffer: Buffer =  Buffer.isBuffer(body) ? body : Buffer.from(body);
-        const bodyBase64 = bodyBuffer.toString("base64");
-        console.log("bodyBase64.length",bodyBase64.length);
-        return this.fileBase64(bodyBase64, mimeType || "application/octet-stream", headers);
+        if(!resolvedPath){
+            return this.status404("File not found", { etag: false });
+        }
+        const fs = await getFS();
+        if(!fs) return this.status404("File not found", { etag: false });
+        const body = await fs.promises.readFile(resolvedPath);
+        const mimeType = mimeTypeResolver.lookup(effectivePath) || "application/octet-stream";
+        return this.buildResponse(200, mimeType, body, options);
     };
 
-	async ejsTemplate(
-        template: string, 
-        pageData: Record<string, any>,
-        headers?: Record<string, string|string[]>,
-    ):Promise<LambderResolverResponse>{
-        const renderedResult = await this.lambderUtils.renderEjs(template, pageData);
+    /**
+     * Render an HTML file under publicPath through LambderTemplatingEngine
+     * (comment-based slots/conditionals) and return it as an HTML response.
+     * The compiled template is cached across warm invocations; a missing file
+     * throws (it is a server-side configuration error, not a client 404).
+     * Set htmlVirtualSlots to expose "title"/"head" slots on marker-less files.
+     */
+    async templateFile(
+        filePath: string,
+        data?: LambderTemplateData,
+        options?: LambderResponseOptions & { htmlVirtualSlots?: boolean },
+    ): Promise<LambderResponse> {
+        const resolvedPath = await this.resolvePublicFilePath(filePath);
+        if(!resolvedPath) throw new Error(`templateFile: file not found under publicPath: ${filePath}`);
 
-        return this.raw({
-            statusCode: 200,
-            isBase64Encoded: true,
-            multiValueHeaders: {"Content-Type": ["text/html; charset=utf-8"], ...convertToMultiHeader(headers)},
-            body: Buffer.from(renderedResult).toString("base64"),
-        });
-    };
-
-	async ejsFile(
-        filePath: string, 
-        pageData: Record<string, any>,
-        headers?: Record<string, string|string[]>,
-    ):Promise<LambderResolverResponse>{
-        const renderedResult = await this.lambderUtils.renderEjsFile(filePath, pageData);
-
-        return this.raw({
-            statusCode: 200,
-            isBase64Encoded: true,
-            multiValueHeaders: {"Content-Type": ["text/html; charset=utf-8"], ...convertToMultiHeader(headers)},
-            body: Buffer.from(renderedResult).toString("base64"),
-        });
+        const cacheKey = `${resolvedPath}|${options?.htmlVirtualSlots ? "v" : ""}`;
+        let template = templateFileCache.get(cacheKey);
+        if(!template){
+            template = await LambderTemplatingEngine.fromFile(resolvedPath, { htmlVirtualSlots: options?.htmlVirtualSlots });
+            templateFileCache.set(cacheKey, template);
+        }
+        return this.buildResponse(200, "text/html; charset=utf-8", template.render(data), options);
     };
 
     api(
-        payload: TResponse | null, 
+        payload: TResponse | null,
         {
-            versionExpired, sessionExpired, notAuthorized, 
+            versionExpired, sessionExpired, notAuthorized,
             message, errorMessage, logList,
-        }: LambderApiResponseConfig = {
-            versionExpired: undefined, sessionExpired: undefined, notAuthorized: undefined, 
-            message: null, errorMessage: null, logList: undefined
-        }, 
-        headers?: Record<string, string|string[]>,
-    ): LambderResolverResponse {
+        }: LambderApiResponseConfig = {},
+        options?: LambderResponseOptions,
+    ): LambderResponse {
         const finalLogList = logList || this.ctx?._otherInternal?.logToApiResponseAccumulator;
-        return this.json({ 
+        return this.json({
             apiVersion: this.apiVersion,
             payload,
-            ...(versionExpired ? {versionExpired} : {}),
-            ...(sessionExpired ? {sessionExpired} : {}),
-            ...(notAuthorized ? {notAuthorized} : {}),
-            ...(message ? {message} : {}),
-            ...(errorMessage ? {errorMessage} : {}),
-            ...(finalLogList?.length ? {logList: finalLogList} : {}),
-        }, headers);
+            ...(versionExpired ? { versionExpired } : {}),
+            ...(sessionExpired ? { sessionExpired } : {}),
+            ...(notAuthorized ? { notAuthorized } : {}),
+            ...(message ? { message } : {}),
+            ...(errorMessage ? { errorMessage } : {}),
+            ...(finalLogList?.length ? { logList: finalLogList } : {}),
+        }, options);
     };
 
-    apiBinary<T=any>(
-        payload: T | null, 
-        {
-            versionExpired, sessionExpired, notAuthorized, 
-            message, errorMessage, logList,
-        }: LambderApiResponseConfig = {
-            versionExpired: undefined, sessionExpired: undefined, notAuthorized: undefined, 
-            message: null, errorMessage: null, logList: undefined
-        }, 
-        headers?: Record<string, string|string[]>,
-    ): LambderResolverResponse {
-        const finalLogList = logList || this.ctx?._otherInternal?.logToApiResponseAccumulator;
-        const result = { 
-            apiVersion: this.apiVersion,
-            payload,
-            ...(versionExpired ? {versionExpired} : {}),
-            ...(sessionExpired ? {sessionExpired} : {}),
-            ...(notAuthorized ? {notAuthorized} : {}),
-            ...(message ? {message} : {}),
-            ...(errorMessage ? {errorMessage} : {}),
-            ...(finalLogList?.length ? {logList: finalLogList} : {}),
-        };
-
-        return this.raw({ 
-            statusCode: 200, 
-            isBase64Encoded: true, 
-            multiValueHeaders: { 
-                "Content-Type": ["application/lambder-json-stream"],
-                "Content-Encoding": ["gzip"],
-                ...convertToMultiHeader(headers) 
-            }, 
-            body: Buffer.from(JSON.stringify(result)).toString("base64"), 
-        });
+    /** Same as api() but forces gzip compression of the response body. */
+    apiBinary(
+        payload: TResponse | null,
+        config: LambderApiResponseConfig = {},
+        options?: LambderResponseOptions,
+    ): LambderResponse {
+        return this.api(payload, config, { ...options, compress: true });
     };
 
 };

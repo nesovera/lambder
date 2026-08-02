@@ -1,52 +1,38 @@
 import LambderResponseBuilder from "./LambderResponseBuilder.js";
+/**
+ * Response builder passed to route/api handlers and hooks.
+ *
+ * `res.die.*` builds the response and THROWS it, immediately halting the
+ * request at any call depth (handlers, hooks, nested service functions).
+ * Lambder's render pipeline catches thrown LambderResponse instances and uses
+ * them as the response. Plain `throw res.html(...)` works the same way.
+ */
 export default class LambderResolver extends LambderResponseBuilder {
-    resolve;
-    reject;
     die;
-    constructor({ isCorsEnabled, publicPath, apiVersion, lambderUtils, ctx, resolve, reject }) {
-        super({ isCorsEnabled, publicPath, apiVersion, lambderUtils, ctx, });
-        this.resolve = resolve;
-        this.reject = reject;
+    constructor(...args) {
+        super(...args);
         this.die = {
-            raw: this.autoResolve(this.raw),
-            json: this.autoResolve(this.json),
-            xml: this.autoResolve(this.xml),
-            html: this.autoResolve(this.html),
-            redirect: this.autoResolve(this.redirect),
-            status404: this.autoResolve(this.status404),
-            cors: this.autoResolve(this.cors),
-            fileBase64: this.autoResolve(this.fileBase64),
-            file: this.autoResolvePromise(this.file),
-            ejsFile: this.autoResolvePromise(this.ejsFile),
-            ejsTemplate: this.autoResolvePromise(this.ejsTemplate),
-            api: this.autoResolve(this.api),
+            raw: (...a) => { throw this.raw(...a); },
+            json: (...a) => { throw this.json(...a); },
+            text: (...a) => { throw this.text(...a); },
+            xml: (...a) => { throw this.xml(...a); },
+            html: (...a) => { throw this.html(...a); },
+            status: (...a) => { throw this.status(...a); },
+            status404: (...a) => { throw this.status404(...a); },
+            redirect: (...a) => { throw this.redirect(...a); },
+            versionExpired: (...a) => { throw this.versionExpired(...a); },
+            fileBase64: (...a) => { throw this.fileBase64(...a); },
+            api: (...a) => { throw this.api(...a); },
+            apiBinary: (...a) => { throw this.apiBinary(...a); },
+            file: async (...a) => { throw await this.file(...a); },
+            templateFile: async (...a) => { throw await this.templateFile(...a); },
         };
     }
-    // Override api method with proper typing
-    api(payload, config, headers) {
-        return super.api(payload, config, headers);
+    // Override api method with proper output typing
+    api(payload, config, options) {
+        return super.api(payload, config, options);
     }
-    autoResolve(method) {
-        return (...args) => {
-            const result = method.apply(this, args);
-            this.resolve(result);
-            return result;
-        };
-    }
-    autoResolvePromise(method) {
-        return (...args) => {
-            return new Promise((resolve, reject) => {
-                method.apply(this, args)
-                    .then(result => {
-                    this.resolve(result);
-                    resolve(result);
-                })
-                    .catch(err => {
-                    this.reject(err);
-                    reject(err);
-                });
-            });
-        };
+    apiBinary(payload, config, options) {
+        return super.apiBinary(payload, config, options);
     }
 }
-;

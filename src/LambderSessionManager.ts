@@ -22,6 +22,7 @@ export default class LambderSessionManager{
     private sortKey: string;
     private ddbDocumentClient: DynamoDBDocumentClient;
     private enableSlidingExpiration: boolean;
+    private slidingWriteIntervalSeconds: number | null;
 
     constructor(
         {
@@ -29,11 +30,13 @@ export default class LambderSessionManager{
             partitionKey, sortKey,
             sessionSalt,
             enableSlidingExpiration = true,
+            slidingWriteIntervalSeconds,
         }: {
             tableName: string, tableRegion: string,
             partitionKey: string, sortKey: string,
             sessionSalt: string,
             enableSlidingExpiration?: boolean,
+            slidingWriteIntervalSeconds?: number,
         }
     ){
         this.tableName = tableName;
@@ -41,6 +44,7 @@ export default class LambderSessionManager{
         this.partitionKey = partitionKey;
         this.sortKey = sortKey;
         this.enableSlidingExpiration = enableSlidingExpiration;
+        this.slidingWriteIntervalSeconds = slidingWriteIntervalSeconds ?? null;
 
         const ddbClient = new DynamoDBClient({ region: tableRegion });
         this.ddbDocumentClient = DynamoDBDocumentClient.from(ddbClient);
@@ -163,12 +167,19 @@ export default class LambderSessionManager{
             if(!session.createdAt) return null;
             if(!session.expiresAt || session.expiresAt < Date.now()/1000) return null;
             
-            // Update last accessed time if sliding expiration is enabled
+            // Update last accessed time if sliding expiration is enabled.
+            // Throttled: skip the DynamoDB write when the session was refreshed
+            // recently, to avoid a write on every request.
             if(this.enableSlidingExpiration){
-                session.lastAccessedAt = Math.floor(Date.now()/1000);
-                session.expiresAt = session.lastAccessedAt + session.ttlInSeconds;
-                // Wait for the update to ensure it persists before Lambda freezes
-                await this.ddbPutItem(session).catch(() => {});
+                const now = Math.floor(Date.now()/1000);
+                const minInterval = this.slidingWriteIntervalSeconds
+                    ?? Math.max(60, Math.floor((session.ttlInSeconds || 0) * 0.05));
+                if(now - (session.lastAccessedAt || 0) >= minInterval){
+                    session.lastAccessedAt = now;
+                    session.expiresAt = now + session.ttlInSeconds;
+                    // Wait for the update to ensure it persists before Lambda freezes
+                    await this.ddbPutItem(session).catch(() => {});
+                }
             }
             
             return session;

@@ -12,6 +12,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
+import { decodeBody } from './helpers.js';
 import { mockClient } from 'aws-sdk-client-mock';
 import { DynamoDBDocumentClient, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import Lambder from '../src/Lambder.js';
@@ -68,7 +69,7 @@ describe('Routes - Basic Path Matching', () => {
         const result = await handler(event, createMockContext());
 
         expect(result.statusCode).toBe(200);
-        const body = Buffer.from(result.body || '', 'base64').toString();
+        const body = decodeBody(result);
         expect(body).toBe('Hello World');
     });
 
@@ -109,13 +110,13 @@ describe('Routes - Basic Path Matching', () => {
         const handler = lambder.getHandler();
 
         const homeResult = await handler(createMockEvent('/home'), createMockContext());
-        expect(Buffer.from(homeResult.body || '', 'base64').toString()).toBe('Home Page');
+        expect(decodeBody(homeResult)).toBe('Home Page');
 
         const aboutResult = await handler(createMockEvent('/about'), createMockContext());
-        expect(Buffer.from(aboutResult.body || '', 'base64').toString()).toBe('About Page');
+        expect(decodeBody(aboutResult)).toBe('About Page');
 
         const contactResult = await handler(createMockEvent('/contact'), createMockContext());
-        expect(Buffer.from(contactResult.body || '', 'base64').toString()).toBe('Contact Page');
+        expect(decodeBody(contactResult)).toBe('Contact Page');
     });
 });
 
@@ -190,10 +191,10 @@ describe('Routes - RegExp Matching', () => {
         const handler = lambder.getHandler();
         
         const adminResult = await handler(createMockEvent('/admin'), createMockContext());
-        expect(Buffer.from(adminResult.body || '', 'base64').toString()).toBe('Admin Area');
+        expect(decodeBody(adminResult)).toBe('Admin Area');
 
         const adminDashResult = await handler(createMockEvent('/admin/dashboard'), createMockContext());
-        expect(Buffer.from(adminDashResult.body || '', 'base64').toString()).toBe('Admin Area');
+        expect(decodeBody(adminDashResult)).toBe('Admin Area');
     });
 
     it('should extract regex match groups', async () => {
@@ -247,7 +248,7 @@ describe('Routes - Function-based Conditional Routing', () => {
         const event = createMockEvent('/custom/anything');
         const result = await handler(event, createMockContext());
 
-        expect(Buffer.from(result.body || '', 'base64').toString()).toBe('Custom Route');
+        expect(decodeBody(result)).toBe('Custom Route');
     });
 
     it('should support complex conditional logic', async () => {
@@ -267,7 +268,7 @@ describe('Routes - Function-based Conditional Routing', () => {
         // Without query param
         const event1 = createMockEvent('/special');
         const result1 = await handler(event1, createMockContext());
-        expect(result1.statusCode).toBe(204); // Fallback
+        expect(result1.statusCode).toBe(404); // Fallback
 
         // With query param
         const event2: APIGatewayProxyEvent = {
@@ -275,7 +276,7 @@ describe('Routes - Function-based Conditional Routing', () => {
             queryStringParameters: { key: 'secret' }
         };
         const result2 = await handler(event2, createMockContext());
-        expect(Buffer.from(result2.body || '', 'base64').toString()).toBe('Special Access');
+        expect(decodeBody(result2)).toBe('Special Access');
     });
 
     it('should access context variables in condition', async () => {
@@ -298,7 +299,7 @@ describe('Routes - Function-based Conditional Routing', () => {
         };
         const result = await handler(event, createMockContext());
         
-        expect(Buffer.from(result.body || '', 'base64').toString()).toBe('Admin Dashboard');
+        expect(decodeBody(result)).toBe('Admin Dashboard');
     });
 });
 
@@ -333,8 +334,9 @@ describe('Routes - Session Protected Routes', () => {
                     tableName: 'test-sessions',
                     tableRegion: 'us-east-1',
                     sessionSalt: 'test-salt',
-                },
-                { partitionKey: 'pk', sortKey: 'sk' }
+                    partitionKey: 'pk',
+                    sortKey: 'sk',
+                }
             )
             .setGlobalErrorHandler((err, ctx, res) => {
                 return res.html(`<h1>Error: ${err.message}</h1>`);
@@ -348,7 +350,7 @@ describe('Routes - Session Protected Routes', () => {
         const result = await handler(event, createMockContext());
 
         expect(result.statusCode).toBe(200);
-        expect(Buffer.from(result.body || '', 'base64').toString()).toContain('Welcome 123');
+        expect(decodeBody(result)).toContain('Welcome 123');
     });
 
     it('should reject access without valid session', async () => {
@@ -363,8 +365,9 @@ describe('Routes - Session Protected Routes', () => {
                     tableName: 'test-sessions',
                     tableRegion: 'us-east-1',
                     sessionSalt: 'test-salt',
-                },
-                { partitionKey: 'pk', sortKey: 'sk' }
+                    partitionKey: 'pk',
+                    sortKey: 'sk',
+                }
             )
             .addSessionRoute('/protected', (ctx, res) => {
                 return res.html('Protected');
@@ -406,8 +409,9 @@ describe('Routes - Session Protected Routes', () => {
                     tableName: 'test-sessions',
                     tableRegion: 'us-east-1',
                     sessionSalt: 'test-salt',
-                },
-                { partitionKey: 'pk', sortKey: 'sk' }
+                    partitionKey: 'pk',
+                    sortKey: 'sk',
+                }
             )
             .setGlobalErrorHandler((err, ctx, res) => {
                 return res.json({ error: err.message });
@@ -449,7 +453,7 @@ describe('Routes - Priority and Ordering', () => {
         const result = await handler(event, createMockContext());
 
         // First route should win
-        expect(Buffer.from(result.body || '', 'base64').toString()).toBe('Exact Match');
+        expect(decodeBody(result)).toBe('Exact Match');
     });
 
     it('should respect route definition order', async () => {
@@ -468,11 +472,11 @@ describe('Routes - Priority and Ordering', () => {
         
         // Should match specific route first
         const adminResult = await handler(createMockEvent('/users/admin'), createMockContext());
-        expect(Buffer.from(adminResult.body || '', 'base64').toString()).toBe('Admin User');
+        expect(decodeBody(adminResult)).toBe('Admin User');
 
         // Should match parameterized route
         const userResult = await handler(createMockEvent('/users/123'), createMockContext());
-        expect(Buffer.from(userResult.body || '', 'base64').toString()).toContain('User 123');
+        expect(decodeBody(userResult)).toContain('User 123');
     });
 });
 
@@ -489,10 +493,10 @@ describe('Routes - Wildcard and Catch-all Routes', () => {
         const handler = lambder.getHandler();
         
         const result1 = await handler(createMockEvent('/anything'), createMockContext());
-        expect(Buffer.from(result1.body || '', 'base64').toString()).toBe('Catch All');
+        expect(decodeBody(result1)).toBe('Catch All');
 
         const result2 = await handler(createMockEvent('/deeply/nested/path'), createMockContext());
-        expect(Buffer.from(result2.body || '', 'base64').toString()).toBe('Catch All');
+        expect(decodeBody(result2)).toBe('Catch All');
     });
 
     it('should use wildcard as final fallback', async () => {
@@ -510,10 +514,10 @@ describe('Routes - Wildcard and Catch-all Routes', () => {
         const handler = lambder.getHandler();
         
         const specificResult = await handler(createMockEvent('/specific'), createMockContext());
-        expect(Buffer.from(specificResult.body || '', 'base64').toString()).toBe('Specific');
+        expect(decodeBody(specificResult)).toBe('Specific');
 
         const fallbackResult = await handler(createMockEvent('/anything-else'), createMockContext());
-        expect(Buffer.from(fallbackResult.body || '', 'base64').toString()).toBe('Fallback');
+        expect(decodeBody(fallbackResult)).toBe('Fallback');
     });
 });
 
@@ -532,12 +536,12 @@ describe('Routes - Method Filtering', () => {
         // GET should work
         const getEvent = createMockEvent('/resource', 'GET');
         const getResult = await handler(getEvent, createMockContext());
-        expect(Buffer.from(getResult.body || '', 'base64').toString()).toBe('GET Response');
+        expect(decodeBody(getResult)).toBe('GET Response');
 
         // POST should also work (no method restriction)
         const postEvent = createMockEvent('/resource', 'POST');
         const postResult = await handler(postEvent, createMockContext());
         expect(postResult.statusCode).toBe(200);
-        expect(Buffer.from(postResult.body || '', 'base64').toString()).toBe('POST Response');
+        expect(decodeBody(postResult)).toBe('POST Response');
     });
 });

@@ -21,6 +21,7 @@ import { setupServer } from 'msw/node';
 // Create an MSW instance
 const lambderMSW = new LambderMSW({
     apiPath: '/secure',  // Must match your Lambder backend apiPath
+    msw: await import('msw'),
 });
 
 // Create mock handlers
@@ -77,7 +78,8 @@ import type { ApiContractType } from '../backend';
 
 const lambderMSW = new LambderMSW<ApiContractType>({
     apiPath: '/secure',
-    apiVersion: '1.0.0'
+    apiVersion: '1.0.0',
+    msw: await import('msw'),
 });
 
 // Now mockApi is fully typed! ✨
@@ -101,6 +103,7 @@ Creates a new LambderMSW instance.
 **Parameters:**
 - `apiPath` (string): The API endpoint path (must match your Lambder backend)
 - `apiVersion` (string, optional): API version to include in responses
+- `msw` (module): The msw module itself, e.g. `msw: await import('msw')` (ESM-safe injection)
 
 ### `mockApi(apiName, handler, options?)`
 
@@ -213,7 +216,8 @@ import type { ApiContractType } from '../backend'; // Type-only import from your
 // Setup MSW
 const lambderMSW = new LambderMSW<ApiContractType>({
     apiPath: '/secure',
-    apiVersion: '1.0.0'
+    apiVersion: '1.0.0',
+    msw: await import('msw'),
 });
 
 const handlers = [
@@ -308,7 +312,8 @@ import { LambderMSW } from 'lambder';
 import type { ApiContractType } from '../backend'; // Type-only import from your backend
 
 const lambderMSW = new LambderMSW<ApiContractType>({
-    apiPath: '/secure'
+    apiPath: '/secure',
+    msw: await import('msw'),
 });
 
 const handlers = [
