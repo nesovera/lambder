@@ -14,4 +14,6 @@ export { html, xml, raw, jsonScript, escapeHtml, renderHtmlValue, LambderSafeHtm
 export { LambderTemplatingEngine } from "./LambderTemplatingEngine.js";
 // Public file serving
 export { LambderPublicFilesHandler } from "./LambderPublicFiles.js";
+// DynamoDB-backed compressed cache (standalone, server-only)
+export { LambderDdbCache } from "./LambderDdbCache.js";
 export { createContext, isV2HttpEvent } from "./LambderContext.js";
