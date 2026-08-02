@@ -3,18 +3,14 @@ export default class LambderMSW {
     apiVersion;
     http;
     HttpResponse;
-    constructor({ apiPath, apiVersion, }) {
+    constructor({ apiPath, apiVersion, msw, }) {
         this.apiPath = apiPath;
         this.apiVersion = apiVersion;
-        // Dynamically import MSW - it needs to be installed by the user
-        try {
-            const msw = require('msw');
-            this.http = msw.http;
-            this.HttpResponse = msw.HttpResponse;
+        if (!msw?.http || !msw?.HttpResponse) {
+            throw new Error('LambderMSW requires the msw module: new LambderMSW({ apiPath, msw: await import("msw") }). Install it with: npm install msw --save-dev');
         }
-        catch (err) {
-            throw new Error('MSW (Mock Service Worker) is required. Install it with: npm install msw --save-dev');
-        }
+        this.http = msw.http;
+        this.HttpResponse = msw.HttpResponse;
     }
     /**
      * Mock an API endpoint with MSW

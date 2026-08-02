@@ -1,5 +1,18 @@
 import type { ApiContractShape } from './LambderApiContract';
 type RequestHandler = any;
+/** The parts of the msw module LambderMSW uses: `import { http, HttpResponse } from "msw"`. */
+export type LambderMswModule = {
+    http: {
+        post: (path: string, resolver: (info: {
+            request: Request;
+        }) => any) => any;
+    };
+    HttpResponse: {
+        json: (body: any, init?: {
+            status?: number;
+        }) => any;
+    };
+};
 type MockApiOptions = {
     versionExpired?: boolean;
     sessionExpired?: boolean;
@@ -14,9 +27,11 @@ export default class LambderMSW<TContract extends ApiContractShape = any> {
     private apiVersion?;
     private http;
     private HttpResponse;
-    constructor({ apiPath, apiVersion, }: {
+    constructor({ apiPath, apiVersion, msw, }: {
         apiPath: string;
         apiVersion?: string;
+        /** Pass the msw module: `import * as msw from "msw"` (ESM-safe; no hidden require). */
+        msw: LambderMswModule;
     });
     /**
      * Mock an API endpoint with MSW

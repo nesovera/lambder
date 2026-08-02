@@ -1,10 +1,12 @@
-import { match } from "path-to-regexp";
 import LambderResolver from "./LambderResolver.js";
 import LambderResponseBuilder from "./LambderResponseBuilder.js";
-import LambderUtils from "./LambderUtils.js";
+import { LambderResponse, finalizeResponse, DEFAULT_FINALIZE_OPTIONS, } from "./LambderResponse.js";
+import { compileRouteMatcher } from "./LambderRouting.js";
+import { applyCorsHeaders } from "./LambderCors.js";
 import LambderSessionManager from "./LambderSessionManager.js";
 import LambderSessionController from "./LambderSessionController.js";
-import { createContext } from "./LambderContext.js";
+import { LambderPublicFilesHandler } from "./LambderPublicFiles.js";
+import { createContext, isV2HttpEvent } from "./LambderContext.js";
 /**
  * Main Lambder class for building type-safe serverless APIs
  *
@@ -23,9 +25,7 @@ import { createContext } from "./LambderContext.js";
 export default class Lambder {
     apiPath;
     apiVersion;
-    isCorsEnabled = false;
     publicPath;
-    ejsPath;
     /**
      * Type property for extracting the API contract
      * Use this to export your API types to the frontend
@@ -37,37 +37,48 @@ export default class Lambder {
      * ```
      */
     ApiContract;
-    actionList;
-    hookList;
+    actionList = [];
+    hookList = { "beforeRender": [], "afterRender": [], "fallback": [] };
+    createdHooks = [];
+    initPromise = null;
     globalErrorHandler = null;
     routeFallbackHandler = null;
     apiFallbackHandler = null;
     apiInputValidationErrorHandler = null;
-    utils;
+    sessionExpiredRouteHandler = null;
+    publicFilesHandler = null;
+    indexHtmlConfig = null;
+    eventActionList = [];
+    corsConfig = null;
+    finalizeOptions;
     lambderSessionManager;
+    sessionCookieOptions = {};
     sessionTokenCookieKey = "LMDRSESSIONTKID";
     sessionCsrfCookieKey = "LMDRSESSIONCSTK";
-    constructor({ publicPath, apiPath, ejsPath, apiVersion }) {
-        this.publicPath = publicPath || "/incorrect-path-not-found";
-        this.ejsPath = ejsPath || "/incorrect-ejs-path-not-found";
-        this.apiPath = apiPath ?? "/api";
-        this.apiVersion = apiVersion ?? null;
-        this.actionList = [];
-        this.hookList = {
-            "beforeRender": [],
-            "afterRender": [],
-            "fallback": [],
+    constructor(options = {}) {
+        this.publicPath = options.publicPath || "/incorrect-path-not-found";
+        this.apiPath = options.apiPath ?? "/api";
+        this.apiVersion = options.apiVersion ?? null;
+        this.finalizeOptions = {
+            compression: options.compression === false
+                ? false
+                : { minBytes: options.compression?.minBytes ?? DEFAULT_FINALIZE_OPTIONS.compression.minBytes },
+            etag: options.etag ?? DEFAULT_FINALIZE_OPTIONS.etag,
+            maxResponseBytes: options.maxResponseBytes ?? DEFAULT_FINALIZE_OPTIONS.maxResponseBytes,
         };
-        this.utils = new LambderUtils({ ejsPath });
     }
-    enableCors(isCorsEnabled) {
-        this.isCorsEnabled = isCorsEnabled;
+    enableCors(config) {
+        this.corsConfig = config === true ? {} : (config === false ? null : config);
         return this;
     }
-    enableDdbSession({ tableName, tableRegion, sessionSalt, enableSlidingExpiration }, { partitionKey, sortKey } = { partitionKey: "pk", sortKey: "sk" }) {
+    enableDdbSession({ tableName, tableRegion, sessionSalt, enableSlidingExpiration, slidingWriteIntervalSeconds, cookie, partitionKey, sortKey, }) {
         this.lambderSessionManager = new LambderSessionManager({
-            tableName, tableRegion, partitionKey, sortKey, sessionSalt, enableSlidingExpiration
+            tableName, tableRegion,
+            partitionKey: partitionKey ?? "pk",
+            sortKey: sortKey ?? "sk",
+            sessionSalt, enableSlidingExpiration, slidingWriteIntervalSeconds,
         });
+        this.sessionCookieOptions = cookie ?? {};
         return this;
     }
     setSessionCookieKey(sessionTokenCookieKey, sessionCsrfCookieKey) {
@@ -91,71 +102,71 @@ export default class Lambder {
         this.globalErrorHandler = globalErrorHandler;
         return this;
     }
-    getPatternMatch(pattern, path) {
-        const result = (match(pattern, { decode: decodeURIComponent }))(path);
-        if (!result)
-            return {};
-        return result?.params || {};
+    /** Response for session routes when the session is missing/expired (non-API). Default: 401. */
+    setSessionExpiredRouteHandler(handler) {
+        this.sessionExpiredRouteHandler = handler;
+        return this;
     }
-    testPatternMatch(pattern, path) {
-        return (match(pattern, { decode: decodeURIComponent }))(path) !== false;
+    /**
+     * Terminal public-file layer. Runs only when no route matched, so it can
+     * never shadow routes registered after it. Serves real files under
+     * publicPath (traversal-safe, mime-typed, memory-cached, immutable-cache
+     * heuristic for content-hashed assets); when the file does not exist the
+     * request falls through to setRouteFallbackHandler, where the app decides
+     * what remains (e.g. render an app shell with res.templateFile).
+     */
+    servePublicFiles(options = {}) {
+        this.publicFilesHandler = new LambderPublicFilesHandler(this.publicPath, options);
+        return this;
     }
-    async handleNoMatchedAction(ctx, resolver) {
-        for (const hook of this.hookList["fallback"]) {
-            await hook.hookFn(ctx, resolver);
+    /**
+     * Serve the app shell for page requests that nothing else handled. Runs
+     * after servePublicFiles in the fallback chain, gated by a built-in
+     * filter: only configured methods (default GET/HEAD) and, by default, only
+     * paths that do not look like files. Gated-out requests fall through to
+     * setRouteFallbackHandler. Without a handler, publicPath/index.html is
+     * served via res.templateFile (markers optional) with no-cache.
+     */
+    serveIndexHtml(handler, options = {}) {
+        this.indexHtmlConfig = { handler: handler ?? null, options };
+        return this;
+    }
+    /** Apply the serveIndexHtml gates; null means fall through. */
+    async tryServeIndexHtml(ctx, resolver) {
+        if (!this.indexHtmlConfig)
+            return null;
+        const { handler, options } = this.indexHtmlConfig;
+        const methods = (options.methods ?? ["GET", "HEAD"]).map((m) => m.toUpperCase());
+        if (!methods.includes(ctx.method.toUpperCase()))
+            return null;
+        if ((options.skipFilePaths ?? true) && (ctx.path.split("/").pop() ?? "").includes("."))
+            return null;
+        if (options.redirectTrailingSlash && ctx.path.length > 1 && ctx.path.endsWith("/")) {
+            const target = ctx.path.replace(/\/+$/, "") || "/";
+            return resolver.redirect(target + buildQueryString(ctx), 301);
         }
-        const isAPI = ctx.path === this.apiPath;
-        if (isAPI && this.apiFallbackHandler) {
-            resolver.resolve(await this.apiFallbackHandler(ctx, resolver));
+        const response = handler
+            ? await handler(ctx, resolver)
+            : await resolver.templateFile(typeof options.indexFile === "function" ? options.indexFile(ctx) : (options.indexFile ?? "index.html"), {}, { cacheControl: "no-cache" });
+        if (options.compress !== undefined) {
+            response.compress = typeof options.compress === "function" ? options.compress(ctx) : options.compress;
         }
-        else if (isAPI) {
-            resolver.resolve({ statusCode: 204, body: "API handler not set.", });
-        }
-        else if (this.routeFallbackHandler) {
-            resolver.resolve(await this.routeFallbackHandler(ctx, resolver));
-        }
-        else {
-            resolver.resolve({ statusCode: 204, body: "Route handler not set.", });
-        }
+        return response;
     }
     addRoute(condition, actionFn) {
         this.actionList.push({
-            conditionFn: (ctx) => (((typeof condition === "string" && this.testPatternMatch(condition, ctx.path)) ||
-                (typeof condition === "function" && condition(ctx)) ||
-                (condition?.constructor == RegExp && condition.test(ctx.path)))),
-            actionFn: async (ctx, resolver) => {
-                if (typeof condition === "string") {
-                    ctx.pathParams = this.getPatternMatch(condition, ctx.path);
-                }
-                else if (condition?.constructor == RegExp) {
-                    const match = ctx.path.match(condition);
-                    ctx.pathParams = match ? (match.groups || match) : {};
-                }
-                return await actionFn(ctx, resolver);
-            }
+            match: compileRouteMatcher(condition),
+            actionFn: (ctx, resolver) => actionFn(ctx, resolver),
         });
         return this;
     }
     addSessionRoute(condition, actionFn) {
         this.actionList.push({
-            conditionFn: (ctx) => (((typeof condition === "string" && this.testPatternMatch(condition, ctx.path)) ||
-                (typeof condition === "function" && condition(ctx)) ||
-                (condition?.constructor == RegExp && condition.test(ctx.path)))),
+            match: compileRouteMatcher(condition),
             actionFn: async (ctx, resolver) => {
-                if (typeof condition === "string") {
-                    ctx.pathParams = this.getPatternMatch(condition, ctx.path);
-                }
-                else if (condition?.constructor == RegExp) {
-                    const match = ctx.path.match(condition);
-                    ctx.pathParams = match ? (match.groups || match) : {};
-                }
-                const sessionCtx = ctx;
-                await this.getSessionController(ctx).fetchSession();
-                if (!sessionCtx.session) {
-                    throw new Error("Session not found.");
-                }
-                return await actionFn(sessionCtx, resolver);
-            }
+                await this.requireSession(ctx, resolver);
+                return await actionFn(ctx, resolver);
+            },
         });
         return this;
     }
@@ -166,21 +177,15 @@ export default class Lambder {
     // Typed API with Zod
     addApi(name, schema, handler) {
         this.actionList.push({
-            conditionFn: (ctx) => ctx.apiName === name,
+            match: (ctx) => ctx.apiName === name ? {} : false,
             actionFn: async (ctx, resolver) => {
-                // Validate Input
                 const inputResult = schema.input.safeParse(ctx.apiPayload);
                 if (!inputResult.success) {
                     if (this.apiInputValidationErrorHandler) {
                         return await this.apiInputValidationErrorHandler(ctx, resolver, inputResult.error);
                     }
-                    return resolver.raw({
-                        statusCode: 422,
-                        body: JSON.stringify({ error: "Input validation failed", zodError: inputResult.error }),
-                        multiValueHeaders: { "Content-Type": ["application/json"] }
-                    });
+                    return resolver.json({ error: "Input validation failed", zodError: inputResult.error }, { statusCode: 422 });
                 }
-                // Run Handler with validated data
                 ctx.apiPayload = inputResult.data;
                 return await handler(ctx, resolver);
             },
@@ -190,41 +195,49 @@ export default class Lambder {
     // Typed Session API with Zod
     addSessionApi(name, schema, handler) {
         this.actionList.push({
-            conditionFn: (ctx) => ctx.apiName === name,
+            match: (ctx) => ctx.apiName === name ? {} : false,
             actionFn: async (ctx, resolver) => {
-                const sessionCtx = ctx;
-                await this.getSessionController(ctx).fetchSession();
-                if (!sessionCtx.session) {
-                    throw new Error("Session not found.");
-                }
-                // Validate Input
+                await this.requireSession(ctx, resolver);
                 const inputResult = schema.input.safeParse(ctx.apiPayload);
                 if (!inputResult.success) {
                     if (this.apiInputValidationErrorHandler) {
                         return await this.apiInputValidationErrorHandler(ctx, resolver, inputResult.error);
                     }
-                    return resolver.raw({
-                        statusCode: 400,
-                        body: JSON.stringify({ error: "Input validation failed", zodError: inputResult.error }),
-                        multiValueHeaders: { "Content-Type": ["application/json"] }
-                    });
+                    return resolver.json({ error: "Input validation failed", zodError: inputResult.error }, { statusCode: 422 });
                 }
-                // Run Handler with validated data
                 ctx.apiPayload = inputResult.data;
-                return await handler(sessionCtx, resolver);
+                return await handler(ctx, resolver);
             }
         });
         return this;
     }
+    /**
+     * Fetch the session or short-circuit the request: API calls get the
+     * protocol's { sessionExpired: true } response (handled by LambderCaller),
+     * routes get the sessionExpiredRouteHandler response (default 401).
+     */
+    async requireSession(ctx, resolver) {
+        const session = await this.getSessionController(ctx).fetchSessionIfExists();
+        if (!session) {
+            if (ctx._otherInternal.isApiCall) {
+                throw resolver.api(null, { sessionExpired: true });
+            }
+            if (this.sessionExpiredRouteHandler) {
+                throw await this.sessionExpiredRouteHandler(ctx, resolver);
+            }
+            throw resolver.status(401, "Session required.");
+        }
+    }
     addHook(hookEvent, hookFn, priority = 0) {
         if (hookEvent === "created") {
-            return hookFn(this).then(() => this);
+            // Runs once, lazily, at the first render() call.
+            this.createdHooks.push(hookFn);
         }
         else {
             this.hookList[hookEvent].push({ priority, hookFn });
             this.hookList[hookEvent].sort((a, b) => a.priority - b.priority);
-            return this;
         }
+        return this;
     }
     getSessionController(ctx) {
         if (!this.lambderSessionManager)
@@ -233,97 +246,230 @@ export default class Lambder {
             lambderSessionManager: this.lambderSessionManager,
             sessionTokenCookieKey: this.sessionTokenCookieKey,
             sessionCsrfCookieKey: this.sessionCsrfCookieKey,
+            cookieOptions: this.sessionCookieOptions,
             ctx,
         });
     }
-    getResponseBuilder() {
+    getResponseBuilder(ctx) {
         return new LambderResponseBuilder({
-            isCorsEnabled: this.isCorsEnabled,
             publicPath: this.publicPath,
             apiVersion: this.apiVersion,
-            lambderUtils: this.utils,
+            ctx,
         });
     }
     ;
-    getResolver(ctx, resolve, reject) {
+    getResolver(ctx) {
         return new LambderResolver({
-            isCorsEnabled: this.isCorsEnabled,
             publicPath: this.publicPath,
             apiVersion: this.apiVersion,
-            lambderUtils: this.utils,
-            ctx, resolve, reject
+            ctx,
         });
     }
     ;
     getHandler() {
-        return (event, context) => this.render(event, context);
+        return ((event, context) => Lambder.isHttpEvent(event)
+            ? this.render(event, context)
+            : this.renderEvent(event, context));
+    }
+    // ---------------------------------------------------------------------
+    // Actions (raw-event or context filtering; the only handler for non-HTTP)
+    // ---------------------------------------------------------------------
+    /** True when the Lambda event is an API Gateway HTTP event (REST API v1 or HTTP API / Function URL v2). */
+    static isHttpEvent(event) {
+        if (!event || typeof event !== "object")
+            return false;
+        if ("httpMethod" in event && "path" in event)
+            return true;
+        return isV2HttpEvent(event);
+    }
+    addAction(filter, actionFn) {
+        // HTTP side: joins the route/API chain in registration order.
+        this.actionList.push({
+            match: (ctx) => filter(ctx.event, ctx) ? {} : false,
+            actionFn: async (ctx, resolver) => {
+                const result = await actionFn(ctx.event, { ctx, res: resolver, lambdaContext: ctx.lambdaContext });
+                if (!(result instanceof LambderResponse)) {
+                    throw new Error("Lambder: an addAction matched an HTTP request but did not return a response. Build one with tools.res.");
+                }
+                return result;
+            },
+        });
+        // Non-HTTP side.
+        this.eventActionList.push({
+            match: (event) => filter(event, null),
+            actionFn: (event, lambdaContext) => actionFn(event, { ctx: null, res: null, lambdaContext }),
+        });
+        return this;
+    }
+    /** Dispatch a non-HTTP Lambda event to the registered actions. */
+    async renderEvent(event, lambdaContext) {
+        await this.ensureInitialized();
+        for (const action of this.eventActionList) {
+            if (action.match(event)) {
+                return await action.actionFn(event, lambdaContext);
+            }
+        }
+        const summary = event && typeof event === "object"
+            ? ` (source: ${String(event.source ?? "?")}, detail-type: ${String(event["detail-type"] ?? "?")})`
+            : "";
+        throw new Error(`Lambder: no action matched non-HTTP event${summary}. Register one with addAction(); a trailing addAction(() => true, ...) acts as a fallback.`);
+    }
+    // ---------------------------------------------------------------------
+    // Render pipeline
+    // ---------------------------------------------------------------------
+    ensureInitialized() {
+        if (!this.initPromise) {
+            this.initPromise = (async () => {
+                for (const hookFn of this.createdHooks) {
+                    await hookFn(this);
+                }
+            })();
+        }
+        return this.initPromise;
+    }
+    applyCors(ctx, response, isPreflight) {
+        applyCorsHeaders(this.corsConfig, ctx, response, isPreflight);
+    }
+    async handleNoMatchedAction(ctx, resolver) {
+        for (const hook of this.hookList["fallback"]) {
+            await hook.hookFn(ctx, resolver);
+        }
+        const isAPI = ctx._otherInternal.isApiCall || ctx.path === this.apiPath;
+        if (isAPI) {
+            if (this.apiFallbackHandler)
+                return await this.apiFallbackHandler(ctx, resolver);
+            return resolver.api(null, { errorMessage: "API not found." });
+        }
+        if (this.publicFilesHandler) {
+            const fileResponse = await this.publicFilesHandler.handle(ctx);
+            if (fileResponse)
+                return fileResponse;
+        }
+        const indexResponse = await this.tryServeIndexHtml(ctx, resolver);
+        if (indexResponse)
+            return indexResponse;
+        if (this.routeFallbackHandler)
+            return await this.routeFallbackHandler(ctx, resolver);
+        return resolver.text("Not found.", { statusCode: 404 });
+    }
+    async resolveRequest(ctx, resolver) {
+        if (ctx.method === "OPTIONS" && this.corsConfig) {
+            const preflight = new LambderResponse({ statusCode: 204, body: null });
+            this.applyCors(ctx, preflight, true);
+            return preflight;
+        }
+        // Version check if provided by both the client and the server
+        if (this.apiVersion && ctx._otherInternal.requestVersion && ctx._otherInternal.requestVersion !== this.apiVersion) {
+            return resolver.versionExpired();
+        }
+        let matched = null;
+        for (const action of this.actionList) {
+            const params = action.match(ctx);
+            if (params !== false) {
+                matched = { action, params };
+                break;
+            }
+        }
+        if (!matched)
+            return await this.handleNoMatchedAction(ctx, resolver);
+        ctx.pathParams = matched.params;
+        let currentCtx = ctx;
+        for (const hook of this.hookList["beforeRender"]) {
+            const hookResult = await hook.hookFn(currentCtx, resolver);
+            if (hookResult instanceof Error)
+                throw hookResult;
+            if (hookResult instanceof LambderResponse)
+                return hookResult;
+            currentCtx = hookResult;
+        }
+        return await matched.action.actionFn(currentCtx, resolver);
     }
     async render(event, lambdaContext) {
-        let eventRenderContext = null;
+        let ctx = null;
         try {
-            let ctx = createContext(event, lambdaContext, this.apiPath);
-            eventRenderContext = ctx;
-            return await new Promise(async (resolve, reject) => {
-                try {
-                    const resolver = this.getResolver(ctx, resolve, reject);
-                    if (ctx.method === "OPTIONS")
-                        return resolve(resolver.cors());
-                    const firstMatchedAction = this.actionList.find(action => action.conditionFn(ctx));
-                    if (firstMatchedAction) {
-                        // Check version if provided by the client and the server
-                        if (this.apiVersion && ctx._otherInternal.requestVersion) {
-                            if (ctx._otherInternal.requestVersion !== this.apiVersion) {
-                                const responseBuilder = this.getResponseBuilder();
-                                return resolve(responseBuilder.versionExpired());
-                            }
-                        }
-                        ;
-                        // Run beforeRender hooks
-                        for (const hook of this.hookList["beforeRender"]) {
-                            const hookCtx = await hook.hookFn(ctx, resolver);
-                            if (hookCtx instanceof Error) {
-                                throw hookCtx;
-                            }
-                            ctx = hookCtx;
-                        }
-                        // Run matched action
-                        let response = await firstMatchedAction.actionFn(ctx, resolver);
-                        // Run afterRender hooks
-                        for (const hook of this.hookList["afterRender"]) {
-                            const hookResponse = await hook.hookFn(ctx, resolver, response);
-                            if (hookResponse instanceof Error) {
-                                throw hookResponse;
-                            }
-                            response = hookResponse;
-                        }
-                        // Apply setHeader, addHeader values.
-                        response.multiValueHeaders = response.multiValueHeaders || {};
-                        for (const header of ctx._otherInternal.setHeaderFnAccumulator) {
-                            response.multiValueHeaders[header.key] = Array.isArray(header.value) ? header.value : [header.value];
-                        }
-                        for (const header of ctx._otherInternal.addHeaderFnAccumulator) {
-                            response.multiValueHeaders[header.key] = response.multiValueHeaders[header.key] || [];
-                            response.multiValueHeaders[header.key].push(header.value);
-                        }
-                        resolve(response);
-                    }
-                    else {
-                        return this.handleNoMatchedAction(ctx, resolver);
-                    }
+            await this.ensureInitialized();
+            ctx = createContext(event, lambdaContext, this.apiPath);
+            const resolver = this.getResolver(ctx);
+            let response;
+            try {
+                response = await this.resolveRequest(ctx, resolver);
+            }
+            catch (err) {
+                // A thrown LambderResponse IS the response (res.die.*, throw res.html(...)).
+                if (err instanceof LambderResponse) {
+                    response = err;
                 }
-                catch (err) {
-                    const wrappedError = err instanceof Error ? err : new Error("Error: " + String(err));
-                    reject(wrappedError);
+                else {
+                    throw err;
                 }
-            });
+            }
+            try {
+                for (const hook of this.hookList["afterRender"]) {
+                    const hookResponse = await hook.hookFn(ctx, resolver, response);
+                    if (hookResponse instanceof Error)
+                        throw hookResponse;
+                    response = hookResponse;
+                }
+            }
+            catch (err) {
+                if (err instanceof LambderResponse) {
+                    response = err;
+                }
+                else {
+                    throw err;
+                }
+            }
+            // Apply setHeader, addHeader values.
+            for (const header of ctx._otherInternal.setHeaderFnAccumulator) {
+                response.setHeader(header.key, header.value);
+            }
+            for (const header of ctx._otherInternal.addHeaderFnAccumulator) {
+                response.addHeader(header.key, header.value);
+            }
+            this.applyCors(ctx, response, false);
+            return await finalizeResponse(ctx, response, this.finalizeOptions, ctx._otherInternal.eventFormat);
         }
         catch (err) {
-            if (this.globalErrorHandler) {
-                const wrappedError = err instanceof Error ? err : new Error("Error: " + String(err));
-                const responseBuilder = this.getResponseBuilder();
-                return this.globalErrorHandler(wrappedError, eventRenderContext, responseBuilder, eventRenderContext?._otherInternal.logToApiResponseAccumulator);
+            const wrappedError = err instanceof Error ? err : new Error("Error: " + String(err));
+            try {
+                if (this.globalErrorHandler) {
+                    const responseBuilder = this.getResponseBuilder(ctx ?? undefined);
+                    const errorResponse = await this.globalErrorHandler(wrappedError, ctx, responseBuilder, ctx?._otherInternal.logToApiResponseAccumulator);
+                    return await finalizeResponse(ctx, errorResponse, this.finalizeOptions, ctx?._otherInternal.eventFormat ?? "v1");
+                }
             }
-            return { statusCode: 500, body: "Internal Server Error.", };
+            catch (handlerErr) {
+                if (handlerErr instanceof LambderResponse) {
+                    try {
+                        return await finalizeResponse(ctx, handlerErr, this.finalizeOptions, ctx?._otherInternal.eventFormat ?? "v1");
+                    }
+                    catch { /* fall through */ }
+                }
+            }
+            return { statusCode: 500, multiValueHeaders: {}, body: "Internal Server Error.", isBase64Encoded: false };
         }
     }
 }
+/** Rebuild the query string from the API Gateway event for redirects. */
+const buildQueryString = (ctx) => {
+    if (isV2HttpEvent(ctx.event)) {
+        return ctx.event.rawQueryString ? `?${ctx.event.rawQueryString}` : "";
+    }
+    const multi = ctx.event.multiValueQueryStringParameters;
+    const single = ctx.event.queryStringParameters;
+    const params = new URLSearchParams();
+    if (multi) {
+        for (const [key, values] of Object.entries(multi)) {
+            for (const value of values ?? [])
+                params.append(key, value);
+        }
+    }
+    else if (single) {
+        for (const [key, value] of Object.entries(single)) {
+            if (value !== undefined)
+                params.append(key, value);
+        }
+    }
+    const queryString = params.toString();
+    return queryString ? `?${queryString}` : "";
+};

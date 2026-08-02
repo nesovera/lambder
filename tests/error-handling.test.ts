@@ -13,6 +13,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { decodeBody } from './helpers.js';
 import { z } from 'zod';
 import Lambder from '../src/Lambder.js';
 import type { APIGatewayProxyEvent, Context } from 'aws-lambda';
@@ -140,34 +141,30 @@ describe('Error Handling - Global Error Handler', () => {
         expect(capturedContext.method).toBe('GET');
     });
 
-    it('should handle null context in error handler', async () => {
-        let capturedContext: any = undefined;
+    it('should tolerate malformed events without invoking the error handler', async () => {
+        let handlerCalled = false;
 
         const lambder = new Lambder({
             publicPath: './public',
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
-                capturedContext = ctx;
+                handlerCalled = true;
                 return res.raw({ statusCode: 500, body: 'Error occurred' });
             });
 
         const handler = lambder.getHandler();
-        
-        // Create a malformed event that might cause early errors
+
+        // Missing headers are normalized to {} by the event decoder.
         const malformedEvent = {
             ...createMockEvent('/test'),
             headers: null as any
         };
 
-        try {
-            await handler(malformedEvent, createMockContext());
-        } catch (e) {
-            // Expected to potentially fail
-        }
+        const result = await handler(malformedEvent, createMockContext());
 
-        // Context might be null for early errors
-        expect(capturedContext === null || capturedContext !== undefined).toBe(true);
+        expect(handlerCalled).toBe(false);
+        expect((result as any).statusCode).toBe(404);
     });
 });
 
@@ -219,7 +216,7 @@ describe('Error Handling - Custom Error Responses', () => {
         const result = await handler(createMockEvent('/page'), createMockContext());
 
         expect(result.statusCode).toBe(200);
-        const body = Buffer.from(result.body || '', 'base64').toString();
+        const body = decodeBody(result);
         expect(body).toContain('<h1>Error</h1>');
         expect(body).toContain('Page load failed');
     });

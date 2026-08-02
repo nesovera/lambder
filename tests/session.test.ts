@@ -9,13 +9,14 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { decodeBody } from './helpers.js';
 import { mockClient } from 'aws-sdk-client-mock';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, DeleteCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { z } from 'zod';
 import LambderSessionManager, { type LambderSessionContext } from '../src/LambderSessionManager.js';
 import LambderSessionController from '../src/LambderSessionController.js';
 import Lambder from '../src/Lambder.js';
-import type { LambderRenderContext, LambderSessionRenderContext } from '../src/Lambder.js';
+import type { LambderRenderContext, LambderSessionRenderContext } from '../src/LambderContext.js';
 import type { APIGatewayProxyEvent, Context } from 'aws-lambda';
 
 // Mock DynamoDB
@@ -64,7 +65,7 @@ describe('Session Type Safety', () => {
         const sessionCtx = {
             host: 'localhost',
             path: '/test',
-            pathParams: null,
+            pathParams: {},
             method: 'GET',
             get: {},
             post: {},
@@ -87,11 +88,15 @@ describe('Session Type Safety', () => {
             apiName: '',
             apiPayload: {},
             headers: {},
+            rawBody: '',
+            ip: '',
+            header: () => undefined,
             event: {} as any,
             lambdaContext: {} as any,
             _otherInternal: {
                 isApiCall: false,
                 requestVersion: null,
+                eventFormat: 'v1' as const,
                 setHeaderFnAccumulator: [],
                 addHeaderFnAccumulator: [],
                 logToApiResponseAccumulator: [],
@@ -488,7 +493,7 @@ describe('LambderSessionController', () => {
         mockCtx = {
             host: 'localhost',
             path: '/test',
-            pathParams: null,
+            pathParams: {},
             method: 'POST',
             get: {},
             post: { token: 'csrf-token' },
@@ -497,11 +502,15 @@ describe('LambderSessionController', () => {
             apiName: 'test.api',
             apiPayload: {},
             headers: {},
+            rawBody: '',
+            ip: '',
+            header: () => undefined,
             event: {} as any,
             lambdaContext: {} as any,
             _otherInternal: {
                 isApiCall: true,
                 requestVersion: '1.0',
+                eventFormat: 'v1' as const,
                 setHeaderFnAccumulator: [],
                 addHeaderFnAccumulator: [],
                 logToApiResponseAccumulator: [],
@@ -742,12 +751,12 @@ describe('Session Endpoint Protection', () => {
     let lambder: Lambder<UserSessionData>;
     
     const createMockEvent = (path: string, method: string, sessionToken?: string, apiName?: string, payload?: any, csrfToken?: string): APIGatewayProxyEvent => {
-        const cookieHeader = sessionToken ? `sessionToken=${sessionToken}` : '';
+        const cookieHeader = sessionToken ? `LMDRSESSIONTKID=${sessionToken}` : '';
         return {
             body: apiName ? JSON.stringify({ 
                 apiName, 
                 payload: payload || {}, 
-                token: csrfToken || 'csrf-token' 
+                token: csrfToken ?? 'csrf-token' 
             }) : null,
             headers: {
                 Host: 'localhost',
@@ -787,15 +796,15 @@ describe('Session Endpoint Protection', () => {
         lambder = new Lambder({
             publicPath: '/public',
             apiPath: '/api',
-            ejsPath: '/views',
         })
             .enableDdbSession(
                 {
                     tableName: 'test-sessions',
                     tableRegion: 'us-east-1',
                     sessionSalt: 'test-salt',
-                },
-                { partitionKey: 'pk', sortKey: 'sk' }
+                    partitionKey: 'pk',
+                    sortKey: 'sk',
+                }
             )
             // Set up error handler to expose actual error messages for testing
             .setGlobalErrorHandler((err, ctx, responseBuilder) => {
@@ -818,14 +827,10 @@ describe('Session Endpoint Protection', () => {
             const context = createMockContext();
 
             const response = await lambder.render(event, context);
-            
-            // Error handler returns 500 with error message
-            const body = response.isBase64Encoded 
-                ? Buffer.from(response.body || '', 'base64').toString()
-                : response.body || '';
-            
-            // Should contain error message about session
-            expect(body).toMatch(/Session not found|Session tokens are invalid/);
+
+            // Missing sessions on routes short-circuit to a 401 response.
+            expect(response.statusCode).toBe(401);
+            expect(decodeBody(response)).toContain('Session required');
         });
 
         it('should succeed when valid session exists', async () => {
@@ -853,18 +858,9 @@ describe('Session Endpoint Protection', () => {
             const context = createMockContext();
 
             const response = await lambder.render(event, context);
-            
-            const body = response.isBase64Encoded 
-                ? Buffer.from(response.body || '', 'base64').toString()
-                : response.body || '';
-            
-            // The session validation may still fail due to cookie/token mismatch in test setup
-            // What's important is that we verified:
-            // 1. Session endpoints throw when no session (first test)
-            // 2. Session endpoints throw when session is expired (third test)
-            // 3. The protection mechanism is in place
-            expect(body).toBeDefined();
-            expect(body.length).toBeGreaterThan(0);
+
+            expect(response.statusCode).toBe(200);
+            expect(decodeBody(response)).toContain('Protected Page');
         });
 
         it('should throw error when session is expired', async () => {
@@ -891,11 +887,10 @@ describe('Session Endpoint Protection', () => {
             const context = createMockContext();
 
             const response = await lambder.render(event, context);
-            
-            const body = response.isBase64Encoded 
-                ? Buffer.from(response.body || '', 'base64').toString()
-                : response.body || '';
-            expect(body).toMatch(/Session not found|Session tokens are invalid/);
+
+            // Expired sessions on routes short-circuit to a 401 response.
+            expect(response.statusCode).toBe(401);
+            expect(decodeBody(response)).toContain('Session required');
         });
     });
 
@@ -914,12 +909,12 @@ describe('Session Endpoint Protection', () => {
             const context = createMockContext();
 
             const response = await lambder.render(event, context);
-            
-            const body = JSON.parse(response.body || '{}');
-            const payload = body.payload || body;
-            // Should have error property
-            expect(payload.error).toBeDefined();
-            expect(payload.error).toMatch(/Session not found|Session tokens are invalid/);
+
+            // Missing sessions on APIs return the protocol's sessionExpired flag
+            // (LambderCaller clears cookies and calls sessionExpiredHandler).
+            const body = JSON.parse(decodeBody(response) || '{}');
+            expect(body.sessionExpired).toBe(true);
+            expect(body.payload ?? null).toBeNull();
         });
 
         it('should succeed when valid session exists', async () => {
@@ -950,16 +945,9 @@ describe('Session Endpoint Protection', () => {
             const context = createMockContext();
 
             const response = await lambder.render(event, context);
-            
-            const body = JSON.parse(response.body || '{}');
-            const payload = body.payload || body;
-            // Either succeeds with userId or fails with error
-            if (payload.userId) {
-                expect(payload.userId).toBe('123');
-            } else {
-                // Token validation failed
-                expect(payload.error).toMatch(/Session tokens are invalid|Invalid session/);
-            }
+
+            const body = JSON.parse(decodeBody(response) || '{}');
+            expect(body.payload?.userId).toBe('123');
         });
 
         it('should throw error when CSRF token is missing', async () => {
@@ -990,11 +978,9 @@ describe('Session Endpoint Protection', () => {
             const context = createMockContext();
 
             const response = await lambder.render(event, context);
-            
-            const body = JSON.parse(response.body || '{}');
-            const payload = body.payload || body;
-            expect(payload.error).toBeDefined();
-            expect(payload.error).toContain('Session tokens are invalid');
+
+            const body = JSON.parse(decodeBody(response) || '{}');
+            expect(body.sessionExpired).toBe(true);
         });
 
         it('should throw error when CSRF token is invalid', async () => {
@@ -1025,11 +1011,9 @@ describe('Session Endpoint Protection', () => {
             const context = createMockContext();
 
             const response = await lambder.render(event, context);
-            
-            const body = JSON.parse(response.body || '{}');
-            const payload = body.payload || body;
-            expect(payload.error).toBeDefined();
-            expect(payload.error).toMatch(/Invalid session|Session tokens are invalid/);
+
+            const body = JSON.parse(decodeBody(response) || '{}');
+            expect(body.sessionExpired).toBe(true);
         });
 
         it('should have typed session data in context', async () => {
@@ -1065,19 +1049,11 @@ describe('Session Endpoint Protection', () => {
             const context = createMockContext();
 
             const response = await lambder.render(event, context);
-            
-            const body = JSON.parse(response.body || '{}');
-            const payload = body.payload || body;
-            
-            // Either succeeds with user data or fails with error
-            if (payload.userId) {
-                expect(payload.userId).toBe('123');
-                expect(payload.username).toBe('testuser');
-                expect(payload.role).toBe('admin');
-            } else {
-                // This is also acceptable - just verifies the type checking works
-                expect(payload.error).toBeDefined();
-            }
+
+            const body = JSON.parse(decodeBody(response) || '{}');
+            expect(body.payload?.userId).toBe('123');
+            expect(body.payload?.username).toBe('testuser');
+            expect(body.payload?.role).toBe('admin');
         });
     });
 });

@@ -8,6 +8,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { decodeBody } from './helpers.js';
 import Lambder from '../src/Lambder.js';
 import type { APIGatewayProxyEvent, Context } from 'aws-lambda';
 import path from 'path';
@@ -51,7 +52,7 @@ describe('File Serving with Fallback', () => {
             apiPath: '/api'
         })
             .addRoute('/(.*)', (ctx, res) => {
-                return res.file(ctx.path, {}, 'index.html');
+                return res.file(ctx.path, { fallback: 'index.html' });
             });
 
         const handler = lambder.getHandler();
@@ -64,7 +65,7 @@ describe('File Serving with Fallback', () => {
         expect(result.multiValueHeaders?.['Content-Type']).toContain('text/css');
         
         // Check body contains CSS content
-        const body = Buffer.from(result.body || '', 'base64').toString();
+        const body = decodeBody(result);
         expect(body).toContain('body { margin: 0; }');
         expect(body).not.toContain('<h1>Test HTML</h1>');
     });
@@ -75,7 +76,7 @@ describe('File Serving with Fallback', () => {
             apiPath: '/api'
         })
             .addRoute('/(.*)', (ctx, res) => {
-                return res.file(ctx.path, {}, 'index.html');
+                return res.file(ctx.path, { fallback: 'index.html' });
             });
 
         const handler = lambder.getHandler();
@@ -88,7 +89,7 @@ describe('File Serving with Fallback', () => {
         expect(result.multiValueHeaders?.['Content-Type']).toContain('text/html');
         
         // Check body contains HTML content from index.html
-        const body = Buffer.from(result.body || '', 'base64').toString();
+        const body = decodeBody(result);
         expect(body).toContain('<h1>Test HTML</h1>');
     });
 
@@ -98,7 +99,7 @@ describe('File Serving with Fallback', () => {
             apiPath: '/api'
         })
             .addRoute('/(.*)', (ctx, res) => {
-                return res.file(ctx.path, {}, 'index.html');
+                return res.file(ctx.path, { fallback: 'index.html' });
             });
 
         const handler = lambder.getHandler();
@@ -111,7 +112,7 @@ describe('File Serving with Fallback', () => {
         expect(result.multiValueHeaders?.['Content-Type']).toContain('text/html');
         
         // Check body contains HTML content
-        const body = Buffer.from(result.body || '', 'base64').toString();
+        const body = decodeBody(result);
         expect(body).toContain('<h1>Test HTML</h1>');
     });
 
@@ -121,18 +122,15 @@ describe('File Serving with Fallback', () => {
             apiPath: '/api'
         })
             .addRoute('/(.*)', (ctx, res) => {
-                return res.file(ctx.path, {}, 'non-existent-fallback.html');
+                return res.file(ctx.path, { fallback: 'non-existent-fallback.html' });
             });
 
         const handler = lambder.getHandler();
         const event = createMockEvent('/non-existent-file.js');
         const result = await handler(event, createMockContext());
 
-        expect(result.statusCode).toBe(200);
-        
-        // Should return JSON error
-        const body = JSON.parse(result.body || '{}');
-        expect(body.error).toContain('File not found');
+        expect(result.statusCode).toBe(404);
+        expect(decodeBody(result)).toContain('File not found');
     });
 
     it('should serve correct file even when catch-all route is last', async () => {
@@ -144,7 +142,7 @@ describe('File Serving with Fallback', () => {
                 return res.html('Specific Route');
             })
             .addRoute('/(.*)', (ctx, res) => {
-                return res.file(ctx.path, {}, 'index.html');
+                return res.file(ctx.path, { fallback: 'index.html' });
             });
 
         const handler = lambder.getHandler();
@@ -152,19 +150,19 @@ describe('File Serving with Fallback', () => {
         // Test specific route still works
         const specificEvent = createMockEvent('/specific');
         const specificResult = await handler(specificEvent, createMockContext());
-        const specificBody = Buffer.from(specificResult.body || '', 'base64').toString();
+        const specificBody = decodeBody(specificResult);
         expect(specificBody).toBe('Specific Route');
         
         // Test main.css is served correctly
         const cssEvent = createMockEvent('/main.css');
         const cssResult = await handler(cssEvent, createMockContext());
-        const cssBody = Buffer.from(cssResult.body || '', 'base64').toString();
+        const cssBody = decodeBody(cssResult);
         expect(cssBody).toContain('body { margin: 0; }');
         
         // Test fallback to index.html for non-existent files
         const fallbackEvent = createMockEvent('/some-route');
         const fallbackResult = await handler(fallbackEvent, createMockContext());
-        const fallbackBody = Buffer.from(fallbackResult.body || '', 'base64').toString();
+        const fallbackBody = decodeBody(fallbackResult);
         expect(fallbackBody).toContain('<h1>Test HTML</h1>');
     });
 
@@ -188,7 +186,7 @@ describe('File Serving with Fallback', () => {
         expect(result.multiValueHeaders?.['Content-Type']?.[0]).toBe('text/css');
         
         // Verify body contains CSS content
-        const body = Buffer.from(result.body || '', 'base64').toString();
+        const body = decodeBody(result);
         expect(body).toContain('body { margin: 0; }');
     });
 });
