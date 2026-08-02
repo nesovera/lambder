@@ -46,6 +46,7 @@ type ApiContractType = typeof lambder.ApiContract;
 const lambderMSW = new LambderMSW<ApiContractType>({
     apiPath: '/secure',
     apiVersion: '1.0.0',
+    msw: await import('msw'),
 });
 
 // Create mock handlers

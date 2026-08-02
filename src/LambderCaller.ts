@@ -128,8 +128,11 @@ export default class LambderCaller<TContract extends ApiContractShape = any> {
             const token = Cookies.get(this.sessionCsrfCookieKey) || "";
             const siteHost = window.location.hostname;
             let data = await fetch(this.apiPath, {
-                method: 'POST', mode: 'same-origin', cache: 'no-cache',
-                credentials: 'same-origin', redirect: 'follow', referrerPolicy: 'origin',
+                method: 'POST', cache: 'no-cache',
+                // Cross-origin API hosts need CORS mode and included credentials.
+                mode: this.isCorsEnabled ? 'cors' : 'same-origin',
+                credentials: this.isCorsEnabled ? 'include' : 'same-origin',
+                redirect: 'follow', referrerPolicy: 'origin',
                 headers: { 'Content-Type': 'application/json', ...(headers || {}) },
                 body: JSON.stringify({ apiName, version, token, siteHost, payload, }),
             }).then(async (res)=>{
@@ -178,7 +181,7 @@ export default class LambderCaller<TContract extends ApiContractShape = any> {
                 if(this.sessionExpiredHandler){
                     await this.sessionExpiredHandler();
                 }else if(this.errorHandler){
-                    await this.errorHandler(new Error("Version Expired; Please refresh;"));
+                    await this.errorHandler(new Error("Session Expired; Please log in again;"));
                 }
                 return null;
             }

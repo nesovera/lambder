@@ -1,23 +1,22 @@
 import { z } from "zod";
 import Lambder from "../src/Lambder.js";
+import { html } from "../src/LambderHtml.js";
 
 // Example: Secure session handling with all security fixes applied
 
-const lambder = new Lambder({
+// Explicit annotation breaks the self-reference cycle (handlers call lambder.getSessionController).
+const lambder: Lambder = new Lambder({
     publicPath: "/public",
     apiPath: "/api",
-    ejsPath: "/views",
 })
 // Enable session management with sliding expiration
-.enableDdbSession(
-    {
-        tableName: process.env.SESSION_TABLE || "sessions",
-        tableRegion: process.env.AWS_REGION || "us-east-1",
-        sessionSalt: process.env.SESSION_SALT || "change-this-to-a-secure-random-string",
-        enableSlidingExpiration: true, // Sessions extend on each access
-    },
-    { partitionKey: "pk", sortKey: "sk" }
-)
+.enableDdbSession({
+    tableName: process.env.SESSION_TABLE || "sessions",
+    tableRegion: process.env.AWS_REGION || "us-east-1",
+    sessionSalt: process.env.SESSION_SALT || "change-this-to-a-secure-random-string",
+    enableSlidingExpiration: true, // Sessions extend on each access
+    // cookie: { domain: ".example.com" }, // share the session across subdomains
+})
 // Example: Login API with session regeneration
 .addApi("user.login", {
     input: z.object({ username: z.string(), password: z.string() }),
@@ -170,21 +169,23 @@ const lambder = new Lambder({
     // Session is automatically fetched and validated
     const userData = ctx.session.data;
 
-    return resolver.ejsFile("dashboard.ejs", {
-        user: userData,
-        csrfToken: ctx.session.csrfToken,
-    });
+    // Type-safe templating: interpolations are auto-escaped
+    return resolver.html(html`
+        <h1>Welcome, ${userData.username}</h1>
+        <input type="hidden" name="csrf" value="${ctx.session.csrfToken}" />
+    `);
 })
 // Example: Route with optional session
 .addRoute("/", async (ctx, resolver) => {
     const sessionController = lambder.getSessionController(ctx);
     const session = await sessionController.fetchSessionIfExists();
 
-    return resolver.ejsFile("home.ejs", {
-        isLoggedIn: !!session,
-        user: session?.data,
-        csrfToken: session?.csrfToken,
-    });
+    return resolver.html(html`
+        <h1>Home</h1>
+        ${session
+            ? html`<p>Logged in as ${session.data.username}</p>`
+            : html`<p><a href="/login">Log in</a></p>`}
+    `);
 });
 
 // Dummy functions (implement these)

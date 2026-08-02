@@ -1,8 +1,14 @@
 import type { ApiContractShape } from './LambderApiContract';
 import type { LambderApiResponse } from './LambderResponseBuilder';
 
-// MSW types - these will be resolved at runtime when msw is installed
+// MSW types - resolved from the injected msw module
 type RequestHandler = any;
+
+/** The parts of the msw module LambderMSW uses: `import { http, HttpResponse } from "msw"`. */
+export type LambderMswModule = {
+    http: { post: (path: string, resolver: (info: { request: Request }) => any) => any };
+    HttpResponse: { json: (body: any, init?: { status?: number }) => any };
+};
 
 type MockApiOptions = {
     versionExpired?: boolean;
@@ -22,27 +28,27 @@ type MockApiResponse<T> = {
 export default class LambderMSW<TContract extends ApiContractShape = any> {
     private apiPath: string;
     private apiVersion?: string;
-    private http: any;
-    private HttpResponse: any;
+    private http: LambderMswModule["http"];
+    private HttpResponse: LambderMswModule["HttpResponse"];
 
     constructor({
         apiPath,
         apiVersion,
+        msw,
     }: {
         apiPath: string;
         apiVersion?: string;
+        /** Pass the msw module: `import * as msw from "msw"` (ESM-safe; no hidden require). */
+        msw: LambderMswModule;
     }) {
         this.apiPath = apiPath;
         this.apiVersion = apiVersion;
-        
-        // Dynamically import MSW - it needs to be installed by the user
-        try {
-            const msw = require('msw');
-            this.http = msw.http;
-            this.HttpResponse = msw.HttpResponse;
-        } catch (err) {
-            throw new Error('MSW (Mock Service Worker) is required. Install it with: npm install msw --save-dev');
+
+        if(!msw?.http || !msw?.HttpResponse){
+            throw new Error('LambderMSW requires the msw module: new LambderMSW({ apiPath, msw: await import("msw") }). Install it with: npm install msw --save-dev');
         }
+        this.http = msw.http;
+        this.HttpResponse = msw.HttpResponse;
     }
 
     /**

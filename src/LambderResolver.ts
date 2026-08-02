@@ -1,101 +1,83 @@
-import type { LambderRenderContext } from "./LambderContext.js";
-import LambderResponseBuilder, { LambderResolverResponse } from "./LambderResponseBuilder.js";
-import LambderUtils from "./LambderUtils.js";
+import LambderResponseBuilder, {
+    type LambderApiResponseConfig,
+    type LambderResponseOptions,
+} from "./LambderResponseBuilder.js";
+import type { LambderResponse } from "./LambderResponse.js";
 
-type MethodType<T, M extends keyof T> = T[M] extends (...args: any[]) => any ? T[M] : never;
+type SyncDie<T extends (...args: any[]) => LambderResponse> = (...args: Parameters<T>) => never;
+type AsyncDie<T extends (...args: any[]) => Promise<LambderResponse>> = (...args: Parameters<T>) => Promise<never>;
 
-interface DieResolverMethods<TOutput> {
-    raw: MethodType<LambderResponseBuilder, 'raw'>;
-    json: MethodType<LambderResponseBuilder, 'json'>;
-    xml: MethodType<LambderResponseBuilder, 'xml'>;
-    html: MethodType<LambderResponseBuilder, 'html'>;
-    redirect: MethodType<LambderResponseBuilder, 'redirect'>;
-    status404: MethodType<LambderResponseBuilder, 'status404'>;
-    cors: MethodType<LambderResponseBuilder, 'cors'>;
-    fileBase64: MethodType<LambderResponseBuilder, 'fileBase64'>;
-    file: MethodType<LambderResponseBuilder, 'file'>;
-    ejsFile: MethodType<LambderResponseBuilder, 'ejsFile'>;
-    ejsTemplate: MethodType<LambderResponseBuilder, 'ejsTemplate'>;
+export interface DieResolverMethods<TOutput> {
+    raw: SyncDie<LambderResponseBuilder["raw"]>;
+    json: SyncDie<LambderResponseBuilder["json"]>;
+    text: SyncDie<LambderResponseBuilder["text"]>;
+    xml: SyncDie<LambderResponseBuilder["xml"]>;
+    html: SyncDie<LambderResponseBuilder["html"]>;
+    status: SyncDie<LambderResponseBuilder["status"]>;
+    status404: SyncDie<LambderResponseBuilder["status404"]>;
+    redirect: SyncDie<LambderResponseBuilder["redirect"]>;
+    versionExpired: SyncDie<LambderResponseBuilder["versionExpired"]>;
+    fileBase64: SyncDie<LambderResponseBuilder["fileBase64"]>;
     api: (
         payload: TOutput | null,
-        config?: Parameters<LambderResponseBuilder['api']>[1],
-        headers?: Parameters<LambderResponseBuilder['api']>[2]
-    ) => LambderResolverResponse;
+        config?: LambderApiResponseConfig,
+        options?: LambderResponseOptions,
+    ) => never;
+    apiBinary: (
+        payload: TOutput | null,
+        config?: LambderApiResponseConfig,
+        options?: LambderResponseOptions,
+    ) => never;
+    file: AsyncDie<LambderResponseBuilder["file"]>;
+    templateFile: AsyncDie<LambderResponseBuilder["templateFile"]>;
 }
 
+/**
+ * Response builder passed to route/api handlers and hooks.
+ *
+ * `res.die.*` builds the response and THROWS it, immediately halting the
+ * request at any call depth (handlers, hooks, nested service functions).
+ * Lambder's render pipeline catches thrown LambderResponse instances and uses
+ * them as the response. Plain `throw res.html(...)` works the same way.
+ */
 export default class LambderResolver<TOutput = any> extends LambderResponseBuilder<TOutput> {
-    public resolve: (response: LambderResolverResponse) => void;
-    public reject: (err: Error) => void;
     public die: DieResolverMethods<TOutput>;
 
-    constructor(
-        { isCorsEnabled, publicPath, apiVersion, lambderUtils, ctx, resolve, reject }: 
-        { 
-            isCorsEnabled: boolean, 
-            publicPath: string,
-            apiVersion?: string|null,
-            lambderUtils: LambderUtils,
-            ctx: LambderRenderContext<any>,
-            resolve: (response: LambderResolverResponse) => void,
-            reject: (err: Error) => void,
-        }
-    ){
-        super({ isCorsEnabled, publicPath, apiVersion, lambderUtils, ctx, });
-        this.resolve = resolve;
-        this.reject = reject;
+    constructor(...args: ConstructorParameters<typeof LambderResponseBuilder>){
+        super(...args);
 
         this.die = {
-            raw: this.autoResolve(this.raw),
-            json: this.autoResolve(this.json),
-            xml: this.autoResolve(this.xml),
-            html: this.autoResolve(this.html),
-            redirect: this.autoResolve(this.redirect),
-            status404: this.autoResolve(this.status404),
-            cors: this.autoResolve(this.cors),
-            fileBase64: this.autoResolve(this.fileBase64),
-            file: this.autoResolvePromise(this.file),
-            ejsFile: this.autoResolvePromise(this.ejsFile),
-            ejsTemplate: this.autoResolvePromise(this.ejsTemplate),
-            api: this.autoResolve(this.api),
+            raw: (...a) => { throw this.raw(...a); },
+            json: (...a) => { throw this.json(...a); },
+            text: (...a) => { throw this.text(...a); },
+            xml: (...a) => { throw this.xml(...a); },
+            html: (...a) => { throw this.html(...a); },
+            status: (...a) => { throw this.status(...a); },
+            status404: (...a) => { throw this.status404(...a); },
+            redirect: (...a) => { throw this.redirect(...a); },
+            versionExpired: (...a) => { throw this.versionExpired(...a); },
+            fileBase64: (...a) => { throw this.fileBase64(...a); },
+            api: (...a) => { throw this.api(...a); },
+            apiBinary: (...a) => { throw this.apiBinary(...a); },
+            file: async (...a) => { throw await this.file(...a); },
+            templateFile: async (...a) => { throw await this.templateFile(...a); },
         };
     }
 
-    // Override api method with proper typing
+    // Override api method with proper output typing
     api(
         payload: TOutput | null,
-        config?: Parameters<LambderResponseBuilder['api']>[1],
-        headers?: Parameters<LambderResponseBuilder['api']>[2]
-    ): LambderResolverResponse {
-        return super.api(payload, config, headers);
+        config?: LambderApiResponseConfig,
+        options?: LambderResponseOptions,
+    ): LambderResponse {
+        return super.api(payload, config, options);
     }
 
-
-    private autoResolve<
-        T extends (...args: any[]) => LambderResolverResponse
-    >(method: T): (...funcArgs: Parameters<T>) => LambderResolverResponse {
-        return (...args: Parameters<T>): LambderResolverResponse => {
-            const result: LambderResolverResponse = method.apply(this, args);
-            this.resolve(result);
-            return result;
-        };
+    apiBinary(
+        payload: TOutput | null,
+        config?: LambderApiResponseConfig,
+        options?: LambderResponseOptions,
+    ): LambderResponse {
+        return super.apiBinary(payload, config, options);
     }
-
-    private autoResolvePromise<
-        T extends (...args: any[]) => Promise<LambderResolverResponse>
-    >(method: T): (...funcArgs: Parameters<T>) => Promise<LambderResolverResponse> {
-        return (...args: Parameters<T>): Promise<LambderResolverResponse> => {
-            return new Promise<LambderResolverResponse>((resolve, reject) => {
-                method.apply(this, args)
-                    .then(result => {
-                        this.resolve(result);
-                        resolve(result);
-                    })
-                    .catch(err => {
-                        this.reject(err);
-                        reject(err);
-                    });
-            });
-        };
-    }
-
-};
+}
