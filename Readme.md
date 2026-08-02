@@ -428,6 +428,28 @@ Responses are finalized once at the end of the request: automatic gzip (when the
 
 **Die Methods**: `res.die.*` - Builds the response and throws it, immediately halting the request at any call depth (handlers, hooks, nested helper functions). Plain `throw res.html(...)` works the same way.
 
+### DynamoDB Cache (LambderDdbCache)
+
+Standalone, persistent JSON cache backed by a DynamoDB table (`pk`/`sk` keys + `expiresAt` TTL attribute, same shape as the session table). Values are Brotli-compressed; small values are stored inline in a manifest item, large values are split into versioned binary chunks written before the manifest, so readers only ever see complete versions. Includes an in-memory LRU layer for warm invocations, single-flight deduplication, a DynamoDB lease so only one Lambda fills a missing key, and fail-open semantics (cache infrastructure errors fall back to the loader; loader errors propagate).
+
+```typescript
+import { LambderDdbCache } from "lambder";
+
+const cache = new LambderDdbCache({
+    tableName: "myapp-cache",
+    region: "us-east-1",
+    namespace: "geo",            // isolates keys per domain
+    defaultTtlSeconds: 24 * 3600,
+});
+
+const city = await cache.getOrSet(`city:${slug}`, async () => fetchCityFromDb(slug), {
+    ttlSeconds: 7 * 24 * 3600,
+});
+// Also: cache.get(key), cache.set(key, value, { ttlSeconds }), cache.has(key), cache.delete(key)
+```
+
+Required IAM actions on the table: `dynamodb:GetItem`, `PutItem`, `DeleteItem`, `Query`, `BatchWriteItem`. Server-only (uses AWS SDK + zlib).
+
 ## Frontend Usage with LambderCaller
 
 LambderCaller is a frontend companion library for Lambder (only 2kb compressed) designed to simplify making type-safe API requests to your Lambder backend.

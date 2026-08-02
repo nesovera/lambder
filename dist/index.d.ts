@@ -17,6 +17,8 @@ export { LambderPublicFilesHandler } from "./LambderPublicFiles.js";
 export type { LambderPublicFilesOptions } from "./LambderPublicFiles.js";
 export type { LambderSessionCookieOptions } from "./LambderSessionController.js";
 export type { LambderSessionContext } from "./LambderSessionManager.js";
+export { LambderDdbCache } from "./LambderDdbCache.js";
+export type { LambderDdbCacheOptions, LambderDdbCacheSetOptions, LambderDdbCacheGetOrSetOptions, } from "./LambderDdbCache.js";
 export { type ApiContractShape, } from "./LambderApiContract.js";
 export type { LambderRenderContext, LambderSessionRenderContext, LambderHttpEvent } from "./LambderContext.js";
 export { createContext, isV2HttpEvent } from "./LambderContext.js";
