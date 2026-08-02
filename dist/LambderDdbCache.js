@@ -1,6 +1,5 @@
 import { BatchWriteItemCommand, DeleteItemCommand, DynamoDBClient, GetItemCommand, PutItemCommand, QueryCommand, } from "@aws-sdk/client-dynamodb";
-import { createHash, randomUUID } from "crypto";
-import { brotliCompress, brotliDecompress, constants as zlibConstants, } from "zlib";
+import { getCrypto, getZlib } from "./node-polyfills.js";
 import { LRUCache } from "lru-cache";
 const DEFAULT_TTL_SECONDS = 365 * 24 * 60 * 60;
 const DEFAULT_CHUNK_BYTES = 350 * 1024;
@@ -11,29 +10,56 @@ const META_SORT_KEY = "meta";
 const LOCK_SORT_KEY = "lock";
 const BATCH_WRITE_LIMIT = 25;
 const MAX_BATCH_RETRIES = 8;
-const compress = (input, quality) => new Promise((resolve, reject) => {
-    const options = {
-        params: {
-            [zlibConstants.BROTLI_PARAM_QUALITY]: quality,
-            [zlibConstants.BROTLI_PARAM_MODE]: zlibConstants.BROTLI_MODE_TEXT,
-        },
-    };
-    brotliCompress(input, options, (error, output) => {
-        if (error)
-            reject(error);
-        else
-            resolve(output);
+// Node builtins are loaded lazily through node-polyfills so this module can
+// sit in a frontend bundle's import graph (via the package root) without
+// breaking; using the cache at runtime still requires Node.
+const requireZlib = async () => {
+    const zlib = await getZlib();
+    if (!zlib)
+        throw new Error("LambderDdbCache requires a Node.js environment.");
+    return zlib;
+};
+const requireCrypto = async () => {
+    const crypto = await getCrypto();
+    if (!crypto)
+        throw new Error("LambderDdbCache requires a Node.js environment.");
+    return crypto;
+};
+const compress = async (input, quality) => {
+    const zlib = await requireZlib();
+    return new Promise((resolve, reject) => {
+        zlib.brotliCompress(input, {
+            params: {
+                [zlib.constants.BROTLI_PARAM_QUALITY]: quality,
+                [zlib.constants.BROTLI_PARAM_MODE]: zlib.constants.BROTLI_MODE_TEXT,
+            },
+        }, (error, output) => {
+            if (error)
+                reject(error);
+            else
+                resolve(output);
+        });
     });
-});
-const decompress = (input, maxOutputLength) => new Promise((resolve, reject) => {
-    brotliDecompress(input, { maxOutputLength }, (error, output) => {
-        if (error)
-            reject(error);
-        else
-            resolve(output);
+};
+const decompress = async (input, maxOutputLength) => {
+    const zlib = await requireZlib();
+    return new Promise((resolve, reject) => {
+        zlib.brotliDecompress(input, { maxOutputLength }, (error, output) => {
+            if (error)
+                reject(error);
+            else
+                resolve(output);
+        });
     });
-});
-const sha256 = (value) => createHash("sha256").update(value).digest("hex");
+};
+const sha256 = async (value) => {
+    const crypto = await requireCrypto();
+    return crypto.createHash("sha256").update(value).digest("hex");
+};
+const randomUUID = async () => {
+    const crypto = await requireCrypto();
+    return crypto.randomUUID();
+};
 const positiveInteger = (value, name) => {
     if (!Number.isSafeInteger(value) || value <= 0) {
         throw new Error(`${name} must be a positive safe integer`);
@@ -105,7 +131,7 @@ export class LambderDdbCache {
         }
         if (cached)
             this.memory?.delete(normalizedKey);
-        const pk = this.partitionKey(normalizedKey);
+        const pk = await this.partitionKey(normalizedKey);
         const manifest = await this.readManifest(pk);
         if (!manifest || manifest.expiresAt <= nowSeconds)
             return undefined;
@@ -114,7 +140,7 @@ export class LambderDdbCache {
             if (compressed.length !== manifest.compressedBytes) {
                 throw new Error("compressed byte length does not match manifest");
             }
-            if (sha256(compressed) !== manifest.checksum) {
+            if (await sha256(compressed) !== manifest.checksum) {
                 throw new Error("compressed checksum does not match manifest");
             }
             const output = await decompress(compressed, this.maxValueBytes);
@@ -140,7 +166,7 @@ export class LambderDdbCache {
             return true;
         if (cached)
             this.memory?.delete(normalizedKey);
-        const manifest = await this.readManifest(this.partitionKey(normalizedKey));
+        const manifest = await this.readManifest(await this.partitionKey(normalizedKey));
         return !!manifest && manifest.expiresAt > nowSeconds;
     }
     async set(key, value, options = {}) {
@@ -157,8 +183,8 @@ export class LambderDdbCache {
         if (compressed.length > this.maxValueBytes) {
             throw new Error(`Compressed cache value exceeds maxValueBytes (${compressed.length} > ${this.maxValueBytes})`);
         }
-        const pk = this.partitionKey(normalizedKey);
-        const version = `${Date.now().toString(36)}-${randomUUID()}`;
+        const pk = await this.partitionKey(normalizedKey);
+        const version = `${Date.now().toString(36)}-${await randomUUID()}`;
         const expiresAt = this.nowSeconds() + ttlSeconds;
         const chunks = [];
         const inline = compressed.length <= this.chunkBytes;
@@ -187,7 +213,7 @@ export class LambderDdbCache {
                 chunkCount: { N: String(chunks.length) },
                 compressedBytes: { N: String(compressed.length) },
                 uncompressedBytes: { N: String(input.length) },
-                checksum: { S: sha256(compressed) },
+                checksum: { S: await sha256(compressed) },
                 encoding: { S: "br" },
                 createdAt: { N: String(this.nowSeconds()) },
                 expiresAt: { N: String(expiresAt) },
@@ -198,7 +224,7 @@ export class LambderDdbCache {
     }
     async delete(key) {
         const normalizedKey = this.normalizeKey(key);
-        const pk = this.partitionKey(normalizedKey);
+        const pk = await this.partitionKey(normalizedKey);
         this.memory?.delete(normalizedKey);
         const keys = [];
         let cursor;
@@ -264,8 +290,8 @@ export class LambderDdbCache {
     async fill(key, factory, options) {
         const leaseSeconds = positiveInteger(options.leaseSeconds ?? 15, "leaseSeconds");
         const waitForFillMs = positiveInteger(options.waitForFillMs ?? 5_000, "waitForFillMs");
-        const pk = this.partitionKey(key);
-        const owner = randomUUID();
+        const pk = await this.partitionKey(key);
+        const owner = await randomUUID();
         if (await this.acquireLease(pk, owner, leaseSeconds)) {
             try {
                 const value = await factory();
@@ -465,8 +491,8 @@ export class LambderDdbCache {
         }
         return key;
     }
-    partitionKey(key) {
-        return `${this.namespace}#${sha256(key)}`;
+    async partitionKey(key) {
+        return `${this.namespace}#${await sha256(key)}`;
     }
     chunkSortKey(version, index) {
         return `chunk#${version}#${String(index).padStart(6, "0")}`;
