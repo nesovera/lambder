@@ -63,6 +63,16 @@ export type {
     LambderDdbCacheGetOrSetOptions,
 } from "./LambderDdbCache.js";
 
+// Typed translations (standalone, isomorphic)
+export { createLambderI18n } from "./LambderI18n.js";
+export type {
+    LambderLanguageMeta,
+    LambderI18nConfig,
+    LambderI18nInstance,
+    LambderI18nTranslator,
+    LambderI18nExtractParams,
+} from "./LambderI18n.js";
+
 // Type-safe API contract utilities
 export {
     type ApiContractShape,

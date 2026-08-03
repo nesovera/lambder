@@ -2,7 +2,7 @@
 
 Lambder is a highly opinionated dynamic serverless framework designed to facilitate the management and implementation of routes and APIs within AWS Lambda functions, specifically tailored for TypeScript projects. It provides a streamlined approach to handling HTTP requests, managing sessions, and defining API routes, making serverless application development more intuitive and structured.
 
-**New in v3:** Public file serving with `servePublicFiles()` + `serveIndexHtml()`, unified `addAction()` for non-HTTP triggers, automatic gzip + ETag, thrown responses with a real `die`, the comment-based `LambderTemplatingEngine`, type-safe `html`/`xml` tagged templates, and API Gateway HTTP API (payload v2) / Lambda Function URL support.
+**New in v3:** Public file serving with `servePublicFiles()` + `serveIndexHtml()`, unified `addAction()` for non-HTTP triggers, automatic gzip + ETag, thrown responses with a real `die`, the comment-based `LambderTemplatingEngine`, type-safe `html`/`xml` tagged templates, API Gateway HTTP API (payload v2) / Lambda Function URL support, the `LambderDdbCache` DynamoDB cache (3.1) and typed translations with `createLambderI18n` (3.2).
 
 ## Features
 
@@ -13,6 +13,19 @@ Lambder is a highly opinionated dynamic serverless framework designed to facilit
 - **Flexible Hooks System**: Employ hooks to execute code at different stages of the request lifecycle.
 - **Error Handling**: Comprehensive error handling capabilities, including global error handlers and route-specific fallbacks.
 - **Seamless Integration**: Works with API Gateway REST APIs (payload v1), HTTP APIs (payload v2) and Lambda Function URLs; the payload format is detected per event.
+
+## Standalone Modules
+
+Self-contained tools that ship with the package and work with or without the framework. Each has its own guide:
+
+| Module | Guide | Description |
+|---|---|---|
+| `html` / `xml` tags + `LambderTemplatingEngine` | [docs/TEMPLATING.md](./docs/TEMPLATING.md) | Type-safe tagged templates and a comment-only HTML template engine (build-pipeline-safe) |
+| `LambderDdbCache` | [docs/DDB_CACHE.md](./docs/DDB_CACHE.md) | DynamoDB-backed compressed JSON cache with lease-based single-fill (server-only) |
+| `createLambderI18n` | [docs/I18N.md](./docs/I18N.md) | Typed translations with enforced/optional languages, component-level extension and auto language detection (isomorphic) |
+| `LambderMSW` | [docs/LAMBDER_MSW.md](./docs/LAMBDER_MSW.md) | Typed MSW mocking of the API contract for frontend development |
+
+Also see [docs/TYPE_SAFE_QUICK_START.md](./docs/TYPE_SAFE_QUICK_START.md) and [docs/DYNAMODB_SETUP.md](./docs/DYNAMODB_SETUP.md).
 
 ## Installation
 
@@ -278,22 +291,14 @@ Access the session controller with `lambder.getSessionController(ctx)`:
 
 ### Type-Safe Templating (html / xml)
 
-Lambder ships zero-dependency tagged template literals instead of a template engine. Interpolated values are HTML-escaped automatically, and everything is plain TypeScript, so templates are fully type-checked and refactorable.
+Lambder ships zero-dependency tagged template literals instead of a template engine. Interpolated values are HTML-escaped automatically, and everything is plain TypeScript, so templates are fully type-checked and refactorable. **Full guide: [docs/TEMPLATING.md](./docs/TEMPLATING.md).**
 
 ```typescript
 import { html, xml, raw } from "lambder";
 
-// Values are escaped by default (XSS-safe):
-const page = html`<h1>Hello ${user.name}</h1>`;
-
-// Arrays flatten; nested fragments are not double-escaped:
+// Values are escaped by default (XSS-safe); arrays flatten; nested fragments
+// are not double-escaped; null/undefined/false render as empty string:
 const list = html`<ul>${items.map((item) => html`<li>${item.label}</li>`)}</ul>`;
-
-// Conditionals: null/undefined/false render as empty string:
-const nav = html`${isLoggedIn && html`<a href="/logout">Log out</a>`}`;
-
-// raw() inserts trusted markup verbatim (never pass user input):
-const head = html`${raw('<meta charset="utf-8">')}`;
 
 // Works for XML too (xml is an alias of html):
 return res.xml(xml`<?xml version="1.0" encoding="UTF-8"?>
@@ -302,77 +307,41 @@ return res.xml(xml`<?xml version="1.0" encoding="UTF-8"?>
 
 ### Templating with LambderTemplatingEngine
 
-`LambderTemplatingEngine` is a standalone, comment-only HTML template engine. Every construct is an HTML comment, so templates survive HTML build pipelines (e.g. Vite) untouched, and during frontend development the browser simply renders the default content because the markers are invisible. It can template anything: SPA shells, emails, error pages.
-
-**Syntax** (everything is an HTML comment):
+`LambderTemplatingEngine` is a standalone, comment-only HTML template engine. Every construct is an HTML comment, so templates survive HTML build pipelines (e.g. Vite) untouched, and during frontend development the browser simply renders the default content because the markers are invisible. **Full guide: [docs/TEMPLATING.md](./docs/TEMPLATING.md).**
 
 ```html
 <title><!--slot:title-->Default Title<!--/slot:title--></title>   <!-- replaceable region -->
 <!--slot:head/-->                                                  <!-- insert-only point -->
 <!--if:isRtl--><body dir="rtl"><!--else--><body><!--/if:isRtl-->   <!-- conditional -->
-<!--if:!minimal--><nav>...</nav><!--/if:!minimal-->                <!-- negated conditional -->
 ```
-
-**Usage** (standalone, importable directly from `lambder`):
 
 ```typescript
-import { LambderTemplatingEngine, html, jsonScript } from "lambder";
+import { LambderTemplatingEngine, html } from "lambder";
 
-// Compile once (throws early on unclosed/mismatched blocks) ...
 const template = await LambderTemplatingEngine.fromFile("./templates/page.html");
-// ... render many times, per request:
 const output = template.render({
-    title: userInput,                                         // plain values are escaped (XSS-safe)
-    head: html`<link rel="canonical" href="${canonicalUrl}" />
-        ${jsonScript("app-data", preloadedState)}`,           // html`...`/raw()/jsonScript() inserted verbatim
-    isRtl: lang === "ar",                                     // condition names use truthiness
+    title: userInput,                                        // escaped (XSS-safe)
+    head: html`<link rel="canonical" href="${canonicalUrl}" />`,
+    isRtl: lang === "ar",
 });
-
-// Runtime introspection (dynamically typed by design):
-template.slotNames;       // e.g. ["title", "head"]
-template.conditionNames;  // e.g. ["isRtl", "minimal"]
-template.has("title");    // true
 ```
-
-Rules:
-- Slot values: strings/numbers escaped; `html`/`raw()`/`jsonScript()` verbatim; arrays flattened; `null`/`undefined`/`false` keep the slot's default content
-- Unknown data keys are ignored, so one data object can serve several templates with different slots
-- Blocks nest freely; there are intentionally no loops or inline expressions: build dynamic lists server-side with `html` and pass them into a slot
-- Attribute-position values (e.g. `<html lang="...">`) are handled with if/else around whole-tag variants
 
 ### Hosting a frontend build (servePublicFiles + templateFile)
 
-Lambder has no SPA-specific machinery; hosting a frontend build is a recipe built from three generic primitives:
-
-1. **`servePublicFiles(options?)`**: a terminal slot that serves real files under `publicPath`. It runs only when no route or API matched, so unlike a `"/(.*)"` catch-all route it can never shadow routes registered after it. Traversal-safe, mime-typed, memory-cached for warm invocations, immutable Cache-Control for content-hashed assets (`app-4f8a1b2c.js`), automatic ETag/gzip. When the file does not exist, the request **falls through**.
-2. **`serveIndexHtml(handler?, options?)`**: the next slot in the fallback chain, gated by a built-in filter: only `GET`/`HEAD` (option `methods`) and, by default, only paths that do not look like files (`skipFilePaths: true`, so a missing `/logo.png` is a 404, not a soft-404 HTML shell). Optional `redirectTrailingSlash` (default false) 301s `/about/` to `/about`. Gated-out requests fall through to `setRouteFallbackHandler`. Without a handler it serves `publicPath/index.html` (option `indexFile`) via `res.templateFile` with `no-cache`, so plain hosting is zero-config and templating is opt-in.
-3. **`res.templateFile(path, data?, options?)`**: render any HTML file under `publicPath` through `LambderTemplatingEngine` (compiled once, cached across warm invocations) and return it as an HTML response.
-
-```html
-<!-- frontend index.html (markers survive the Vite build; defaults show in vite dev) -->
-<title><!--slot:title-->My App<!--/slot:title--></title>
-<!--slot:head/-->
-```
+Lambder has no SPA-specific machinery; hosting a frontend build is a recipe built from three generic primitives: `servePublicFiles()` (terminal slot serving real files: memory-cached, immutable Cache-Control for hashed assets, ETag/gzip, falls through when missing), `serveIndexHtml()` (next fallback slot, GET/HEAD + non-file-path gated) and `res.templateFile()` (render an HTML file through the templating engine, compiled once and cached). **Full guide with the multi-tenant recipe: [docs/TEMPLATING.md](./docs/TEMPLATING.md).**
 
 ```typescript
-lambder
-    // Multi-tenant roots are just app logic in the path mapper:
-    .servePublicFiles({ path: (ctx) => `${getBrandFromHost(ctx.host)}${ctx.path}` })
-    // Only GET/HEAD page requests reach this handler:
-    .serveIndexHtml(async (ctx, res) => {
-        return res.templateFile(`${getBrandFromHost(ctx.host)}/index.html`, {
-            title: pageTitle(ctx),                        // escaped automatically
-            head: html`<link rel="canonical" href="${canonicalUrl(ctx)}" />
-                ${jsonScript("app-data", preloadedState(ctx))}`,
-            isRtl: activeLang(ctx) === "ar",
-        }, { cacheControl: "no-cache" });
-    });
-
-// Or, zero-config for a single-tenant app without templating:
+// Zero-config single-tenant hosting:
 lambder.servePublicFiles().serveIndexHtml();
-```
 
-Files without template markers can opt into virtual slots (`title` = the `<title>` element, `head` = before `</head>`) with `res.templateFile(path, data, { htmlVirtualSlots: true })`. File cache policies (`cacheControl`, `immutablePattern`, `memoryCache`) are configurable via `LambderPublicFilesOptions`, and both slots take an explicit compression policy: `servePublicFiles({ compress: (ctx) => /\.(css|js|svg)$/.test(ctx.path) })` and `serveIndexHtml(handler, { compress: true })` (default "auto").
+// Templated shell:
+lambder.servePublicFiles().serveIndexHtml(async (ctx, res) => {
+    return res.templateFile("index.html", {
+        title: pageTitle(ctx),
+        head: html`<link rel="canonical" href="${canonicalUrl(ctx)}" />`,
+    }, { cacheControl: "no-cache" });
+});
+```
 
 ### Render Context (ctx) Variables
 
@@ -430,7 +399,7 @@ Responses are finalized once at the end of the request: automatic gzip (when the
 
 ### DynamoDB Cache (LambderDdbCache)
 
-Standalone, persistent JSON cache backed by a DynamoDB table (`pk`/`sk` keys + `expiresAt` TTL attribute, same shape as the session table). Values are Brotli-compressed; small values are stored inline in a manifest item, large values are split into versioned binary chunks written before the manifest, so readers only ever see complete versions. Includes an in-memory LRU layer for warm invocations, single-flight deduplication, a DynamoDB lease so only one Lambda fills a missing key, and fail-open semantics (cache infrastructure errors fall back to the loader; loader errors propagate).
+Standalone, persistent JSON cache backed by a DynamoDB table (`pk`/`sk` keys + `expiresAt` TTL attribute, same shape as the session table). Brotli-compressed values, in-memory LRU layer, single-flight deduplication, a DynamoDB lease so only one Lambda fills a missing key, and fail-open semantics. Server-only. **Full guide with table setup: [docs/DDB_CACHE.md](./docs/DDB_CACHE.md).**
 
 ```typescript
 import { LambderDdbCache } from "lambder";
@@ -448,7 +417,30 @@ const city = await cache.getOrSet(`city:${slug}`, async () => fetchCityFromDb(sl
 // Also: cache.get(key), cache.set(key, value, { ttlSeconds }), cache.has(key), cache.delete(key)
 ```
 
-Required IAM actions on the table: `dynamodb:GetItem`, `PutItem`, `DeleteItem`, `Query`, `BatchWriteItem`. Server-only (uses AWS SDK + zlib).
+### Typed Translations (createLambderI18n)
+
+Standalone, framework-free i18n with a compile-time contract: keys and `{token}` params are inferred from the default-language dictionary, components extend the base keys with their own (strictly, or partially with fallback), and the active language resolves automatically (custom detector → browser languages → default). **Full guide: [docs/I18N.md](./docs/I18N.md).**
+
+```typescript
+import { createLambderI18n } from "lambder";
+
+export const i18n = createLambderI18n({
+    languages: { en: { name: "English" }, tr: { name: "Türkçe" }, de: { name: "Deutsch" } },
+    defaultLanguage: "en",
+    enforced: ["en"],                       // languages every dictionary must provide
+    base: {                                 // strict: all languages, all keys
+        en: { greet: "Hello {name}" },
+        tr: { greet: "Merhaba {name}" },
+        de: { greet: "Hallo {name}" },
+    },
+});
+
+// componentA.ts — only enforced languages required; de falls back to en:
+const cI18n = i18n.extendPartial({ en: { compute: "Compute" }, tr: { compute: "Hesapla" } });
+cI18n.t("compute");                 // auto-resolved language
+cI18n.t("greet", { name: "Ada" });  // base keys + params, compile-time enforced
+cI18n.forLanguage("tr")("compute"); // explicit (per-request backend use)
+```
 
 ## Frontend Usage with LambderCaller
 
