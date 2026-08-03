@@ -25,7 +25,7 @@ export type LambderI18nExtractParams<S extends string> = S extends `${string}{${
  * `{tokens}`, a params object with exactly those tokens is required.
  */
 export type LambderI18nTranslator<TContract extends Record<string, string>> = <K extends keyof TContract & string>(...args: LambderI18nExtractParams<TContract[K]> extends never ? [key: K] : [key: K, params: Record<LambderI18nExtractParams<TContract[K]>, string | number>]) => string;
-export interface LambderI18nConfig<TLanguages extends Record<string, LambderLanguageMeta>, TDefault extends keyof TLanguages & string, TEnforced extends readonly (keyof TLanguages & string)[], TContract extends Record<string, string>> {
+export interface LambderI18nConfig<TLanguages extends Record<string, LambderLanguageMeta>, TDefault extends keyof TLanguages & string, TEnforced extends readonly (keyof TLanguages & string)[], TBase extends Record<TDefault, Record<string, string>>> {
     /** Master registry of every supported language and its metadata. */
     languages: TLanguages;
     /** Final fallback language. Must be included in `enforced`. */
@@ -39,10 +39,8 @@ export interface LambderI18nConfig<TLanguages extends Record<string, LambderLang
      * App-wide base dictionary. Strict: every language in `languages` must
      * provide every key (the `defaultLanguage` block is the typed contract).
      */
-    base: {
-        [L in keyof TLanguages]: Record<keyof TContract, string>;
-    } & {
-        [D in TDefault]: TContract;
+    base: TBase & {
+        [L in keyof TLanguages]: Record<keyof TBase[TDefault], string>;
     };
     /**
      * Optional language detector, tried before browser detection. Return a
@@ -117,9 +115,15 @@ export interface LambderI18nInstance<TLanguages extends Record<string, LambderLa
     readonly enforced: TEnforced;
 }
 /** Language codes of an instance: `LambderI18nCodes<typeof i18n>`. */
-export type LambderI18nCodes<T> = T extends LambderI18nInstance<infer L, any, any, any> ? keyof L & string : never;
+export type LambderI18nCodes<T extends {
+    languageList: readonly string[];
+}> = T["languageList"][number];
 /** Translation keys of an instance: `LambderI18nKeys<typeof i18n>`. */
-export type LambderI18nKeys<T> = T extends LambderI18nInstance<any, any, any, infer C> ? keyof C & string : never;
+export type LambderI18nKeys<T extends {
+    t: (...args: never[]) => string;
+}> = Parameters<T["t"]>[0];
 /** Translator type of an instance: `LambderI18nTranslatorFor<typeof i18n>`. */
-export type LambderI18nTranslatorFor<T> = T extends LambderI18nInstance<any, any, any, infer C> ? LambderI18nTranslator<C> : never;
-export declare const createLambderI18n: <const TLanguages extends Record<string, LambderLanguageMeta>, const TDefault extends keyof TLanguages & string, const TEnforced extends readonly (keyof TLanguages & string)[], const TContract extends Record<string, string>>(config: LambderI18nConfig<TLanguages, TDefault, TEnforced, TContract>) => LambderI18nInstance<TLanguages, TDefault, TEnforced, TContract>;
+export type LambderI18nTranslatorFor<T extends {
+    t: unknown;
+}> = T["t"];
+export declare const createLambderI18n: <const TLanguages extends Record<string, LambderLanguageMeta>, const TDefault extends keyof TLanguages & string, const TEnforced extends readonly (keyof TLanguages & string)[], const TBase extends Record<TDefault, Record<string, string>>>(config: LambderI18nConfig<TLanguages, TDefault, TEnforced, TBase>) => LambderI18nInstance<TLanguages, TDefault, TEnforced, TBase[TDefault]>;

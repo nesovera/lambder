@@ -287,6 +287,25 @@ describe("LambderI18n: applyToDocument", () => {
 });
 
 describe("LambderI18n: compile-time contract", () => {
+    it("keeps the contract when the base is a non-inline const (imported dictionary map)", () => {
+        // Mirrors the app pattern: `en` declared as const in one module, the
+        // full map assembled in another, then passed as `base`.
+        const en = { plain: "Plain", withParam: "Hi {name}" } as const;
+        const de: Record<keyof typeof en, string> = { plain: "Schlicht", withParam: "Hallo {name}" };
+        const DICT = { en, de };
+        const i18n = createLambderI18n({
+            languages: { en: { name: "English" }, de: { name: "Deutsch" } },
+            defaultLanguage: "en",
+            enforced: ["en"],
+            base: DICT,
+        });
+        expect(i18n.forLanguage("de")("withParam", { name: "X" })).toBe("Hallo X");
+        // @ts-expect-error - {name} param is required (literal types survived)
+        void (() => i18n.t("withParam"));
+        // @ts-expect-error - unknown key
+        void (() => i18n.t("nope"));
+    });
+
     it("enforces keys and params at the type level", () => {
         const i18n = makeI18n();
         const child = i18n.extendPartial({ en: { withParam: "Value: {value}" }, tr: { withParam: "Değer: {value}" } });
