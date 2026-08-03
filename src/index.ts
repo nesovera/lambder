@@ -71,6 +71,9 @@ export type {
     LambderI18nInstance,
     LambderI18nTranslator,
     LambderI18nExtractParams,
+    LambderI18nCodes,
+    LambderI18nKeys,
+    LambderI18nTranslatorFor,
 } from "./LambderI18n.js";
 
 // Type-safe API contract utilities

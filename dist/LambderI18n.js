@@ -131,7 +131,17 @@ const buildInstance = (core, layer) => {
         setLanguage(code) { core.state.set(code); },
         resetLanguage() { core.state.reset(); },
         get currentLanguage() { return core.state.resolve(); },
-        get currentLanguageMeta() { return core.languages[core.state.resolve()]; },
+        get currentLanguageMeta() {
+            const code = core.state.resolve();
+            return { code, ...core.languages[code] };
+        },
+        get currentDir() {
+            return core.languages[core.state.resolve()]?.dir ?? "ltr";
+        },
+        get currentIntlLocale() {
+            const code = core.state.resolve();
+            return core.languages[code]?.intlLocale ?? code;
+        },
         onLanguageChange(listener) { return core.state.subscribe(listener); },
         applyToDocument() {
             const doc = globalThis.document;
@@ -144,6 +154,9 @@ const buildInstance = (core, layer) => {
         isLanguageCode: core.isCode,
         languages: core.languages,
         languageList: core.languageList,
+        get languageMetaList() {
+            return core.languageList.map((code) => ({ code, ...core.languages[code] }));
+        },
         defaultLanguage: core.defaultLanguage,
         enforced: core.enforced,
     };

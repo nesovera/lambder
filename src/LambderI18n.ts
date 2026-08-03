@@ -111,8 +111,12 @@ export interface LambderI18nInstance<
     resetLanguage(): void;
     /** The currently active language code. */
     readonly currentLanguage: keyof TLanguages & string;
-    /** Metadata of the currently active language. */
-    readonly currentLanguageMeta: TLanguages[keyof TLanguages];
+    /** Metadata of the currently active language, with `code` injected. */
+    readonly currentLanguageMeta: TLanguages[keyof TLanguages] & { code: keyof TLanguages & string };
+    /** Text direction of the active language (defaults to "ltr"). */
+    readonly currentDir: "ltr" | "rtl";
+    /** BCP-47 locale of the active language for Intl APIs (defaults to the code). */
+    readonly currentIntlLocale: string;
     /** Subscribe to language changes. Returns an unsubscribe function. */
     onLanguageChange(listener: (code: keyof TLanguages & string) => void): () => void;
     /**
@@ -126,9 +130,27 @@ export interface LambderI18nInstance<
     isLanguageCode(value: string): value is keyof TLanguages & string;
     readonly languages: TLanguages;
     readonly languageList: (keyof TLanguages & string)[];
+    /** Ordered language metadata (declaration order), with `code` injected — ready for switcher menus. */
+    readonly languageMetaList: (TLanguages[keyof TLanguages] & { code: keyof TLanguages & string })[];
     readonly defaultLanguage: TDefault;
     readonly enforced: TEnforced;
 }
+
+// ---------------------------------------------------------------------------
+// Instance-derived utility types
+// ---------------------------------------------------------------------------
+
+/** Language codes of an instance: `LambderI18nCodes<typeof i18n>`. */
+export type LambderI18nCodes<T> =
+    T extends LambderI18nInstance<infer L, any, any, any> ? keyof L & string : never;
+
+/** Translation keys of an instance: `LambderI18nKeys<typeof i18n>`. */
+export type LambderI18nKeys<T> =
+    T extends LambderI18nInstance<any, any, any, infer C> ? keyof C & string : never;
+
+/** Translator type of an instance: `LambderI18nTranslatorFor<typeof i18n>`. */
+export type LambderI18nTranslatorFor<T> =
+    T extends LambderI18nInstance<any, any, any, infer C> ? LambderI18nTranslator<C> : never;
 
 // ---------------------------------------------------------------------------
 // Implementation
@@ -266,7 +288,17 @@ const buildInstance = (core: InternalCore, layer: DictLayer): LambderI18nInstanc
         setLanguage(code: string) { core.state.set(code); },
         resetLanguage() { core.state.reset(); },
         get currentLanguage() { return core.state.resolve(); },
-        get currentLanguageMeta() { return core.languages[core.state.resolve()]!; },
+        get currentLanguageMeta() {
+            const code = core.state.resolve();
+            return { code, ...core.languages[code] };
+        },
+        get currentDir() {
+            return (core.languages[core.state.resolve()]?.dir as "ltr" | "rtl") ?? "ltr";
+        },
+        get currentIntlLocale() {
+            const code = core.state.resolve();
+            return (core.languages[code]?.intlLocale as string) ?? code;
+        },
         onLanguageChange(listener: (code: string) => void) { return core.state.subscribe(listener); },
         applyToDocument() {
             const doc = (globalThis as { document?: { documentElement: { lang: string; dir: string } } }).document;
@@ -278,6 +310,9 @@ const buildInstance = (core: InternalCore, layer: DictLayer): LambderI18nInstanc
         isLanguageCode: core.isCode as any,
         languages: core.languages,
         languageList: core.languageList,
+        get languageMetaList() {
+            return core.languageList.map((code) => ({ code, ...core.languages[code] }));
+        },
         defaultLanguage: core.defaultLanguage,
         enforced: core.enforced,
     };
