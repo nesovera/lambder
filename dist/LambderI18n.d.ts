@@ -89,8 +89,14 @@ export interface LambderI18nInstance<TLanguages extends Record<string, LambderLa
     resetLanguage(): void;
     /** The currently active language code. */
     readonly currentLanguage: keyof TLanguages & string;
-    /** Metadata of the currently active language. */
-    readonly currentLanguageMeta: TLanguages[keyof TLanguages];
+    /** Metadata of the currently active language, with `code` injected. */
+    readonly currentLanguageMeta: TLanguages[keyof TLanguages] & {
+        code: keyof TLanguages & string;
+    };
+    /** Text direction of the active language (defaults to "ltr"). */
+    readonly currentDir: "ltr" | "rtl";
+    /** BCP-47 locale of the active language for Intl APIs (defaults to the code). */
+    readonly currentIntlLocale: string;
     /** Subscribe to language changes. Returns an unsubscribe function. */
     onLanguageChange(listener: (code: keyof TLanguages & string) => void): () => void;
     /**
@@ -103,7 +109,17 @@ export interface LambderI18nInstance<TLanguages extends Record<string, LambderLa
     isLanguageCode(value: string): value is keyof TLanguages & string;
     readonly languages: TLanguages;
     readonly languageList: (keyof TLanguages & string)[];
+    /** Ordered language metadata (declaration order), with `code` injected — ready for switcher menus. */
+    readonly languageMetaList: (TLanguages[keyof TLanguages] & {
+        code: keyof TLanguages & string;
+    })[];
     readonly defaultLanguage: TDefault;
     readonly enforced: TEnforced;
 }
+/** Language codes of an instance: `LambderI18nCodes<typeof i18n>`. */
+export type LambderI18nCodes<T> = T extends LambderI18nInstance<infer L, any, any, any> ? keyof L & string : never;
+/** Translation keys of an instance: `LambderI18nKeys<typeof i18n>`. */
+export type LambderI18nKeys<T> = T extends LambderI18nInstance<any, any, any, infer C> ? keyof C & string : never;
+/** Translator type of an instance: `LambderI18nTranslatorFor<typeof i18n>`. */
+export type LambderI18nTranslatorFor<T> = T extends LambderI18nInstance<any, any, any, infer C> ? LambderI18nTranslator<C> : never;
 export declare const createLambderI18n: <const TLanguages extends Record<string, LambderLanguageMeta>, const TDefault extends keyof TLanguages & string, const TEnforced extends readonly (keyof TLanguages & string)[], const TContract extends Record<string, string>>(config: LambderI18nConfig<TLanguages, TDefault, TEnforced, TContract>) => LambderI18nInstance<TLanguages, TDefault, TEnforced, TContract>;
