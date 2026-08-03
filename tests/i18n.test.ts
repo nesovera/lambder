@@ -238,6 +238,26 @@ describe("LambderI18n: config validation", () => {
     });
 });
 
+describe("LambderI18n: applyToDocument", () => {
+    it("sets html lang and dir from the active language", () => {
+        const documentElement = { lang: "", dir: "" };
+        vi.stubGlobal("document", { documentElement });
+        const i18n = makeI18n();
+        i18n.setLanguage("ar");
+        i18n.applyToDocument();
+        expect(documentElement.lang).toBe("ar");
+        expect(documentElement.dir).toBe("rtl");
+        i18n.setLanguage("en");
+        i18n.applyToDocument();
+        expect(documentElement.dir).toBe("ltr");
+    });
+
+    it("no-ops outside a browser", () => {
+        const i18n = makeI18n();
+        expect(() => i18n.applyToDocument()).not.toThrow();
+    });
+});
+
 describe("LambderI18n: compile-time contract", () => {
     it("enforces keys and params at the type level", () => {
         const i18n = makeI18n();

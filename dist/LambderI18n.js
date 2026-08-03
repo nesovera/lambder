@@ -133,6 +133,14 @@ const buildInstance = (core, layer) => {
         get currentLanguage() { return core.state.resolve(); },
         get currentLanguageMeta() { return core.languages[core.state.resolve()]; },
         onLanguageChange(listener) { return core.state.subscribe(listener); },
+        applyToDocument() {
+            const doc = globalThis.document;
+            if (!doc)
+                return;
+            const code = core.state.resolve();
+            doc.documentElement.lang = code;
+            doc.documentElement.dir = core.languages[code]?.dir ?? "ltr";
+        },
         isLanguageCode: core.isCode,
         languages: core.languages,
         languageList: core.languageList,
