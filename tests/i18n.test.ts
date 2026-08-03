@@ -228,6 +228,24 @@ describe("LambderI18n: config validation", () => {
         })).toThrow(/base dictionary is missing language "tr"/);
     });
 
+    it("throws when base contains an unsupported language", () => {
+        expect(() => createLambderI18n({
+            languages: { en: { name: "English" } },
+            defaultLanguage: "en",
+            enforced: ["en"],
+            base: { en: { a: "A" }, xx: { a: "A" } } as any,
+        })).toThrow(/unsupported language "xx"/);
+    });
+
+    it("extensions copy the dictionary (no aliasing of the caller's object)", () => {
+        const i18n = makeI18n();
+        const source = { en: { k: "V" } };
+        const child = i18n.extendPartial(source as any);
+        child.registerDictionary("en", { other: "O" });
+        expect(source.en).toEqual({ k: "V" });
+        expect(child.forLanguage("en")("other" as never)).toBe("O");
+    });
+
     it("exposes registry helpers", () => {
         const i18n = makeI18n();
         expect(i18n.languageList).toEqual(["en", "tr", "ar"]);
@@ -286,7 +304,87 @@ describe("LambderI18n: applyToDocument", () => {
     });
 });
 
+describe("LambderI18n: quality behaviors", () => {
+    it("forLanguage caches translators per code (hot-path, no re-allocation)", () => {
+        const i18n = makeI18n();
+        expect(i18n.forLanguage("tr")).toBe(i18n.forLanguage("tr"));
+        expect(i18n.forLanguage("tr")).not.toBe(i18n.forLanguage("ar"));
+    });
+
+    it("fails open when detectLanguage throws", () => {
+        const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+        const i18n = createLambderI18n({
+            languages: { en: { name: "English" }, tr: { name: "Türkçe" } },
+            defaultLanguage: "en",
+            enforced: ["en"],
+            base: { en: { hi: "Hi" }, tr: { hi: "Selam" } },
+            detectLanguage: () => { throw new Error("boom"); },
+        });
+        expect(i18n.t("hi")).toBe("Hi"); // chain continued to default
+        expect(consoleError).toHaveBeenCalled();
+        consoleError.mockRestore();
+    });
+
+    it("isolates throwing change listeners", () => {
+        const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+        const i18n = makeI18n();
+        const seen: string[] = [];
+        i18n.onLanguageChange(() => { throw new Error("bad listener"); });
+        i18n.onLanguageChange((code) => seen.push(code));
+        expect(() => i18n.setLanguage("tr")).not.toThrow();
+        expect(seen).toEqual(["tr"]);
+        expect(consoleError).toHaveBeenCalled();
+        consoleError.mockRestore();
+    });
+
+    it("registerDictionary notifies change listeners (reactive bridges re-render)", () => {
+        const i18n = makeI18n();
+        let notified = 0;
+        i18n.onLanguageChange(() => { notified += 1; });
+        i18n.registerDictionary("tr", { save: "Sakla" });
+        expect(notified).toBe(1);
+    });
+
+    it("extend rejects redeclared parent keys at runtime", () => {
+        const i18n = makeI18n();
+        expect(() => (i18n.extendPartial as any)({ en: { save: "Shadow" } }))
+            .toThrow(/redeclares existing key "save"/);
+        const child = i18n.extendPartial({ en: { fresh: "Fresh" } });
+        expect(() => (child.extendPartial as any)({ en: { fresh: "Again" } }))
+            .toThrow(/redeclares existing key "fresh"/);
+    });
+
+    it("memoizes currentLanguageMeta and languageMetaList (stable identities)", () => {
+        const i18n = makeI18n();
+        expect(i18n.currentLanguageMeta).toBe(i18n.currentLanguageMeta);
+        expect(i18n.languageMetaList).toBe(i18n.languageMetaList);
+        const before = i18n.currentLanguageMeta;
+        i18n.setLanguage("ar");
+        expect(i18n.currentLanguageMeta).not.toBe(before);
+        expect(i18n.currentLanguageMeta).toBe(i18n.currentLanguageMeta);
+    });
+});
+
 describe("LambderI18n: compile-time contract", () => {
+    it("keeps the contract when the base is a non-inline const (imported dictionary map)", () => {
+        // Mirrors the app pattern: `en` declared as const in one module, the
+        // full map assembled in another, then passed as `base`.
+        const en = { plain: "Plain", withParam: "Hi {name}" } as const;
+        const de: Record<keyof typeof en, string> = { plain: "Schlicht", withParam: "Hallo {name}" };
+        const DICT = { en, de };
+        const i18n = createLambderI18n({
+            languages: { en: { name: "English" }, de: { name: "Deutsch" } },
+            defaultLanguage: "en",
+            enforced: ["en"],
+            base: DICT,
+        });
+        expect(i18n.forLanguage("de")("withParam", { name: "X" })).toBe("Hallo X");
+        // @ts-expect-error - {name} param is required (literal types survived)
+        void (() => i18n.t("withParam"));
+        // @ts-expect-error - unknown key
+        void (() => i18n.t("nope"));
+    });
+
     it("enforces keys and params at the type level", () => {
         const i18n = makeI18n();
         const child = i18n.extendPartial({ en: { withParam: "Value: {value}" }, tr: { withParam: "Değer: {value}" } });
@@ -306,6 +404,8 @@ describe("LambderI18n: compile-time contract", () => {
         void (() => i18n.extend({ en: { k: "V" }, tr: { k: "V" } }));
         // @ts-expect-error - extendPartial still requires enforced languages
         void (() => i18n.extendPartial({ tr: { k: "V" } }));
+        // @ts-expect-error - redeclaring an existing parent key is rejected
+        void (() => i18n.extendPartial({ en: { save: "Shadow" } }));
 
         expect(child.forLanguage("tr")("withParam", { value: 2 })).toBe("Değer: 2");
     });
