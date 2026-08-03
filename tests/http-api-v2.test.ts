@@ -117,6 +117,36 @@ describe('HTTP API v2 events', () => {
         expect(body.payload).toEqual({ hello: 'v2' });
     });
 
+    it('strips named stage prefixes from rawPath (parity with v1 path)', async () => {
+        const lambder = new Lambder({ publicPath: './public', apiPath: '/secure' })
+            .addRoute('/hello', (ctx, res) => res.html('Hello ' + ctx.path));
+
+        // Named stage: rawPath includes the prefix, requestContext.stage names it.
+        const staged = createMockEventV2('/prod-stage/hello');
+        staged.requestContext.stage = 'prod-stage';
+        const result = await lambder.render(staged, createMockContext());
+        expect(decodeBody(result as any)).toBe('Hello /hello');
+
+        // Stage root maps to "/".
+        const root = createMockEventV2('/prod-stage');
+        root.requestContext.stage = 'prod-stage';
+        const rootCtx = await new Lambder({ publicPath: './public' })
+            .addRoute('/', (ctx, res) => res.html('root'))
+            .render(root, createMockContext());
+        expect(decodeBody(rootCtx as any)).toBe('root');
+
+        // $default stage: rawPath has no prefix and must not be touched.
+        const plain = createMockEventV2('/hello');
+        const plainResult = await lambder.render(plain, createMockContext());
+        expect(decodeBody(plainResult as any)).toBe('Hello /hello');
+
+        // A path that merely looks like the stage name is not stripped.
+        const lookalike = createMockEventV2('/prod-stage-extra/hello');
+        lookalike.requestContext.stage = 'prod-stage';
+        const lookalikeResult = await lambder.render(lookalike, createMockContext());
+        expect((lookalikeResult as any).statusCode).toBe(404);
+    });
+
     it('applies ETag + If-None-Match 304 on v2 GETs', async () => {
         const lambder = new Lambder({ publicPath: './public' })
             .addRoute('/page', (ctx, res) => res.html('<p>stable content</p>'));
