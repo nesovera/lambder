@@ -86,23 +86,28 @@ export interface LambderI18nInstance<
     /** Translator bound to an explicit language (per-request backend use). */
     forLanguage(code: keyof TLanguages & string): LambderI18nTranslator<TContract>;
     /**
-     * Strict extension: every language must provide every new key.
+     * Strict extension: every language must provide every new key. Keys must
+     * be new — redeclaring a parent key is a compile-time and runtime error.
      * Returns a new instance whose key space = parent keys + new keys.
      */
     extend<const TExt extends { [D in TDefault]: Record<string, string> }>(
-        dict: { [L in keyof TLanguages]: Record<keyof TExt[TDefault], string> } & TExt
+        dict: { [L in keyof TLanguages]: Record<keyof TExt[TDefault], string> }
+            & { [D in TDefault]: Partial<Record<keyof TContract, never>> }
+            & TExt
     ): LambderI18nInstance<TLanguages, TDefault, TEnforced, TContract & TExt[TDefault]>;
     /**
      * Partial extension: only the `enforced` languages are required; all other
      * languages are optional (and may provide a subset of keys) — missing
-     * translations fall back to the default language.
+     * translations fall back to the default language. Keys must be new —
+     * redeclaring a parent key is a compile-time and runtime error.
      */
     extendPartial<const TExt extends { [D in TDefault]: Record<string, string> }>(
         dict: { [E in TEnforced[number]]: Record<keyof TExt[TDefault], string> }
             & { [L in Exclude<keyof TLanguages & string, TEnforced[number]>]?: Partial<Record<keyof TExt[TDefault], string>> }
+            & { [D in TDefault]: Partial<Record<keyof TContract, never>> }
             & TExt
     ): LambderI18nInstance<TLanguages, TDefault, TEnforced, TContract & TExt[TDefault]>;
-    /** Merge additional translations at runtime (e.g. fetched from an API). */
+    /** Merge additional translations at runtime (e.g. fetched from an API). Notifies change listeners. */
     registerDictionary(code: keyof TLanguages & string, dict: Record<string, string>): void;
 
     /** Override the active language (shared with all extended instances). */
@@ -117,7 +122,10 @@ export interface LambderI18nInstance<
     readonly currentDir: "ltr" | "rtl";
     /** BCP-47 locale of the active language for Intl APIs (defaults to the code). */
     readonly currentIntlLocale: string;
-    /** Subscribe to language changes. Returns an unsubscribe function. */
+    /**
+     * Subscribe to changes (language switched, or runtime dictionaries
+     * registered). Returns an unsubscribe function.
+     */
     onLanguageChange(listener: (code: keyof TLanguages & string) => void): () => void;
     /**
      * Apply the active language to `<html lang>` and `<html dir>` (RTL support).
@@ -183,7 +191,13 @@ class LanguageState {
     resolve(): string {
         if (this.override) return this.override;
         if (this.detected) return this.detected;
-        const custom = this.customDetect?.();
+        // Fail-open: a broken app detector must not take down every t() call.
+        let custom: string | null | undefined = null;
+        try {
+            custom = this.customDetect?.();
+        } catch (err) {
+            console.error("LambderI18n: detectLanguage threw; continuing detection chain.", err);
+        }
         if (custom && this.isCode(custom)) { this.detected = custom; return custom; }
         const browser = detectBrowserLanguage(this.isCode);
         this.detected = browser ?? this.defaultLanguage;
@@ -203,13 +217,25 @@ class LanguageState {
         this.notify(this.resolve());
     }
 
+    /** Re-notify listeners without a language change (e.g. dictionaries changed). */
+    emitChange(): void {
+        this.notify(this.resolve());
+    }
+
     subscribe(listener: (code: string) => void): () => void {
         this.listeners.add(listener);
         return () => { this.listeners.delete(listener); };
     }
 
     private notify(code: string): void {
-        for (const listener of this.listeners) listener(code);
+        for (const listener of this.listeners) {
+            // Isolate listeners: one bad subscriber must not block the others.
+            try {
+                listener(code);
+            } catch (err) {
+                console.error("LambderI18n: onLanguageChange listener threw.", err);
+            }
+        }
     }
 }
 
@@ -225,6 +251,9 @@ const interpolate = (text: string, params?: Record<string, string | number>): st
 interface InternalCore {
     languages: Record<string, LambderLanguageMeta>;
     languageList: string[];
+    /** Precomputed `{ code, ...meta }` objects, keyed by code (languages are immutable). */
+    metaByCode: Map<string, LambderLanguageMeta & { code: string }>;
+    metaList: (LambderLanguageMeta & { code: string })[];
     defaultLanguage: string;
     enforced: readonly string[];
     state: LanguageState;
@@ -245,7 +274,35 @@ const layerLookup = (layer: DictLayer | null, lang: string, key: string): string
     return undefined;
 };
 
-const buildInstance = (core: InternalCore, layer: DictLayer): LambderI18nInstance<any, any, any, any> => {
+type InternalTranslator = (key: string, params?: Record<string, string | number>) => string;
+
+/**
+ * Untyped structural mirror of LambderI18nInstance so the implementation is
+ * fully type-checked; createLambderI18n casts once at the facade boundary.
+ */
+interface InternalInstance {
+    t: InternalTranslator;
+    forLanguage(code: string): InternalTranslator;
+    extend(dict: DictSet): InternalInstance;
+    extendPartial(dict: DictSet): InternalInstance;
+    registerDictionary(code: string, dict: Record<string, string>): void;
+    setLanguage(code: string): void;
+    resetLanguage(): void;
+    readonly currentLanguage: string;
+    readonly currentLanguageMeta: LambderLanguageMeta & { code: string };
+    readonly currentDir: "ltr" | "rtl";
+    readonly currentIntlLocale: string;
+    onLanguageChange(listener: (code: string) => void): () => void;
+    applyToDocument(): void;
+    isLanguageCode(value: string): boolean;
+    readonly languages: Record<string, LambderLanguageMeta>;
+    readonly languageList: string[];
+    readonly languageMetaList: (LambderLanguageMeta & { code: string })[];
+    readonly defaultLanguage: string;
+    readonly enforced: readonly string[];
+}
+
+const buildInstance = (core: InternalCore, layer: DictLayer): InternalInstance => {
     const translateIn = (lang: string, key: string, params?: Record<string, string | number>): string => {
         const text = layerLookup(layer, lang, key)
             ?? layerLookup(layer, core.defaultLanguage, key)
@@ -253,8 +310,11 @@ const buildInstance = (core: InternalCore, layer: DictLayer): LambderI18nInstanc
         return interpolate(text, params);
     };
 
-    const t = (key: string, params?: Record<string, string | number>) =>
+    const t: InternalTranslator = (key, params) =>
         translateIn(core.state.resolve(), key, params);
+
+    // forLanguage sits on the hot path of reactive T() bridges: cache per code.
+    const translatorCache = new Map<string, InternalTranslator>();
 
     const validateExtension = (dict: DictSet, requiredLanguages: readonly string[], label: string): void => {
         for (const lang of Object.keys(dict)) {
@@ -263,55 +323,61 @@ const buildInstance = (core: InternalCore, layer: DictLayer): LambderI18nInstanc
         for (const lang of requiredLanguages) {
             if (!dict[lang]) throw new Error(`LambderI18n: ${label} is missing required language "${lang}".`);
         }
+        for (const block of Object.values(dict)) {
+            for (const key of Object.keys(block ?? {})) {
+                if (layerLookup(layer, core.defaultLanguage, key) !== undefined) {
+                    throw new Error(`LambderI18n: ${label} redeclares existing key "${key}".`);
+                }
+            }
+        }
     };
 
-    const instance: LambderI18nInstance<any, any, any, any> = {
-        t: t as LambderI18nTranslator<any>,
-        forLanguage(code: string) {
+    const instance: InternalInstance = {
+        t,
+        forLanguage(code) {
+            const cached = translatorCache.get(code);
+            if (cached) return cached;
             if (!core.isCode(code)) throw new Error(`LambderI18n: unsupported language code "${code}".`);
-            return ((key: string, params?: Record<string, string | number>) =>
-                translateIn(code, key, params)) as LambderI18nTranslator<any>;
+            const translator: InternalTranslator = (key, params) => translateIn(code, key, params);
+            translatorCache.set(code, translator);
+            return translator;
         },
-        extend(dict: DictSet) {
+        extend(dict) {
             validateExtension(dict, core.languageList, "extend() dictionary");
             return buildInstance(core, { dicts: { ...dict }, parent: layer });
         },
-        extendPartial(dict: DictSet) {
+        extendPartial(dict) {
             validateExtension(dict, core.enforced, "extendPartial() dictionary");
             return buildInstance(core, { dicts: { ...dict }, parent: layer });
         },
-        registerDictionary(code: string, dict: Record<string, string>) {
+        registerDictionary(code, dict) {
             if (!core.isCode(code)) throw new Error(`LambderI18n: unsupported language code "${code}".`);
             layer.dicts[code] = { ...layer.dicts[code], ...dict };
+            core.state.emitChange();
         },
-        setLanguage(code: string) { core.state.set(code); },
+        setLanguage(code) { core.state.set(code); },
         resetLanguage() { core.state.reset(); },
         get currentLanguage() { return core.state.resolve(); },
-        get currentLanguageMeta() {
-            const code = core.state.resolve();
-            return { code, ...core.languages[code] };
-        },
+        get currentLanguageMeta() { return core.metaByCode.get(core.state.resolve())!; },
         get currentDir() {
-            return (core.languages[core.state.resolve()]?.dir as "ltr" | "rtl") ?? "ltr";
+            return core.metaByCode.get(core.state.resolve())?.dir ?? "ltr";
         },
         get currentIntlLocale() {
             const code = core.state.resolve();
-            return (core.languages[code]?.intlLocale as string) ?? code;
+            return core.metaByCode.get(code)?.intlLocale ?? code;
         },
-        onLanguageChange(listener: (code: string) => void) { return core.state.subscribe(listener); },
+        onLanguageChange(listener) { return core.state.subscribe(listener); },
         applyToDocument() {
             const doc = (globalThis as { document?: { documentElement: { lang: string; dir: string } } }).document;
             if (!doc) return;
             const code = core.state.resolve();
             doc.documentElement.lang = code;
-            doc.documentElement.dir = (core.languages[code]?.dir as string) ?? "ltr";
+            doc.documentElement.dir = core.metaByCode.get(code)?.dir ?? "ltr";
         },
-        isLanguageCode: core.isCode as any,
+        isLanguageCode: core.isCode,
         languages: core.languages,
         languageList: core.languageList,
-        get languageMetaList() {
-            return core.languageList.map((code) => ({ code, ...core.languages[code] }));
-        },
+        languageMetaList: core.metaList,
         defaultLanguage: core.defaultLanguage,
         enforced: core.enforced,
     };
@@ -352,20 +418,25 @@ export const createLambderI18n = <
 
     const customDetect = config.detectLanguage
         ? () => config.detectLanguage!({
-            isLanguageCode: isCode as any,
+            isLanguageCode: isCode as (value: string) => value is keyof TLanguages & string,
             languages: config.languages,
             defaultLanguage: config.defaultLanguage,
         })
         : null;
 
+    const metaByCode = new Map(languageList.map((code) => [code, { code, ...config.languages[code]! }]));
+
     const core: InternalCore = {
         languages: config.languages,
         languageList,
+        metaByCode,
+        metaList: [...metaByCode.values()],
         defaultLanguage: config.defaultLanguage,
         enforced: config.enforced,
         state: new LanguageState(isCode, config.defaultLanguage, customDetect),
         isCode,
     };
 
-    return buildInstance(core, { dicts: { ...(config.base as DictSet) }, parent: null });
+    return buildInstance(core, { dicts: { ...(config.base as DictSet) }, parent: null }) as unknown as
+        LambderI18nInstance<TLanguages, TDefault, TEnforced, TBase[TDefault]>;
 };

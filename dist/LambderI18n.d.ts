@@ -59,18 +59,22 @@ export interface LambderI18nInstance<TLanguages extends Record<string, LambderLa
     /** Translator bound to an explicit language (per-request backend use). */
     forLanguage(code: keyof TLanguages & string): LambderI18nTranslator<TContract>;
     /**
-     * Strict extension: every language must provide every new key.
+     * Strict extension: every language must provide every new key. Keys must
+     * be new — redeclaring a parent key is a compile-time and runtime error.
      * Returns a new instance whose key space = parent keys + new keys.
      */
     extend<const TExt extends {
         [D in TDefault]: Record<string, string>;
     }>(dict: {
         [L in keyof TLanguages]: Record<keyof TExt[TDefault], string>;
+    } & {
+        [D in TDefault]: Partial<Record<keyof TContract, never>>;
     } & TExt): LambderI18nInstance<TLanguages, TDefault, TEnforced, TContract & TExt[TDefault]>;
     /**
      * Partial extension: only the `enforced` languages are required; all other
      * languages are optional (and may provide a subset of keys) — missing
-     * translations fall back to the default language.
+     * translations fall back to the default language. Keys must be new —
+     * redeclaring a parent key is a compile-time and runtime error.
      */
     extendPartial<const TExt extends {
         [D in TDefault]: Record<string, string>;
@@ -78,8 +82,10 @@ export interface LambderI18nInstance<TLanguages extends Record<string, LambderLa
         [E in TEnforced[number]]: Record<keyof TExt[TDefault], string>;
     } & {
         [L in Exclude<keyof TLanguages & string, TEnforced[number]>]?: Partial<Record<keyof TExt[TDefault], string>>;
+    } & {
+        [D in TDefault]: Partial<Record<keyof TContract, never>>;
     } & TExt): LambderI18nInstance<TLanguages, TDefault, TEnforced, TContract & TExt[TDefault]>;
-    /** Merge additional translations at runtime (e.g. fetched from an API). */
+    /** Merge additional translations at runtime (e.g. fetched from an API). Notifies change listeners. */
     registerDictionary(code: keyof TLanguages & string, dict: Record<string, string>): void;
     /** Override the active language (shared with all extended instances). */
     setLanguage(code: keyof TLanguages & string): void;
@@ -95,7 +101,10 @@ export interface LambderI18nInstance<TLanguages extends Record<string, LambderLa
     readonly currentDir: "ltr" | "rtl";
     /** BCP-47 locale of the active language for Intl APIs (defaults to the code). */
     readonly currentIntlLocale: string;
-    /** Subscribe to language changes. Returns an unsubscribe function. */
+    /**
+     * Subscribe to changes (language switched, or runtime dictionaries
+     * registered). Returns an unsubscribe function.
+     */
     onLanguageChange(listener: (code: keyof TLanguages & string) => void): () => void;
     /**
      * Apply the active language to `<html lang>` and `<html dir>` (RTL support).

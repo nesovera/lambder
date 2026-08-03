@@ -42,7 +42,14 @@ class LanguageState {
             return this.override;
         if (this.detected)
             return this.detected;
-        const custom = this.customDetect?.();
+        // Fail-open: a broken app detector must not take down every t() call.
+        let custom = null;
+        try {
+            custom = this.customDetect?.();
+        }
+        catch (err) {
+            console.error("LambderI18n: detectLanguage threw; continuing detection chain.", err);
+        }
         if (custom && this.isCode(custom)) {
             this.detected = custom;
             return custom;
@@ -64,13 +71,24 @@ class LanguageState {
         this.detected = null;
         this.notify(this.resolve());
     }
+    /** Re-notify listeners without a language change (e.g. dictionaries changed). */
+    emitChange() {
+        this.notify(this.resolve());
+    }
     subscribe(listener) {
         this.listeners.add(listener);
         return () => { this.listeners.delete(listener); };
     }
     notify(code) {
-        for (const listener of this.listeners)
-            listener(code);
+        for (const listener of this.listeners) {
+            // Isolate listeners: one bad subscriber must not block the others.
+            try {
+                listener(code);
+            }
+            catch (err) {
+                console.error("LambderI18n: onLanguageChange listener threw.", err);
+            }
+        }
     }
 }
 const interpolate = (text, params) => {
@@ -98,6 +116,8 @@ const buildInstance = (core, layer) => {
         return interpolate(text, params);
     };
     const t = (key, params) => translateIn(core.state.resolve(), key, params);
+    // forLanguage sits on the hot path of reactive T() bridges: cache per code.
+    const translatorCache = new Map();
     const validateExtension = (dict, requiredLanguages, label) => {
         for (const lang of Object.keys(dict)) {
             if (!core.isCode(lang))
@@ -107,13 +127,25 @@ const buildInstance = (core, layer) => {
             if (!dict[lang])
                 throw new Error(`LambderI18n: ${label} is missing required language "${lang}".`);
         }
+        for (const block of Object.values(dict)) {
+            for (const key of Object.keys(block ?? {})) {
+                if (layerLookup(layer, core.defaultLanguage, key) !== undefined) {
+                    throw new Error(`LambderI18n: ${label} redeclares existing key "${key}".`);
+                }
+            }
+        }
     };
     const instance = {
-        t: t,
+        t,
         forLanguage(code) {
+            const cached = translatorCache.get(code);
+            if (cached)
+                return cached;
             if (!core.isCode(code))
                 throw new Error(`LambderI18n: unsupported language code "${code}".`);
-            return ((key, params) => translateIn(code, key, params));
+            const translator = (key, params) => translateIn(code, key, params);
+            translatorCache.set(code, translator);
+            return translator;
         },
         extend(dict) {
             validateExtension(dict, core.languageList, "extend() dictionary");
@@ -127,20 +159,18 @@ const buildInstance = (core, layer) => {
             if (!core.isCode(code))
                 throw new Error(`LambderI18n: unsupported language code "${code}".`);
             layer.dicts[code] = { ...layer.dicts[code], ...dict };
+            core.state.emitChange();
         },
         setLanguage(code) { core.state.set(code); },
         resetLanguage() { core.state.reset(); },
         get currentLanguage() { return core.state.resolve(); },
-        get currentLanguageMeta() {
-            const code = core.state.resolve();
-            return { code, ...core.languages[code] };
-        },
+        get currentLanguageMeta() { return core.metaByCode.get(core.state.resolve()); },
         get currentDir() {
-            return core.languages[core.state.resolve()]?.dir ?? "ltr";
+            return core.metaByCode.get(core.state.resolve())?.dir ?? "ltr";
         },
         get currentIntlLocale() {
             const code = core.state.resolve();
-            return core.languages[code]?.intlLocale ?? code;
+            return core.metaByCode.get(code)?.intlLocale ?? code;
         },
         onLanguageChange(listener) { return core.state.subscribe(listener); },
         applyToDocument() {
@@ -149,14 +179,12 @@ const buildInstance = (core, layer) => {
                 return;
             const code = core.state.resolve();
             doc.documentElement.lang = code;
-            doc.documentElement.dir = core.languages[code]?.dir ?? "ltr";
+            doc.documentElement.dir = core.metaByCode.get(code)?.dir ?? "ltr";
         },
         isLanguageCode: core.isCode,
         languages: core.languages,
         languageList: core.languageList,
-        get languageMetaList() {
-            return core.languageList.map((code) => ({ code, ...core.languages[code] }));
-        },
+        languageMetaList: core.metaList,
         defaultLanguage: core.defaultLanguage,
         enforced: core.enforced,
     };
@@ -192,9 +220,12 @@ export const createLambderI18n = (config) => {
             defaultLanguage: config.defaultLanguage,
         })
         : null;
+    const metaByCode = new Map(languageList.map((code) => [code, { code, ...config.languages[code] }]));
     const core = {
         languages: config.languages,
         languageList,
+        metaByCode,
+        metaList: [...metaByCode.values()],
         defaultLanguage: config.defaultLanguage,
         enforced: config.enforced,
         state: new LanguageState(isCode, config.defaultLanguage, customDetect),
