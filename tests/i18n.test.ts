@@ -236,6 +236,34 @@ describe("LambderI18n: config validation", () => {
         expect(i18n.defaultLanguage).toBe("en");
         expect(i18n.languages.ar.dir).toBe("rtl");
     });
+
+    it("languageMetaList injects codes in declaration order", () => {
+        const i18n = makeI18n();
+        expect(i18n.languageMetaList.map((m) => m.code)).toEqual(["en", "tr", "ar"]);
+        expect(i18n.languageMetaList[1]).toMatchObject({ code: "tr", name: "Türkçe" });
+    });
+
+    it("currentLanguageMeta / currentDir / currentIntlLocale follow the active language", () => {
+        const i18n = makeI18n();
+        i18n.setLanguage("ar");
+        expect(i18n.currentLanguageMeta).toMatchObject({ code: "ar", dir: "rtl" });
+        expect(i18n.currentDir).toBe("rtl");
+        expect(i18n.currentIntlLocale).toBe("ar");
+        i18n.setLanguage("en");
+        expect(i18n.currentDir).toBe("ltr");
+    });
+
+    it("currentIntlLocale falls back to the code when meta omits it", () => {
+        const i18n = createLambderI18n({
+            languages: { "zh-cn": { name: "简体中文", intlLocale: "zh-CN" }, en: { name: "English" } },
+            defaultLanguage: "en",
+            enforced: ["en"],
+            base: { "zh-cn": { a: "A" }, en: { a: "A" } },
+        });
+        expect(i18n.currentIntlLocale).toBe("en"); // no intlLocale on en → code
+        i18n.setLanguage("zh-cn");
+        expect(i18n.currentIntlLocale).toBe("zh-CN");
+    });
 });
 
 describe("LambderI18n: applyToDocument", () => {
