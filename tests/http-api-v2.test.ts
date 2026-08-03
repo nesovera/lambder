@@ -6,7 +6,7 @@
 
 import { describe, it, expect } from 'vitest';
 import Lambder from '../src/Lambder.js';
-import { decodeBody, createMockContext } from './helpers.js';
+import { decodeBody, gunzipBody, createMockContext } from './helpers.js';
 import type { APIGatewayProxyEventV2 } from 'aws-lambda';
 
 const createMockEventV2 = (
@@ -115,5 +115,81 @@ describe('HTTP API v2 events', () => {
         const result = await lambder.render(event, createMockContext());
         const body = JSON.parse(decodeBody(result));
         expect(body.payload).toEqual({ hello: 'v2' });
+    });
+
+    it('applies ETag + If-None-Match 304 on v2 GETs', async () => {
+        const lambder = new Lambder({ publicPath: './public' })
+            .addRoute('/page', (ctx, res) => res.html('<p>stable content</p>'));
+
+        const first = await lambder.render(createMockEventV2('/page'), createMockContext());
+        const etag = (first.headers as Record<string, string>).ETag;
+        expect(etag).toBeTruthy();
+
+        const second = await lambder.render(
+            createMockEventV2('/page', { headers: { 'host': 'localhost', 'if-none-match': etag } }),
+            createMockContext(),
+        );
+        expect(second.statusCode).toBe(304);
+        expect(second.body).toBe('');
+    });
+
+    it('gzips large compressible v2 responses when accepted', async () => {
+        const bigHtml = `<p>${'lambder '.repeat(500)}</p>`;
+        const lambder = new Lambder({ publicPath: './public' })
+            .addRoute('/big', (ctx, res) => res.html(bigHtml));
+
+        const result = await lambder.render(
+            createMockEventV2('/big', { headers: { 'host': 'localhost', 'accept-encoding': 'gzip, br' } }),
+            createMockContext(),
+        );
+        expect((result.headers as Record<string, string>)['Content-Encoding']).toBe('gzip');
+        expect(result.isBase64Encoded).toBe(true);
+        expect(gunzipBody(result as any)).toBe(bigHtml);
+    });
+
+    it('answers CORS preflight on v2 OPTIONS requests', async () => {
+        const lambder = new Lambder({ publicPath: './public' })
+            .enableCors(true)
+            .addRoute('/x', (ctx, res) => res.html('x'));
+
+        const event = createMockEventV2('/x', { headers: { 'host': 'localhost', 'origin': 'https://app.example.com' } });
+        event.requestContext.http.method = 'OPTIONS';
+
+        const result = await lambder.render(event, createMockContext());
+        expect(result.statusCode).toBe(204);
+        expect((result.headers as Record<string, string>)['Access-Control-Allow-Origin']).toBeTruthy();
+    });
+
+    it('preserves the raw query string on trailing-slash redirects (v2)', async () => {
+        const lambder = new Lambder({ publicPath: './tests/fixtures/public' })
+            .servePublicFiles()
+            .serveIndexHtml(undefined, { redirectTrailingSlash: true });
+
+        const result = await lambder.render(
+            createMockEventV2('/about/', { rawQueryString: 'a=1&a=2&b=x%20y' }),
+            createMockContext(),
+        );
+        expect(result.statusCode).toBe(301);
+        expect((result.headers as Record<string, string>).Location).toBe('/about?a=1&a=2&b=x%20y');
+    });
+
+    it('emits the v2 shape from the global error handler and the last-resort 500', async () => {
+        const lambder = new Lambder({ publicPath: './public' })
+            .addRoute('/boom', () => { throw new Error('boom'); })
+            .setGlobalErrorHandler((err, ctx, res) => res.html('handled: ' + err.message, { statusCode: 500 }));
+
+        const handled = await lambder.render(createMockEventV2('/boom'), createMockContext());
+        expect(handled.statusCode).toBe(500);
+        expect(handled).toHaveProperty('headers');
+        expect(handled).not.toHaveProperty('multiValueHeaders');
+        expect(decodeBody(handled as any)).toBe('handled: boom');
+
+        // No global error handler: the hardcoded 500 must still be v2-shaped.
+        const bare = new Lambder({ publicPath: './public' })
+            .addRoute('/boom', () => { throw new Error('boom'); });
+        const fallback = await bare.render(createMockEventV2('/boom'), createMockContext());
+        expect(fallback.statusCode).toBe(500);
+        expect(fallback).toHaveProperty('headers');
+        expect(fallback).not.toHaveProperty('multiValueHeaders');
     });
 });

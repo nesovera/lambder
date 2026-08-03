@@ -646,6 +646,8 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
             return await finalizeResponse(ctx, response, this.finalizeOptions, ctx._otherInternal.eventFormat);
         }catch(err){
             const wrappedError = err instanceof Error ? err : new Error("Error: " + String(err));
+            // ctx may be null (createContext failed): derive the format from the raw event.
+            const eventFormat = ctx?._otherInternal.eventFormat ?? (isV2HttpEvent(event) ? "v2" : "v1");
             try {
                 if(this.globalErrorHandler){
                     const responseBuilder = this.getResponseBuilder(ctx ?? undefined);
@@ -655,14 +657,16 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
                         responseBuilder,
                         ctx?._otherInternal.logToApiResponseAccumulator
                     );
-                    return await finalizeResponse(ctx, errorResponse, this.finalizeOptions, ctx?._otherInternal.eventFormat ?? "v1");
+                    return await finalizeResponse(ctx, errorResponse, this.finalizeOptions, eventFormat);
                 }
             } catch(handlerErr){
                 if(handlerErr instanceof LambderResponse){
-                    try { return await finalizeResponse(ctx, handlerErr, this.finalizeOptions, ctx?._otherInternal.eventFormat ?? "v1"); } catch { /* fall through */ }
+                    try { return await finalizeResponse(ctx, handlerErr, this.finalizeOptions, eventFormat); } catch { /* fall through */ }
                 }
             }
-            return { statusCode: 500, multiValueHeaders: {}, body: "Internal Server Error.", isBase64Encoded: false };
+            return eventFormat === "v2"
+                ? { statusCode: 500, headers: {}, body: "Internal Server Error.", isBase64Encoded: false }
+                : { statusCode: 500, multiValueHeaders: {}, body: "Internal Server Error.", isBase64Encoded: false };
         }
     }
 
