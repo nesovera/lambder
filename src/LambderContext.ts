@@ -68,6 +68,11 @@ export const createContext = (
     if(isV2HttpEvent(event)){
         host = headers.host || event.requestContext.domainName || "";
         path = event.rawPath;
+        // Named stages (non-$default) are included in rawPath; v1 strips them.
+        const stage = event.requestContext.stage;
+        if(stage && stage !== "$default" && (path === `/${stage}` || path.startsWith(`/${stage}/`))){
+            path = path.slice(stage.length + 1) || "/";
+        }
         method = event.requestContext.http.method;
         get = {};
         for(const [key, value] of new URLSearchParams(event.rawQueryString ?? "").entries()){
