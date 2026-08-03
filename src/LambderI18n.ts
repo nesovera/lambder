@@ -115,6 +115,12 @@ export interface LambderI18nInstance<
     readonly currentLanguageMeta: TLanguages[keyof TLanguages];
     /** Subscribe to language changes. Returns an unsubscribe function. */
     onLanguageChange(listener: (code: keyof TLanguages & string) => void): () => void;
+    /**
+     * Apply the active language to `<html lang>` and `<html dir>` (RTL support).
+     * No-op outside a browser. Re-apply on changes with
+     * `i18n.onLanguageChange(() => i18n.applyToDocument())`.
+     */
+    applyToDocument(): void;
 
     /** Type guard: is this string a supported language code? */
     isLanguageCode(value: string): value is keyof TLanguages & string;
@@ -262,6 +268,13 @@ const buildInstance = (core: InternalCore, layer: DictLayer): LambderI18nInstanc
         get currentLanguage() { return core.state.resolve(); },
         get currentLanguageMeta() { return core.languages[core.state.resolve()]!; },
         onLanguageChange(listener: (code: string) => void) { return core.state.subscribe(listener); },
+        applyToDocument() {
+            const doc = (globalThis as { document?: { documentElement: { lang: string; dir: string } } }).document;
+            if (!doc) return;
+            const code = core.state.resolve();
+            doc.documentElement.lang = code;
+            doc.documentElement.dir = (core.languages[code]?.dir as string) ?? "ltr";
+        },
         isLanguageCode: core.isCode as any,
         languages: core.languages,
         languageList: core.languageList,

@@ -93,6 +93,12 @@ export interface LambderI18nInstance<TLanguages extends Record<string, LambderLa
     readonly currentLanguageMeta: TLanguages[keyof TLanguages];
     /** Subscribe to language changes. Returns an unsubscribe function. */
     onLanguageChange(listener: (code: keyof TLanguages & string) => void): () => void;
+    /**
+     * Apply the active language to `<html lang>` and `<html dir>` (RTL support).
+     * No-op outside a browser. Re-apply on changes with
+     * `i18n.onLanguageChange(() => i18n.applyToDocument())`.
+     */
+    applyToDocument(): void;
     /** Type guard: is this string a supported language code? */
     isLanguageCode(value: string): value is keyof TLanguages & string;
     readonly languages: TLanguages;
