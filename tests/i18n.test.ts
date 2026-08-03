@@ -228,6 +228,24 @@ describe("LambderI18n: config validation", () => {
         })).toThrow(/base dictionary is missing language "tr"/);
     });
 
+    it("throws when base contains an unsupported language", () => {
+        expect(() => createLambderI18n({
+            languages: { en: { name: "English" } },
+            defaultLanguage: "en",
+            enforced: ["en"],
+            base: { en: { a: "A" }, xx: { a: "A" } } as any,
+        })).toThrow(/unsupported language "xx"/);
+    });
+
+    it("extensions copy the dictionary (no aliasing of the caller's object)", () => {
+        const i18n = makeI18n();
+        const source = { en: { k: "V" } };
+        const child = i18n.extendPartial(source as any);
+        child.registerDictionary("en", { other: "O" });
+        expect(source.en).toEqual({ k: "V" });
+        expect(child.forLanguage("en")("other" as never)).toBe("O");
+    });
+
     it("exposes registry helpers", () => {
         const i18n = makeI18n();
         expect(i18n.languageList).toEqual(["en", "tr", "ar"]);

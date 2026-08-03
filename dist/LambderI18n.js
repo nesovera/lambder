@@ -117,11 +117,11 @@ const buildInstance = (core, layer) => {
         },
         extend(dict) {
             validateExtension(dict, core.languageList, "extend() dictionary");
-            return buildInstance(core, { dicts: dict, parent: layer });
+            return buildInstance(core, { dicts: { ...dict }, parent: layer });
         },
         extendPartial(dict) {
             validateExtension(dict, core.enforced, "extendPartial() dictionary");
-            return buildInstance(core, { dicts: dict, parent: layer });
+            return buildInstance(core, { dicts: { ...dict }, parent: layer });
         },
         registerDictionary(code, dict) {
             if (!core.isCode(code))
@@ -178,6 +178,11 @@ export const createLambderI18n = (config) => {
     for (const lang of languageList) {
         if (!config.base[lang]) {
             throw new Error(`LambderI18n: base dictionary is missing language "${lang}".`);
+        }
+    }
+    for (const lang of Object.keys(config.base)) {
+        if (!isCode(lang)) {
+            throw new Error(`LambderI18n: base dictionary contains unsupported language "${lang}".`);
         }
     }
     const customDetect = config.detectLanguage
