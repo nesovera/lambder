@@ -189,21 +189,51 @@ describe('serveIndexHtml', () => {
         expect(result.statusCode).toBe(405);
     });
 
-    it('gates on file-looking paths by default (missing assets 404, no soft-404 shell)', async () => {
+    it('does not guess at files: a missing dotted path reaches the shell', async () => {
         const lambder = new Lambder({ publicPath: spaRoot })
             .servePublicFiles()
             .serveIndexHtml();
 
         const result = await lambder.render(createMockEvent('/missing-image.png'), createMockContext());
+        expect(result.statusCode).toBe(200);
+        expect(decodeBody(result)).toContain('<div id="app">');
+    });
+
+    it('skipFilePaths: true opts back into 404s for dotted paths', async () => {
+        const lambder = new Lambder({ publicPath: spaRoot })
+            .servePublicFiles()
+            .serveIndexHtml(undefined, { skipFilePaths: true });
+
+        const result = await lambder.render(createMockEvent('/missing-image.png'), createMockContext());
         expect(result.statusCode).toBe(404);
     });
 
-    it('skipFilePaths: false lets dotted paths reach the handler', async () => {
+    it('dotted app routes reach the shell', async () => {
         const lambder = new Lambder({ publicPath: spaRoot })
-            .serveIndexHtml((ctx, res) => res.html(`page ${ctx.path}`), { skipFilePaths: false });
+            .servePublicFiles()
+            .serveIndexHtml((ctx, res) => res.html(`page ${ctx.path}`));
 
-        const result = await lambder.render(createMockEvent('/user/john.doe'), createMockContext());
-        expect(decodeBody(result)).toBe('page /user/john.doe');
+        const paths = [
+            '/birth-report/eyJhbGci.eyJ2IjoxfQ.sIgNaTuRe', // JWT
+            '/planetarium/41.0082,28.9784', // coordinates
+            '/whois/example.com', // domain name
+            '/docs/v1.2.3', // version number
+            '/us/missouri/st.-louis', // place slug
+        ];
+        for (const path of paths) {
+            const result = await lambder.render(createMockEvent(path), createMockContext());
+            expect(decodeBody(result)).toBe(`page ${path}`);
+        }
+    });
+
+    it('real files still win over the shell', async () => {
+        const lambder = new Lambder({ publicPath: spaRoot })
+            .servePublicFiles()
+            .serveIndexHtml((ctx, res) => res.html(`page ${ctx.path}`));
+
+        const result = await lambder.render(createMockEvent('/style.css'), createMockContext());
+        expect(result.multiValueHeaders?.['Content-Type']?.[0]).toBe('text/css');
+        expect(decodeBody(result)).toContain('color: red');
     });
 
     it('custom handler has full control (templating, per-brand shells)', async () => {
