@@ -55,8 +55,11 @@ export type LambderIndexHtmlOptions = {
     /** Methods that reach the index handler. Default: ["GET", "HEAD"]. */
     methods?: string[];
     /**
-     * Skip paths whose last segment has an extension (missing assets by this
-     * point; a 200 HTML shell would be a soft-404). Default: true.
+     * Skip paths whose last segment contains a dot, treating them as missing
+     * assets rather than app routes. Default: false — real files have already
+     * been served by servePublicFiles at this point, and plenty of app routes
+     * carry dots (JWTs, coordinates, domain names, version numbers). Turn it
+     * on to get 404s instead of a 200 shell for missing-asset requests.
      */
     skipFilePaths?: boolean;
     /** 301-redirect trailing-slash paths to the canonical no-slash URL. Default: false. */
@@ -254,11 +257,12 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
 
     /**
      * Serve the app shell for page requests that nothing else handled. Runs
-     * after servePublicFiles in the fallback chain, gated by a built-in
-     * filter: only configured methods (default GET/HEAD) and, by default, only
-     * paths that do not look like files. Gated-out requests fall through to
-     * setRouteFallbackHandler. Without a handler, publicPath/index.html is
-     * served via res.templateFile (markers optional) with no-cache.
+     * after servePublicFiles in the fallback chain, so real files are already
+     * gone; everything left is an app route (option `skipFilePaths` opts back
+     * into 404ing dotted paths). Only configured methods reach it, default
+     * GET/HEAD. Gated-out requests fall through to setRouteFallbackHandler.
+     * Without a handler, publicPath/index.html is served via res.templateFile
+     * (markers optional) with no-cache.
      */
     serveIndexHtml(handler?: FallbackHandlerFunction, options: LambderIndexHtmlOptions = {}): this {
         this.indexHtmlConfig = { handler: handler ?? null, options };
@@ -273,7 +277,7 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
         const methods = (options.methods ?? ["GET", "HEAD"]).map((m) => m.toUpperCase());
         if(!methods.includes(ctx.method.toUpperCase())) return null;
 
-        if((options.skipFilePaths ?? true) && (ctx.path.split("/").pop() ?? "").includes(".")) return null;
+        if((options.skipFilePaths ?? false) && (ctx.path.split("/").pop() ?? "").includes(".")) return null;
 
         if(options.redirectTrailingSlash && ctx.path.length > 1 && ctx.path.endsWith("/")){
             const target = ctx.path.replace(/\/+$/, "") || "/";
