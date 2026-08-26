@@ -48,6 +48,7 @@ export default class LambderCaller<TContract extends ApiContractShape = any> {
 
     private sessionTokenCookieKey = "LMDRSESSIONTKID";
     private sessionCsrfCookieKey = "LMDRSESSIONCSTK";
+    private sessionCookieDomain?: string | ((hostname: string) => string | undefined | null);
 
     constructor(
         { 
@@ -58,6 +59,7 @@ export default class LambderCaller<TContract extends ApiContractShape = any> {
             notAuthorizedHandler, errorHandler,
             fetchStartedHandler, fetchEndedHandler,
             apiInputValidationErrorHandler,
+            sessionCookieDomain,
         }: 
         { 
             apiPath: string,
@@ -72,11 +74,14 @@ export default class LambderCaller<TContract extends ApiContractShape = any> {
             fetchStartedHandler?: FetchStartEventHandler, 
             fetchEndedHandler?: FetchEndEventHandler,
             apiInputValidationErrorHandler?: ValidationErrorHandler,
+            /** Must mirror the server's session cookie Domain, otherwise expired cookies cannot be cleared. */
+            sessionCookieDomain?: string | ((hostname: string) => string | undefined | null),
         }
     ){
         this.apiPath = apiPath ?? "/api";
         this.apiVersion = apiVersion;
         this.isCorsEnabled = isCorsEnabled;
+        this.sessionCookieDomain = sessionCookieDomain;
 
         this.versionExpiredHandler = versionExpiredHandler;
         this.sessionExpiredHandler = sessionExpiredHandler;
@@ -95,6 +100,17 @@ export default class LambderCaller<TContract extends ApiContractShape = any> {
     setSessionCookieKey(sessionTokenCookieKey: string, sessionCsrfCookieKey: string){
         this.sessionTokenCookieKey = sessionTokenCookieKey;
         this.sessionCsrfCookieKey = sessionCsrfCookieKey;
+    }
+
+    private clearSessionCookies(){
+        const domainOption = this.sessionCookieDomain;
+        const hostname = typeof window !== "undefined" ? window.location.hostname : "";
+        const resolvedDomain = typeof domainOption === "function" ? domainOption(hostname) : domainOption;
+        for(const key of [this.sessionTokenCookieKey, this.sessionCsrfCookieKey]){
+            // Host-only and domain-scoped cookies are distinct entries; clear both.
+            Cookies.remove(key);
+            if(resolvedDomain) Cookies.remove(key, { domain: resolvedDomain, path: "/" });
+        }
     }
     
     async apiRaw<
@@ -176,8 +192,7 @@ export default class LambderCaller<TContract extends ApiContractShape = any> {
                 return null;
             }
             if(data && data.sessionExpired){ 
-                Cookies.set(this.sessionTokenCookieKey, '', { expires: -1 });
-                Cookies.set(this.sessionCsrfCookieKey, '', { expires: -1 });
+                this.clearSessionCookies();
                 if(this.sessionExpiredHandler){
                     await this.sessionExpiredHandler();
                 }else if(this.errorHandler){

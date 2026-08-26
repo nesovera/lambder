@@ -3,8 +3,12 @@ import type LambderSessionManager from "./LambderSessionManager.js";
 import type { LambderSessionContext } from "./LambderSessionManager.js";
 
 export type LambderSessionCookieOptions = {
-    /** e.g. ".example.com" to share sessions across subdomains. */
-    domain?: string;
+    /**
+     * e.g. ".example.com" to share sessions across subdomains. Pass a function to
+     * derive it from the request hostname when one deployment serves several
+     * apex domains; return undefined for a host-only cookie.
+     */
+    domain?: string | ((hostname: string) => string | undefined | null);
     path?: string;
     sameSite?: "Strict" | "Lax" | "None";
     secure?: boolean;
@@ -41,11 +45,14 @@ export default class LambderSessionController<TSessionData = any> {
 
     private buildCookie(key: string, value: string, expiresAtMs: number, httpOnly: boolean): string {
         const { domain, path = "/", sameSite = "Lax", secure = true } = this.cookieOptions;
+        // Host header can carry a port; browsers match the Domain attribute on hostname only.
+        const hostname = (this.ctx.host || "").split(":")[0];
+        const resolvedDomain = typeof domain === "function" ? domain(hostname) : domain;
         const parts = [
             `${key}=${value}`,
             `Expires=${new Date(expiresAtMs).toUTCString()}`,
             `Path=${path}`,
-            ...(domain ? [`Domain=${domain}`] : []),
+            ...(resolvedDomain ? [`Domain=${resolvedDomain}`] : []),
             ...(httpOnly ? ["HttpOnly"] : []),
             `SameSite=${sameSite}`,
             ...(secure ? ["Secure"] : []),
