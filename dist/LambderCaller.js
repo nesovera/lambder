@@ -16,10 +16,12 @@ export default class LambderCaller {
     fetchEndedHandler;
     sessionTokenCookieKey = "LMDRSESSIONTKID";
     sessionCsrfCookieKey = "LMDRSESSIONCSTK";
-    constructor({ apiPath, apiVersion, isCorsEnabled = false, versionExpiredHandler, sessionExpiredHandler, messageHandler, errorMessageHandler, notAuthorizedHandler, errorHandler, fetchStartedHandler, fetchEndedHandler, apiInputValidationErrorHandler, }) {
+    sessionCookieDomain;
+    constructor({ apiPath, apiVersion, isCorsEnabled = false, versionExpiredHandler, sessionExpiredHandler, messageHandler, errorMessageHandler, notAuthorizedHandler, errorHandler, fetchStartedHandler, fetchEndedHandler, apiInputValidationErrorHandler, sessionCookieDomain, }) {
         this.apiPath = apiPath ?? "/api";
         this.apiVersion = apiVersion;
         this.isCorsEnabled = isCorsEnabled;
+        this.sessionCookieDomain = sessionCookieDomain;
         this.versionExpiredHandler = versionExpiredHandler;
         this.sessionExpiredHandler = sessionExpiredHandler;
         this.messageHandler = messageHandler;
@@ -34,6 +36,17 @@ export default class LambderCaller {
     setSessionCookieKey(sessionTokenCookieKey, sessionCsrfCookieKey) {
         this.sessionTokenCookieKey = sessionTokenCookieKey;
         this.sessionCsrfCookieKey = sessionCsrfCookieKey;
+    }
+    clearSessionCookies() {
+        const domainOption = this.sessionCookieDomain;
+        const hostname = typeof window !== "undefined" ? window.location.hostname : "";
+        const resolvedDomain = typeof domainOption === "function" ? domainOption(hostname) : domainOption;
+        for (const key of [this.sessionTokenCookieKey, this.sessionCsrfCookieKey]) {
+            // Host-only and domain-scoped cookies are distinct entries; clear both.
+            Cookies.remove(key);
+            if (resolvedDomain)
+                Cookies.remove(key, { domain: resolvedDomain, path: "/" });
+        }
     }
     async apiRaw(apiName, payload, options) {
         const headers = options?.headers;
@@ -102,8 +115,7 @@ export default class LambderCaller {
                 return null;
             }
             if (data && data.sessionExpired) {
-                Cookies.set(this.sessionTokenCookieKey, '', { expires: -1 });
-                Cookies.set(this.sessionCsrfCookieKey, '', { expires: -1 });
+                this.clearSessionCookies();
                 if (this.sessionExpiredHandler) {
                     await this.sessionExpiredHandler();
                 }
