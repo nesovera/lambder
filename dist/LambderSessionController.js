@@ -14,11 +14,14 @@ export default class LambderSessionController {
     ;
     buildCookie(key, value, expiresAtMs, httpOnly) {
         const { domain, path = "/", sameSite = "Lax", secure = true } = this.cookieOptions;
+        // Host header can carry a port; browsers match the Domain attribute on hostname only.
+        const hostname = (this.ctx.host || "").split(":")[0];
+        const resolvedDomain = typeof domain === "function" ? domain(hostname) : domain;
         const parts = [
             `${key}=${value}`,
             `Expires=${new Date(expiresAtMs).toUTCString()}`,
             `Path=${path}`,
-            ...(domain ? [`Domain=${domain}`] : []),
+            ...(resolvedDomain ? [`Domain=${resolvedDomain}`] : []),
             ...(httpOnly ? ["HttpOnly"] : []),
             `SameSite=${sameSite}`,
             ...(secure ? ["Secure"] : []),

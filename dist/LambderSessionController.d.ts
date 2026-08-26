@@ -2,8 +2,12 @@ import { LambderRenderContext, LambderSessionRenderContext } from "./LambderCont
 import type LambderSessionManager from "./LambderSessionManager.js";
 import type { LambderSessionContext } from "./LambderSessionManager.js";
 export type LambderSessionCookieOptions = {
-    /** e.g. ".example.com" to share sessions across subdomains. */
-    domain?: string;
+    /**
+     * e.g. ".example.com" to share sessions across subdomains. Pass a function to
+     * derive it from the request hostname when one deployment serves several
+     * apex domains; return undefined for a host-only cookie.
+     */
+    domain?: string | ((hostname: string) => string | undefined | null);
     path?: string;
     sameSite?: "Strict" | "Lax" | "None";
     secure?: boolean;

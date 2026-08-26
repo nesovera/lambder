@@ -198,7 +198,7 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
             enableSlidingExpiration?: boolean;
             /** Min seconds between sliding-expiration writes. Default: max(60, 5% of TTL). */
             slidingWriteIntervalSeconds?: number;
-            /** Session cookie attributes, e.g. { domain: ".example.com" } for cross-subdomain sessions. */
+            /** Session cookie attributes, e.g. { domain: ".example.com" } for cross-subdomain sessions. `domain` may be a (hostname) => string function for multi-domain deployments. */
             cookie?: LambderSessionCookieOptions;
             partitionKey?: string;
             sortKey?: string;

@@ -121,11 +121,12 @@ export default class Lambder {
     }
     /**
      * Serve the app shell for page requests that nothing else handled. Runs
-     * after servePublicFiles in the fallback chain, gated by a built-in
-     * filter: only configured methods (default GET/HEAD) and, by default, only
-     * paths that do not look like files. Gated-out requests fall through to
-     * setRouteFallbackHandler. Without a handler, publicPath/index.html is
-     * served via res.templateFile (markers optional) with no-cache.
+     * after servePublicFiles in the fallback chain, so real files are already
+     * gone; everything left is an app route (option `skipFilePaths` opts back
+     * into 404ing dotted paths). Only configured methods reach it, default
+     * GET/HEAD. Gated-out requests fall through to setRouteFallbackHandler.
+     * Without a handler, publicPath/index.html is served via res.templateFile
+     * (markers optional) with no-cache.
      */
     serveIndexHtml(handler, options = {}) {
         this.indexHtmlConfig = { handler: handler ?? null, options };
@@ -139,7 +140,7 @@ export default class Lambder {
         const methods = (options.methods ?? ["GET", "HEAD"]).map((m) => m.toUpperCase());
         if (!methods.includes(ctx.method.toUpperCase()))
             return null;
-        if ((options.skipFilePaths ?? true) && (ctx.path.split("/").pop() ?? "").includes("."))
+        if ((options.skipFilePaths ?? false) && (ctx.path.split("/").pop() ?? "").includes("."))
             return null;
         if (options.redirectTrailingSlash && ctx.path.length > 1 && ctx.path.endsWith("/")) {
             const target = ctx.path.replace(/\/+$/, "") || "/";

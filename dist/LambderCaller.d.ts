@@ -41,7 +41,8 @@ export default class LambderCaller<TContract extends ApiContractShape = any> {
     private fetchEndedHandler?;
     private sessionTokenCookieKey;
     private sessionCsrfCookieKey;
-    constructor({ apiPath, apiVersion, isCorsEnabled, versionExpiredHandler, sessionExpiredHandler, messageHandler, errorMessageHandler, notAuthorizedHandler, errorHandler, fetchStartedHandler, fetchEndedHandler, apiInputValidationErrorHandler, }: {
+    private sessionCookieDomain?;
+    constructor({ apiPath, apiVersion, isCorsEnabled, versionExpiredHandler, sessionExpiredHandler, messageHandler, errorMessageHandler, notAuthorizedHandler, errorHandler, fetchStartedHandler, fetchEndedHandler, apiInputValidationErrorHandler, sessionCookieDomain, }: {
         apiPath: string;
         apiVersion?: string;
         isCorsEnabled: boolean;
@@ -54,8 +55,11 @@ export default class LambderCaller<TContract extends ApiContractShape = any> {
         fetchStartedHandler?: FetchStartEventHandler;
         fetchEndedHandler?: FetchEndEventHandler;
         apiInputValidationErrorHandler?: ValidationErrorHandler;
+        /** Must mirror the server's session cookie Domain, otherwise expired cookies cannot be cleared. */
+        sessionCookieDomain?: string | ((hostname: string) => string | undefined | null);
     });
     setSessionCookieKey(sessionTokenCookieKey: string, sessionCsrfCookieKey: string): void;
+    private clearSessionCookies;
     apiRaw<TApiName extends keyof TContract & string = string, TOutput = TApiName extends keyof TContract ? TContract[TApiName]['output'] : any>(apiName: TApiName, payload?: TApiName extends keyof TContract ? TContract[TApiName]['input'] : any, options?: {
         headers?: Record<string, any>;
         versionExpiredHandler?: VoidFunction;
