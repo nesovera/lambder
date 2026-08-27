@@ -63,6 +63,15 @@ export type {
     LambderDdbCacheGetOrSetOptions,
 } from "./LambderDdbCache.js";
 
+// DynamoDB-backed fixed-window rate limiter (standalone, server-only)
+export { LambderDdbRateLimiter } from "./LambderDdbRateLimiter.js";
+export type {
+    LambderDdbRateLimiterOptions,
+    LambderRateLimitPolicy,
+    LambderRateLimitExceededMap,
+    LambderRateLimitResult,
+} from "./LambderDdbRateLimiter.js";
+
 // Typed translations (standalone, isomorphic)
 export { createLambderI18n } from "./LambderI18n.js";
 export type {

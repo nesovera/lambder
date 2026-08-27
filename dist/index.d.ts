@@ -19,6 +19,8 @@ export type { LambderSessionCookieOptions } from "./LambderSessionController.js"
 export type { LambderSessionContext } from "./LambderSessionManager.js";
 export { LambderDdbCache } from "./LambderDdbCache.js";
 export type { LambderDdbCacheOptions, LambderDdbCacheSetOptions, LambderDdbCacheGetOrSetOptions, } from "./LambderDdbCache.js";
+export { LambderDdbRateLimiter } from "./LambderDdbRateLimiter.js";
+export type { LambderDdbRateLimiterOptions, LambderRateLimitPolicy, LambderRateLimitExceededMap, LambderRateLimitResult, } from "./LambderDdbRateLimiter.js";
 export { createLambderI18n } from "./LambderI18n.js";
 export type { LambderLanguageMeta, LambderI18nConfig, LambderI18nInstance, LambderI18nTranslator, LambderI18nExtractParams, LambderI18nCodes, LambderI18nKeys, LambderI18nTranslatorFor, } from "./LambderI18n.js";
 export { type ApiContractShape, } from "./LambderApiContract.js";
