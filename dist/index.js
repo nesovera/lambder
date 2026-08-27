@@ -16,6 +16,8 @@ export { LambderTemplatingEngine } from "./LambderTemplatingEngine.js";
 export { LambderPublicFilesHandler } from "./LambderPublicFiles.js";
 // DynamoDB-backed compressed cache (standalone, server-only)
 export { LambderDdbCache } from "./LambderDdbCache.js";
+// DynamoDB-backed fixed-window rate limiter (standalone, server-only)
+export { LambderDdbRateLimiter } from "./LambderDdbRateLimiter.js";
 // Typed translations (standalone, isomorphic)
 export { createLambderI18n } from "./LambderI18n.js";
 export { createContext, isV2HttpEvent } from "./LambderContext.js";
