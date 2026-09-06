@@ -406,7 +406,7 @@ describe("LambderDdbCache", () => {
 
     it("takes over an expired fill lease from a crashed process", async () => {
         const client = new MemoryDynamoClient();
-        const pk = `unit#${createHash("sha256").update("expired-lease").digest("hex")}`;
+        const pk = `CACHE#unit#${createHash("sha256").update("expired-lease").digest("hex")}`;
         client.items.set(`${pk}|lock`, {
             pk: { S: pk },
             sk: { S: "lock" },
@@ -425,7 +425,7 @@ describe("LambderDdbCache", () => {
 
     it("waits for a concurrent process's fill instead of running its own loader", async () => {
         const client = new MemoryDynamoClient();
-        const pk = `unit#${createHash("sha256").update("contended").digest("hex")}`;
+        const pk = `CACHE#unit#${createHash("sha256").update("contended").digest("hex")}`;
         client.items.set(`${pk}|lock`, {
             pk: { S: pk },
             sk: { S: "lock" },
@@ -448,7 +448,7 @@ describe("LambderDdbCache", () => {
     it("fails open with the loader when a fill lease never frees", async () => {
         const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
         const client = new MemoryDynamoClient();
-        const pk = `unit#${createHash("sha256").update("locked-out").digest("hex")}`;
+        const pk = `CACHE#unit#${createHash("sha256").update("locked-out").digest("hex")}`;
         client.items.set(`${pk}|lock`, {
             pk: { S: pk },
             sk: { S: "lock" },

@@ -2,6 +2,11 @@ import Lambder from './Lambder.js';
 
 export default Lambder;
 export { default as LambderCaller } from "./LambderCaller.js";
+export type { LambderApiOutcome, LambderApiFailureReason, LambderCallOptions } from "./LambderCaller.js";
+
+// Typed API refusals (isomorphic: shared code may throw them from anywhere)
+export { LambderApiError, isLambderApiError } from "./LambderApiError.js";
+export type { LambderApiErrorOptions } from "./LambderApiError.js";
 export { default as LambderResponseBuilder } from "./LambderResponseBuilder.js";
 export { default as LambderResolver } from "./LambderResolver.js";
 export { default as LambderSessionManager } from "./LambderSessionManager.js";
@@ -72,6 +77,24 @@ export type {
     LambderRateLimitExceededMap,
     LambderRateLimitResult,
 } from "./LambderDdbRateLimiter.js";
+
+// DynamoDB-backed idempotency records (standalone, server-only)
+export { LambderDdbIdempotency } from "./LambderDdbIdempotency.js";
+export type {
+    LambderDdbIdempotencyOptions,
+    LambderIdempotencyBeginResult,
+} from "./LambderDdbIdempotency.js";
+
+// Declarative per-API policies (rate limits, guards, idempotency)
+export type {
+    LambderApiGuardFunction,
+    LambderRateLimitPer,
+    LambderApiRateLimitPolicyConfig,
+    LambderApiRateLimitsConfig,
+    LambderApiIdempotencyConfig,
+    LambderApiRegistrationOptions,
+    LambderPublicRateLimitNames,
+} from "./LambderApiPolicies.js";
 
 // Typed translations (standalone, isomorphic)
 export { createLambderI18n } from "./LambderI18n.js";

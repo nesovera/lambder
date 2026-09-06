@@ -6,12 +6,17 @@ import { applyCorsHeaders } from "./LambderCors.js";
 import LambderSessionManager from "./LambderSessionManager.js";
 import LambderSessionController from "./LambderSessionController.js";
 import { LambderPublicFilesHandler } from "./LambderPublicFiles.js";
+import { isLambderApiError } from "./LambderApiError.js";
+import { LambderApiPolicyEngine, } from "./LambderApiPolicies.js";
 import { createContext, isV2HttpEvent } from "./LambderContext.js";
 /**
  * Main Lambder class for building type-safe serverless APIs
  *
  * @typeParam TSessionData - Type of session data stored in DynamoDB
  * @typeParam _TContract - @internal Accumulates API contract during chaining (do not pass manually)
+ * @typeParam _TRateLimitPolicies - @internal Accumulated by enableApiRateLimits (do not pass manually)
+ * @typeParam _TGuardName - @internal Accumulated by defineApiGuards (do not pass manually)
+ * @typeParam _TIdempotencyEnabled - @internal Flipped by enableApiIdempotency (do not pass manually)
  *
  * @example
  * ```typescript
@@ -38,6 +43,8 @@ export default class Lambder {
      */
     ApiContract;
     actionList = [];
+    apiPolicyEngine = null;
+    registeredApiNames = new Set();
     hookList = { "beforeRender": [], "afterRender": [], "fallback": [] };
     createdHooks = [];
     initPromise = null;
@@ -155,6 +162,65 @@ export default class Lambder {
         }
         return response;
     }
+    // ---------------------------------------------------------------------
+    // Declarative API policies (rate limits, guards, idempotency)
+    // ---------------------------------------------------------------------
+    /**
+     * Wire declarative per-API rate limiting: your LambderDdbRateLimiter
+     * instance plus named policies, each declaring its windows and what one
+     * counter tracks (`per`: "ip", "session", or a custom key function).
+     * APIs then reference policies by name via the `rateLimit` option; the
+     * returned type narrows so only declared names are accepted, and
+     * policies keyed per "session" are only referable from addSessionApi.
+     * Callable once; call it before the API registrations that use it.
+     */
+    enableApiRateLimits(config) {
+        this.getOrCreatePolicyEngine().setRateLimits(config);
+        return this;
+    }
+    /**
+     * Wire declarative idempotency: your LambderDdbIdempotency instance plus
+     * replay defaults. APIs opt in via `idempotency: true | { ttlSeconds }`;
+     * the option is a type error until this is called. Requests carrying a
+     * client `idempotencyKey` (sent by LambderCaller) claim an
+     * identity+api+key scope atomically: concurrent duplicates refuse with
+     * 409, replays of a completed request return the stored response, and a
+     * crashed original releases its claim. Callable once.
+     */
+    enableApiIdempotency(config) {
+        this.getOrCreatePolicyEngine().setIdempotency(config);
+        return this;
+    }
+    /**
+     * Define named guards that APIs reference (typed) via the `guards`
+     * option. Guards run before input validation, in the order the API
+     * declares them; a guard refuses by throwing (typically LambderApiError).
+     * Callable multiple times so domain modules can contribute their own;
+     * names must not collide.
+     */
+    defineApiGuards(guards) {
+        this.getOrCreatePolicyEngine().addGuards(guards);
+        return this;
+    }
+    getOrCreatePolicyEngine() {
+        if (!this.apiPolicyEngine)
+            this.apiPolicyEngine = new LambderApiPolicyEngine();
+        return this.apiPolicyEngine;
+    }
+    /** Registration-time checks shared by addApi/addSessionApi. */
+    assertApiRegistration(name, mode, options) {
+        if (this.registeredApiNames.has(name)) {
+            throw new Error(`Lambder: duplicate API name "${name}". Dispatch is first-match, so the second registration would be silently dead code.`);
+        }
+        this.registeredApiNames.add(name);
+        const usesPolicies = options.rateLimit !== undefined || options.guards !== undefined || options.idempotency !== undefined;
+        if (!usesPolicies)
+            return;
+        if (!this.apiPolicyEngine) {
+            throw new Error(`Lambder: API "${name}" declares rateLimit/guards/idempotency, but none of enableApiRateLimits()/defineApiGuards()/enableApiIdempotency() was called first.`);
+        }
+        this.apiPolicyEngine.assertRegistration(name, mode, options);
+    }
     addRoute(condition, actionFn) {
         this.actionList.push({
             match: compileRouteMatcher(condition),
@@ -173,14 +239,21 @@ export default class Lambder {
         return this;
     }
     // Plugin system
+    // The policy generics are `any` in the plugin signature on purpose: a
+    // module may annotate its parameter as the bare Lambder<SessionData> or
+    // as the app's narrowed alias, and both must chain. Registration-time
+    // assertions still verify every referenced policy/guard name at runtime.
     use(plugin) {
         return plugin(this);
     }
     // Typed API with Zod
     addApi(name, schema, handler) {
+        this.assertApiRegistration(name, "public", schema);
         this.actionList.push({
             match: (ctx) => ctx.apiName === name ? {} : false,
             actionFn: async (ctx, resolver) => {
+                if (this.apiPolicyEngine)
+                    await this.apiPolicyEngine.runPreflight(name, ctx, resolver, schema);
                 const inputResult = schema.input.safeParse(ctx.apiPayload);
                 if (!inputResult.success) {
                     if (this.apiInputValidationErrorHandler) {
@@ -189,17 +262,23 @@ export default class Lambder {
                     return resolver.json({ error: "Input validation failed", zodError: inputResult.error }, { statusCode: 422 });
                 }
                 ctx.apiPayload = inputResult.data;
-                return await handler(ctx, resolver);
+                const run = async () => await handler(ctx, resolver);
+                if (this.apiPolicyEngine && schema.idempotency)
+                    return await this.apiPolicyEngine.withIdempotency(name, ctx, schema.idempotency, run);
+                return await run();
             },
         });
         return this;
     }
     // Typed Session API with Zod
     addSessionApi(name, schema, handler) {
+        this.assertApiRegistration(name, "session", schema);
         this.actionList.push({
             match: (ctx) => ctx.apiName === name ? {} : false,
             actionFn: async (ctx, resolver) => {
                 await this.requireSession(ctx, resolver);
+                if (this.apiPolicyEngine)
+                    await this.apiPolicyEngine.runPreflight(name, ctx, resolver, schema);
                 const inputResult = schema.input.safeParse(ctx.apiPayload);
                 if (!inputResult.success) {
                     if (this.apiInputValidationErrorHandler) {
@@ -208,7 +287,10 @@ export default class Lambder {
                     return resolver.json({ error: "Input validation failed", zodError: inputResult.error }, { statusCode: 422 });
                 }
                 ctx.apiPayload = inputResult.data;
-                return await handler(ctx, resolver);
+                const run = async () => await handler(ctx, resolver);
+                if (this.apiPolicyEngine && schema.idempotency)
+                    return await this.apiPolicyEngine.withIdempotency(name, ctx, schema.idempotency, run);
+                return await run();
             }
         });
         return this;
@@ -268,6 +350,14 @@ export default class Lambder {
         });
     }
     ;
+    /** Map a thrown LambderApiError onto the structured API envelope. */
+    apiErrorResponse(err, resolver) {
+        return resolver.api(null, {
+            ...(err.errorMessage !== undefined ? { errorMessage: err.errorMessage } : {}),
+            ...(err.notAuthorized ? { notAuthorized: true } : {}),
+            ...(err.sessionExpired ? { sessionExpired: true } : {}),
+        }, err.statusCode !== undefined ? { statusCode: err.statusCode } : undefined);
+    }
     getHandler() {
         return ((event, context) => Lambder.isHttpEvent(event)
             ? this.render(event, context)
@@ -401,6 +491,11 @@ export default class Lambder {
                 if (err instanceof LambderResponse) {
                     response = err;
                 }
+                // A thrown LambderApiError on an API call IS a structured refusal
+                // (brand-checked, not instanceof, to survive duplicate installs).
+                else if (isLambderApiError(err) && ctx._otherInternal.isApiCall) {
+                    response = this.apiErrorResponse(err, resolver);
+                }
                 else {
                     throw err;
                 }
@@ -416,6 +511,9 @@ export default class Lambder {
             catch (err) {
                 if (err instanceof LambderResponse) {
                     response = err;
+                }
+                else if (isLambderApiError(err) && ctx._otherInternal.isApiCall) {
+                    response = this.apiErrorResponse(err, resolver);
                 }
                 else {
                     throw err;
@@ -449,6 +547,14 @@ export default class Lambder {
                     }
                     catch { /* fall through */ }
                 }
+            }
+            // Last-resort 500. API calls get the JSON envelope so clients can
+            // parse a structured failure; everything else keeps plain text.
+            if (ctx?._otherInternal.isApiCall) {
+                const apiBody = JSON.stringify({ apiVersion: this.apiVersion, payload: null, errorMessage: "Internal server error." });
+                return eventFormat === "v2"
+                    ? { statusCode: 500, headers: { "Content-Type": "application/json; charset=utf-8" }, body: apiBody, isBase64Encoded: false }
+                    : { statusCode: 500, multiValueHeaders: { "Content-Type": ["application/json; charset=utf-8"] }, body: apiBody, isBase64Encoded: false };
             }
             return eventFormat === "v2"
                 ? { statusCode: 500, headers: {}, body: "Internal Server Error.", isBase64Encoded: false }

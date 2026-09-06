@@ -40,6 +40,8 @@ interface MemoryEntry {
 export interface LambderDdbCacheOptions {
     tableName: string;
     region?: string;
+    /** Partition key prefix, keeps cache items separated from other systems in a shared table. Default: "CACHE". */
+    keyPrefix?: string;
     namespace?: string;
     defaultTtlSeconds?: number;
     chunkBytes?: number;
@@ -130,9 +132,15 @@ const sleep = (milliseconds: number): Promise<void> =>
  * chunk succeeds, so readers see either the previous complete version or the
  * new complete version. DynamoDB TTL is cleanup only; every read also checks
  * expiresAt because TTL deletion can lag.
+ *
+ * Table shape: string hash key `pk`, string range key `sk`, TTL on
+ * `expiresAt`. Items are prefixed `CACHE#<namespace>#` by default, so the
+ * table can be shared with LambderDdbRateLimiter (`RL#`) and
+ * LambderDdbIdempotency (`IDEM#`) without key collisions.
  */
 export class LambderDdbCache {
     readonly tableName: string;
+    readonly keyPrefix: string;
     readonly namespace: string;
 
     private readonly client: DynamoDBClient;
@@ -146,6 +154,7 @@ export class LambderDdbCache {
     constructor(options: LambderDdbCacheOptions) {
         if (!options.tableName.trim()) throw new Error("tableName is required");
         this.tableName = options.tableName;
+        this.keyPrefix = options.keyPrefix ?? "CACHE";
         this.namespace = options.namespace?.trim() || "default";
         if (Buffer.byteLength(this.namespace, "utf8") > 128) {
             throw new Error("namespace must be at most 128 UTF-8 bytes");
@@ -603,7 +612,7 @@ export class LambderDdbCache {
     }
 
     private async partitionKey(key: string): Promise<string> {
-        return `${this.namespace}#${await sha256(key)}`;
+        return `${this.keyPrefix}#${this.namespace}#${await sha256(key)}`;
     }
 
     private chunkSortKey(version: string, index: number): string {

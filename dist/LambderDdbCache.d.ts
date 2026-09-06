@@ -2,6 +2,8 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 export interface LambderDdbCacheOptions {
     tableName: string;
     region?: string;
+    /** Partition key prefix, keeps cache items separated from other systems in a shared table. Default: "CACHE". */
+    keyPrefix?: string;
     namespace?: string;
     defaultTtlSeconds?: number;
     chunkBytes?: number;
@@ -26,9 +28,15 @@ export interface LambderDdbCacheGetOrSetOptions extends LambderDdbCacheSetOption
  * chunk succeeds, so readers see either the previous complete version or the
  * new complete version. DynamoDB TTL is cleanup only; every read also checks
  * expiresAt because TTL deletion can lag.
+ *
+ * Table shape: string hash key `pk`, string range key `sk`, TTL on
+ * `expiresAt`. Items are prefixed `CACHE#<namespace>#` by default, so the
+ * table can be shared with LambderDdbRateLimiter (`RL#`) and
+ * LambderDdbIdempotency (`IDEM#`) without key collisions.
  */
 export declare class LambderDdbCache {
     readonly tableName: string;
+    readonly keyPrefix: string;
     readonly namespace: string;
     private readonly client;
     private readonly defaultTtlSeconds;
