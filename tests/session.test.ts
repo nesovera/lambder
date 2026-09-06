@@ -14,14 +14,19 @@ import { decodeBody } from './helpers.js';
 import { mockClient } from 'aws-sdk-client-mock';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, DeleteCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { z } from 'zod';
-import LambderSessionManager, { LambderSessionDataRefreshError, type LambderSessionContext } from '../src/LambderSessionManager.js';
-import LambderSessionController from '../src/LambderSessionController.js';
-import Lambder from '../src/Lambder.js';
-import type { LambderRenderContext, LambderSessionRenderContext } from '../src/LambderContext.js';
+import LambderSessionManager, { LambderSessionDataRefreshError, LambderSessionReadError, type LambderSessionContext } from '../src/session/LambderSessionManager.js';
+import LambderSessionController from '../src/session/LambderSessionController.js';
+import { lambderGuard } from '../src/policies/LambderApiGuards.js';
+import Lambder from '../src/core/Lambder.js';
+import type { LambderRenderContext, LambderSessionRenderContext } from '../src/core/LambderContext.js';
 import type { APIGatewayProxyEvent, Context } from 'aws-lambda';
 
 // Mock DynamoDB
 const ddbMock = mockClient(DynamoDBDocumentClient);
+
+// Sessions store only hashes of the bearer secrets: mock items carry
+// hashTok(<raw>) where the presented cookie carries <raw>.
+const hashTok = (value: string) => nodeCrypto.createHash('sha256').update(value).digest('hex');
 
 // Test session data types
 interface UserSessionData {
@@ -43,8 +48,7 @@ describe('Session Type Safety', () => {
     it('should correctly type LambderSessionContext', () => {
         // Type test: LambderSessionContext should have correct structure
         const session: LambderSessionContext<UserSessionData> = {
-            sessionToken: 'hash:sortkey',
-            csrfToken: 'csrf-token',
+            csrfTokenHash: 'csrf-token-hash',
             sessionKey: 'user-123',
             data: {
                 userId: '123',
@@ -72,8 +76,7 @@ describe('Session Type Safety', () => {
             post: {},
             cookie: {},
             session: {
-                sessionToken: 'hash:sortkey',
-                csrfToken: 'csrf-token',
+                csrfTokenHash: 'csrf-token-hash',
                 sessionKey: 'user-123',
                 data: {
                     userId: '123',
@@ -136,11 +139,11 @@ describe('LambderSessionManager', () => {
                 role: 'user',
             };
 
-            const session = await sessionManager.createSession('user-123', sessionData, 3600);
+            const { session, sessionToken, csrfToken } = await sessionManager.createSession('user-123', sessionData, 3600);
 
             expect(session).toBeDefined();
-            expect(session.sessionToken).toBeDefined();
-            expect(session.csrfToken).toBeDefined();
+            expect(sessionToken).toBeDefined();
+            expect(csrfToken).toBeDefined();
             expect(session.sessionKey).toBe('user-123');
             expect(session.data).toEqual(sessionData);
             expect(session.createdAt).toBeDefined();
@@ -148,10 +151,29 @@ describe('LambderSessionManager', () => {
             expect(session.ttlInSeconds).toBe(3600);
         });
 
+        it('stores only hashes of the bearer secrets, never the raw tokens', async () => {
+            ddbMock.on(PutCommand).resolves({});
+
+            const { sessionToken, csrfToken } = await sessionManager.createSession('user-123', {}, 3600);
+
+            const putItem = ddbMock.commandCalls(PutCommand)[0]!.args[0].input.Item!;
+            const sortKeySecret = sessionToken.split(':')[1]!;
+            // The range key is the hash of the cookie's secret half; the CSRF
+            // token is stored as its hash. Neither raw value appears anywhere
+            // in the record, so a table read yields no usable cookies.
+            expect(putItem.sk).toBe(hashTok(sortKeySecret));
+            expect(putItem.csrfTokenHash).toBe(hashTok(csrfToken));
+            const serialized = JSON.stringify(putItem);
+            expect(serialized).not.toContain(sortKeySecret);
+            expect(serialized).not.toContain(csrfToken);
+            expect(putItem.sessionToken).toBe(undefined);
+            expect(putItem.csrfToken).toBe(undefined);
+        });
+
         it('should create session with default TTL', async () => {
             ddbMock.on(PutCommand).resolves({});
 
-            const session = await sessionManager.createSession('user-123', {});
+            const { session } = await sessionManager.createSession('user-123', {});
 
             expect(session.ttlInSeconds).toBe(30 * 24 * 60 * 60); // 30 days default
         });
@@ -159,11 +181,11 @@ describe('LambderSessionManager', () => {
         it('should generate unique session tokens', async () => {
             ddbMock.on(PutCommand).resolves({});
 
-            const session1 = await sessionManager.createSession('user-123', {});
-            const session2 = await sessionManager.createSession('user-123', {});
+            const created1 = await sessionManager.createSession('user-123', {});
+            const created2 = await sessionManager.createSession('user-123', {});
 
-            expect(session1.sessionToken).not.toBe(session2.sessionToken);
-            expect(session1.csrfToken).not.toBe(session2.csrfToken);
+            expect(created1.sessionToken).not.toBe(created2.sessionToken);
+            expect(created1.csrfToken).not.toBe(created2.csrfToken);
         });
     });
 
@@ -171,9 +193,8 @@ describe('LambderSessionManager', () => {
         it('should retrieve a valid session', async () => {
             const mockSession = {
                 pk: 'hashed-key',
-                sk: 'sort-key',
-                sessionToken: 'hashed-key:sort-key',
-                csrfToken: 'csrf-token',
+                sk: hashTok('sort-key'),
+                csrfTokenHash: hashTok('csrf-token'),
                 sessionKey: 'user-123',
                 data: { userId: '123', username: 'testuser', role: 'user' },
                 createdAt: Math.floor(Date.now() / 1000),
@@ -188,7 +209,7 @@ describe('LambderSessionManager', () => {
             const session = await sessionManager.getSession('hashed-key:sort-key');
 
             expect(session).toBeDefined();
-            expect(session?.sessionToken).toBe('hashed-key:sort-key');
+            expect(session?.sessionKey).toBe('user-123');
             expect(session?.data.userId).toBe('123');
         });
 
@@ -200,9 +221,8 @@ describe('LambderSessionManager', () => {
         it('should return null for expired session', async () => {
             const expiredSession = {
                 pk: 'hashed-key',
-                sk: 'sort-key',
-                sessionToken: 'hashed-key:sort-key',
-                csrfToken: 'csrf-token',
+                sk: hashTok('sort-key'),
+                csrfTokenHash: hashTok('csrf-token'),
                 sessionKey: 'user-123',
                 data: {},
                 createdAt: Math.floor(Date.now() / 1000) - 7200,
@@ -224,12 +244,20 @@ describe('LambderSessionManager', () => {
             expect(session).toBeNull();
         });
 
+        it('propagates DynamoDB read failures as LambderSessionReadError instead of null', async () => {
+            // Null would read as sessionExpired and make the caller clear the
+            // client's cookies: an infra blip must not force a logout.
+            ddbMock.on(GetCommand).rejects(new Error('ddb down'));
+
+            await expect(sessionManager.getSession('hashed-key:sort-key'))
+                .rejects.toBeInstanceOf(LambderSessionReadError);
+        });
+
         it('should update lastAccessedAt with sliding expiration', async () => {
             const mockSession = {
                 pk: 'hashed-key',
-                sk: 'sort-key',
-                sessionToken: 'hashed-key:sort-key',
-                csrfToken: 'csrf-token',
+                sk: hashTok('sort-key'),
+                csrfTokenHash: hashTok('csrf-token'),
                 sessionKey: 'user-123',
                 data: {},
                 createdAt: Math.floor(Date.now() / 1000) - 1800,
@@ -251,8 +279,9 @@ describe('LambderSessionManager', () => {
     describe('isSessionValid', () => {
         it('should validate a correct session', () => {
             const session = {
-                sessionToken: 'hash:sortkey',
-                csrfToken: 'csrf-token',
+                pk: 'hash',
+                sk: hashTok('sortkey'),
+                csrfTokenHash: hashTok('csrf-token'),
                 sessionKey: 'user-123',
                 data: {},
                 createdAt: Math.floor(Date.now() / 1000),
@@ -272,8 +301,9 @@ describe('LambderSessionManager', () => {
 
         it('should reject session with wrong token', () => {
             const session = {
-                sessionToken: 'hash:sortkey',
-                csrfToken: 'csrf-token',
+                pk: 'hash',
+                sk: hashTok('sortkey'),
+                csrfTokenHash: hashTok('csrf-token'),
                 sessionKey: 'user-123',
                 data: {},
                 createdAt: Math.floor(Date.now() / 1000),
@@ -293,8 +323,9 @@ describe('LambderSessionManager', () => {
 
         it('should reject session with wrong CSRF token', () => {
             const session = {
-                sessionToken: 'hash:sortkey',
-                csrfToken: 'csrf-token',
+                pk: 'hash',
+                sk: hashTok('sortkey'),
+                csrfTokenHash: hashTok('csrf-token'),
                 sessionKey: 'user-123',
                 data: {},
                 createdAt: Math.floor(Date.now() / 1000),
@@ -314,8 +345,9 @@ describe('LambderSessionManager', () => {
 
         it('should skip CSRF validation when requested', () => {
             const session = {
-                sessionToken: 'hash:sortkey',
-                csrfToken: 'csrf-token',
+                pk: 'hash',
+                sk: hashTok('sortkey'),
+                csrfTokenHash: hashTok('csrf-token'),
                 sessionKey: 'user-123',
                 data: {},
                 createdAt: Math.floor(Date.now() / 1000),
@@ -336,8 +368,9 @@ describe('LambderSessionManager', () => {
 
         it('should reject expired session', () => {
             const session = {
-                sessionToken: 'hash:sortkey',
-                csrfToken: 'csrf-token',
+                pk: 'hash',
+                sk: hashTok('sortkey'),
+                csrfTokenHash: hashTok('csrf-token'),
                 sessionKey: 'user-123',
                 data: {},
                 createdAt: Math.floor(Date.now() / 1000) - 7200,
@@ -360,9 +393,8 @@ describe('LambderSessionManager', () => {
         it('should update session data', async () => {
             const session: LambderSessionContext<UserSessionData> = {
                 pk: 'hashed-key',
-                sk: 'sort-key',
-                sessionToken: 'hash:sortkey',
-                csrfToken: 'csrf-token',
+                sk: hashTok('sort-key'),
+                csrfTokenHash: hashTok('csrf-token'),
                 sessionKey: 'user-123',
                 data: {
                     userId: '123',
@@ -391,9 +423,8 @@ describe('LambderSessionManager', () => {
         it('should extend expiration with sliding expiration enabled', async () => {
             const session: LambderSessionContext = {
                 pk: 'hashed-key',
-                sk: 'sort-key',
-                sessionToken: 'hash:sortkey',
-                csrfToken: 'csrf-token',
+                sk: hashTok('sort-key'),
+                csrfTokenHash: hashTok('csrf-token'),
                 sessionKey: 'user-123',
                 data: {},
                 createdAt: Math.floor(Date.now() / 1000) - 1800,
@@ -417,7 +448,7 @@ describe('LambderSessionManager', () => {
 
             const session = {
                 pk: 'hashed-key',
-                sk: 'sort-key',
+                sk: hashTok('sort-key'),
             };
 
             const result = await sessionManager.deleteSession(session);
@@ -429,9 +460,8 @@ describe('LambderSessionManager', () => {
         it('should regenerate session with new tokens', async () => {
             const originalSession: LambderSessionContext<UserSessionData> = {
                 pk: 'hashed-key',
-                sk: 'sort-key',
-                sessionToken: 'old-hash:old-sortkey',
-                csrfToken: 'old-csrf-token',
+                sk: hashTok('sort-key'),
+                csrfTokenHash: hashTok('old-csrf-token'),
                 sessionKey: 'user-123',
                 data: {
                     userId: '123',
@@ -447,10 +477,13 @@ describe('LambderSessionManager', () => {
             ddbMock.on(DeleteCommand).resolves({});
             ddbMock.on(PutCommand).resolves({});
 
-            const newSession = await sessionManager.regenerateSession(originalSession);
+            const { session: newSession, sessionToken, csrfToken } = await sessionManager.regenerateSession(originalSession);
 
-            expect(newSession.sessionToken).not.toBe(originalSession.sessionToken);
-            expect(newSession.csrfToken).not.toBe(originalSession.csrfToken);
+            // Fresh raw secrets, stored only as hashes on the new record.
+            expect(newSession.sk).toBe(hashTok(sessionToken.split(':')[1]!));
+            expect(newSession.sk).not.toBe(originalSession.sk);
+            expect(newSession.csrfTokenHash).toBe(hashTok(csrfToken));
+            expect(newSession.csrfTokenHash).not.toBe(originalSession.csrfTokenHash);
             expect(newSession.sessionKey).toBe(originalSession.sessionKey);
             expect(newSession.data).toEqual(originalSession.data);
             expect(newSession.ttlInSeconds).toBe(originalSession.ttlInSeconds);
@@ -554,9 +587,8 @@ describe('LambderSessionController', () => {
         it('should fetch and validate session', async () => {
             const mockSession = {
                 pk: 'hash',
-                sk: 'sortkey',
-                sessionToken: 'hash:sortkey',
-                csrfToken: 'csrf-token',
+                sk: hashTok('sortkey'),
+                csrfTokenHash: hashTok('csrf-token'),
                 sessionKey: 'user-123',
                 data: { userId: '123', username: 'testuser', role: 'user' },
                 createdAt: Math.floor(Date.now() / 1000),
@@ -593,9 +625,8 @@ describe('LambderSessionController', () => {
         it('should return session if it exists', async () => {
             const mockSession = {
                 pk: 'hash',
-                sk: 'sortkey',
-                sessionToken: 'hash:sortkey',
-                csrfToken: 'csrf-token',
+                sk: hashTok('sortkey'),
+                csrfTokenHash: hashTok('csrf-token'),
                 sessionKey: 'user-123',
                 data: { userId: '123', username: 'testuser', role: 'user' },
                 createdAt: Math.floor(Date.now() / 1000),
@@ -617,9 +648,8 @@ describe('LambderSessionController', () => {
         it('should regenerate session and update cookies', async () => {
             const originalSession: LambderSessionContext<UserSessionData> = {
                 pk: 'hash',
-                sk: 'sortkey',
-                sessionToken: 'hash:sortkey',
-                csrfToken: 'csrf-token',
+                sk: hashTok('sortkey'),
+                csrfTokenHash: hashTok('csrf-token'),
                 sessionKey: 'user-123',
                 data: { userId: '123', username: 'testuser', role: 'user' },
                 createdAt: Math.floor(Date.now() / 1000),
@@ -635,13 +665,18 @@ describe('LambderSessionController', () => {
 
             const newSession = await sessionController.regenerateSession();
 
-            expect(newSession.sessionToken).not.toBe(originalSession.sessionToken);
-            expect(newSession.csrfToken).not.toBe(originalSession.csrfToken);
-            
+            // Fresh secrets: new hashes at rest, new raw values in the cookies.
+            expect(newSession.sk).not.toBe(originalSession.sk);
+            expect(newSession.csrfTokenHash).not.toBe(originalSession.csrfTokenHash);
+
             const cookieHeaders = mockCtx._otherInternal.addHeaderFnAccumulator.filter(
                 h => h.key === 'Set-Cookie'
             );
             expect(cookieHeaders.length).toBe(2);
+            // The cookie carries the raw secret whose hash is the record's range key.
+            const tokenCookie = cookieHeaders.find(h => h.value.startsWith('sessionToken='))!.value;
+            const rawSecret = tokenCookie.split(';')[0]!.split(':')[1]!;
+            expect(hashTok(rawSecret)).toBe(newSession.sk);
         });
 
         it('should throw error if no session exists', async () => {
@@ -655,9 +690,8 @@ describe('LambderSessionController', () => {
         it('should update session data', async () => {
             const session: LambderSessionContext<UserSessionData> = {
                 pk: 'hash',
-                sk: 'sortkey',
-                sessionToken: 'hash:sortkey',
-                csrfToken: 'csrf-token',
+                sk: hashTok('sortkey'),
+                csrfTokenHash: hashTok('csrf-token'),
                 sessionKey: 'user-123',
                 data: { userId: '123', username: 'testuser', role: 'user' },
                 createdAt: Math.floor(Date.now() / 1000),
@@ -685,9 +719,8 @@ describe('LambderSessionController', () => {
         it('should delete session and clear cookies', async () => {
             const session: LambderSessionContext<UserSessionData> = {
                 pk: 'hash',
-                sk: 'sortkey',
-                sessionToken: 'hash:sortkey',
-                csrfToken: 'csrf-token',
+                sk: hashTok('sortkey'),
+                csrfTokenHash: hashTok('csrf-token'),
                 sessionKey: 'user-123',
                 data: { userId: '123', username: 'testuser', role: 'user' },
                 createdAt: Math.floor(Date.now() / 1000),
@@ -720,9 +753,8 @@ describe('LambderSessionController', () => {
         it('should delete all sessions and clear cookies', async () => {
             const session: LambderSessionContext<UserSessionData> = {
                 pk: 'hash',
-                sk: 'sortkey',
-                sessionToken: 'hash:sortkey',
-                csrfToken: 'csrf-token',
+                sk: hashTok('sortkey'),
+                csrfTokenHash: hashTok('csrf-token'),
                 sessionKey: 'user-123',
                 data: { userId: '123', username: 'testuser', role: 'user' },
                 createdAt: Math.floor(Date.now() / 1000),
@@ -837,9 +869,8 @@ describe('Session Endpoint Protection', () => {
         it('should succeed when valid session exists', async () => {
             const mockSession = {
                 pk: 'hash',
-                sk: 'sortkey',
-                sessionToken: 'hash:sortkey',
-                csrfToken: 'csrf-token',
+                sk: hashTok('sortkey'),
+                csrfTokenHash: hashTok('csrf-token'),
                 sessionKey: 'user-123',
                 data: { userId: '123', username: 'testuser', role: 'user' },
                 createdAt: Math.floor(Date.now() / 1000),
@@ -867,9 +898,8 @@ describe('Session Endpoint Protection', () => {
         it('should throw error when session is expired', async () => {
             const expiredSession = {
                 pk: 'hash',
-                sk: 'sortkey',
-                sessionToken: 'hash:sortkey',
-                csrfToken: 'csrf-token',
+                sk: hashTok('sortkey'),
+                csrfTokenHash: hashTok('csrf-token'),
                 sessionKey: 'user-123',
                 data: { userId: '123' },
                 createdAt: Math.floor(Date.now() / 1000) - 7200,
@@ -921,9 +951,8 @@ describe('Session Endpoint Protection', () => {
         it('should succeed when valid session exists', async () => {
             const mockSession = {
                 pk: 'hash',
-                sk: 'sortkey',
-                sessionToken: 'hash:sortkey',
-                csrfToken: 'csrf-token',
+                sk: hashTok('sortkey'),
+                csrfTokenHash: hashTok('csrf-token'),
                 sessionKey: 'user-123',
                 data: { userId: '123', username: 'testuser', role: 'user' },
                 createdAt: Math.floor(Date.now() / 1000),
@@ -951,12 +980,51 @@ describe('Session Endpoint Protection', () => {
             expect(body.payload?.userId).toBe('123');
         });
 
+        it('session guards see ctx.session, receive their param, and feed ctx.guardData', async () => {
+            const mockSession = {
+                pk: 'hash',
+                sk: hashTok('sortkey'),
+                csrfTokenHash: hashTok('csrf-token'),
+                sessionKey: 'user-123',
+                data: { userId: '123', role: 'admin' },
+                createdAt: Math.floor(Date.now() / 1000),
+                expiresAt: Math.floor(Date.now() / 1000) + 3600,
+                lastAccessedAt: Math.floor(Date.now() / 1000),
+                ttlInSeconds: 3600,
+            };
+            ddbMock.on(GetCommand).resolves({ Item: mockSession });
+            ddbMock.on(PutCommand).resolves({});
+
+            lambder
+                .defineApiGuards({
+                    orgPermission: lambderGuard({
+                        session: true,
+                        handler: (ctx, _payload, _res, permission: string) => {
+                            // The session is fetched before guards run on session APIs.
+                            return { subject: ctx.session.sessionKey, permission };
+                        },
+                    }),
+                })
+                .addSessionApi('org.action', {
+                    input: z.any(),
+                    output: z.any(),
+                    guards: { orgPermission: 'ORG.MANAGE' },
+                }, async (ctx, resolver) => {
+                    return resolver.api(ctx.guardData.orgPermission);
+                });
+
+            const event = createMockEvent('/api', 'POST', 'hash:sortkey', 'org.action');
+            const response = await lambder.render(event, createMockContext());
+
+            const body = JSON.parse(decodeBody(response) || '{}');
+            expect(body.payload).toEqual({ subject: 'user-123', permission: 'ORG.MANAGE' });
+        });
+
         it('should throw error when CSRF token is missing', async () => {
             const mockSession = {
                 pk: 'hash',
-                sk: 'sortkey',
-                sessionToken: 'hash:sortkey',
-                csrfToken: 'csrf-token',
+                sk: hashTok('sortkey'),
+                csrfTokenHash: hashTok('csrf-token'),
                 sessionKey: 'user-123',
                 data: { userId: '123' },
                 createdAt: Math.floor(Date.now() / 1000),
@@ -987,9 +1055,8 @@ describe('Session Endpoint Protection', () => {
         it('should throw error when CSRF token is invalid', async () => {
             const mockSession = {
                 pk: 'hash',
-                sk: 'sortkey',
-                sessionToken: 'hash:sortkey',
-                csrfToken: 'csrf-token',
+                sk: hashTok('sortkey'),
+                csrfTokenHash: hashTok('csrf-token'),
                 sessionKey: 'user-123',
                 data: { userId: '123' },
                 createdAt: Math.floor(Date.now() / 1000),
@@ -1020,9 +1087,8 @@ describe('Session Endpoint Protection', () => {
         it('should have typed session data in context', async () => {
             const mockSession = {
                 pk: 'hash',
-                sk: 'sortkey',
-                sessionToken: 'hash:sortkey',
-                csrfToken: 'csrf-token',
+                sk: hashTok('sortkey'),
+                csrfTokenHash: hashTok('csrf-token'),
                 sessionKey: 'user-123',
                 data: { userId: '123', username: 'testuser', role: 'admin' as const },
                 createdAt: Math.floor(Date.now() / 1000),
@@ -1061,9 +1127,8 @@ describe('Session Endpoint Protection', () => {
     describe('addSessionApi with dataRefresh', () => {
         const staleSession = () => ({
             pk: 'hash',
-            sk: 'sortkey',
-            sessionToken: 'hash:sortkey',
-            csrfToken: 'csrf-token',
+            sk: hashTok('sortkey'),
+            csrfTokenHash: hashTok('csrf-token'),
             sessionKey: 'user-123',
             data: { userId: '123', username: 'testuser', role: 'user' as const },
             createdAt: Math.floor(Date.now() / 1000) - 1200,
@@ -1137,9 +1202,8 @@ describe('LambderSessionManager dataRefresh', () => {
 
     const makeSessionItem = (overrides: Record<string, any> = {}) => ({
         pk: 'hashed-key',
-        sk: 'sort-key',
-        sessionToken: 'hashed-key:sort-key',
-        csrfToken: 'csrf-token',
+        sk: hashTok('sort-key'),
+        csrfTokenHash: hashTok('csrf-token'),
         sessionKey: 'user-123',
         data: { role: 'user' },
         createdAt: nowSec() - 1000,
@@ -1173,10 +1237,10 @@ describe('LambderSessionManager dataRefresh', () => {
     it('createSession stamps dataExpiresAt only when configured', async () => {
         ddbMock.on(PutCommand).resolves({});
 
-        const session = await makeManager(async (s) => s.data).createSession('user-123', {}, 3600);
+        const { session } = await makeManager(async (s) => s.data).createSession('user-123', {}, 3600);
         expect(session.dataExpiresAt).toBeGreaterThanOrEqual(nowSec() + 599);
 
-        const plainSession = await makePlainManager().createSession('user-123', {}, 3600);
+        const { session: plainSession } = await makePlainManager().createSession('user-123', {}, 3600);
         expect(plainSession.dataExpiresAt).toBeUndefined();
     });
 
@@ -1275,7 +1339,7 @@ describe('LambderSessionManager dataRefresh', () => {
 
         const regenerated = await makeManager(async (s) => s.data).regenerateSession(session);
 
-        expect(regenerated.dataExpiresAt).toBe(oldStamp);
+        expect(regenerated.session.dataExpiresAt).toBe(oldStamp);
     });
 
     it('deleteSessionAllByKey derives the partition key internally', async () => {
@@ -1342,9 +1406,8 @@ describe('LambderSessionController dataRefresh', () => {
 
     const makeSessionItem = (overrides: Record<string, any> = {}) => ({
         pk: 'hashed-key',
-        sk: 'sort-key',
-        sessionToken: 'hashed-key:sort-key',
-        csrfToken: 'csrf-token',
+        sk: hashTok('sort-key'),
+        csrfTokenHash: hashTok('csrf-token'),
         sessionKey: 'user-123',
         data: { role: 'user' },
         createdAt: nowSec(),

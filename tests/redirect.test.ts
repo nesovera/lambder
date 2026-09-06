@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import Lambder from '../src/Lambder.js';
+import Lambder from '../src/core/Lambder.js';
 import type { APIGatewayProxyEvent, Context } from 'aws-lambda';
 
 const createMockEvent = (path: string, method: string = 'GET'): APIGatewayProxyEvent => ({

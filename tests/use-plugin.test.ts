@@ -6,8 +6,8 @@
 
 import { describe, it, expect, expectTypeOf } from 'vitest';
 import { z } from 'zod';
-import Lambder from '../src/Lambder.js';
-import LambderCaller from '../src/LambderCaller.js';
+import Lambder from '../src/core/Lambder.js';
+import LambderCaller from '../src/client/LambderCaller.js';
 import { APIGatewayProxyEvent, Context } from 'aws-lambda';
 
 // Mock AWS Lambda event and context helpers

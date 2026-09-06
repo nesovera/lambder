@@ -12,8 +12,8 @@
 
 import { describe, it, expect } from 'vitest';
 import { z } from 'zod';
-import Lambder from '../src/Lambder.js';
-import { LambderApiError, isLambderApiError, refuse } from '../src/LambderApiError.js';
+import Lambder from '../src/core/Lambder.js';
+import { LambderApiError, isLambderApiError, refuse } from '../src/shared/LambderApiError.js';
 import { decodeBody, createMockContext } from './helpers.js';
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 

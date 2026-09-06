@@ -15,7 +15,7 @@ yarn add msw --dev
 ## Basic Setup
 
 ```typescript
-import { LambderMSW } from 'lambder';
+import { LambderMSW } from 'lambder/testing';
 import { setupServer } from 'msw/node';
 
 // Create an MSW instance
@@ -73,7 +73,7 @@ const lambder = new Lambder({ apiPath: '/secure', publicPath: './public' })
 export type ApiContractType = typeof lambder.ApiContract;
 
 // test/setup.ts
-import { LambderMSW } from 'lambder';
+import { LambderMSW } from 'lambder/testing';
 import type { ApiContractType } from '../backend';
 
 const lambderMSW = new LambderMSW<ApiContractType>({
@@ -308,7 +308,7 @@ LambderMSW also works in browser environments with MSW's browser integration:
 ```typescript
 // test/browser-setup.ts
 import { setupWorker } from 'msw/browser';
-import { LambderMSW } from 'lambder';
+import { LambderMSW } from 'lambder/testing';
 import type { ApiContractType } from '../backend'; // Type-only import from your backend
 
 const lambderMSW = new LambderMSW<ApiContractType>({

@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import Lambder from '../src/Lambder.js';
+import Lambder from '../src/core/Lambder.js';
 import { decodeBody, gunzipBody, createMockEvent, createMockContext } from './helpers.js';
 describe('Compression (gzip)', () => {
     const bigHtml = '<p>' + 'lambder '.repeat(500) + '</p>';

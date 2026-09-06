@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import Lambder from '../src/Lambder.js';
+import Lambder from '../src/core/Lambder.js';
 import { decodeBody, createMockEvent, createMockContext } from './helpers.js';
 describe('Context additions', () => {
     it('exposes rawBody, case-insensitive header(), and ip', async () => {
