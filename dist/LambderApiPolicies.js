@@ -5,6 +5,8 @@ const IDEMPOTENCY_PENDING_TTL_SECONDS = 300;
 /** Responses above this size skip replay storage (DynamoDB item limit is 400KB). */
 const IDEMPOTENCY_MAX_STORED_BODY_BYTES = 350_000;
 const RATE_LIMIT_WINDOW_KEYS = ["perMin", "per10Min", "perHour", "perDay", "perWeek", "perMonth"];
+export function lambderRateLimitKey(key) { return key; }
+export function lambderGuard(guard) { return guard; }
 const toList = (value) => value === undefined ? [] : typeof value === "string" ? [value] : value;
 /**
  * Runtime side of the declarative API options: holds what the enable/define
@@ -24,8 +26,10 @@ export class LambderApiPolicyEngine {
         if (this.limiter)
             throw new Error("Lambder: enableApiRateLimits() was already called.");
         for (const [name, policy] of Object.entries(config.policies)) {
-            if (!policy.per)
-                throw new Error(`Lambder: rate-limit policy "${name}" is missing its "per" key source.`);
+            const per = policy.per;
+            if (!per || (per !== "ip" && per !== "session" && typeof per.handler !== "function")) {
+                throw new Error(`Lambder: rate-limit policy "${name}" needs per: "ip", "session", or a { input?, handler } key.`);
+            }
             if (!RATE_LIMIT_WINDOW_KEYS.some((key) => policy[key])) {
                 throw new Error(`Lambder: rate-limit policy "${name}" declares no window (${RATE_LIMIT_WINDOW_KEYS.join("/")}).`);
             }
@@ -34,10 +38,12 @@ export class LambderApiPolicyEngine {
         this.rateLimitPolicies = { ...config.policies };
     }
     addGuards(guards) {
-        for (const [name, guardFn] of Object.entries(guards)) {
+        for (const [name, guardDef] of Object.entries(guards)) {
             if (this.guards[name])
                 throw new Error(`Lambder: guard "${name}" is already defined.`);
-            this.guards[name] = guardFn;
+            if (typeof guardDef?.handler !== "function")
+                throw new Error(`Lambder: guard "${name}" has no handler function.`);
+            this.guards[name] = guardDef;
         }
     }
     setIdempotency(config) {
@@ -73,7 +79,7 @@ export class LambderApiPolicyEngine {
             const policy = this.rateLimitPolicies[name];
             if (!policy || !this.limiter)
                 throw new Error(`Lambder: rate-limit policy "${name}" is not configured.`);
-            const key = await this.resolveRateLimitKey(ctx, policy.per);
+            const key = await this.resolveRateLimitKey(ctx, resolver, policy.per);
             const limited = await this.limiter.isRateLimited(`api|${apiName}|${name}|${key}`, policy);
             if (limited) {
                 throw new LambderApiError(`Rate limited: "${apiName}" exceeded policy "${name}".`, {
@@ -83,13 +89,29 @@ export class LambderApiPolicyEngine {
             }
         }
         for (const name of toList(options.guards)) {
-            const guardFn = this.guards[name];
-            if (!guardFn)
+            const guardDef = this.guards[name];
+            if (!guardDef)
                 throw new Error(`Lambder: guard "${name}" is not configured.`);
-            await guardFn(ctx, resolver);
+            const payload = this.parseSlice(guardDef.input, ctx, resolver);
+            await guardDef.handler(ctx, payload, resolver);
         }
     }
-    async resolveRateLimitKey(ctx, per) {
+    /**
+     * Validate a preflight input slice against the raw payload. Runs before
+     * the API's own validation, so guard/key requirements hold even when the
+     * API schema does not declare (and would strip) those fields. Failures
+     * answer the same 422 shape as regular input validation.
+     */
+    parseSlice(input, ctx, resolver) {
+        if (!input)
+            return undefined;
+        const parsed = input.safeParse(ctx.post?.payload);
+        if (!parsed.success) {
+            throw resolver.json({ error: "Input validation failed", zodError: parsed.error }, { statusCode: 422 });
+        }
+        return parsed.data;
+    }
+    async resolveRateLimitKey(ctx, resolver, per) {
         if (per === "ip")
             return `ip:${ctx.ip}`;
         if (per === "session") {
@@ -98,7 +120,8 @@ export class LambderApiPolicyEngine {
                 throw new Error('Lambder: rate-limit per "session" evaluated without a session on the context.');
             return `session:${sessionKey}`;
         }
-        return `custom:${await per(ctx)}`;
+        const payload = this.parseSlice(per.input, ctx, resolver);
+        return `custom:${await per.handler(ctx, payload)}`;
     }
     /**
      * Idempotency wrapper around validation-passed handler execution. Without
