@@ -16,7 +16,7 @@ type LambderApiPolicyOptions = {
  * ./LambderApiGuards.ts, idempotency in ./LambderApiIdempotency.ts), asserts
  * registrations against them at startup, and executes them around handlers
  * at request time. Internal to Lambder; apps interact through
- * enableApiRateLimits(), enableApiIdempotency(), defineApiGuards() and the
+ * the create() options (rateLimits, guards, idempotency) and the
  * per-API options.
  */
 export declare class LambderApiPolicyEngine {

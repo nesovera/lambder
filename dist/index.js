@@ -1,5 +1,6 @@
 import Lambder from './core/Lambder.js';
 export default Lambder;
+export { initLambder } from './core/Lambder.js';
 export { default as LambderCaller } from "./client/LambderCaller.js";
 // Typed API refusals (isomorphic: shared code may throw them from anywhere)
 export { LambderApiError, isLambderApiError, refuse } from "./shared/LambderApiError.js";

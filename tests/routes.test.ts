@@ -16,7 +16,7 @@ import nodeCrypto from 'crypto';
 import { decodeBody } from './helpers.js';
 import { mockClient } from 'aws-sdk-client-mock';
 import { DynamoDBDocumentClient, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
-import Lambder from '../src/core/Lambder.js';
+import Lambder, { initLambder } from '../src/core/Lambder.js';
 import type { APIGatewayProxyEvent, Context } from 'aws-lambda';
 
 // Session records store only hashes of the bearer secrets.
@@ -328,19 +328,14 @@ describe('Routes - Session Protected Routes', () => {
         ddbMock.on(GetCommand).resolves({ Item: mockSession });
         ddbMock.on(PutCommand).resolves({});
 
-        const lambder = new Lambder({
-            publicPath: './public',
-            apiPath: '/api'
-        })
-            .enableDdbSession(
-                {
+        const lambder = initLambder().create({ publicPath: './public',
+            apiPath: '/api', session: {
                     tableName: 'test-sessions',
                     tableRegion: 'us-east-1',
                     sessionSalt: 'test-salt',
                     partitionKey: 'pk',
                     sortKey: 'sk',
-                }
-            )
+                } })
             .setGlobalErrorHandler((err, ctx, res) => {
                 return res.html(`<h1>Error: ${err.message}</h1>`);
             })
@@ -359,19 +354,14 @@ describe('Routes - Session Protected Routes', () => {
     it('should reject access without valid session', async () => {
         ddbMock.on(GetCommand).resolves({}); // No session found
 
-        const lambder = new Lambder({
-            publicPath: './public',
-            apiPath: '/api'
-        })
-            .enableDdbSession(
-                {
+        const lambder = initLambder().create({ publicPath: './public',
+            apiPath: '/api', session: {
                     tableName: 'test-sessions',
                     tableRegion: 'us-east-1',
                     sessionSalt: 'test-salt',
                     partitionKey: 'pk',
                     sortKey: 'sk',
-                }
-            )
+                } })
             .addSessionRoute('/protected', (ctx, res) => {
                 return res.html('Protected');
             })
@@ -402,19 +392,14 @@ describe('Routes - Session Protected Routes', () => {
         ddbMock.on(GetCommand).resolves({ Item: mockSession });
         ddbMock.on(PutCommand).resolves({});
 
-        const lambder = new Lambder({
-            publicPath: './public',
-            apiPath: '/api'
-        })
-            .enableDdbSession(
-                {
+        const lambder = initLambder().create({ publicPath: './public',
+            apiPath: '/api', session: {
                     tableName: 'test-sessions',
                     tableRegion: 'us-east-1',
                     sessionSalt: 'test-salt',
                     partitionKey: 'pk',
                     sortKey: 'sk',
-                }
-            )
+                } })
             .setGlobalErrorHandler((err, ctx, res) => {
                 return res.json({ error: err.message });
             })

@@ -7,7 +7,7 @@ import { LambderApiIdempotencyEngine } from "./LambderApiIdempotency.js";
  * ./LambderApiGuards.ts, idempotency in ./LambderApiIdempotency.ts), asserts
  * registrations against them at startup, and executes them around handlers
  * at request time. Internal to Lambder; apps interact through
- * enableApiRateLimits(), enableApiIdempotency(), defineApiGuards() and the
+ * the create() options (rateLimits, guards, idempotency) and the
  * per-API options.
  */
 export class LambderApiPolicyEngine {
@@ -28,7 +28,7 @@ export class LambderApiPolicyEngine {
         this.rateLimits.assertRegistration(apiName, mode, options.rateLimit);
         this.guards.assertRegistration(apiName, mode, options.guards);
         if (options.idempotency !== undefined && !this.idempotency.isConfigured) {
-            throw new Error(`Lambder: API "${apiName}" declares idempotency but enableApiIdempotency() was not called first.`);
+            throw new Error(`Lambder: API "${apiName}" declares idempotency but no idempotency store was configured at creation.`);
         }
     }
     /** Rate limits then guards, in declared order. Refusals throw (LambderApiError or a guard's own throw). */

@@ -1,6 +1,7 @@
 import Lambder from './core/Lambder.js';
 
 export default Lambder;
+export { initLambder } from './core/Lambder.js';
 export { default as LambderCaller } from "./client/LambderCaller.js";
 export type { LambderApiOutcome, LambderApiFailureReason, LambderCallOptions, LambderIdempotencyKeyScope } from "./client/LambderCaller.js";
 
@@ -39,14 +40,14 @@ export type {
 export type {
     LambderRouteMatcher,
     LambderCorsConfig,
-    LambderConstructorOptions,
+    LambderCreateOptions,
+    LambderSessionOptions,
     ConditionFunction,
     RouteCondition,
     PathParamsOf,
     LambderActionTools,
     LambderHandler,
     LambderIndexHtmlOptions,
-    LambderApp,
 } from "./core/Lambder.js";
 
 // Public file serving

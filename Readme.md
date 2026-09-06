@@ -8,9 +8,9 @@ Lambder is a highly opinionated dynamic serverless framework designed to facilit
 - **Hardened policy layer**: rate-limit policies can share one counter across APIs (`scope: "policy"`); idempotency replays answer before rate limits, survive client IP changes (key-scoped for public APIs, 16-char minimum keys), store full response headers, refuse to store Set-Cookie responses, and Brotli-compress stored bodies of 1KB+ so the ~350KB replay budget applies to compressed bytes.
 - **Secrets hashed at rest**: session records store only sha256 hashes of the bearer secrets, so a session-table read yields no usable cookies; `LambderSessionReadError` keeps a DynamoDB blip from reading as a logout.
 - **Three package entry points**: `lambder` (server), `lambder/client` (browser-safe by construction: no AWS SDK, no Node built-ins), `lambder/testing` (`LambderMSW`); sources organized into core/policies/session/stores/client/shared.
-- **Quality of life**: the `LambderApp` alias for annotating api modules, `LambderCaller.createIdempotencyKeyScope()` for one self-rotating key per logical operation, fail-open rate limiting logs its passes.
+- **Configuration at creation**: `initLambder<SessionData>().create({...})` takes the WHOLE configuration (serving options, session, cors, rate limits, guards, idempotency) in one declaration; the enable/define chain methods are gone, so nothing can be half-configured or wired in the wrong order, and api modules annotate with `typeof lambderApp` derived from the real instance. Plus `LambderCaller.createIdempotencyKeyScope()` for one self-rotating key per logical operation, and fail-open rate limiting logs its passes.
 
-**Breaking in v4** (from 3.x): session records are reshaped (hashes at rest; live sessions invalidate once on upgrade, clients just re-login) and the manager-level `createSession`/`regenerateSession` return `LambderCreatedSession` (`{ session, sessionToken, csrfToken }`; the controller API is unchanged); `LambderMSW` moved from the root entry to `lambder/testing`; `LambderCaller.apiRaw()` is removed (use `apiOutcome()`, whose failure outcomes carry the envelope on `response`); the `multiValueHeaders` alias on `res.raw()` is removed (use `headers`); `LambderDdbIdempotency.complete()` answers `"stored" | "too-large" | "lost"`; idempotency keys must be 16-200 chars.
+**Breaking in v4** (from 3.x): configuration moved entirely to creation, removing `enableCors`, `enableDdbSession`, `setSessionCookieKey`, `enableApiRateLimits`, `enableApiIdempotency`, and `defineApiGuards` in favor of the `cors`/`session`/`rateLimits`/`guards`/`idempotency` options of `initLambder().create({...})`; session records are reshaped (hashes at rest; live sessions invalidate once on upgrade, clients just re-login) and the manager-level `createSession`/`regenerateSession` return `LambderCreatedSession` (`{ session, sessionToken, csrfToken }`; the controller API is unchanged); `LambderMSW` moved from the root entry to `lambder/testing`; `LambderCaller.apiRaw()` is removed (use `apiOutcome()`, whose failure outcomes carry the envelope on `response`); the `multiValueHeaders` alias on `res.raw()` is removed (use `headers`); `LambderDdbIdempotency.complete()` answers `"stored" | "too-large" | "lost"`; idempotency keys must be 16-200 chars.
 
 v3 (public file serving, `addAction()`, gzip + ETag, thrown responses, `LambderTemplatingEngine`, `html`/`xml` tags, payload v2 support, `LambderDdbCache`, `createLambderI18n`, `LambderApiError`/`refuse()`, `apiOutcome()`, the declarative policy foundations) is documented in the git history.
 
@@ -63,25 +63,32 @@ Source layout mirrors this: `src/core/` (request pipeline), `src/policies/` (dec
 
 ### Basic Setup
 
+The whole configuration is given at creation, in one declaration; only
+registration (routes, apis, hooks, `use()`) chains afterwards. `initLambder`
+is curried so the session data type is fixed first and everything else
+(policy names, guard metadata) is INFERRED from the options; TypeScript type
+arguments are all-or-nothing per call, so a plain `new Lambder<SessionData>({...})`
+would silently widen the inferred policy types, which is why the curried
+creator is the canonical entry.
+
 ```typescript
-import Lambder from 'lambder';
+import { initLambder } from 'lambder';
 import { z } from 'zod';
 import * as path from 'path';
 
-const lambder = new Lambder({
+interface SessionData { userId: string; }
+
+const lambder = initLambder<SessionData>().create({
     apiPath: "/api",
     publicPath: path.resolve(`./public`),
-});
-
-// Enable session and CORS
-lambder
-    .enableDdbSession({
+    session: {
         tableName: "website-session",
         tableRegion: "us-east-1",
-        sessionSalt: "CHANGE-THIS-TO-A-SECURE-RANDOM-STRING"
-    })
+        sessionSalt: "CHANGE-THIS-TO-A-SECURE-RANDOM-STRING",
+    },
     // true allows any origin; or configure: { origins: ["https://app.example.com"], credentials: true }
-    .enableCors(true);
+    cors: true,
+});
 
 // Define type-safe APIs with Zod schemas
 lambder
@@ -277,18 +284,21 @@ lambder
 
 ### Session Management
 
-Enable DynamoDB-based sessions with `enableDdbSession()`. Optional configuration:
+Enable DynamoDB-based sessions with the `session` option at creation:
 
 ```typescript
-lambder
-    .enableDdbSession({
+const lambder = initLambder<SessionData>().create({
+    apiPath: "/api",
+    session: {
         tableName: "website-session",
         tableRegion: "us-east-1",
         sessionSalt: "CHANGE-THIS-TO-A-SECURE-RANDOM-STRING",
-        enableSlidingExpiration: true // Optional: extend session on each access
-    })
-    // Optionally customize session cookie names (defaults: LMDRSESSIONTKID, LMDRSESSIONCSTK)
-    .setSessionCookieKey("MY_SESSION_TOKEN", "MY_CSRF_TOKEN");
+        enableSlidingExpiration: true, // Optional: extend session on each access
+        // Optionally customize cookie names (defaults: LMDRSESSIONTKID, LMDRSESSIONCSTK)
+        tokenCookieKey: "MY_SESSION_TOKEN",
+        csrfCookieKey: "MY_CSRF_TOKEN",
+    },
+});
 ```
 
 #### DynamoDB Session Table Structure
@@ -308,16 +318,18 @@ The session cookie is `pkHash:secret`: `pkHash = sha256(sessionKey + sessionSalt
 Session data often caches values derived from external state: roles, permissions, feature flags. Opt in to `dataRefresh` to give that data a shelf life. Every session read checks it, and once `ttlSeconds` have passed your `refresh` callback rebuilds the data, which is persisted onto the same session record: same tokens, same cookies, the session itself is untouched. Changes to the source of truth then reach every live session within `ttlSeconds`, with no mass session invalidation.
 
 ```typescript
-lambder.enableDdbSession({
-    tableName: "website-session",
-    tableRegion: "us-east-1",
-    sessionSalt: "CHANGE-THIS-TO-A-SECURE-RANDOM-STRING",
-    dataRefresh: {
-        ttlSeconds: 600, // data is renewed at most every 10 minutes
-        refresh: async (session) => {
-            const user = await loadUser(session.data.userId);
-            if (!user || user.disabled) return null; // null ends the session
-            return buildSessionData(user);
+const lambder = initLambder<SessionData>().create({
+    session: {
+        tableName: "website-session",
+        tableRegion: "us-east-1",
+        sessionSalt: "CHANGE-THIS-TO-A-SECURE-RANDOM-STRING",
+        dataRefresh: {
+            ttlSeconds: 600, // data is renewed at most every 10 minutes
+            refresh: async (session) => {
+                const user = await loadUser(session.data.userId);
+                if (!user || user.disabled) return null; // null ends the session
+                return buildSessionData(user);
+            },
         },
     },
 });
@@ -495,12 +507,13 @@ Related: when an API call crashes with no `setGlobalErrorHandler` (or the handle
 Declare named building blocks once; reference them from API definitions with full type inference (unknown names are compile errors, and everything is re-asserted at registration time for plain-JS safety). Each piece is independent and optional.
 
 ```typescript
-import Lambder, { LambderDdbRateLimiter, LambderDdbIdempotency, lambderGuard, lambderRateLimitKey, refuse } from "lambder";
+import { initLambder, LambderDdbRateLimiter, LambderDdbIdempotency, lambderGuard, lambderRateLimitKey, refuse } from "lambder";
 
-const lambder = new Lambder<SessionData>({ apiPath: "/api" })
+const lambder = initLambder<SessionData>().create({
+    apiPath: "/api",
     // 1. Rate limiting: your limiter instance + named policies. Each policy
     //    declares its windows AND what one counter tracks ("per").
-    .enableApiRateLimits({
+    rateLimits: {
         limiter: new LambderDdbRateLimiter({ tableName: "app-rate-limiter", region: "us-east-1", failOpen: true }),
         policies: {
             authPerIp:    { perMin: 5, perHour: 30, per: "ip" },
@@ -521,14 +534,14 @@ const lambder = new Lambder<SessionData>({ apiPath: "/api" })
                 errorMessage: { type: "warning", content: "Too many attempts for this address." },
             },
         },
-    })
+    },
     // 2. Idempotency: a store instance + replay defaults. May share the rate
     //    limiter's table (records use an IDEM# key prefix).
-    .enableApiIdempotency({
+    idempotency: {
         store: new LambderDdbIdempotency({ tableName: "app-rate-limiter", region: "us-east-1" }),
         defaultTtlSeconds: 24 * 3600,
         failOpen: true,   // DynamoDB down => execute without dedupe instead of failing
-    })
+    },
     // 3. Named guards. Input modes: apiInput checks a slice of the API's own
     //    payload (the schema keeps the field; the guard is declarable only
     //    where the payload type passes both); guardInput is the guard's OWN
@@ -539,7 +552,7 @@ const lambder = new Lambder<SessionData>({ apiPath: "/api" })
     //    (session: true, declarable only on addSessionApi), take a per-API
     //    PARAM (annotate a 4th handler argument), and RETURN a value that
     //    lands typed on the API handler's ctx.guardData[name].
-    .defineApiGuards({
+    guards: {
         captcha: lambderGuard({
             guardInput: z.object({ captchaToken: z.string() }),
             handler: async (ctx, { captchaToken }) => {
@@ -557,7 +570,8 @@ const lambder = new Lambder<SessionData>({ apiPath: "/api" })
             handler: (ctx, _payload, _res, permission: PermissionString) =>
                 requirePermissionOrRefuse(ctx.session, permission),   // return value → ctx.guardData.orgPermission
         }),
-    });
+    },
+});
 
 lambder.addApi("public.resetPassword", {
     // captchaToken is NOT declared here: it travels in the separate
@@ -575,7 +589,7 @@ lambder.addSessionApi("secure.order.create", {
     output: OrderResultSchema,
     rateLimit: "writePerUser",
     guards: { orgPermission: "ORDERS.CREATE" }, // param typed per guard; entries run in insertion order
-    idempotency: true,                          // or { ttlSeconds: 3600 }; type error until enableApiIdempotency()
+    idempotency: true,                          // or { ttlSeconds: 3600 }; type error unless created with idempotency
 }, async (ctx, res) => {
     const { organizationId } = ctx.guardData.orgPermission;  // typed guard output
     // ...
@@ -584,15 +598,25 @@ lambder.addSessionApi("secure.order.create", {
 
 Guard results are typed end to end: the handler's `ctx.guardData` carries exactly the declared guards that return a value, a session guard on a public API is a compile error (and a startup assert), an apiInput guard is declarable only where the API's schema carries its fields, and a parameterized guard's param is typechecked in the declaration.
 
-For api modules split across files, annotate their `lambder` parameter with the `LambderApp` alias instead of hand-writing the instance generics:
+For api modules split across files, DERIVE the annotation type from the real instance instead of writing it by hand: create the instance next to the policy declarations and export `typeof` it. The type can never drift from what actually runs, and modules import it without a cycle (the app file imports no modules):
 
 ```typescript
-export type AppLambder = LambderApp<SessionData, {
-    policies: typeof apiRateLimitPolicies;   // what enableApiRateLimits({ policies }) receives
-    guards: typeof apiGuards;                // what defineApiGuards(...) receives
-    idempotency: true;                       // enableApiIdempotency(...) is called
-}>;
+// app.ts: declarations + the fully configured instance
+export const lambderApp = initLambder<SessionData>().create({
+    apiPath: "/api",
+    session: { tableName: "app-session", tableRegion: "us-east-1", sessionSalt: "..." },
+    rateLimits: { limiter, policies: apiRateLimitPolicies },
+    idempotency: { store: idempotencyStore },
+    guards: apiGuards,
+});
+export type AppLambder = typeof lambderApp;
+
+// orders.ts: an api module
 export const orderApi = (lambder: AppLambder) => lambder.addSessionApi(...);
+
+// index.ts: registration only (hooks, routes, modules)
+const lambder = lambderApp.addHook(...).use(orderApi)...;
+export const handler = lambder.getHandler();
 ```
 
 Request flow per API: session (session APIs) → idempotency replay lookup → rate limits → guards → zod validation → idempotency claim → handler → idempotency store. The replay lookup runs first on purpose: a completed idempotent request answers its stored response without burning rate-limit quota or re-running guards (the original already passed them, and no handler executes either way). Refusals ride the envelope via `LambderApiError` (429 rate limited, 409 duplicate in flight), so the caller's `errorMessageHandler` surfaces them with zero client code.
