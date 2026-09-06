@@ -53,7 +53,8 @@ export type { LambderPublicFilesOptions } from "./LambderPublicFiles.js";
 
 // Session types
 export type { LambderSessionCookieOptions } from "./LambderSessionController.js";
-export type { LambderSessionContext } from "./LambderSessionManager.js";
+export type { LambderSessionContext, LambderSessionDataRefreshConfig } from "./LambderSessionManager.js";
+export { LambderSessionDataRefreshError } from "./LambderSessionManager.js";
 
 // DynamoDB-backed compressed cache (standalone, server-only)
 export { LambderDdbCache } from "./LambderDdbCache.js";

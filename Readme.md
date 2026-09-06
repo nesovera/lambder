@@ -275,6 +275,35 @@ lambder
 
 See [docs/DYNAMODB_SETUP.md](docs/DYNAMODB_SETUP.md) for detailed setup instructions.
 
+#### Keeping session data fresh (`dataRefresh`)
+
+Session data often caches values derived from external state: roles, permissions, feature flags. Opt in to `dataRefresh` to give that data a shelf life. Every session read checks it, and once `ttlSeconds` have passed your `refresh` callback rebuilds the data, which is persisted onto the same session record: same tokens, same cookies, the session itself is untouched. Changes to the source of truth then reach every live session within `ttlSeconds`, with no mass session invalidation.
+
+```typescript
+lambder.enableDdbSession({
+    tableName: "website-session",
+    tableRegion: "us-east-1",
+    sessionSalt: "CHANGE-THIS-TO-A-SECURE-RANDOM-STRING",
+    dataRefresh: {
+        ttlSeconds: 600, // data is renewed at most every 10 minutes
+        refresh: async (session) => {
+            const user = await loadUser(session.data.userId);
+            if (!user || user.disabled) return null; // null ends the session
+            return buildSessionData(user);
+        },
+    },
+});
+```
+
+Semantics:
+
+- The callback must be a pure derivation of external state: concurrent reads may run it in parallel, last write wins.
+- Returning `null` deletes the session; the request is answered as session-expired.
+- Thrown errors fail the request as a `LambderSessionDataRefreshError` and leave the session untouched (they are never mistaken for a logout). Catch inside and return `session.data` to explicitly serve stale instead.
+- The renewal write and the sliding-expiration write share a single DynamoDB put when both are due.
+- Records created before `dataRefresh` was enabled renew on their first read.
+- `updateSessionData()` marks data fresh (it was just written deliberately); `regenerateSession()` carries the old freshness stamp over.
+
 #### Session Controller
 
 Access the session controller with `lambder.getSessionController(ctx)`:
@@ -285,8 +314,10 @@ Access the session controller with `lambder.getSessionController(ctx)`:
 | `fetchSession()` | Fetch & validate existing session (throws if not found) |
 | `fetchSessionIfExists()` | Returns session or null |
 | `updateSessionData(newData)` | Update session data in DDB |
+| `refreshSessionData()` | Run the `dataRefresh` callback now, regardless of TTL |
 | `endSession()` | End session, delete from DDB |
 | `endSessionAll()` | End all sessions for this sessionKey (all devices) |
+| `deleteSessionAllByKey(sessionKey)` | Delete all sessions of any sessionKey (e.g. "log user X out everywhere") |
 | `regenerateSession()` | Regenerate token (use after password change) |
 
 ### Type-Safe Templating (html / xml)

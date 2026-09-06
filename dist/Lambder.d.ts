@@ -5,6 +5,7 @@ import LambderResponseBuilder from "./LambderResponseBuilder.js";
 import { LambderResponse, type LambderHttpResponse } from "./LambderResponse.js";
 import { type ConditionFunction, type LambderRouteMatcher, type PathParamsOf } from "./LambderRouting.js";
 import { type LambderCorsConfig } from "./LambderCors.js";
+import { type LambderSessionDataRefreshConfig } from "./LambderSessionManager.js";
 import LambderSessionController, { type LambderSessionCookieOptions } from "./LambderSessionController.js";
 import { type LambderPublicFilesOptions } from "./LambderPublicFiles.js";
 import type { MergeContract } from "./LambderApiContract.js";
@@ -123,7 +124,7 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
     private sessionCsrfCookieKey;
     constructor(options?: LambderConstructorOptions);
     enableCors(config: boolean | LambderCorsConfig): this;
-    enableDdbSession({ tableName, tableRegion, sessionSalt, enableSlidingExpiration, slidingWriteIntervalSeconds, cookie, partitionKey, sortKey, }: {
+    enableDdbSession({ tableName, tableRegion, sessionSalt, enableSlidingExpiration, slidingWriteIntervalSeconds, cookie, partitionKey, sortKey, dataRefresh, }: {
         tableName: string;
         tableRegion: string;
         sessionSalt: string;
@@ -134,6 +135,15 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
         cookie?: LambderSessionCookieOptions;
         partitionKey?: string;
         sortKey?: string;
+        /**
+         * Opt-in freshness for session.data derived from external state
+         * (roles, permissions, feature flags...). Every session read
+         * renews data past its ttlSeconds via your refresh callback,
+         * persisting in place on the same record: same tokens, same
+         * cookies. Return null from refresh to end the session. See
+         * LambderSessionDataRefreshConfig for the exact semantics.
+         */
+        dataRefresh?: LambderSessionDataRefreshConfig<TSessionData>;
     }): this;
     setSessionCookieKey(sessionTokenCookieKey: string, sessionCsrfCookieKey: string): this;
     setRouteFallbackHandler(routeFallbackHandler: FallbackHandlerFunction): this;

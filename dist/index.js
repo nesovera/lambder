@@ -14,6 +14,7 @@ export { html, xml, raw, jsonScript, escapeHtml, renderHtmlValue, LambderSafeHtm
 export { LambderTemplatingEngine } from "./LambderTemplatingEngine.js";
 // Public file serving
 export { LambderPublicFilesHandler } from "./LambderPublicFiles.js";
+export { LambderSessionDataRefreshError } from "./LambderSessionManager.js";
 // DynamoDB-backed compressed cache (standalone, server-only)
 export { LambderDdbCache } from "./LambderDdbCache.js";
 // DynamoDB-backed fixed-window rate limiter (standalone, server-only)

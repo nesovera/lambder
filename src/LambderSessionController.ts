@@ -1,6 +1,6 @@
 import { LambderRenderContext, LambderSessionRenderContext } from "./LambderContext.js";
 import type LambderSessionManager from "./LambderSessionManager.js";
-import type { LambderSessionContext } from "./LambderSessionManager.js";
+import { LambderSessionDataRefreshError, type LambderSessionContext } from "./LambderSessionManager.js";
 
 export type LambderSessionCookieOptions = {
     /**
@@ -113,10 +113,13 @@ export default class LambderSessionController<TSessionData = any> {
         return session;
     };
 
-    async fetchSessionIfExists (): Promise<LambderSessionContext|null> {
+    async fetchSessionIfExists (): Promise<LambderSessionContext<TSessionData>|null> {
         try {
             return await this.fetchSession();
         }catch(err){
+            // Missing or invalid sessions become null, but a failing
+            // dataRefresh callback must not masquerade as a logout.
+            if(err instanceof LambderSessionDataRefreshError) throw err;
             return null;
         }
     };
@@ -136,6 +139,33 @@ export default class LambderSessionController<TSessionData = any> {
         if(!this.ctx.session) throw new Error("Session not found.");
         this.ctx.session = await this.lambderSessionManager.updateSessionData(this.ctx.session, newData);
         return this.ctx.session;
+    };
+
+    /**
+     * Force-runs the dataRefresh callback now (see enableDdbSession) and
+     * persists the result onto the current session. Returns the updated
+     * session, or null when the callback ended it: the record is deleted and
+     * the session cookies are cleared.
+     */
+    async refreshSessionData (): Promise<LambderSessionContext<TSessionData>|null> {
+        if(!this.ctx.session) throw new Error("Session not found.");
+        const refreshed = await this.lambderSessionManager.refreshSessionData(this.ctx.session);
+        if(!refreshed){
+            this.clearSessionCookies();
+            (this.ctx as any).session = null;
+            return null;
+        }
+        this.ctx.session = refreshed;
+        return this.ctx.session;
+    };
+
+    /**
+     * Deletes every session of the given sessionKey (e.g. a user id): "log
+     * this subject out everywhere". Unlike endSessionAll it needs no fetched
+     * session and touches no cookies, so it works on any subject.
+     */
+    async deleteSessionAllByKey (sessionKey: string): Promise<void> {
+        await this.lambderSessionManager.deleteSessionAllByKey(sessionKey);
     };
 
     async endSession (){

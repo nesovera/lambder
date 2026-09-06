@@ -16,7 +16,8 @@ export type { LambderRouteMatcher, LambderCorsConfig, LambderConstructorOptions,
 export { LambderPublicFilesHandler } from "./LambderPublicFiles.js";
 export type { LambderPublicFilesOptions } from "./LambderPublicFiles.js";
 export type { LambderSessionCookieOptions } from "./LambderSessionController.js";
-export type { LambderSessionContext } from "./LambderSessionManager.js";
+export type { LambderSessionContext, LambderSessionDataRefreshConfig } from "./LambderSessionManager.js";
+export { LambderSessionDataRefreshError } from "./LambderSessionManager.js";
 export { LambderDdbCache } from "./LambderDdbCache.js";
 export type { LambderDdbCacheOptions, LambderDdbCacheSetOptions, LambderDdbCacheGetOrSetOptions, } from "./LambderDdbCache.js";
 export { LambderDdbRateLimiter } from "./LambderDdbRateLimiter.js";
