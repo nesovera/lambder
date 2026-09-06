@@ -3,12 +3,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import Lambder from '../src/core/Lambder.js';
+import Lambder, { initLambder } from '../src/core/Lambder.js';
 import { createMockEvent, createMockContext } from './helpers.js';
 describe('CORS', () => {
     it('answers preflight with configured origins', async () => {
-        const lambder = new Lambder({ publicPath: './public' })
-            .enableCors({ origins: ['https://app.example.com'], credentials: true });
+        const lambder = initLambder().create({ publicPath: './public', cors: { origins: ['https://app.example.com'], credentials: true } });
 
         const result = await lambder.render(
             createMockEvent('/api', { httpMethod: 'OPTIONS', headers: { Host: 'localhost', Origin: 'https://app.example.com' } }),
@@ -21,8 +20,7 @@ describe('CORS', () => {
     });
 
     it('never combines a wildcard origin with credentials', async () => {
-        const lambder = new Lambder({ publicPath: './public' })
-            .enableCors({ credentials: true })
+        const lambder = initLambder().create({ publicPath: './public', cors: { credentials: true } })
             .addRoute('/data', (ctx, res) => res.json({ ok: true }));
 
         const result = await lambder.render(
@@ -33,8 +31,7 @@ describe('CORS', () => {
     });
 
     it('omits CORS headers for disallowed origins', async () => {
-        const lambder = new Lambder({ publicPath: './public' })
-            .enableCors({ origins: ['https://allowed.example'] })
+        const lambder = initLambder().create({ publicPath: './public', cors: { origins: ['https://allowed.example'] } })
             .addRoute('/data', (ctx, res) => res.json({ ok: true }));
 
         const result = await lambder.render(

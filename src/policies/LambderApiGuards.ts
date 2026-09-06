@@ -180,7 +180,7 @@ export class LambderApiGuardsEngine {
         for(const { name } of toGuardEntries(guardsOption)){
             const guardDef = this.guards[name];
             if(!guardDef){
-                throw new Error(`Lambder: API "${apiName}" references unknown guard "${name}". Define it via defineApiGuards() before registering the API.`);
+                throw new Error(`Lambder: API "${apiName}" references unknown guard "${name}". Declare it in the guards option at creation.`);
             }
             if(guardDef.session && mode !== "session"){
                 throw new Error(`Lambder: API "${apiName}" uses guard "${name}" (session: true), which requires addSessionApi.`);

@@ -82,7 +82,7 @@ export class LambderApiRateLimitsEngine {
     private policies: Record<string, LambderApiRateLimitPolicyConfig> = {};
 
     configure(config: LambderApiRateLimitsConfig<Record<string, LambderApiRateLimitPolicyConfig>>): void {
-        if(this.limiter) throw new Error("Lambder: enableApiRateLimits() was already called.");
+        if(this.limiter) throw new Error("Lambder: rateLimits were already configured.");
         for(const [name, policy] of Object.entries(config.policies)){
             const per = policy.per as LambderRateLimitPer | undefined;
             if(!per || (per !== "ip" && per !== "session" && typeof per.handler !== "function")){
@@ -101,7 +101,7 @@ export class LambderApiRateLimitsEngine {
         for(const name of toList(rateLimitOption)){
             const policy = this.policies[name];
             if(!policy){
-                throw new Error(`Lambder: API "${apiName}" references unknown rate-limit policy "${name}". Declare it via enableApiRateLimits() before registering the API.`);
+                throw new Error(`Lambder: API "${apiName}" references unknown rate-limit policy "${name}". Declare it in the rateLimits option at creation.`);
             }
             if(policy.per === "session" && mode !== "session"){
                 throw new Error(`Lambder: API "${apiName}" uses rate-limit policy "${name}" (per "session"), which requires addSessionApi.`);

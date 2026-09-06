@@ -37,7 +37,7 @@ export default class LambderSessionController<TSessionData = any> {
     isSessionValid(session: any): boolean;
     updateSessionData(newData: any): Promise<LambderSessionContext>;
     /**
-     * Force-runs the dataRefresh callback now (see enableDdbSession) and
+     * Force-runs the dataRefresh callback now (see the session option of create) and
      * persists the result onto the current session. Returns the updated
      * session, or null when the callback ended it: the record is deleted and
      * the session cookies are cleared.

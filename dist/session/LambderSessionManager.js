@@ -230,7 +230,7 @@ export default class LambderSessionManager {
      */
     async refreshSessionData(session) {
         if (!this.dataRefresh)
-            throw new Error("dataRefresh is not configured. Pass dataRefresh to enableDdbSession(...) to enable.");
+            throw new Error("dataRefresh is not configured. Pass session.dataRefresh at creation to enable.");
         if (!session)
             throw new Error("Invalid session");
         let newData;

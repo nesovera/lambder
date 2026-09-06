@@ -17,7 +17,7 @@ import { z } from 'zod';
 import LambderSessionManager, { LambderSessionDataRefreshError, LambderSessionReadError, type LambderSessionContext } from '../src/session/LambderSessionManager.js';
 import LambderSessionController from '../src/session/LambderSessionController.js';
 import { lambderGuard } from '../src/policies/LambderApiGuards.js';
-import Lambder from '../src/core/Lambder.js';
+import Lambder, { initLambder } from '../src/core/Lambder.js';
 import type { LambderRenderContext, LambderSessionRenderContext } from '../src/core/LambderContext.js';
 import type { APIGatewayProxyEvent, Context } from 'aws-lambda';
 
@@ -826,19 +826,14 @@ describe('Session Endpoint Protection', () => {
     beforeEach(() => {
         ddbMock.reset();
         
-        lambder = new Lambder({
-            publicPath: '/public',
-            apiPath: '/api',
-        })
-            .enableDdbSession(
-                {
+        lambder = initLambder().create({ publicPath: '/public',
+            apiPath: '/api', session: {
                     tableName: 'test-sessions',
                     tableRegion: 'us-east-1',
                     sessionSalt: 'test-salt',
                     partitionKey: 'pk',
                     sortKey: 'sk',
-                }
-            )
+                } })
             // Set up error handler to expose actual error messages for testing
             .setGlobalErrorHandler((err, ctx, responseBuilder) => {
                 if (ctx?._otherInternal.isApiCall) {
@@ -995,8 +990,17 @@ describe('Session Endpoint Protection', () => {
             ddbMock.on(GetCommand).resolves({ Item: mockSession });
             ddbMock.on(PutCommand).resolves({});
 
-            lambder
-                .defineApiGuards({
+            const guardedLambder = initLambder().create({
+                publicPath: '/public',
+                apiPath: '/api',
+                session: {
+                    tableName: 'test-sessions',
+                    tableRegion: 'us-east-1',
+                    sessionSalt: 'test-salt',
+                    partitionKey: 'pk',
+                    sortKey: 'sk',
+                },
+                guards: {
                     orgPermission: lambderGuard({
                         session: true,
                         handler: (ctx, _payload, _res, permission: string) => {
@@ -1004,7 +1008,8 @@ describe('Session Endpoint Protection', () => {
                             return { subject: ctx.session.sessionKey, permission };
                         },
                     }),
-                })
+                },
+            })
                 .addSessionApi('org.action', {
                     input: z.any(),
                     output: z.any(),
@@ -1014,7 +1019,7 @@ describe('Session Endpoint Protection', () => {
                 });
 
             const event = createMockEvent('/api', 'POST', 'hash:sortkey', 'org.action');
-            const response = await lambder.render(event, createMockContext());
+            const response = await guardedLambder.render(event, createMockContext());
 
             const body = JSON.parse(decodeBody(response) || '{}');
             expect(body.payload).toEqual({ subject: 'user-123', permission: 'ORG.MANAGE' });
@@ -1139,15 +1144,14 @@ describe('Session Endpoint Protection', () => {
         });
 
         const makeRefreshingLambder = (refresh: (session: LambderSessionContext<UserSessionData>) => Promise<UserSessionData | null>) =>
-            new Lambder<UserSessionData>({ publicPath: '/public', apiPath: '/api' })
-                .enableDdbSession({
+            initLambder<UserSessionData>().create({ publicPath: '/public', apiPath: '/api', session: {
                     tableName: 'test-sessions',
                     tableRegion: 'us-east-1',
                     sessionSalt: 'test-salt',
                     partitionKey: 'pk',
                     sortKey: 'sk',
                     dataRefresh: { ttlSeconds: 600, refresh },
-                });
+                } });
 
         it('should hand handlers renewed data when the session data is stale', async () => {
             ddbMock.on(GetCommand).resolves({ Item: staleSession() });
