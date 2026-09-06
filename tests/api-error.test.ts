@@ -13,7 +13,7 @@
 import { describe, it, expect } from 'vitest';
 import { z } from 'zod';
 import Lambder from '../src/Lambder.js';
-import { LambderApiError, isLambderApiError } from '../src/LambderApiError.js';
+import { LambderApiError, isLambderApiError, refuse } from '../src/LambderApiError.js';
 import { decodeBody, createMockContext } from './helpers.js';
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
@@ -164,6 +164,50 @@ describe('LambderApiError - envelope mapping on API calls', () => {
         const body = JSON.parse(decodeBody(result));
         expect(body.notAuthorized).toBe(true);
         expect(isLambderApiError(foreign)).toBe(true);
+    });
+});
+
+describe('refuse() - the standard refusal shape', () => {
+    it('maps to a warning envelope by default', async () => {
+        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+            .addApi('nope', testSchema, async () => refuse('Record not found.'));
+
+        const result = await lambder.render(createApiEvent('nope', { value: 'x' }), createMockContext());
+        expect(result.statusCode).toBe(200);
+        const body = JSON.parse(decodeBody(result));
+        expect(body.payload).toBe(null);
+        expect(body.errorMessage).toEqual({ type: 'warning', content: 'Record not found.' });
+    });
+
+    it('carries type, title, flags and statusCode through its options', async () => {
+        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+            .addApi('denied', testSchema, async () => refuse('Admins only.', {
+                type: 'error', title: 'Not Allowed', notAuthorized: true, statusCode: 403,
+            }));
+
+        const result = await lambder.render(createApiEvent('denied', { value: 'x' }), createMockContext());
+        expect(result.statusCode).toBe(403);
+        const body = JSON.parse(decodeBody(result));
+        expect(body.notAuthorized).toBe(true);
+        expect(body.errorMessage).toEqual({ type: 'error', title: 'Not Allowed', content: 'Admins only.' });
+    });
+
+    it('works from nested helpers and skips the global error handler', async () => {
+        let globalHandlerCalled = false;
+        const assertPositive = (n: number) => { if (n <= 0) refuse('Value must be positive.'); };
+        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+            .setGlobalErrorHandler((err, ctx, res) => {
+                globalHandlerCalled = true;
+                return res.raw({ statusCode: 500, body: 'crash' });
+            })
+            .addApi('guarded', testSchema, async (ctx, res) => {
+                assertPositive(-1);
+                return res.api({ result: 'never' });
+            });
+
+        const result = await lambder.render(createApiEvent('guarded', { value: 'x' }), createMockContext());
+        expect(globalHandlerCalled).toBe(false);
+        expect(JSON.parse(decodeBody(result)).errorMessage.content).toBe('Value must be positive.');
     });
 });
 

@@ -36,3 +36,28 @@ export class LambderApiError extends Error {
 }
 /** Brand-based type guard (see LambderApiError.isLambderApiError). */
 export const isLambderApiError = (err) => err instanceof Error && err.isLambderApiError === true;
+/**
+ * Refuse the current API call: a routine business "no" (not found, invalid
+ * input, not allowed) with a user-facing message. Throws a LambderApiError
+ * carrying the standard LambderRefusalMessage shape, so the pipeline maps it
+ * onto the structured envelope instead of a 500, and crash logging never
+ * sees it. Callable from anywhere in the call stack — handlers, hooks,
+ * guards, shared helpers with no resolver access.
+ *
+ * The const carries the annotation so TypeScript applies never-return
+ * control-flow narrowing at call sites (`if (!row) refuse(...)` implies
+ * `row` is defined afterwards).
+ */
+export const refuse = (content, options = {}) => {
+    throw new LambderApiError(content, {
+        errorMessage: {
+            type: options.type ?? "warning",
+            ...(options.title !== undefined ? { title: options.title } : {}),
+            content,
+        },
+        notAuthorized: options.notAuthorized,
+        sessionExpired: options.sessionExpired,
+        statusCode: options.statusCode,
+        cause: options.cause,
+    });
+};
