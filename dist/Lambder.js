@@ -71,12 +71,13 @@ export default class Lambder {
         this.corsConfig = config === true ? {} : (config === false ? null : config);
         return this;
     }
-    enableDdbSession({ tableName, tableRegion, sessionSalt, enableSlidingExpiration, slidingWriteIntervalSeconds, cookie, partitionKey, sortKey, }) {
+    enableDdbSession({ tableName, tableRegion, sessionSalt, enableSlidingExpiration, slidingWriteIntervalSeconds, cookie, partitionKey, sortKey, dataRefresh, }) {
         this.lambderSessionManager = new LambderSessionManager({
             tableName, tableRegion,
             partitionKey: partitionKey ?? "pk",
             sortKey: sortKey ?? "sk",
             sessionSalt, enableSlidingExpiration, slidingWriteIntervalSeconds,
+            dataRefresh,
         });
         this.sessionCookieOptions = cookie ?? {};
         return this;

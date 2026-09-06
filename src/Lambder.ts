@@ -12,7 +12,7 @@ import {
 } from "./LambderResponse.js";
 import { compileRouteMatcher, type CompiledMatcher, type RouteCondition, type ConditionFunction, type LambderRouteMatcher, type PathParamsOf } from "./LambderRouting.js";
 import { applyCorsHeaders, type LambderCorsConfig } from "./LambderCors.js";
-import LambderSessionManager from "./LambderSessionManager.js";
+import LambderSessionManager, { type LambderSessionDataRefreshConfig } from "./LambderSessionManager.js";
 import LambderSessionController, { type LambderSessionCookieOptions } from "./LambderSessionController.js";
 import { LambderPublicFilesHandler, type LambderPublicFilesOptions } from "./LambderPublicFiles.js";
 import type { MergeContract } from "./LambderApiContract.js";
@@ -190,7 +190,7 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
         {
             tableName, tableRegion, sessionSalt,
             enableSlidingExpiration, slidingWriteIntervalSeconds,
-            cookie, partitionKey, sortKey,
+            cookie, partitionKey, sortKey, dataRefresh,
         }: {
             tableName: string;
             tableRegion: string;
@@ -202,6 +202,15 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
             cookie?: LambderSessionCookieOptions;
             partitionKey?: string;
             sortKey?: string;
+            /**
+             * Opt-in freshness for session.data derived from external state
+             * (roles, permissions, feature flags...). Every session read
+             * renews data past its ttlSeconds via your refresh callback,
+             * persisting in place on the same record: same tokens, same
+             * cookies. Return null from refresh to end the session. See
+             * LambderSessionDataRefreshConfig for the exact semantics.
+             */
+            dataRefresh?: LambderSessionDataRefreshConfig<TSessionData>;
         }
     ): this {
         this.lambderSessionManager = new LambderSessionManager({
@@ -209,6 +218,7 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
             partitionKey: partitionKey ?? "pk",
             sortKey: sortKey ?? "sk",
             sessionSalt, enableSlidingExpiration, slidingWriteIntervalSeconds,
+            dataRefresh,
         });
         this.sessionCookieOptions = cookie ?? {};
         return this;
