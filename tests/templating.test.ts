@@ -3,9 +3,9 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import Lambder from '../src/Lambder.js';
-import { html, xml, raw } from '../src/LambderHtml.js';
-import { LambderTemplatingEngine } from '../src/LambderTemplatingEngine.js';
+import Lambder from '../src/core/Lambder.js';
+import { html, xml, raw } from '../src/shared/LambderHtml.js';
+import { LambderTemplatingEngine } from '../src/core/LambderTemplatingEngine.js';
 import { decodeBody, createMockEvent, createMockContext } from './helpers.js';
 describe('Type-safe templating (html/xml tagged templates)', () => {
     it('escapes interpolated values by default', () => {

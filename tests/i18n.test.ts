@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { createLambderI18n } from "../src/LambderI18n.js";
+import { createLambderI18n } from "../src/shared/LambderI18n.js";
 
 const makeI18n = () => createLambderI18n({
     languages: {

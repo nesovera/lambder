@@ -1,6 +1,6 @@
 {
   "name": "lambder",
-  "version": "3.8.1",
+  "version": "4.0.1",
   "description": "",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -9,6 +9,24 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "default": "./dist/client.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "client": [
+        "./dist/client.d.ts"
+      ],
+      "testing": [
+        "./dist/testing.d.ts"
+      ]
     }
   },
   "browser": {

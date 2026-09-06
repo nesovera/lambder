@@ -1,18 +1,16 @@
-import Lambder from './Lambder.js';
+import Lambder from './core/Lambder.js';
 
 export default Lambder;
-export { default as LambderCaller } from "./LambderCaller.js";
-export type { LambderApiOutcome, LambderApiFailureReason, LambderCallOptions } from "./LambderCaller.js";
+export { default as LambderCaller } from "./client/LambderCaller.js";
+export type { LambderApiOutcome, LambderApiFailureReason, LambderCallOptions, LambderIdempotencyKeyScope } from "./client/LambderCaller.js";
 
 // Typed API refusals (isomorphic: shared code may throw them from anywhere)
-export { LambderApiError, isLambderApiError, refuse } from "./LambderApiError.js";
-export type { LambderApiErrorOptions, LambderRefusalMessage, LambderRefuseOptions } from "./LambderApiError.js";
-export { default as LambderResponseBuilder } from "./LambderResponseBuilder.js";
-export { default as LambderResolver } from "./LambderResolver.js";
-export { default as LambderSessionManager } from "./LambderSessionManager.js";
-export { default as LambderSessionController } from "./LambderSessionController.js";
-export { default as LambderMSW } from "./LambderMSW.js";
-export type { LambderMswModule } from "./LambderMSW.js";
+export { LambderApiError, isLambderApiError, refuse } from "./shared/LambderApiError.js";
+export type { LambderApiErrorOptions, LambderRefusalMessage, LambderRefuseOptions } from "./shared/LambderApiError.js";
+export { default as LambderResponseBuilder } from "./core/LambderResponseBuilder.js";
+export { default as LambderResolver } from "./core/LambderResolver.js";
+export { default as LambderSessionManager } from "./session/LambderSessionManager.js";
+export { default as LambderSessionController } from "./session/LambderSessionController.js";
 
 // Response model
 export {
@@ -24,20 +22,18 @@ export {
     type LambderHttpEventFormat,
     type LambderHeadersInput,
     type LambderFinalizeOptions,
-} from "./LambderResponse.js";
+} from "./core/LambderResponse.js";
 
 // Type-safe templating (tagged templates with auto-escaping)
-export { html, xml, raw, jsonScript, escapeHtml, renderHtmlValue, LambderSafeHtml, type LambderHtmlValue } from "./LambderHtml.js";
+export { html, xml, raw, jsonScript, escapeHtml, renderHtmlValue, LambderSafeHtml, type LambderHtmlValue } from "./shared/LambderHtml.js";
 
 // Comment-based HTML templating engine (build-pipeline-safe slots and conditionals, standalone)
-export { LambderTemplatingEngine } from "./LambderTemplatingEngine.js";
-export type { LambderTemplateData, LambderTemplatingEngineOptions } from "./LambderTemplatingEngine.js";
+export { LambderTemplatingEngine } from "./core/LambderTemplatingEngine.js";
+export type { LambderTemplateData, LambderTemplatingEngineOptions } from "./core/LambderTemplatingEngine.js";
 export type {
     LambderResponseOptions,
-    LambderApiResponse,
-    LambderApiResponseConfig,
     LambderRawResponseInit,
-} from "./LambderResponseBuilder.js";
+} from "./core/LambderResponseBuilder.js";
 
 // Routing / configuration types
 export type {
@@ -50,59 +46,72 @@ export type {
     LambderActionTools,
     LambderHandler,
     LambderIndexHtmlOptions,
-} from "./Lambder.js";
+    LambderApp,
+} from "./core/Lambder.js";
 
 // Public file serving
-export { LambderPublicFilesHandler } from "./LambderPublicFiles.js";
-export type { LambderPublicFilesOptions } from "./LambderPublicFiles.js";
+export { LambderPublicFilesHandler } from "./core/LambderPublicFiles.js";
+export type { LambderPublicFilesOptions } from "./core/LambderPublicFiles.js";
 
 // Session types
-export type { LambderSessionCookieOptions } from "./LambderSessionController.js";
-export type { LambderSessionContext, LambderSessionDataRefreshConfig } from "./LambderSessionManager.js";
-export { LambderSessionDataRefreshError } from "./LambderSessionManager.js";
+export type { LambderSessionCookieOptions } from "./session/LambderSessionController.js";
+export type { LambderSessionContext, LambderCreatedSession, LambderSessionDataRefreshConfig } from "./session/LambderSessionManager.js";
+export { LambderSessionDataRefreshError, LambderSessionReadError } from "./session/LambderSessionManager.js";
 
 // DynamoDB-backed compressed cache (standalone, server-only)
-export { LambderDdbCache } from "./LambderDdbCache.js";
+export { LambderDdbCache } from "./stores/LambderDdbCache.js";
 export type {
     LambderDdbCacheOptions,
     LambderDdbCacheSetOptions,
     LambderDdbCacheGetOrSetOptions,
-} from "./LambderDdbCache.js";
+} from "./stores/LambderDdbCache.js";
 
 // DynamoDB-backed fixed-window rate limiter (standalone, server-only)
-export { LambderDdbRateLimiter } from "./LambderDdbRateLimiter.js";
+export { LambderDdbRateLimiter } from "./stores/LambderDdbRateLimiter.js";
 export type {
     LambderDdbRateLimiterOptions,
     LambderRateLimitPolicy,
     LambderRateLimitExceededMap,
     LambderRateLimitResult,
-} from "./LambderDdbRateLimiter.js";
+} from "./stores/LambderDdbRateLimiter.js";
 
 // DynamoDB-backed idempotency records (standalone, server-only)
-export { LambderDdbIdempotency } from "./LambderDdbIdempotency.js";
+export { LambderDdbIdempotency } from "./stores/LambderDdbIdempotency.js";
 export type {
     LambderDdbIdempotencyOptions,
     LambderIdempotencyBeginResult,
-} from "./LambderDdbIdempotency.js";
+    LambderIdempotencyDoneRecord,
+} from "./stores/LambderDdbIdempotency.js";
 
-// Declarative per-API policies (rate limits, guards, idempotency)
-export { lambderGuard, lambderRateLimitKey } from "./LambderApiPolicies.js";
+// Declarative per-API policies: guards
+export { lambderGuard } from "./policies/LambderApiGuards.js";
 export type {
     LambderApiGuard,
+    LambderGuardMeta,
+    LambderGuardMetaMap,
+    LambderAllowedGuardNames,
+    LambderParamlessGuardNames,
+    LambderGuardsOption,
+    LambderGuardsOptionValue,
+    LambderGuardDataOf,
+    LambderGuardInputsOf,
+} from "./policies/LambderApiGuards.js";
+
+// Declarative per-API policies: rate limits
+export { lambderRateLimitKey } from "./policies/LambderApiRateLimits.js";
+export type {
     LambderRateLimitKeyFn,
     LambderRateLimitPer,
     LambderApiRateLimitPolicyConfig,
     LambderApiRateLimitsConfig,
-    LambderApiIdempotencyConfig,
-    LambderGuardMeta,
-    LambderGuardMetaMap,
-    LambderAllowedGuardNames,
     LambderAllowedPolicyNames,
-    LambderGuardInputsOf,
-} from "./LambderApiPolicies.js";
+} from "./policies/LambderApiRateLimits.js";
+
+// Declarative per-API policies: idempotency
+export type { LambderApiIdempotencyConfig } from "./policies/LambderApiIdempotency.js";
 
 // Typed translations (standalone, isomorphic)
-export { createLambderI18n } from "./LambderI18n.js";
+export { createLambderI18n } from "./shared/LambderI18n.js";
 export type {
     LambderLanguageMeta,
     LambderI18nConfig,
@@ -112,13 +121,15 @@ export type {
     LambderI18nCodes,
     LambderI18nKeys,
     LambderI18nTranslatorFor,
-} from "./LambderI18n.js";
+} from "./shared/LambderI18n.js";
 
-// Type-safe API contract utilities
+// Type-safe API contract utilities and the wire envelope
 export {
     type ApiContractShape,
-} from "./LambderApiContract.js";
+    type LambderApiResponse,
+    type LambderApiResponseConfig,
+} from "./shared/LambderApiContract.js";
 
 // Context types and utilities
-export type { LambderRenderContext, LambderSessionRenderContext, LambderHttpEvent } from "./LambderContext.js";
-export { createContext, isV2HttpEvent } from "./LambderContext.js";
+export type { LambderRenderContext, LambderSessionRenderContext, LambderHttpEvent } from "./core/LambderContext.js";
+export { createContext, isV2HttpEvent } from "./core/LambderContext.js";

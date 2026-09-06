@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import Lambder from '../src/Lambder.js';
+import Lambder from '../src/core/Lambder.js';
 import { decodeBody, createMockEvent, createMockContext } from './helpers.js';
 describe('Thrown responses and die', () => {
     it('a thrown response becomes the response (any call depth)', async () => {

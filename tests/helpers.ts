@@ -1,6 +1,6 @@
 import { gunzipSync } from 'node:zlib';
 import type { APIGatewayProxyEvent, Context } from 'aws-lambda';
-import type { LambderHttpResponse } from '../src/LambderResponse.js';
+import type { LambderHttpResponse } from '../src/core/LambderResponse.js';
 
 /** Decode a finalized response body: base64-aware, gzip-unaware (tests opt out of gzip by not sending Accept-Encoding). */
 export const decodeBody = (result: { body: string | null, isBase64Encoded?: boolean }): string => {

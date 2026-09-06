@@ -16,7 +16,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { decodeBody } from './helpers.js';
 import { z } from 'zod';
-import Lambder from '../src/Lambder.js';
+import Lambder from '../src/core/Lambder.js';
 import type { APIGatewayProxyEvent, Context } from 'aws-lambda';
 
 const createMockEvent = (path: string, method: string = 'GET', apiName?: string, payload?: any): APIGatewayProxyEvent => ({

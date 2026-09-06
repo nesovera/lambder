@@ -2,13 +2,13 @@
  * LambderCaller: outcome semantics, per-call handler overrides, timeout.
  *
  * - apiOutcome() resolves to a discriminated { ok } union and never throws.
- * - api()/apiRaw() keep their legacy null-collapsing shape.
+ * - api() keeps its payload-shortcut shape (null/undefined on failure).
  * - Per-call handlers override the constructor handlers.
  * - timeoutMs aborts the fetch and reports reason 'timeout'.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import LambderCaller from '../src/LambderCaller.js';
+import LambderCaller from '../src/client/LambderCaller.js';
 
 /** Minimal Response stand-in: enough surface for the caller's dispatch. */
 const mockResponse = (body: any, init: { status?: number, statusText?: string, rawText?: string, invalidJson?: boolean } = {}) => ({
@@ -55,7 +55,7 @@ describe('LambderCaller - outcomes', () => {
         if(outcome.ok) expect(outcome.payload).toBe(null);
     });
 
-    it('errorMessage envelope: reason errorMessage, handler called, apiRaw keeps the envelope', async () => {
+    it('errorMessage envelope: reason errorMessage, handler called, envelope kept on the outcome', async () => {
         stubFetch(async () => mockResponse({ apiVersion: '1', payload: null, errorMessage: { type: 'warning', content: 'Denied.' } }));
         const errorMessageHandler = vi.fn();
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, errorMessageHandler });
@@ -63,9 +63,8 @@ describe('LambderCaller - outcomes', () => {
         const outcome = await caller.apiOutcome('doThing', {});
         expect(outcome).toMatchObject({ ok: false, reason: 'errorMessage', errorMessage: { type: 'warning', content: 'Denied.' } });
         expect(errorMessageHandler).toHaveBeenCalledWith({ type: 'warning', content: 'Denied.' });
+        if(!outcome.ok) expect(outcome.response?.errorMessage).toEqual({ type: 'warning', content: 'Denied.' });
 
-        const raw = await caller.apiRaw('doThing', {});
-        expect(raw?.errorMessage).toEqual({ type: 'warning', content: 'Denied.' });
         expect(await caller.api('doThing', {})).toBe(null);
     });
 
@@ -190,6 +189,21 @@ describe('LambderCaller - createIdempotencyKey', () => {
         vi.stubGlobal('crypto', { getRandomValues: realCrypto.getRandomValues.bind(realCrypto) });
         const key = LambderCaller.createIdempotencyKey();
         expect(key).toMatch(V4_SHAPE);
+    });
+
+    it('createIdempotencyKeyScope keeps one key per operation and rotates to a fresh one', () => {
+        const scope = LambderCaller.createIdempotencyKeyScope();
+        const first = scope.current;
+        expect(first).toMatch(V4_SHAPE);
+        // Stable across attempts of the same operation.
+        expect(scope.current).toBe(first);
+        // A confirmed success starts a new intent.
+        const rotated = scope.rotate();
+        expect(rotated).toMatch(V4_SHAPE);
+        expect(rotated).not.toBe(first);
+        expect(scope.current).toBe(rotated);
+        // Scopes are independent of each other.
+        expect(LambderCaller.createIdempotencyKeyScope().current).not.toBe(rotated);
     });
 });
 
