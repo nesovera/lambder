@@ -2,7 +2,7 @@
 
 Lambder is a highly opinionated dynamic serverless framework designed to facilitate the management and implementation of routes and APIs within AWS Lambda functions, specifically tailored for TypeScript projects. It provides a streamlined approach to handling HTTP requests, managing sessions, and defining API routes, making serverless application development more intuitive and structured.
 
-**New in v3:** Public file serving with `servePublicFiles()` + `serveIndexHtml()`, unified `addAction()` for non-HTTP triggers, automatic gzip + ETag, thrown responses with a real `die`, the comment-based `LambderTemplatingEngine`, type-safe `html`/`xml` tagged templates, API Gateway HTTP API (payload v2) / Lambda Function URL support, the `LambderDdbCache` DynamoDB cache (3.1) and typed translations with `createLambderI18n` (3.2).
+**New in v3:** Public file serving with `servePublicFiles()` + `serveIndexHtml()`, unified `addAction()` for non-HTTP triggers, automatic gzip + ETag, thrown responses with a real `die`, the comment-based `LambderTemplatingEngine`, type-safe `html`/`xml` tagged templates, API Gateway HTTP API (payload v2) / Lambda Function URL support, the `LambderDdbCache` DynamoDB cache (3.1), typed translations with `createLambderI18n` (3.2), and in 3.5: typed API refusals with `LambderApiError`, caller outcomes/timeouts with `apiOutcome()`, plus declarative per-API rate limits, guards, and idempotency.
 
 ## Features
 
@@ -428,9 +428,88 @@ Responses are finalized once at the end of the request: automatic gzip (when the
 
 **Die Methods**: `res.die.*` - Builds the response and throws it, immediately halting the request at any call depth (handlers, hooks, nested helper functions). Plain `throw res.html(...)` works the same way.
 
+### Typed API Refusals (LambderApiError)
+
+A refusal ("you are not allowed", "quota exceeded") is not a crash. `res.die.*` covers refusals where you hold the resolver, but shared helpers (permission checks, validators) usually don't. Throw `LambderApiError` from anywhere in an API call's stack and the pipeline maps it onto the structured envelope instead of the global error handler, so refusals never pollute crash logging and clients get a parseable response:
+
+```typescript
+import { LambderApiError } from "lambder";
+
+// In any helper, no resolver needed:
+export const requirePermission = (granted: boolean) => {
+    if (!granted) throw new LambderApiError("Permission denied.", {
+        notAuthorized: true,                                    // envelope flag -> caller's notAuthorizedHandler
+        errorMessage: { type: "warning", content: "Not allowed." }, // any shape your errorMessageHandler expects
+        // sessionExpired: true,                                // optional envelope flag
+        // statusCode: 403,                                     // optional; default 200 (avoid 5xx and 422)
+    });
+};
+```
+
+`errorMessage` defaults to the error's message string, so `throw new LambderApiError("Nope.")` alone is already visible to the client. Thrown outside an API call (e.g. in a route handler) it behaves like a normal error. The class is isomorphic and dependency-free, so shared server/browser packages can import it safely. Detection is brand-based (`isLambderApiError`), so it works even when two copies of lambder end up in one bundle.
+
+Related: when an API call crashes with no `setGlobalErrorHandler` (or the handler itself fails), the last-resort 500 is now a JSON envelope (`{ payload: null, errorMessage: "Internal server error." }`) instead of a plain-text page; routes keep the plain-text 500.
+
+### Declarative API Policies (rate limits, guards, idempotency)
+
+Declare named building blocks once; reference them from API definitions with full type inference (unknown names are compile errors, and everything is re-asserted at registration time for plain-JS safety). Each piece is independent and optional.
+
+```typescript
+import Lambder, { LambderDdbRateLimiter, LambderDdbIdempotency, LambderApiError } from "lambder";
+
+const lambder = new Lambder<SessionData>({ apiPath: "/api" })
+    // 1. Rate limiting: your limiter instance + named policies. Each policy
+    //    declares its windows AND what one counter tracks ("per").
+    .enableApiRateLimits({
+        limiter: new LambderDdbRateLimiter({ tableName: "app-rate-limiter", region: "us-east-1", failOpen: true }),
+        policies: {
+            authPerIp:    { perMin: 5, perHour: 30, per: "ip" },
+            writePerUser: { perMin: 30, per: "session" },   // only referable from addSessionApi (also enforced at compile time)
+            codePerEmail: { perMin: 3, per: (ctx) => String(ctx.post?.payload?.email ?? "").toLowerCase(),
+                            errorMessage: { type: "warning", content: "Too many attempts for this address." } },
+        },
+    })
+    // 2. Idempotency: a store instance + replay defaults. May share the rate
+    //    limiter's table (records use an IDEM# key prefix).
+    .enableApiIdempotency({
+        store: new LambderDdbIdempotency({ tableName: "app-rate-limiter", region: "us-east-1" }),
+        defaultTtlSeconds: 24 * 3600,
+        failOpen: true,   // DynamoDB down => execute without dedupe instead of failing
+    })
+    // 3. Named guards: run before input validation, refuse by throwing.
+    //    Callable multiple times; domain modules can contribute their own.
+    .defineApiGuards({
+        captcha: async (ctx) => {
+            if (!await verifyCaptcha(ctx.post?.payload?.captchaToken, ctx.ip)) {
+                throw new LambderApiError("Captcha failed", { errorMessage: "Verification failed, please retry." });
+            }
+        },
+    });
+
+lambder.addApi("public.resetPassword", {
+    input: z.object({ email: z.string().email(), captchaToken: z.string() }),
+    output: z.object({ ok: z.boolean() }),
+    rateLimit: ["authPerIp", "codePerEmail"],   // stacked: checked in order, first exceeded refuses (429 envelope)
+    guards: "captcha",
+}, handler);
+
+lambder.addSessionApi("secure.order.create", {
+    input: OrderSchema,
+    output: OrderResultSchema,
+    rateLimit: "writePerUser",
+    idempotency: true,                          // or { ttlSeconds: 3600 }; type error until enableApiIdempotency()
+}, handler);
+```
+
+Request flow per API: session (session APIs) → rate limits → guards → zod validation → idempotency claim → handler → idempotency store. Refusals ride the envelope via `LambderApiError` (429 rate limited, 409 duplicate in flight), so the caller's `errorMessageHandler` surfaces them with zero client code.
+
+**Idempotency semantics**: the client sends an `idempotencyKey` per call (see LambderCaller below); generate it once per logical operation and reuse it on retries. The scope is identity (session key, or IP for public APIs) + API name + key: concurrent duplicates of an in-flight request refuse with 409, repeats of a completed one replay the stored response verbatim until the TTL, and a crashed original releases its claim so a retry actually retries. A response delivered by throwing (`res.die.*`, `throw res.api(...)`) counts as a completion and is stored like a returned one; thrown `LambderApiError` refusals release the claim instead. Responses with status ≥ 500 are never stored. Claims are owner-checked, so an original that stalls past the pending window can no longer overwrite or delete the claim a retry has since taken. Requests without a key execute normally.
+
+Also enforced at registration: **duplicate API names throw** (dispatch is first-match, so a second registration of the same name would be silently dead code).
+
 ### DynamoDB Cache (LambderDdbCache)
 
-Standalone, persistent JSON cache backed by a DynamoDB table (`pk`/`sk` keys + `expiresAt` TTL attribute, same shape as the session table). Brotli-compressed values, in-memory LRU layer, single-flight deduplication, a DynamoDB lease so only one Lambda fills a missing key, and fail-open semantics. Server-only. **Full guide with table setup: [docs/DDB_CACHE.md](./docs/DDB_CACHE.md).**
+Standalone, persistent JSON cache backed by a DynamoDB table (`pk`/`sk` keys + `expiresAt` TTL attribute, same shape as the session table). Items are prefixed `CACHE#<namespace>#`, and the rate limiter (`RL#`) and idempotency store (`IDEM#`) prefix theirs too, so all three non-session systems can share one table without collisions; keep sessions in their own table for IAM scoping. Brotli-compressed values, in-memory LRU layer, single-flight deduplication, a DynamoDB lease so only one Lambda fills a missing key, and fail-open semantics. Server-only. **Full guide with table setup: [docs/DDB_CACHE.md](./docs/DDB_CACHE.md).**
 
 ```typescript
 import { LambderDdbCache } from "lambder";
@@ -504,6 +583,33 @@ const user = await lambderCaller.api("getCompanyPage", { companyName: "Acme" });
 // - Required input type
 // - Expected output type
 ```
+
+### Failure Semantics (apiOutcome, timeouts, per-call overrides)
+
+`api()` collapses every failure to `null`, which is indistinguishable from a legitimately-null payload. When the call site needs to know why, use `apiOutcome()`; it never throws and resolves to a discriminated union:
+
+```typescript
+const outcome = await lambderCaller.apiOutcome("getCompanyPage", { companyName: "Acme" });
+if (outcome.ok) {
+    render(outcome.payload);
+} else if (outcome.reason === "network" || outcome.reason === "timeout") {
+    showOfflineScreen();
+} else if (outcome.reason === "sessionExpired") {
+    redirectToLogin();
+} else {
+    // 'server' (5xx / non-envelope body), 'validation' (422), 'versionExpired',
+    // 'notAuthorized', 'errorMessage' (structured refusal), 'unknown'
+    showError(outcome.errorMessage);
+}
+```
+
+Every configured handler still fires on the matching failure, so global UX (toasts, re-login prompts) lives in the constructor while individual call sites branch on the outcome.
+
+Also available:
+
+- **Timeouts**: pass `timeoutMs` in the constructor for a default (API Gateway caps around 29s, so ~30000 is sensible) and/or per call; timed-out calls abort the fetch and report `reason: 'timeout'`. A per-call `signal` combines with the timeout.
+- **Per-call handler overrides**: every constructor handler (`errorHandler`, `sessionExpiredHandler`, `errorMessageHandler`, ...) can be overridden in the options of a single `api`/`apiRaw`/`apiOutcome` call.
+- **Idempotency keys**: pass `idempotencyKey` per call for APIs declared idempotent on the server (see Declarative API Policies). Generate it once per logical operation with `LambderCaller.createIdempotencyKey()` (safe in insecure contexts where `crypto.randomUUID` is missing) and send the same key on retries; rotate after a confirmed success.
 
 ### Benefits
 

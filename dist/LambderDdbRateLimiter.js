@@ -17,6 +17,9 @@ const WINDOW_CONFIG = [
  * larger counters. Items carry an `expiresAt` attribute for DynamoDB TTL.
  *
  * Table shape: string hash key `pk`, string range key `sk`, TTL on `expiresAt`.
+ * Items are prefixed `RL#` by default, so the table can be shared with
+ * LambderDdbCache (`CACHE#`) and LambderDdbIdempotency (`IDEM#`) without key
+ * collisions.
  */
 export class LambderDdbRateLimiter {
     tableName;

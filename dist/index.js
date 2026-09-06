@@ -1,6 +1,8 @@
 import Lambder from './Lambder.js';
 export default Lambder;
 export { default as LambderCaller } from "./LambderCaller.js";
+// Typed API refusals (isomorphic: shared code may throw them from anywhere)
+export { LambderApiError, isLambderApiError } from "./LambderApiError.js";
 export { default as LambderResponseBuilder } from "./LambderResponseBuilder.js";
 export { default as LambderResolver } from "./LambderResolver.js";
 export { default as LambderSessionManager } from "./LambderSessionManager.js";
@@ -19,6 +21,8 @@ export { LambderSessionDataRefreshError } from "./LambderSessionManager.js";
 export { LambderDdbCache } from "./LambderDdbCache.js";
 // DynamoDB-backed fixed-window rate limiter (standalone, server-only)
 export { LambderDdbRateLimiter } from "./LambderDdbRateLimiter.js";
+// DynamoDB-backed idempotency records (standalone, server-only)
+export { LambderDdbIdempotency } from "./LambderDdbIdempotency.js";
 // Typed translations (standalone, isomorphic)
 export { createLambderI18n } from "./LambderI18n.js";
 export { createContext, isV2HttpEvent } from "./LambderContext.js";

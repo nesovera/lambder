@@ -13,7 +13,7 @@ export type LambderRateLimitResult = false | LambderRateLimitExceededMap;
 export interface LambderDdbRateLimiterOptions {
     tableName: string;
     region?: string;
-    /** Partition key prefix, keeps counters separated from other items. */
+    /** Partition key prefix, keeps counters separated from other systems in a shared table. Default: "RL". */
     keyPrefix?: string;
     /** Multiplier applied to the window length when setting the item TTL. */
     ttlWindowMultiplier?: number;
@@ -31,6 +31,9 @@ export interface LambderDdbRateLimiterOptions {
  * larger counters. Items carry an `expiresAt` attribute for DynamoDB TTL.
  *
  * Table shape: string hash key `pk`, string range key `sk`, TTL on `expiresAt`.
+ * Items are prefixed `RL#` by default, so the table can be shared with
+ * LambderDdbCache (`CACHE#`) and LambderDdbIdempotency (`IDEM#`) without key
+ * collisions.
  */
 export declare class LambderDdbRateLimiter {
     readonly tableName: string;

@@ -229,9 +229,12 @@ describe('Output Type Enforcement - Runtime', () => {
         
         const response = await lambder.render(event, context);
         
-        // Should return 500 error when session is not configured
+        // Should return a 500 when session is not configured; API calls get
+        // the JSON envelope so clients can parse the failure.
         expect(response.statusCode).toBe(500);
-        expect(response.body).toBe('Internal Server Error.');
+        const body = JSON.parse(response.body || '{}');
+        expect(body.payload).toBe(null);
+        expect(body.errorMessage).toBe('Internal server error.');
     });
 });
 
