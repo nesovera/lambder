@@ -33,13 +33,13 @@ export class LambderApiIdempotencyEngine {
     private failOpen = true;
 
     configure(config: LambderApiIdempotencyConfig): void {
-        if(this.store) throw new Error("Lambder: enableApiIdempotency() was already called.");
+        if(this.store) throw new Error("Lambder: idempotency was already configured.");
         this.store = config.store;
         this.defaultTtlSeconds = config.defaultTtlSeconds ?? 24 * 3600;
         this.failOpen = config.failOpen ?? true;
     }
 
-    /** True once enableApiIdempotency() ran; registration asserts check it. */
+    /** True once the idempotency option was configured; registration asserts check it. */
     get isConfigured(): boolean { return this.store !== null; }
 
     /**

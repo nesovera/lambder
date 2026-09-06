@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import Lambder from '../src/core/Lambder.js';
+import Lambder, { initLambder } from '../src/core/Lambder.js';
 import { decodeBody, gunzipBody, createMockContext } from './helpers.js';
 import type { APIGatewayProxyEventV2 } from 'aws-lambda';
 
@@ -178,8 +178,7 @@ describe('HTTP API v2 events', () => {
     });
 
     it('answers CORS preflight on v2 OPTIONS requests', async () => {
-        const lambder = new Lambder({ publicPath: './public' })
-            .enableCors(true)
+        const lambder = initLambder().create({ publicPath: './public', cors: true })
             .addRoute('/x', (ctx, res) => res.html('x'));
 
         const event = createMockEventV2('/x', { headers: { 'host': 'localhost', 'origin': 'https://app.example.com' } });

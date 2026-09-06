@@ -19,7 +19,7 @@ export declare class LambderApiIdempotencyEngine {
     private defaultTtlSeconds;
     private failOpen;
     configure(config: LambderApiIdempotencyConfig): void;
-    /** True once enableApiIdempotency() ran; registration asserts check it. */
+    /** True once the idempotency option was configured; registration asserts check it. */
     get isConfigured(): boolean;
     /**
      * The request's idempotencyKey: null when absent, the key when valid, a

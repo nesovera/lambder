@@ -10,19 +10,22 @@ import { isLambderApiError } from "../shared/LambderApiError.js";
 import { LambderApiPolicyEngine } from "../policies/LambderApiPolicies.js";
 import { createContext, isV2HttpEvent } from "./LambderContext.js";
 /**
- * Main Lambder class for building type-safe serverless APIs
+ * Main Lambder class for building type-safe serverless APIs. Create
+ * instances with initLambder<SessionData>().create({...}) (see below): the
+ * whole configuration, including the typed policy layer, is given at
+ * construction, and only registration (routes, apis, hooks, use) chains.
  *
  * @typeParam TSessionData - Type of session data stored in DynamoDB
  * @typeParam _TContract - @internal Accumulates API contract during chaining (do not pass manually)
- * @typeParam _TRateLimitPolicies - @internal Accumulated by enableApiRateLimits (do not pass manually)
- * @typeParam _TGuards - @internal Guard name to required-payload map, accumulated by defineApiGuards (do not pass manually)
- * @typeParam _TIdempotencyEnabled - @internal Flipped by enableApiIdempotency (do not pass manually)
+ * @typeParam _TRateLimitPolicies - @internal Inferred from create()'s rateLimits.policies (do not pass manually)
+ * @typeParam _TGuards - @internal Guard metadata map inferred from create()'s guards (do not pass manually)
+ * @typeParam _TIdempotencyEnabled - @internal True when create() received idempotency (do not pass manually)
  *
  * @example
  * ```typescript
  * interface SessionData { userId: string; role: string; }
  *
- * const lambder = new Lambder<SessionData>({ apiPath: '/api' })
+ * const lambder = initLambder<SessionData>().create({ apiPath: '/api' })
  *   .addApi('getUser', { input: z.object({...}), output: z.object({...}) }, handler)
  *   .addApi('createUser', { input: z.object({...}), output: z.object({...}) }, handler);
  * ```
@@ -73,26 +76,33 @@ export default class Lambder {
             etag: options.etag ?? DEFAULT_FINALIZE_OPTIONS.etag,
             maxResponseBytes: options.maxResponseBytes ?? DEFAULT_FINALIZE_OPTIONS.maxResponseBytes,
         };
-    }
-    enableCors(config) {
-        this.corsConfig = config === true ? {} : (config === false ? null : config);
-        return this;
-    }
-    enableDdbSession({ tableName, tableRegion, sessionSalt, enableSlidingExpiration, slidingWriteIntervalSeconds, cookie, partitionKey, sortKey, dataRefresh, }) {
-        this.lambderSessionManager = new LambderSessionManager({
-            tableName, tableRegion,
-            partitionKey: partitionKey ?? "pk",
-            sortKey: sortKey ?? "sk",
-            sessionSalt, enableSlidingExpiration, slidingWriteIntervalSeconds,
-            dataRefresh,
-        });
-        this.sessionCookieOptions = cookie ?? {};
-        return this;
-    }
-    setSessionCookieKey(sessionTokenCookieKey, sessionCsrfCookieKey) {
-        this.sessionTokenCookieKey = sessionTokenCookieKey;
-        this.sessionCsrfCookieKey = sessionCsrfCookieKey;
-        return this;
+        if (options.cors !== undefined && options.cors !== false) {
+            this.corsConfig = options.cors === true ? {} : options.cors;
+        }
+        if (options.session) {
+            const session = options.session;
+            this.lambderSessionManager = new LambderSessionManager({
+                tableName: session.tableName,
+                tableRegion: session.tableRegion,
+                partitionKey: session.partitionKey ?? "pk",
+                sortKey: session.sortKey ?? "sk",
+                sessionSalt: session.sessionSalt,
+                enableSlidingExpiration: session.enableSlidingExpiration,
+                slidingWriteIntervalSeconds: session.slidingWriteIntervalSeconds,
+                dataRefresh: session.dataRefresh,
+            });
+            this.sessionCookieOptions = session.cookie ?? {};
+            if (session.tokenCookieKey)
+                this.sessionTokenCookieKey = session.tokenCookieKey;
+            if (session.csrfCookieKey)
+                this.sessionCsrfCookieKey = session.csrfCookieKey;
+        }
+        if (options.rateLimits)
+            this.getOrCreatePolicyEngine().setRateLimits(options.rateLimits);
+        if (options.guards)
+            this.getOrCreatePolicyEngine().addGuards(options.guards);
+        if (options.idempotency)
+            this.getOrCreatePolicyEngine().setIdempotency(options.idempotency);
     }
     setRouteFallbackHandler(routeFallbackHandler) {
         this.routeFallbackHandler = routeFallbackHandler;
@@ -162,51 +172,6 @@ export default class Lambder {
         }
         return response;
     }
-    // ---------------------------------------------------------------------
-    // Declarative API policies (rate limits, guards, idempotency)
-    // ---------------------------------------------------------------------
-    /**
-     * Wire declarative per-API rate limiting: your LambderDdbRateLimiter
-     * instance plus named policies, each declaring its windows and what one
-     * counter tracks (`per`: "ip", "session", or a custom key function).
-     * APIs then reference policies by name via the `rateLimit` option; the
-     * returned type narrows so only declared names are accepted, and
-     * policies keyed per "session" are only referable from addSessionApi.
-     * Callable once; call it before the API registrations that use it.
-     */
-    enableApiRateLimits(config) {
-        this.getOrCreatePolicyEngine().setRateLimits(config);
-        return this;
-    }
-    /**
-     * Wire declarative idempotency: your LambderDdbIdempotency instance plus
-     * replay defaults. APIs opt in via `idempotency: true | { ttlSeconds }`;
-     * the option is a type error until this is called. Requests carrying a
-     * client `idempotencyKey` (sent by LambderCaller) claim an
-     * identity+api+key scope atomically: concurrent duplicates refuse with
-     * 409, replays of a completed request return the stored response, and a
-     * crashed original releases its claim. Callable once.
-     */
-    enableApiIdempotency(config) {
-        this.getOrCreatePolicyEngine().setIdempotency(config);
-        return this;
-    }
-    /**
-     * Define named guards that APIs reference (typed) via the `guards`
-     * option. Each guard is built with lambderGuard(): its input mode
-     * (apiInput slice of the API's own payload, a separate client-sent
-     * guardInput, or none), an optional `session: true` requirement, an
-     * optional parameter APIs pass in their declaration (`guards: { name:
-     * param }`), and an optional return value that lands typed on the
-     * handler's ctx.guardData[name]. Guards run before input validation, in
-     * the order the API declares them; a handler refuses by throwing
-     * (typically refuse()). Callable multiple times so domain modules can
-     * contribute their own; names must not collide.
-     */
-    defineApiGuards(guards) {
-        this.getOrCreatePolicyEngine().addGuards(guards);
-        return this;
-    }
     getOrCreatePolicyEngine() {
         if (!this.apiPolicyEngine)
             this.apiPolicyEngine = new LambderApiPolicyEngine();
@@ -222,7 +187,7 @@ export default class Lambder {
         if (!usesPolicies)
             return;
         if (!this.apiPolicyEngine) {
-            throw new Error(`Lambder: API "${name}" declares rateLimit/guards/idempotency, but none of enableApiRateLimits()/defineApiGuards()/enableApiIdempotency() was called first.`);
+            throw new Error(`Lambder: API "${name}" declares rateLimit/guards/idempotency, but none of rateLimits/guards/idempotency was configured at creation.`);
         }
         this.apiPolicyEngine.assertRegistration(name, mode, options);
     }
@@ -345,7 +310,7 @@ export default class Lambder {
     }
     getSessionController(ctx) {
         if (!this.lambderSessionManager)
-            throw new Error("Session is not enabled. Use lambder.enableDdbSession(...) to enable.");
+            throw new Error("Session is not enabled. Configure the session option at creation.");
         return new LambderSessionController({
             lambderSessionManager: this.lambderSessionManager,
             sessionTokenCookieKey: this.sessionTokenCookieKey,
@@ -582,6 +547,46 @@ export default class Lambder {
         }
     }
 }
+/**
+ * The canonical way to create an instance: fix the session data type first,
+ * then create with the full configuration in one declaration; the policy,
+ * guard, and idempotency types are INFERRED from the options, so the
+ * instance is born fully typed and `typeof lambderApp` is the annotation
+ * type for api modules. No enable/define chain exists, so there are no
+ * ordering rules and nothing can be half-configured.
+ *
+ * ```typescript
+ * // app.ts (imports no api modules, so modules can import the type back)
+ * export const lambderApp = initLambder<SessionData>().create({
+ *     apiPath: "/api",
+ *     session: { tableName: "app-session", tableRegion: "us-east-1", sessionSalt: "..." },
+ *     rateLimits: { limiter, policies },
+ *     guards,
+ *     idempotency: { store },
+ * });
+ * export type AppLambder = typeof lambderApp;
+ *
+ * // orders.ts
+ * export const orderApi = (lambder: AppLambder) => lambder.addSessionApi(...);
+ *
+ * // index.ts: registration only
+ * const lambder = lambderApp.addHook(...).use(orderApi)...;
+ * export const handler = lambder.getHandler();
+ * ```
+ *
+ * Why curried (`initLambder<S>().create(...)` rather than
+ * `new Lambder<S>(...)`): TypeScript type arguments are all-or-nothing per
+ * call, so explicitly passing the session data type to the constructor
+ * would silently WIDEN the inferred policy and guard types to their {}
+ * defaults. Fixing the session type in the first call lets the second call
+ * infer everything else from the options. `new Lambder(options)` remains
+ * for untyped or session-data-free instances.
+ */
+export const initLambder = () => ({
+    create(options) {
+        return new Lambder(options);
+    },
+});
 /** Rebuild the query string from the API Gateway event for redirects. */
 const buildQueryString = (ctx) => {
     if (isV2HttpEvent(ctx.event)) {

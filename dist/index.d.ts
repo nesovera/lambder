@@ -1,5 +1,6 @@
 import Lambder from './core/Lambder.js';
 export default Lambder;
+export { initLambder } from './core/Lambder.js';
 export { default as LambderCaller } from "./client/LambderCaller.js";
 export type { LambderApiOutcome, LambderApiFailureReason, LambderCallOptions, LambderIdempotencyKeyScope } from "./client/LambderCaller.js";
 export { LambderApiError, isLambderApiError, refuse } from "./shared/LambderApiError.js";
@@ -13,7 +14,7 @@ export { html, xml, raw, jsonScript, escapeHtml, renderHtmlValue, LambderSafeHtm
 export { LambderTemplatingEngine } from "./core/LambderTemplatingEngine.js";
 export type { LambderTemplateData, LambderTemplatingEngineOptions } from "./core/LambderTemplatingEngine.js";
 export type { LambderResponseOptions, LambderRawResponseInit, } from "./core/LambderResponseBuilder.js";
-export type { LambderRouteMatcher, LambderCorsConfig, LambderConstructorOptions, ConditionFunction, RouteCondition, PathParamsOf, LambderActionTools, LambderHandler, LambderIndexHtmlOptions, LambderApp, } from "./core/Lambder.js";
+export type { LambderRouteMatcher, LambderCorsConfig, LambderCreateOptions, LambderSessionOptions, ConditionFunction, RouteCondition, PathParamsOf, LambderActionTools, LambderHandler, LambderIndexHtmlOptions, } from "./core/Lambder.js";
 export { LambderPublicFilesHandler } from "./core/LambderPublicFiles.js";
 export type { LambderPublicFilesOptions } from "./core/LambderPublicFiles.js";
 export type { LambderSessionCookieOptions } from "./session/LambderSessionController.js";
