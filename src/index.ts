@@ -86,14 +86,21 @@ export type {
 } from "./LambderDdbIdempotency.js";
 
 // Declarative per-API policies (rate limits, guards, idempotency)
+export { lambderGuard, lambderRateLimitKey } from "./LambderApiPolicies.js";
 export type {
-    LambderApiGuardFunction,
+    LambderApiGuard,
+    LambderRateLimitKeyFn,
     LambderRateLimitPer,
     LambderApiRateLimitPolicyConfig,
     LambderApiRateLimitsConfig,
     LambderApiIdempotencyConfig,
-    LambderApiRegistrationOptions,
     LambderPublicRateLimitNames,
+    LambderGuardPayload,
+    LambderGuardPayloadMap,
+    LambderPolicyPayload,
+    LambderGuardsRequirement,
+    LambderPoliciesRequirement,
+    LambderMergedInput,
 } from "./LambderApiPolicies.js";
 
 // Typed translations (standalone, isomorphic)

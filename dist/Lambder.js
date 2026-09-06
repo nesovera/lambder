@@ -15,7 +15,7 @@ import { createContext, isV2HttpEvent } from "./LambderContext.js";
  * @typeParam TSessionData - Type of session data stored in DynamoDB
  * @typeParam _TContract - @internal Accumulates API contract during chaining (do not pass manually)
  * @typeParam _TRateLimitPolicies - @internal Accumulated by enableApiRateLimits (do not pass manually)
- * @typeParam _TGuardName - @internal Accumulated by defineApiGuards (do not pass manually)
+ * @typeParam _TGuards - @internal Guard name to required-payload map, accumulated by defineApiGuards (do not pass manually)
  * @typeParam _TIdempotencyEnabled - @internal Flipped by enableApiIdempotency (do not pass manually)
  *
  * @example
@@ -193,8 +193,12 @@ export default class Lambder {
     }
     /**
      * Define named guards that APIs reference (typed) via the `guards`
-     * option. Guards run before input validation, in the order the API
-     * declares them; a guard refuses by throwing (typically LambderApiError).
+     * option. Each guard is a { input?, handler } definition (build with
+     * lambderGuard()): the input slice is validated against the raw payload
+     * before the handler runs, the handler receives it typed, and the
+     * requirement merges into the contract input of every API declaring the
+     * guard. Guards run before input validation, in the order the API
+     * declares them; a handler refuses by throwing (typically refuse()).
      * Callable multiple times so domain modules can contribute their own;
      * names must not collide.
      */

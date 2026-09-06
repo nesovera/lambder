@@ -18,6 +18,7 @@ import Lambder from '../src/Lambder.js';
 import { LambderApiError } from '../src/LambderApiError.js';
 import { LambderDdbRateLimiter } from '../src/LambderDdbRateLimiter.js';
 import { LambderDdbIdempotency } from '../src/LambderDdbIdempotency.js';
+import { lambderGuard, lambderRateLimitKey } from '../src/LambderApiPolicies.js';
 import { createMockContext } from './helpers.js';
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
@@ -124,7 +125,7 @@ describe('API policies - registration assertions', () => {
     it('throws on unknown rate-limit policy and unknown guard names', () => {
         const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
             .enableApiRateLimits({ limiter: makeLimiter(new MemoryDdb()), policies: { real: { perMin: 5, per: 'ip' } } })
-            .defineApiGuards({ realGuard: async () => {} });
+            .defineApiGuards({ realGuard: { handler: async () => {} } });
         expect(() => lambder.addApi('a', { ...testSchema, rateLimit: 'fake' } as any, async (ctx, res) => res.api(null)))
             .toThrow(/unknown rate-limit policy "fake"/);
         expect(() => lambder.addApi('b', { ...testSchema, guards: 'fakeGuard' } as any, async (ctx, res) => res.api(null)))
@@ -140,7 +141,7 @@ describe('API policies - registration assertions', () => {
 
     it('rejects idempotency without enableApiIdempotency', () => {
         const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
-            .defineApiGuards({ g: async () => {} });
+            .defineApiGuards({ g: { handler: async () => {} } });
         expect(() => lambder.addApi('x', { ...testSchema, idempotency: true } as any, async (ctx, res) => res.api(null)))
             .toThrow(/enableApiIdempotency\(\) was not called first/);
     });
@@ -149,10 +150,10 @@ describe('API policies - registration assertions', () => {
         const client = new MemoryDdb();
         const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
             .enableApiRateLimits({ limiter: makeLimiter(client), policies: { p: { perMin: 1, per: 'ip' } } })
-            .defineApiGuards({ g: async () => {} });
+            .defineApiGuards({ g: { handler: async () => {} } });
         expect(() => lambder.enableApiRateLimits({ limiter: makeLimiter(client), policies: { q: { perMin: 1, per: 'ip' } } }))
             .toThrow(/already called/);
-        expect(() => lambder.defineApiGuards({ g: async () => {} })).toThrow(/already defined/);
+        expect(() => lambder.defineApiGuards({ g: { handler: async () => {} } })).toThrow(/already defined/);
     });
 
     it('rejects policies with no window or no per', () => {
@@ -162,7 +163,7 @@ describe('API policies - registration assertions', () => {
             .toThrow(/declares no window/);
         expect(() => new Lambder({ publicPath: './public', apiPath: '/api' })
             .enableApiRateLimits({ limiter: makeLimiter(client), policies: { bad: { perMin: 1 } as any } }))
-            .toThrow(/missing its "per"/);
+            .toThrow(/needs per/);
     });
 });
 
@@ -194,7 +195,11 @@ describe('API policies - rate limiting', () => {
                 limiter: makeLimiter(new MemoryDdb()),
                 policies: {
                     perEmail: {
-                        perMin: 1, per: (ctx) => String(ctx.post?.payload?.value ?? ''),
+                        perMin: 1,
+                        per: lambderRateLimitKey({
+                            input: z.object({ value: z.string() }),
+                            handler: (_ctx, { value }) => value,
+                        }),
                         errorMessage: { type: 'warning', content: 'Too many attempts for this address.' },
                     },
                 },
@@ -245,8 +250,10 @@ describe('API policies - guards', () => {
         let handlerRan = false;
         const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
             .defineApiGuards({
-                deny: async () => {
-                    throw new LambderApiError('Guard says no', { errorMessage: { type: 'error', content: 'Blocked.' } });
+                deny: {
+                    handler: async () => {
+                        throw new LambderApiError('Guard says no', { errorMessage: { type: 'error', content: 'Blocked.' } });
+                    },
                 },
             })
             .addApi('guarded', { ...testSchema, guards: 'deny' }, async (ctx, res) => {
@@ -261,12 +268,56 @@ describe('API policies - guards', () => {
         expect(handlerRan).toBe(false);
     });
 
+    it('validates the guard input slice before the handler and answers 422 when it is missing', async () => {
+        let sawToken: string | null = null;
+        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+            .defineApiGuards({
+                token: lambderGuard({
+                    input: z.object({ token: z.string().min(3) }),
+                    handler: async (_ctx, { token }) => { sawToken = token; },
+                }),
+            })
+            .addApi('gated', { ...testSchema, guards: 'token' }, async (ctx, res) => res.api({ result: ctx.apiPayload.value }));
+
+        // Missing token: the 422 validation shape, before the guard or handler runs.
+        const missing = await lambder.render(createApiEvent('gated', { value: 'x' }), createMockContext());
+        expect(missing.statusCode).toBe(422);
+        expect(JSON.parse(missing.body || '{}').zodError).toBeDefined();
+        expect(sawToken).toBe(null);
+
+        // Present: the handler receives the parsed slice even though the API
+        // schema does not declare (and strips) the field.
+        const ok = await lambder.render(createApiEvent('gated', { value: 'x', token: 'abc' }), createMockContext());
+        expect(ok.statusCode).toBe(200);
+        expect(JSON.parse(ok.body || '{}').payload.result).toBe('x');
+        expect(sawToken).toBe('abc');
+    });
+
+    it('validates a custom rate-limit key slice and answers 422 when it is missing', async () => {
+        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+            .enableApiRateLimits({
+                limiter: makeLimiter(new MemoryDdb()),
+                policies: {
+                    perEmail: {
+                        perMin: 5,
+                        per: lambderRateLimitKey({ input: z.object({ email: z.string() }), handler: (_ctx, { email }) => email }),
+                    },
+                },
+            })
+            .addApi('keyed', { ...testSchema, rateLimit: 'perEmail' }, async (ctx, res) => res.api({ result: 'ok' }));
+
+        const missing = await lambder.render(createApiEvent('keyed', { value: 'x' }), createMockContext());
+        expect(missing.statusCode).toBe(422);
+        const ok = await lambder.render(createApiEvent('keyed', { value: 'x', email: 'a@x.com' }), createMockContext());
+        expect(ok.statusCode).toBe(200);
+    });
+
     it('guards run in declared order and passing guards let the handler run', async () => {
         const order: string[] = [];
         const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
             .defineApiGuards({
-                first: async () => { order.push('first'); },
-                second: async () => { order.push('second'); },
+                first: { handler: async () => { order.push('first'); } },
+                second: { handler: async () => { order.push('second'); } },
             })
             .addApi('ordered', { ...testSchema, guards: ['first', 'second'] }, async (ctx, res) => res.api({ result: 'ran' }));
 

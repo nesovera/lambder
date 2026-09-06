@@ -21,8 +21,11 @@ import {
     type LambderApiRateLimitPolicyConfig,
     type LambderApiRateLimitsConfig,
     type LambderApiIdempotencyConfig,
-    type LambderApiGuardFunction,
-    type LambderApiRegistrationOptions,
+    type LambderApiGuard,
+    type LambderGuardPayloadMap,
+    type LambderGuardsRequirement,
+    type LambderPoliciesRequirement,
+    type LambderMergedInput,
     type LambderPublicRateLimitNames,
 } from "./LambderApiPolicies.js";
 import type { MergeContract } from "./LambderApiContract.js";
@@ -126,7 +129,7 @@ export type LambderConstructorOptions = {
  * @typeParam TSessionData - Type of session data stored in DynamoDB
  * @typeParam _TContract - @internal Accumulates API contract during chaining (do not pass manually)
  * @typeParam _TRateLimitPolicies - @internal Accumulated by enableApiRateLimits (do not pass manually)
- * @typeParam _TGuardName - @internal Accumulated by defineApiGuards (do not pass manually)
+ * @typeParam _TGuards - @internal Guard name to required-payload map, accumulated by defineApiGuards (do not pass manually)
  * @typeParam _TIdempotencyEnabled - @internal Flipped by enableApiIdempotency (do not pass manually)
  *
  * @example
@@ -142,7 +145,7 @@ export default class Lambder<
     TSessionData = any,
     _TContract extends Record<string, any> = {},
     _TRateLimitPolicies extends Record<string, LambderApiRateLimitPolicyConfig> = {},
-    _TGuardName extends string = never,
+    _TGuards extends Record<string, any> = {},
     _TIdempotencyEnabled extends boolean = false,
 > {
     public apiPath: string;
@@ -342,7 +345,7 @@ export default class Lambder<
      */
     enableApiRateLimits<const TPolicies extends Record<string, LambderApiRateLimitPolicyConfig>>(
         config: LambderApiRateLimitsConfig<TPolicies>,
-    ): Lambder<TSessionData, _TContract, TPolicies, _TGuardName, _TIdempotencyEnabled> {
+    ): Lambder<TSessionData, _TContract, TPolicies, _TGuards, _TIdempotencyEnabled> {
         this.getOrCreatePolicyEngine().setRateLimits(config);
         return this as any;
     }
@@ -358,21 +361,25 @@ export default class Lambder<
      */
     enableApiIdempotency(
         config: LambderApiIdempotencyConfig,
-    ): Lambder<TSessionData, _TContract, _TRateLimitPolicies, _TGuardName, true> {
+    ): Lambder<TSessionData, _TContract, _TRateLimitPolicies, _TGuards, true> {
         this.getOrCreatePolicyEngine().setIdempotency(config);
         return this as any;
     }
 
     /**
      * Define named guards that APIs reference (typed) via the `guards`
-     * option. Guards run before input validation, in the order the API
-     * declares them; a guard refuses by throwing (typically LambderApiError).
+     * option. Each guard is a { input?, handler } definition (build with
+     * lambderGuard()): the input slice is validated against the raw payload
+     * before the handler runs, the handler receives it typed, and the
+     * requirement merges into the contract input of every API declaring the
+     * guard. Guards run before input validation, in the order the API
+     * declares them; a handler refuses by throwing (typically refuse()).
      * Callable multiple times so domain modules can contribute their own;
      * names must not collide.
      */
-    defineApiGuards<TGuards extends Record<string, LambderApiGuardFunction>>(
+    defineApiGuards<TGuards extends Record<string, LambderApiGuard<any>>>(
         guards: TGuards,
-    ): Lambder<TSessionData, _TContract, _TRateLimitPolicies, _TGuardName | Extract<keyof TGuards, string>, _TIdempotencyEnabled> {
+    ): Lambder<TSessionData, _TContract, _TRateLimitPolicies, _TGuards & LambderGuardPayloadMap<TGuards>, _TIdempotencyEnabled> {
         this.getOrCreatePolicyEngine().addGuards(guards);
         return this as any;
     }
@@ -441,7 +448,7 @@ export default class Lambder<
         plugin: (
             lambder: Lambder<TSessionData, _TContract, any, any, any>
         ) => Lambder<TSessionData, _TNewContract, any, any, any>
-    ): Lambder<TSessionData, _TNewContract extends _TContract ? _TNewContract : (_TContract & _TNewContract), _TRateLimitPolicies, _TGuardName, _TIdempotencyEnabled> {
+    ): Lambder<TSessionData, _TNewContract extends _TContract ? _TNewContract : (_TContract & _TNewContract), _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled> {
         return plugin(this as any) as any;
     }
 
@@ -449,16 +456,26 @@ export default class Lambder<
     public addApi<
         TName extends string,
         TInput extends z.ZodTypeAny,
-        TOutput extends z.ZodTypeAny
+        TOutput extends z.ZodTypeAny,
+        const TRateOpt extends LambderPublicRateLimitNames<_TRateLimitPolicies> | readonly LambderPublicRateLimitNames<_TRateLimitPolicies>[] = never,
+        const TGuardsOpt extends Extract<keyof _TGuards, string> | readonly Extract<keyof _TGuards, string>[] = never,
     >(
         name: TName,
-        schema: { input: TInput, output: TOutput }
-            & LambderApiRegistrationOptions<LambderPublicRateLimitNames<_TRateLimitPolicies>, _TGuardName, _TIdempotencyEnabled>,
+        schema: { input: TInput, output: TOutput } & {
+            /** Named rate limits, checked in declared order before guards and validation; the first exceeded one refuses (429 envelope). */
+            rateLimit?: TRateOpt;
+            /** Named guards, run in declared order before input validation; their input requirements merge into this API's contract input. */
+            guards?: TGuardsOpt;
+            /** Replay-protect this API per client idempotencyKey. Requires enableApiIdempotency() first. */
+            idempotency?: _TIdempotencyEnabled extends true ? (boolean | { ttlSeconds?: number }) : never;
+        },
         handler: (
             ctx: LambderRenderContext<z.infer<TInput>>,
             resolver: LambderResolver<z.infer<TOutput>>
         ) => MaybePromise<LambderResponse>
-    ): Lambder<TSessionData, MergeContract<_TContract, TName, z.infer<TInput>, z.infer<TOutput>>, _TRateLimitPolicies, _TGuardName, _TIdempotencyEnabled> {
+    ): Lambder<TSessionData, MergeContract<_TContract, TName,
+        LambderMergedInput<z.infer<TInput>, LambderPoliciesRequirement<_TRateLimitPolicies, TRateOpt>, LambderGuardsRequirement<_TGuards, TGuardsOpt>>,
+        z.infer<TOutput>>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled> {
         this.assertApiRegistration(name, "public", schema);
         this.actionList.push({
             match: (ctx) => ctx.apiName === name ? {} : false,
@@ -486,16 +503,26 @@ export default class Lambder<
     public addSessionApi<
         TName extends string,
         TInput extends z.ZodTypeAny,
-        TOutput extends z.ZodTypeAny
+        TOutput extends z.ZodTypeAny,
+        const TRateOpt extends Extract<keyof _TRateLimitPolicies, string> | readonly Extract<keyof _TRateLimitPolicies, string>[] = never,
+        const TGuardsOpt extends Extract<keyof _TGuards, string> | readonly Extract<keyof _TGuards, string>[] = never,
     >(
         name: TName,
-        schema: { input: TInput, output: TOutput }
-            & LambderApiRegistrationOptions<Extract<keyof _TRateLimitPolicies, string>, _TGuardName, _TIdempotencyEnabled>,
+        schema: { input: TInput, output: TOutput } & {
+            /** Named rate limits, checked in declared order before guards and validation; the first exceeded one refuses (429 envelope). */
+            rateLimit?: TRateOpt;
+            /** Named guards, run in declared order before input validation; their input requirements merge into this API's contract input. */
+            guards?: TGuardsOpt;
+            /** Replay-protect this API per client idempotencyKey. Requires enableApiIdempotency() first. */
+            idempotency?: _TIdempotencyEnabled extends true ? (boolean | { ttlSeconds?: number }) : never;
+        },
         handler: (
             ctx: LambderSessionRenderContext<z.infer<TInput>, TSessionData>,
             resolver: LambderResolver<z.infer<TOutput>>
         ) => MaybePromise<LambderResponse>
-    ): Lambder<TSessionData, MergeContract<_TContract, TName, z.infer<TInput>, z.infer<TOutput>>, _TRateLimitPolicies, _TGuardName, _TIdempotencyEnabled> {
+    ): Lambder<TSessionData, MergeContract<_TContract, TName,
+        LambderMergedInput<z.infer<TInput>, LambderPoliciesRequirement<_TRateLimitPolicies, TRateOpt>, LambderGuardsRequirement<_TGuards, TGuardsOpt>>,
+        z.infer<TOutput>>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled> {
         this.assertApiRegistration(name, "session", schema);
         this.actionList.push({
             match: (ctx) => ctx.apiName === name ? {} : false,
