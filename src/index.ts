@@ -94,13 +94,11 @@ export type {
     LambderApiRateLimitPolicyConfig,
     LambderApiRateLimitsConfig,
     LambderApiIdempotencyConfig,
-    LambderPublicRateLimitNames,
-    LambderGuardPayload,
-    LambderGuardPayloadMap,
-    LambderPolicyPayload,
-    LambderGuardsRequirement,
-    LambderPoliciesRequirement,
-    LambderMergedInput,
+    LambderGuardMeta,
+    LambderGuardMetaMap,
+    LambderAllowedGuardNames,
+    LambderAllowedPolicyNames,
+    LambderGuardInputsOf,
 } from "./LambderApiPolicies.js";
 
 // Typed translations (standalone, isomorphic)

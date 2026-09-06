@@ -193,14 +193,15 @@ export default class Lambder {
     }
     /**
      * Define named guards that APIs reference (typed) via the `guards`
-     * option. Each guard is a { input?, handler } definition (build with
-     * lambderGuard()): the input slice is validated against the raw payload
-     * before the handler runs, the handler receives it typed, and the
-     * requirement merges into the contract input of every API declaring the
-     * guard. Guards run before input validation, in the order the API
-     * declares them; a handler refuses by throwing (typically refuse()).
-     * Callable multiple times so domain modules can contribute their own;
-     * names must not collide.
+     * option. Each guard is built with lambderGuard() in one of two modes:
+     * apiInput (checks a slice of the API's own payload; declarable only on
+     * APIs whose input schema carries those fields, so the payload type
+     * passes both the API input and the guard's apiInput) or guardInput (the
+     * client sends the guard's value separately via options.guardInputs, and
+     * the contract forces it at the call site). Guards run before input
+     * validation, in the order the API declares them; a handler refuses by
+     * throwing (typically refuse()). Callable multiple times so domain
+     * modules can contribute their own; names must not collide.
      */
     defineApiGuards(guards) {
         this.getOrCreatePolicyEngine().addGuards(guards);
