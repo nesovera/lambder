@@ -65,3 +65,55 @@ export class LambderApiError extends Error {
 /** Brand-based type guard (see LambderApiError.isLambderApiError). */
 export const isLambderApiError = (err: unknown): err is LambderApiError =>
     err instanceof Error && (err as LambderApiError).isLambderApiError === true;
+
+/**
+ * The standard shape refusals carry on the envelope's errorMessage field.
+ * The caller's errorMessageHandler receives it as-is; apps with their own
+ * errorMessage vocabulary can keep using LambderApiError directly instead.
+ */
+export type LambderRefusalMessage = {
+    type: "warning" | "error" | "info";
+    title?: string;
+    content: string;
+};
+
+export type LambderRefuseOptions = {
+    /** Rendering intent for the client's errorMessageHandler. Default: "warning". */
+    type?: LambderRefusalMessage["type"];
+    /** Optional heading shown above the content. */
+    title?: string;
+    /** Sets the envelope's notAuthorized flag (routed to the caller's notAuthorizedHandler). */
+    notAuthorized?: boolean;
+    /** Sets the envelope's sessionExpired flag. */
+    sessionExpired?: boolean;
+    /** HTTP status of the refusal. Default 200; avoid 5xx (caller treats as crash) and 422 (reserved for validation). */
+    statusCode?: HttpStatusCode;
+    /** Underlying cause, preserved on the Error cause property. */
+    cause?: unknown;
+};
+
+/**
+ * Refuse the current API call: a routine business "no" (not found, invalid
+ * input, not allowed) with a user-facing message. Throws a LambderApiError
+ * carrying the standard LambderRefusalMessage shape, so the pipeline maps it
+ * onto the structured envelope instead of a 500, and crash logging never
+ * sees it. Callable from anywhere in the call stack — handlers, hooks,
+ * guards, shared helpers with no resolver access.
+ *
+ * The const carries the annotation so TypeScript applies never-return
+ * control-flow narrowing at call sites (`if (!row) refuse(...)` implies
+ * `row` is defined afterwards).
+ */
+export const refuse: (content: string, options?: LambderRefuseOptions) => never = (content, options = {}) => {
+    throw new LambderApiError(content, {
+        errorMessage: {
+            type: options.type ?? "warning",
+            ...(options.title !== undefined ? { title: options.title } : {}),
+            content,
+        } satisfies LambderRefusalMessage,
+        notAuthorized: options.notAuthorized,
+        sessionExpired: options.sessionExpired,
+        statusCode: options.statusCode,
+        cause: options.cause,
+    });
+};

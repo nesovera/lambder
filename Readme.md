@@ -428,9 +428,20 @@ Responses are finalized once at the end of the request: automatic gzip (when the
 
 **Die Methods**: `res.die.*` - Builds the response and throws it, immediately halting the request at any call depth (handlers, hooks, nested helper functions). Plain `throw res.html(...)` works the same way.
 
-### Typed API Refusals (LambderApiError)
+### Typed API Refusals (refuse / LambderApiError)
 
-A refusal ("you are not allowed", "quota exceeded") is not a crash. `res.die.*` covers refusals where you hold the resolver, but shared helpers (permission checks, validators) usually don't. Throw `LambderApiError` from anywhere in an API call's stack and the pipeline maps it onto the structured envelope instead of the global error handler, so refusals never pollute crash logging and clients get a parseable response:
+A refusal ("you are not allowed", "quota exceeded") is not a crash. `res.die.*` covers refusals where you hold the resolver, but shared helpers (permission checks, validators) usually don't. The one-liner for the common case is `refuse()`: callable from anywhere in an API call's stack, it throws a typed refusal carrying the standard `LambderRefusalMessage` shape (`{ type, title?, content }`) that the pipeline maps onto the envelope's `errorMessage`, so refusals never pollute crash logging and clients get a parseable response:
+
+```typescript
+import { refuse } from "lambder";
+
+if (!row) refuse("Record not found.");                                  // { type: "warning", content }
+if (!isAdmin) refuse("Admins only.", { notAuthorized: true });          // + envelope flag
+refuse("Too many attempts.", { type: "error", statusCode: 429 });       // custom rendering intent + status
+// TypeScript applies never-return narrowing: after `if (!row) refuse(...)`, row is defined.
+```
+
+For full control of the errorMessage payload (apps with their own message vocabulary), throw `LambderApiError` directly; `refuse()` is sugar over it:
 
 ```typescript
 import { LambderApiError } from "lambder";
