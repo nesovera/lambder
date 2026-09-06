@@ -149,6 +149,7 @@ export default class LambderCaller {
                     headers: { 'Content-Type': 'application/json', ...(headers || {}) },
                     body: JSON.stringify({
                         apiName, version, token, siteHost, payload,
+                        ...(options?.guardInputs !== undefined ? { guardInputs: options.guardInputs } : {}),
                         ...(options?.idempotencyKey !== undefined ? { idempotencyKey: options.idempotencyKey } : {}),
                     }),
                     ...(signal ? { signal } : {}),
@@ -280,8 +281,8 @@ export default class LambderCaller {
      * Full-fidelity call: resolves to a discriminated LambderApiOutcome
      * instead of collapsing every failure to null. Never throws.
      */
-    async apiOutcome(apiName, payload, options) {
-        return await this.dispatch(apiName, payload, options);
+    async apiOutcome(apiName, payload, ...rest) {
+        return await this.dispatch(apiName, payload, rest[0]);
     }
     ;
     /**
@@ -289,16 +290,18 @@ export default class LambderCaller {
      * errorMessage refusals, which carry an envelope), null on every other
      * failure. Prefer apiOutcome() when the call site needs to know why.
      */
-    async apiRaw(apiName, payload, options) {
-        const outcome = await this.dispatch(apiName, payload, options);
+    async apiRaw(apiName, payload, ...rest) {
+        const outcome = await this.dispatch(apiName, payload, rest[0]);
         if (outcome.ok)
             return outcome.response;
         return outcome.reason === 'errorMessage' ? outcome.response : null;
     }
     ;
     /** Payload on success, null/undefined otherwise (indistinguishable from a null payload; prefer apiOutcome() when that matters). */
-    async api(apiName, payload, options) {
-        const result = await this.apiRaw(apiName, payload, options);
-        return result?.payload;
+    async api(apiName, payload, ...rest) {
+        const outcome = await this.dispatch(apiName, payload, rest[0]);
+        if (outcome.ok)
+            return outcome.response?.payload;
+        return outcome.reason === 'errorMessage' ? outcome.response?.payload : undefined;
     }
 }

@@ -1,6 +1,18 @@
 import { LambderApiResponse } from './LambderResponseBuilder';
 import type { ApiContractShape } from './LambderApiContract';
 import type { z } from "zod";
+type IsAny<T> = 0 extends (1 & T) ? true : false;
+type GuardInputsOf<TEntry> = TEntry extends {
+    guardInputs: infer G;
+} ? G : never;
+/**
+ * The options argument: optional normally, REQUIRED (with guardInputs) when
+ * the API's contract declares guardInput-mode guards, so forgetting to send
+ * a guard's value is a compile error at the call site.
+ */
+type CallOptionsArg<TContract, TApiName> = IsAny<TContract> extends true ? [options?: LambderCallOptions] : TApiName extends keyof TContract ? [GuardInputsOf<TContract[TApiName]>] extends [never] ? [options?: LambderCallOptions] : [options: LambderCallOptions & {
+    guardInputs: GuardInputsOf<TContract[TApiName]>;
+}] : [options?: LambderCallOptions];
 type VoidFunction = () => void | Promise<void>;
 type FetchTracker = {
     apiName: string;
@@ -55,6 +67,12 @@ export type LambderCallOptions = {
     timeoutMs?: number;
     /** External abort signal, combined with the timeout when both are set. */
     signal?: AbortSignal;
+    /**
+     * Values for the API's guardInput-mode guards, keyed by guard name; sent
+     * beside the payload and consumed by the guards before validation. The
+     * typed contract makes this REQUIRED for APIs that declare such guards.
+     */
+    guardInputs?: Record<string, unknown>;
     /**
      * Replay-protection key for APIs declared idempotent on the server.
      * Generate once per logical operation (e.g. crypto.randomUUID() when the
@@ -127,14 +145,14 @@ export default class LambderCaller<TContract extends ApiContractShape = any> {
      * Full-fidelity call: resolves to a discriminated LambderApiOutcome
      * instead of collapsing every failure to null. Never throws.
      */
-    apiOutcome<TApiName extends keyof TContract & string = string, TOutput = TApiName extends keyof TContract ? TContract[TApiName]['output'] : any>(apiName: TApiName, payload?: TApiName extends keyof TContract ? TContract[TApiName]['input'] : any, options?: LambderCallOptions): Promise<LambderApiOutcome<TOutput>>;
+    apiOutcome<TApiName extends keyof TContract & string = string, TOutput = TApiName extends keyof TContract ? TContract[TApiName]['output'] : any>(apiName: TApiName, payload?: TApiName extends keyof TContract ? TContract[TApiName]['input'] : any, ...rest: CallOptionsArg<TContract, TApiName>): Promise<LambderApiOutcome<TOutput>>;
     /**
      * Legacy shape: the parsed envelope on success (and on structured
      * errorMessage refusals, which carry an envelope), null on every other
      * failure. Prefer apiOutcome() when the call site needs to know why.
      */
-    apiRaw<TApiName extends keyof TContract & string = string, TOutput = TApiName extends keyof TContract ? TContract[TApiName]['output'] : any>(apiName: TApiName, payload?: TApiName extends keyof TContract ? TContract[TApiName]['input'] : any, options?: LambderCallOptions): Promise<LambderApiResponse<TOutput> | null | undefined>;
+    apiRaw<TApiName extends keyof TContract & string = string, TOutput = TApiName extends keyof TContract ? TContract[TApiName]['output'] : any>(apiName: TApiName, payload?: TApiName extends keyof TContract ? TContract[TApiName]['input'] : any, ...rest: CallOptionsArg<TContract, TApiName>): Promise<LambderApiResponse<TOutput> | null | undefined>;
     /** Payload on success, null/undefined otherwise (indistinguishable from a null payload; prefer apiOutcome() when that matters). */
-    api<TApiName extends keyof TContract & string = string, TOutput = TApiName extends keyof TContract ? TContract[TApiName]['output'] : any>(apiName: TApiName, payload?: TApiName extends keyof TContract ? TContract[TApiName]['input'] : any, options?: LambderCallOptions): Promise<TOutput | null | undefined>;
+    api<TApiName extends keyof TContract & string = string, TOutput = TApiName extends keyof TContract ? TContract[TApiName]['output'] : any>(apiName: TApiName, payload?: TApiName extends keyof TContract ? TContract[TApiName]['input'] : any, ...rest: CallOptionsArg<TContract, TApiName>): Promise<TOutput | null | undefined>;
 }
 export {};

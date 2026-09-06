@@ -197,7 +197,7 @@ describe('API policies - rate limiting', () => {
                     perEmail: {
                         perMin: 1,
                         per: lambderRateLimitKey({
-                            input: z.object({ value: z.string() }),
+                            apiInput: z.object({ value: z.string() }),
                             handler: (_ctx, { value }) => value,
                         }),
                         errorMessage: { type: 'warning', content: 'Too many attempts for this address.' },
@@ -268,16 +268,20 @@ describe('API policies - guards', () => {
         expect(handlerRan).toBe(false);
     });
 
-    it('validates the guard input slice before the handler and answers 422 when it is missing', async () => {
+    it('apiInput guards validate their slice of the API payload and answer 422 when it is missing', async () => {
         let sawToken: string | null = null;
+        const gatedSchema = {
+            input: z.object({ value: z.string(), token: z.string().min(3) }),
+            output: z.object({ result: z.string() }),
+        };
         const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
             .defineApiGuards({
                 token: lambderGuard({
-                    input: z.object({ token: z.string().min(3) }),
+                    apiInput: z.object({ token: z.string().min(3) }),
                     handler: async (_ctx, { token }) => { sawToken = token; },
                 }),
             })
-            .addApi('gated', { ...testSchema, guards: 'token' }, async (ctx, res) => res.api({ result: ctx.apiPayload.value }));
+            .addApi('gated', { ...gatedSchema, guards: 'token' }, async (ctx, res) => res.api({ result: ctx.apiPayload.value }));
 
         // Missing token: the 422 validation shape, before the guard or handler runs.
         const missing = await lambder.render(createApiEvent('gated', { value: 'x' }), createMockContext());
@@ -285,9 +289,35 @@ describe('API policies - guards', () => {
         expect(JSON.parse(missing.body || '{}').zodError).toBeDefined();
         expect(sawToken).toBe(null);
 
-        // Present: the handler receives the parsed slice even though the API
-        // schema does not declare (and strips) the field.
+        // Present: guard gets its typed slice AND the field flows on into the
+        // API's own validated payload (it stays part of the API input shape).
         const ok = await lambder.render(createApiEvent('gated', { value: 'x', token: 'abc' }), createMockContext());
+        expect(ok.statusCode).toBe(200);
+        expect(JSON.parse(ok.body || '{}').payload.result).toBe('x');
+        expect(sawToken).toBe('abc');
+    });
+
+    it('guardInput guards read their value from the separate guardInputs envelope', async () => {
+        let sawToken: string | null = null;
+        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+            .defineApiGuards({
+                captcha: lambderGuard({
+                    guardInput: z.object({ token: z.string().min(3) }),
+                    handler: async (_ctx, { token }) => { sawToken = token; },
+                }),
+            })
+            .addApi('gated', { ...testSchema, guards: 'captcha' }, async (ctx, res) => res.api({ result: ctx.apiPayload.value }));
+
+        // Missing guardInputs entry: 422 before the handler runs, and the API
+        // payload itself is untouched by the requirement.
+        const missing = await lambder.render(createApiEvent('gated', { value: 'x' }), createMockContext());
+        expect(missing.statusCode).toBe(422);
+        expect(sawToken).toBe(null);
+
+        const ok = await lambder.render(
+            createApiEvent('gated', { value: 'x' }, { guardInputs: { captcha: { token: 'abc' } } }),
+            createMockContext(),
+        );
         expect(ok.statusCode).toBe(200);
         expect(JSON.parse(ok.body || '{}').payload.result).toBe('x');
         expect(sawToken).toBe('abc');
@@ -300,7 +330,7 @@ describe('API policies - guards', () => {
                 policies: {
                     perEmail: {
                         perMin: 5,
-                        per: lambderRateLimitKey({ input: z.object({ email: z.string() }), handler: (_ctx, { email }) => email }),
+                        per: lambderRateLimitKey({ apiInput: z.object({ email: z.string() }), handler: (_ctx, { email }) => email }),
                     },
                 },
             })
