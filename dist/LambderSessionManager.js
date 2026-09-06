@@ -1,6 +1,18 @@
 import crypto from "crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, QueryCommand, DeleteCommand, PutCommand, GetCommand } from "@aws-sdk/lib-dynamodb";
+/**
+ * Wraps errors thrown by the dataRefresh callback so they stay
+ * distinguishable from "no session": fetchSessionIfExists() swallows missing
+ * or invalid sessions but rethrows this, otherwise a transient failure in
+ * the refresh source would masquerade as a logout.
+ */
+export class LambderSessionDataRefreshError extends Error {
+    constructor(cause) {
+        super(`Session dataRefresh failed: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+        this.name = "LambderSessionDataRefreshError";
+    }
+}
 export default class LambderSessionManager {
     tableName;
     sessionSalt;
@@ -9,13 +21,15 @@ export default class LambderSessionManager {
     ddbDocumentClient;
     enableSlidingExpiration;
     slidingWriteIntervalSeconds;
-    constructor({ tableName, tableRegion, partitionKey, sortKey, sessionSalt, enableSlidingExpiration = true, slidingWriteIntervalSeconds, }) {
+    dataRefresh;
+    constructor({ tableName, tableRegion, partitionKey, sortKey, sessionSalt, enableSlidingExpiration = true, slidingWriteIntervalSeconds, dataRefresh, }) {
         this.tableName = tableName;
         this.sessionSalt = sessionSalt;
         this.partitionKey = partitionKey;
         this.sortKey = sortKey;
         this.enableSlidingExpiration = enableSlidingExpiration;
         this.slidingWriteIntervalSeconds = slidingWriteIntervalSeconds ?? null;
+        this.dataRefresh = dataRefresh ?? null;
         const ddbClient = new DynamoDBClient({ region: tableRegion });
         this.ddbDocumentClient = DynamoDBDocumentClient.from(ddbClient);
     }
@@ -74,7 +88,7 @@ export default class LambderSessionManager {
             }));
         }
     }
-    async createSession(sessionKey, data = {}, ttlInSeconds = 30 * 24 * 60 * 60) {
+    async createSession(sessionKey, data = {}, ttlInSeconds = 30 * 24 * 60 * 60, options) {
         const sessionKeyHash = this.sessionUserKeyHasher(sessionKey);
         const sessionSortKey = crypto.randomBytes(32).toString("hex");
         const sessionToken = `${sessionKeyHash}:${sessionSortKey}`;
@@ -87,7 +101,8 @@ export default class LambderSessionManager {
             [this.sortKey]: sessionSortKey,
             sessionToken, csrfToken,
             sessionKey, data,
-            createdAt, lastAccessedAt, expiresAt, ttlInSeconds
+            createdAt, lastAccessedAt, expiresAt, ttlInSeconds,
+            ...(this.dataRefresh ? { dataExpiresAt: options?.dataExpiresAt ?? (createdAt + this.dataRefresh.ttlSeconds) } : {}),
         };
         await this.ddbPutItem(session);
         return session;
@@ -97,6 +112,10 @@ export default class LambderSessionManager {
             throw new Error("Invalid session");
         session.data = newData;
         session.lastAccessedAt = Math.floor(Date.now() / 1000);
+        // Explicitly written data is fresh by definition.
+        if (this.dataRefresh) {
+            session.dataExpiresAt = session.lastAccessedAt + this.dataRefresh.ttlSeconds;
+        }
         // Update expiration if sliding expiration is enabled
         if (this.enableSlidingExpiration) {
             session.expiresAt = session.lastAccessedAt + session.ttlInSeconds;
@@ -108,43 +127,105 @@ export default class LambderSessionManager {
         const [sessionKeyHash, sessionSortKey] = sessionToken.split(":");
         if (!sessionKeyHash || !sessionSortKey)
             return null;
+        let session;
         try {
-            let session = await this.ddbGetItem({
+            session = await this.ddbGetItem({
                 [this.partitionKey]: sessionKeyHash,
                 [this.sortKey]: sessionSortKey
             });
-            // Use constant error response to prevent timing attacks
-            if (!session)
-                return null;
-            if (!session.sessionToken || !this.constantTimeCompare(session.sessionToken, sessionToken))
-                return null;
-            if (!session.csrfToken)
-                return null;
-            if (!session.sessionKey)
-                return null;
-            if (!session.createdAt)
-                return null;
-            if (!session.expiresAt || session.expiresAt < Date.now() / 1000)
-                return null;
-            // Update last accessed time if sliding expiration is enabled.
-            // Throttled: skip the DynamoDB write when the session was refreshed
-            // recently, to avoid a write on every request.
-            if (this.enableSlidingExpiration) {
-                const now = Math.floor(Date.now() / 1000);
-                const minInterval = this.slidingWriteIntervalSeconds
-                    ?? Math.max(60, Math.floor((session.ttlInSeconds || 0) * 0.05));
-                if (now - (session.lastAccessedAt || 0) >= minInterval) {
-                    session.lastAccessedAt = now;
-                    session.expiresAt = now + session.ttlInSeconds;
-                    // Wait for the update to ensure it persists before Lambda freezes
-                    await this.ddbPutItem(session).catch(() => { });
-                }
-            }
-            return session;
         }
         catch (err) {
             return null;
         }
+        // Use constant error response to prevent timing attacks
+        if (!session)
+            return null;
+        if (!session.sessionToken || !this.constantTimeCompare(session.sessionToken, sessionToken))
+            return null;
+        if (!session.csrfToken)
+            return null;
+        if (!session.sessionKey)
+            return null;
+        if (!session.createdAt)
+            return null;
+        if (!session.expiresAt || session.expiresAt < Date.now() / 1000)
+            return null;
+        const now = Math.floor(Date.now() / 1000);
+        let needsWrite = false;
+        // Renew session.data once its shelf life has passed (opt-in
+        // dataRefresh). Records from before the feature was enabled have no
+        // dataExpiresAt, so they renew on first read.
+        if (this.dataRefresh && (session.dataExpiresAt ?? 0) <= now) {
+            let newData;
+            try {
+                newData = await this.dataRefresh.refresh(session);
+            }
+            catch (err) {
+                // A failing refresh must fail this read, not masquerade as a
+                // missing session or silently serve stale data.
+                throw new LambderSessionDataRefreshError(err);
+            }
+            if (newData === null) {
+                await this.deleteSession(session);
+                return null;
+            }
+            session.data = newData;
+            session.dataExpiresAt = now + this.dataRefresh.ttlSeconds;
+            needsWrite = true;
+        }
+        // Update last accessed time if sliding expiration is enabled.
+        // Throttled: skip the DynamoDB write when the session was refreshed
+        // recently, to avoid a write on every request. A due data renewal
+        // above forces the write anyway, so both updates share one put.
+        if (this.enableSlidingExpiration) {
+            const minInterval = this.slidingWriteIntervalSeconds
+                ?? Math.max(60, Math.floor((session.ttlInSeconds || 0) * 0.05));
+            if (needsWrite || now - (session.lastAccessedAt || 0) >= minInterval) {
+                session.lastAccessedAt = now;
+                session.expiresAt = now + session.ttlInSeconds;
+                needsWrite = true;
+            }
+        }
+        if (needsWrite) {
+            // Wait for the update to ensure it persists before Lambda freezes.
+            // A failed put is not fatal: the data served is fresh, and an
+            // unpersisted renewal simply runs again on the next read.
+            await this.ddbPutItem(session).catch(() => { });
+        }
+        return session;
+    }
+    ;
+    /**
+     * Runs the dataRefresh callback now, regardless of dataExpiresAt, and
+     * persists the result onto the same record. Returns the updated session,
+     * or null when the callback ended it (the record is deleted). Requires
+     * dataRefresh to be configured.
+     */
+    async refreshSessionData(session) {
+        if (!this.dataRefresh)
+            throw new Error("dataRefresh is not configured. Pass dataRefresh to enableDdbSession(...) to enable.");
+        if (!session)
+            throw new Error("Invalid session");
+        let newData;
+        try {
+            newData = await this.dataRefresh.refresh(session);
+        }
+        catch (err) {
+            throw new LambderSessionDataRefreshError(err);
+        }
+        if (newData === null) {
+            await this.deleteSession(session);
+            return null;
+        }
+        const now = Math.floor(Date.now() / 1000);
+        session.data = newData;
+        session.dataExpiresAt = now + this.dataRefresh.ttlSeconds;
+        session.lastAccessedAt = now;
+        if (this.enableSlidingExpiration) {
+            session.expiresAt = now + session.ttlInSeconds;
+        }
+        await this.ddbPutItem(session);
+        return session;
     }
     ;
     isSessionValid(session, sessionToken, csrfToken, skipCsrfTokenCheck = false) {
@@ -183,13 +264,25 @@ export default class LambderSessionManager {
         return true;
     }
     ;
+    /**
+     * Deletes every session created for the given sessionKey (e.g. a user
+     * id): "log this subject out everywhere", without needing a fetched
+     * session record.
+     */
+    async deleteSessionAllByKey(sessionKey) {
+        await this.ddbDeleteAllByPartitionKey(this.sessionUserKeyHasher(sessionKey));
+        return true;
+    }
+    ;
     async regenerateSession(session) {
         if (!session)
             throw new Error("Invalid session");
         // Delete old session
         await this.deleteSession(session);
-        // Create new session with same sessionKey and data but new tokens
-        return await this.createSession(session.sessionKey, session.data, session.ttlInSeconds);
+        // Create new session with same sessionKey and data but new tokens.
+        // The data freshness stamp carries over: rotating tokens must not
+        // extend how long dataRefresh-managed data may stay unrenewed.
+        return await this.createSession(session.sessionKey, session.data, session.ttlInSeconds, session.dataExpiresAt !== undefined ? { dataExpiresAt: session.dataExpiresAt } : undefined);
     }
 }
 ;
