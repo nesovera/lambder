@@ -3,6 +3,21 @@ import { LambderApiResponse } from './LambderResponseBuilder';
 import type { ApiContractShape } from './LambderApiContract';
 import type { z } from "zod";
 
+type IsAny<T> = 0 extends (1 & T) ? true : false;
+type GuardInputsOf<TEntry> = TEntry extends { guardInputs: infer G } ? G : never;
+/**
+ * The options argument: optional normally, REQUIRED (with guardInputs) when
+ * the API's contract declares guardInput-mode guards, so forgetting to send
+ * a guard's value is a compile error at the call site.
+ */
+type CallOptionsArg<TContract, TApiName> =
+    IsAny<TContract> extends true ? [options?: LambderCallOptions]
+    : TApiName extends keyof TContract
+        ? [GuardInputsOf<TContract[TApiName]>] extends [never]
+            ? [options?: LambderCallOptions]
+            : [options: LambderCallOptions & { guardInputs: GuardInputsOf<TContract[TApiName]> }]
+        : [options?: LambderCallOptions];
+
 type VoidFunction = ()=>void|Promise<void>;
 type FetchTracker = { apiName: string, done: boolean, fetchEndCalled: boolean };
 type EventHandlerFetchParams = {
@@ -66,6 +81,12 @@ export type LambderCallOptions = {
     timeoutMs?: number;
     /** External abort signal, combined with the timeout when both are set. */
     signal?: AbortSignal;
+    /**
+     * Values for the API's guardInput-mode guards, keyed by guard name; sent
+     * beside the payload and consumed by the guards before validation. The
+     * typed contract makes this REQUIRED for APIs that declare such guards.
+     */
+    guardInputs?: Record<string, unknown>;
     /**
      * Replay-protection key for APIs declared idempotent on the server.
      * Generate once per logical operation (e.g. crypto.randomUUID() when the
@@ -273,6 +294,7 @@ export default class LambderCaller<TContract extends ApiContractShape = any> {
                     headers: { 'Content-Type': 'application/json', ...(headers || {}) },
                     body: JSON.stringify({
                         apiName, version, token, siteHost, payload,
+                        ...(options?.guardInputs !== undefined ? { guardInputs: options.guardInputs } : {}),
                         ...(options?.idempotencyKey !== undefined ? { idempotencyKey: options.idempotencyKey } : {}),
                     }),
                     ...(signal ? { signal } : {}),
@@ -387,9 +409,9 @@ export default class LambderCaller<TContract extends ApiContractShape = any> {
     >(
         apiName: TApiName,
         payload?: TApiName extends keyof TContract ? TContract[TApiName]['input'] : any,
-        options?: LambderCallOptions,
+        ...rest: CallOptionsArg<TContract, TApiName>
     ): Promise<LambderApiOutcome<TOutput>>{
-        return await this.dispatch<TOutput>(apiName, payload, options);
+        return await this.dispatch<TOutput>(apiName, payload, rest[0]);
     };
 
     /**
@@ -403,9 +425,9 @@ export default class LambderCaller<TContract extends ApiContractShape = any> {
     >(
         apiName: TApiName,
         payload?: TApiName extends keyof TContract ? TContract[TApiName]['input'] : any,
-        options?: LambderCallOptions,
+        ...rest: CallOptionsArg<TContract, TApiName>
     ): Promise<LambderApiResponse<TOutput>|null|undefined>{
-        const outcome = await this.dispatch<TOutput>(apiName, payload, options);
+        const outcome = await this.dispatch<TOutput>(apiName, payload, rest[0]);
         if(outcome.ok) return outcome.response;
         return outcome.reason === 'errorMessage' ? outcome.response : null;
     };
@@ -417,10 +439,11 @@ export default class LambderCaller<TContract extends ApiContractShape = any> {
     >(
         apiName: TApiName,
         payload?: TApiName extends keyof TContract ? TContract[TApiName]['input'] : any,
-        options?: LambderCallOptions,
+        ...rest: CallOptionsArg<TContract, TApiName>
     ): Promise<TOutput|null|undefined> {
-        const result = await this.apiRaw<TApiName, TOutput>(apiName, payload, options);
-        return result?.payload;
+        const outcome = await this.dispatch<TOutput>(apiName, payload, rest[0]);
+        if(outcome.ok) return outcome.response?.payload;
+        return outcome.reason === 'errorMessage' ? outcome.response?.payload : undefined;
     }
 
 }

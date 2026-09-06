@@ -28,7 +28,7 @@ export class LambderApiPolicyEngine {
         for (const [name, policy] of Object.entries(config.policies)) {
             const per = policy.per;
             if (!per || (per !== "ip" && per !== "session" && typeof per.handler !== "function")) {
-                throw new Error(`Lambder: rate-limit policy "${name}" needs per: "ip", "session", or a { input?, handler } key.`);
+                throw new Error(`Lambder: rate-limit policy "${name}" needs per: "ip", "session", or a { apiInput?, handler } key.`);
             }
             if (!RATE_LIMIT_WINDOW_KEYS.some((key) => policy[key])) {
                 throw new Error(`Lambder: rate-limit policy "${name}" declares no window (${RATE_LIMIT_WINDOW_KEYS.join("/")}).`);
@@ -43,6 +43,8 @@ export class LambderApiPolicyEngine {
                 throw new Error(`Lambder: guard "${name}" is already defined.`);
             if (typeof guardDef?.handler !== "function")
                 throw new Error(`Lambder: guard "${name}" has no handler function.`);
+            if (guardDef.apiInput && guardDef.guardInput)
+                throw new Error(`Lambder: guard "${name}" declares both apiInput and guardInput; pick one.`);
             this.guards[name] = guardDef;
         }
     }
@@ -92,20 +94,25 @@ export class LambderApiPolicyEngine {
             const guardDef = this.guards[name];
             if (!guardDef)
                 throw new Error(`Lambder: guard "${name}" is not configured.`);
-            const payload = this.parseSlice(guardDef.input, ctx, resolver);
+            const post = ctx.post;
+            let payload;
+            if (guardDef.apiInput) {
+                payload = this.parseSlice(guardDef.apiInput, post?.payload, resolver);
+            }
+            else if (guardDef.guardInput) {
+                payload = this.parseSlice(guardDef.guardInput, post?.guardInputs?.[name], resolver);
+            }
             await guardDef.handler(ctx, payload, resolver);
         }
     }
     /**
-     * Validate a preflight input slice against the raw payload. Runs before
-     * the API's own validation, so guard/key requirements hold even when the
-     * API schema does not declare (and would strip) those fields. Failures
-     * answer the same 422 shape as regular input validation.
+     * Validate a preflight input slice (an apiInput slice of the raw payload,
+     * or a guardInput value from the raw guardInputs map). Runs before the
+     * API's own validation; failures answer the same 422 shape as regular
+     * input validation.
      */
-    parseSlice(input, ctx, resolver) {
-        if (!input)
-            return undefined;
-        const parsed = input.safeParse(ctx.post?.payload);
+    parseSlice(input, value, resolver) {
+        const parsed = input.safeParse(value);
         if (!parsed.success) {
             throw resolver.json({ error: "Input validation failed", zodError: parsed.error }, { statusCode: 422 });
         }
@@ -120,7 +127,9 @@ export class LambderApiPolicyEngine {
                 throw new Error('Lambder: rate-limit per "session" evaluated without a session on the context.');
             return `session:${sessionKey}`;
         }
-        const payload = this.parseSlice(per.input, ctx, resolver);
+        const payload = per.apiInput
+            ? this.parseSlice(per.apiInput, ctx.post?.payload, resolver)
+            : undefined;
         return `custom:${await per.handler(ctx, payload)}`;
     }
     /**

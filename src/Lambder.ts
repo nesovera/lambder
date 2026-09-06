@@ -22,11 +22,10 @@ import {
     type LambderApiRateLimitsConfig,
     type LambderApiIdempotencyConfig,
     type LambderApiGuard,
-    type LambderGuardPayloadMap,
-    type LambderGuardsRequirement,
-    type LambderPoliciesRequirement,
-    type LambderMergedInput,
-    type LambderPublicRateLimitNames,
+    type LambderGuardMetaMap,
+    type LambderAllowedGuardNames,
+    type LambderAllowedPolicyNames,
+    type LambderGuardInputsOf,
 } from "./LambderApiPolicies.js";
 import type { MergeContract } from "./LambderApiContract.js";
 import { createContext, isV2HttpEvent, type LambderHttpEvent, type LambderRenderContext, type LambderSessionRenderContext } from "./LambderContext.js";
@@ -368,18 +367,19 @@ export default class Lambder<
 
     /**
      * Define named guards that APIs reference (typed) via the `guards`
-     * option. Each guard is a { input?, handler } definition (build with
-     * lambderGuard()): the input slice is validated against the raw payload
-     * before the handler runs, the handler receives it typed, and the
-     * requirement merges into the contract input of every API declaring the
-     * guard. Guards run before input validation, in the order the API
-     * declares them; a handler refuses by throwing (typically refuse()).
-     * Callable multiple times so domain modules can contribute their own;
-     * names must not collide.
+     * option. Each guard is built with lambderGuard() in one of two modes:
+     * apiInput (checks a slice of the API's own payload; declarable only on
+     * APIs whose input schema carries those fields, so the payload type
+     * passes both the API input and the guard's apiInput) or guardInput (the
+     * client sends the guard's value separately via options.guardInputs, and
+     * the contract forces it at the call site). Guards run before input
+     * validation, in the order the API declares them; a handler refuses by
+     * throwing (typically refuse()). Callable multiple times so domain
+     * modules can contribute their own; names must not collide.
      */
     defineApiGuards<TGuards extends Record<string, LambderApiGuard<any>>>(
         guards: TGuards,
-    ): Lambder<TSessionData, _TContract, _TRateLimitPolicies, _TGuards & LambderGuardPayloadMap<TGuards>, _TIdempotencyEnabled> {
+    ): Lambder<TSessionData, _TContract, _TRateLimitPolicies, _TGuards & LambderGuardMetaMap<TGuards>, _TIdempotencyEnabled> {
         this.getOrCreatePolicyEngine().addGuards(guards);
         return this as any;
     }
@@ -457,8 +457,8 @@ export default class Lambder<
         TName extends string,
         TInput extends z.ZodTypeAny,
         TOutput extends z.ZodTypeAny,
-        const TRateOpt extends LambderPublicRateLimitNames<_TRateLimitPolicies> | readonly LambderPublicRateLimitNames<_TRateLimitPolicies>[] = never,
-        const TGuardsOpt extends Extract<keyof _TGuards, string> | readonly Extract<keyof _TGuards, string>[] = never,
+        const TRateOpt extends LambderAllowedPolicyNames<_TRateLimitPolicies, z.infer<TInput>, false> | readonly LambderAllowedPolicyNames<_TRateLimitPolicies, z.infer<TInput>, false>[] = never,
+        const TGuardsOpt extends LambderAllowedGuardNames<_TGuards, z.infer<TInput>> | readonly LambderAllowedGuardNames<_TGuards, z.infer<TInput>>[] = never,
     >(
         name: TName,
         schema: { input: TInput, output: TOutput } & {
@@ -474,8 +474,9 @@ export default class Lambder<
             resolver: LambderResolver<z.infer<TOutput>>
         ) => MaybePromise<LambderResponse>
     ): Lambder<TSessionData, MergeContract<_TContract, TName,
-        LambderMergedInput<z.infer<TInput>, LambderPoliciesRequirement<_TRateLimitPolicies, TRateOpt>, LambderGuardsRequirement<_TGuards, TGuardsOpt>>,
-        z.infer<TOutput>>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled> {
+        z.infer<TInput>,
+        z.infer<TOutput>,
+        LambderGuardInputsOf<_TGuards, TGuardsOpt>>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled> {
         this.assertApiRegistration(name, "public", schema);
         this.actionList.push({
             match: (ctx) => ctx.apiName === name ? {} : false,
@@ -504,8 +505,8 @@ export default class Lambder<
         TName extends string,
         TInput extends z.ZodTypeAny,
         TOutput extends z.ZodTypeAny,
-        const TRateOpt extends Extract<keyof _TRateLimitPolicies, string> | readonly Extract<keyof _TRateLimitPolicies, string>[] = never,
-        const TGuardsOpt extends Extract<keyof _TGuards, string> | readonly Extract<keyof _TGuards, string>[] = never,
+        const TRateOpt extends LambderAllowedPolicyNames<_TRateLimitPolicies, z.infer<TInput>, true> | readonly LambderAllowedPolicyNames<_TRateLimitPolicies, z.infer<TInput>, true>[] = never,
+        const TGuardsOpt extends LambderAllowedGuardNames<_TGuards, z.infer<TInput>> | readonly LambderAllowedGuardNames<_TGuards, z.infer<TInput>>[] = never,
     >(
         name: TName,
         schema: { input: TInput, output: TOutput } & {
@@ -521,8 +522,9 @@ export default class Lambder<
             resolver: LambderResolver<z.infer<TOutput>>
         ) => MaybePromise<LambderResponse>
     ): Lambder<TSessionData, MergeContract<_TContract, TName,
-        LambderMergedInput<z.infer<TInput>, LambderPoliciesRequirement<_TRateLimitPolicies, TRateOpt>, LambderGuardsRequirement<_TGuards, TGuardsOpt>>,
-        z.infer<TOutput>>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled> {
+        z.infer<TInput>,
+        z.infer<TOutput>,
+        LambderGuardInputsOf<_TGuards, TGuardsOpt>>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled> {
         this.assertApiRegistration(name, "session", schema);
         this.actionList.push({
             match: (ctx) => ctx.apiName === name ? {} : false,

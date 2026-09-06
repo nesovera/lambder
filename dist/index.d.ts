@@ -28,7 +28,7 @@ export type { LambderDdbRateLimiterOptions, LambderRateLimitPolicy, LambderRateL
 export { LambderDdbIdempotency } from "./LambderDdbIdempotency.js";
 export type { LambderDdbIdempotencyOptions, LambderIdempotencyBeginResult, } from "./LambderDdbIdempotency.js";
 export { lambderGuard, lambderRateLimitKey } from "./LambderApiPolicies.js";
-export type { LambderApiGuard, LambderRateLimitKeyFn, LambderRateLimitPer, LambderApiRateLimitPolicyConfig, LambderApiRateLimitsConfig, LambderApiIdempotencyConfig, LambderPublicRateLimitNames, LambderGuardPayload, LambderGuardPayloadMap, LambderPolicyPayload, LambderGuardsRequirement, LambderPoliciesRequirement, LambderMergedInput, } from "./LambderApiPolicies.js";
+export type { LambderApiGuard, LambderRateLimitKeyFn, LambderRateLimitPer, LambderApiRateLimitPolicyConfig, LambderApiRateLimitsConfig, LambderApiIdempotencyConfig, LambderGuardMeta, LambderGuardMetaMap, LambderAllowedGuardNames, LambderAllowedPolicyNames, LambderGuardInputsOf, } from "./LambderApiPolicies.js";
 export { createLambderI18n } from "./LambderI18n.js";
 export type { LambderLanguageMeta, LambderI18nConfig, LambderI18nInstance, LambderI18nTranslator, LambderI18nExtractParams, LambderI18nCodes, LambderI18nKeys, LambderI18nTranslatorFor, } from "./LambderI18n.js";
 export { type ApiContractShape, } from "./LambderApiContract.js";

@@ -14,24 +14,25 @@ const IDEMPOTENCY_MAX_STORED_BODY_BYTES = 350_000;
 const RATE_LIMIT_WINDOW_KEYS: (keyof LambderRateLimitPolicy)[] = ["perMin", "per10Min", "perHour", "perDay", "perWeek", "perMonth"];
 
 /**
- * A custom rate-limit key: `input` names the payload fields the key needs.
- * The slice is validated against the raw payload before `handler` runs (a
- * failure answers the standard 422 validation shape), and the requirement is
- * merged into the contract input of every API that references the policy, so
- * clients are forced by the compiler to send those fields. Build with
- * lambderRateLimitKey() so the handler's payload type follows `input`.
+ * A custom rate-limit key. `apiInput` names the fields of the API's OWN
+ * payload the key derives from: the slice is validated against the raw
+ * payload before `handler` runs (failures answer the standard 422 validation
+ * shape) and the handler receives it typed. Referencing the policy from an
+ * API whose input schema does not carry those fields is a compile error, so
+ * the API's schema stays the single owner of the field. Build with
+ * lambderRateLimitKey() so the handler's payload type follows `apiInput`.
  */
 export type LambderRateLimitKeyFn<TInput extends z.ZodTypeAny = z.ZodTypeAny> =
-    | { input: TInput; handler: (ctx: LambderRenderContext, payload: z.output<TInput>) => string | Promise<string> }
-    | { input?: undefined; handler: (ctx: LambderRenderContext, payload: undefined) => string | Promise<string> };
+    | { apiInput: TInput; handler: (ctx: LambderRenderContext, payload: z.output<TInput>) => string | Promise<string> }
+    | { apiInput?: undefined; handler: (ctx: LambderRenderContext, payload: undefined) => string | Promise<string> };
 
 /**
- * Builder that ties the handler's payload type to the `input` schema inside
- * one literal. Returns the exact union member (not the union), so requirement
- * extraction can see the `input` type.
+ * Builder that ties the handler's payload type to the `apiInput` schema
+ * inside one literal. Returns the exact union member so type extraction can
+ * see the schema.
  */
-export function lambderRateLimitKey<TInput extends z.ZodTypeAny>(key: { input: TInput; handler: (ctx: LambderRenderContext, payload: z.output<TInput>) => string | Promise<string> }): { input: TInput; handler: (ctx: LambderRenderContext, payload: z.output<TInput>) => string | Promise<string> };
-export function lambderRateLimitKey(key: { handler: (ctx: LambderRenderContext, payload: undefined) => string | Promise<string> }): { input?: undefined; handler: (ctx: LambderRenderContext, payload: undefined) => string | Promise<string> };
+export function lambderRateLimitKey<TInput extends z.ZodTypeAny>(key: { apiInput: TInput; handler: (ctx: LambderRenderContext, payload: z.output<TInput>) => string | Promise<string> }): { apiInput: TInput; handler: (ctx: LambderRenderContext, payload: z.output<TInput>) => string | Promise<string> };
+export function lambderRateLimitKey(key: { handler: (ctx: LambderRenderContext, payload: undefined) => string | Promise<string> }): { apiInput?: undefined; handler: (ctx: LambderRenderContext, payload: undefined) => string | Promise<string> };
 export function lambderRateLimitKey(key: LambderRateLimitKeyFn<any>): LambderRateLimitKeyFn<any> { return key; }
 
 /** What one rate-limit counter tracks: the client IP, the session identity, or a custom payload-derived key. */
@@ -61,58 +62,73 @@ export type LambderApiIdempotencyConfig = {
 };
 
 /**
- * A named guard, run before the API's own input validation. `input` names the
- * payload fields the guard requires: the slice is validated against the raw
- * payload before `handler` runs (a failure answers the standard 422
- * validation shape), the handler receives it typed, and the requirement is
- * merged into the contract input of every API that declares the guard, so
- * clients are forced by the compiler to send those fields. The handler
- * refuses by throwing (typically refuse()/LambderApiError). Build with
- * lambderGuard() so the handler's payload type follows `input`.
+ * A named guard, run before the API's own input validation. Two modes:
+ *
+ * - `apiInput`: the guard checks fields of the API's OWN payload. The slice
+ *   is validated against the raw payload before `handler` runs and handed to
+ *   it typed. The API's input schema stays the owner of those fields:
+ *   declaring the guard on an API whose schema does not carry them is a
+ *   compile error.
+ * - `guardInput`: the guard has its own value the client sends SEPARATELY,
+ *   outside the API payload, via the caller's options.guardInputs[name].
+ *   The requirement lands on the API's contract (`guardInputs`), so the
+ *   typed caller refuses to compile a call that does not send it. The API
+ *   payload and handler never see the value.
+ *
+ * Either way a validation failure answers the standard 422 shape, and the
+ * handler refuses by throwing (typically refuse()/LambderApiError). Build
+ * with lambderGuard() so the handler's payload type follows the schema.
  */
 export type LambderApiGuard<TInput extends z.ZodTypeAny = z.ZodTypeAny> =
-    | { input: TInput; handler: (ctx: LambderRenderContext, payload: z.output<TInput>, res: LambderResolver) => void | Promise<void> }
-    | { input?: undefined; handler: (ctx: LambderRenderContext, payload: undefined, res: LambderResolver) => void | Promise<void> };
+    | { apiInput: TInput; guardInput?: undefined; handler: (ctx: LambderRenderContext, payload: z.output<TInput>, res: LambderResolver) => void | Promise<void> }
+    | { guardInput: TInput; apiInput?: undefined; handler: (ctx: LambderRenderContext, payload: z.output<TInput>, res: LambderResolver) => void | Promise<void> }
+    | { apiInput?: undefined; guardInput?: undefined; handler: (ctx: LambderRenderContext, payload: undefined, res: LambderResolver) => void | Promise<void> };
 
 /**
- * Builder that ties the handler's payload type to the `input` schema inside
- * one literal. Returns the exact union member (not the union), so requirement
- * extraction can see the `input` type.
+ * Builder that ties the handler's payload type to the schema inside one
+ * literal. Returns the exact union member so mode/type extraction works.
  */
-export function lambderGuard<TInput extends z.ZodTypeAny>(guard: { input: TInput; handler: (ctx: LambderRenderContext, payload: z.output<TInput>, res: LambderResolver) => void | Promise<void> }): { input: TInput; handler: (ctx: LambderRenderContext, payload: z.output<TInput>, res: LambderResolver) => void | Promise<void> };
-export function lambderGuard(guard: { handler: (ctx: LambderRenderContext, payload: undefined, res: LambderResolver) => void | Promise<void> }): { input?: undefined; handler: (ctx: LambderRenderContext, payload: undefined, res: LambderResolver) => void | Promise<void> };
+export function lambderGuard<TInput extends z.ZodTypeAny>(guard: { apiInput: TInput; handler: (ctx: LambderRenderContext, payload: z.output<TInput>, res: LambderResolver) => void | Promise<void> }): { apiInput: TInput; guardInput?: undefined; handler: (ctx: LambderRenderContext, payload: z.output<TInput>, res: LambderResolver) => void | Promise<void> };
+export function lambderGuard<TInput extends z.ZodTypeAny>(guard: { guardInput: TInput; handler: (ctx: LambderRenderContext, payload: z.output<TInput>, res: LambderResolver) => void | Promise<void> }): { guardInput: TInput; apiInput?: undefined; handler: (ctx: LambderRenderContext, payload: z.output<TInput>, res: LambderResolver) => void | Promise<void> };
+export function lambderGuard(guard: { handler: (ctx: LambderRenderContext, payload: undefined, res: LambderResolver) => void | Promise<void> }): { apiInput?: undefined; guardInput?: undefined; handler: (ctx: LambderRenderContext, payload: undefined, res: LambderResolver) => void | Promise<void> };
 export function lambderGuard(guard: LambderApiGuard<any>): LambderApiGuard<any> { return guard; }
 
-/** Names of policies usable on public APIs: everything not keyed per "session". */
-export type LambderPublicRateLimitNames<TPolicies> = {
-    [K in keyof TPolicies]: TPolicies[K] extends { per: "session" } ? never : K
-}[keyof TPolicies] & string;
+/** Per-guard metadata carried on the Lambder instance: mode plus payload type. */
+export type LambderGuardMeta<G> =
+    G extends { apiInput: infer S extends z.ZodTypeAny } ? { apiInput: z.output<S> }
+    : G extends { guardInput: infer S extends z.ZodTypeAny } ? { guardInput: z.output<S> }
+    : {};
+export type LambderGuardMetaMap<TGuards> = { [K in keyof TGuards]: LambderGuardMeta<TGuards[K]> };
 
-/** Payload fields a guard requires; {} when it declares no input. */
-export type LambderGuardPayload<G> = G extends { input: infer S extends z.ZodTypeAny } ? z.output<S> : {};
-/** Guard name to required-payload map, accumulated on the Lambder instance by defineApiGuards. */
-export type LambderGuardPayloadMap<TGuards> = { [K in keyof TGuards]: LambderGuardPayload<TGuards[K]> };
-/** Payload fields a policy's custom key requires; {} for "ip"/"session" or keys with no input. */
-export type LambderPolicyPayload<P> = P extends { per: { input: infer S extends z.ZodTypeAny } } ? z.output<S> : {};
-
-type UnionToIntersection<U> = (U extends any ? (x: U) => void : never) extends (x: infer I) => void ? I : never;
 type NamesIn<TOpt> = TOpt extends readonly (infer N extends string)[] ? N : TOpt extends string ? TOpt : never;
 
-/** Intersection of the payload requirements of the referenced guards; never when none are declared. */
-export type LambderGuardsRequirement<TGuardPayloads, TOpt> =
-    [NamesIn<TOpt>] extends [never] ? never
-    : UnionToIntersection<TGuardPayloads[Extract<NamesIn<TOpt>, keyof TGuardPayloads>]>;
+/** Guard names an API may declare: apiInput-mode guards only when the API's payload carries their fields. */
+export type LambderAllowedGuardNames<TGuards, TPayload> = {
+    [K in keyof TGuards]:
+        TGuards[K] extends { apiInput: infer R } ? (TPayload extends R ? K : never) : K
+}[keyof TGuards] & string;
 
-/** Intersection of the payload requirements of the referenced rate-limit policies; never when none are declared. */
-export type LambderPoliciesRequirement<TPolicies, TOpt> =
-    [NamesIn<TOpt>] extends [never] ? never
-    : UnionToIntersection<LambderPolicyPayload<TPolicies[Extract<NamesIn<TOpt>, keyof TPolicies>]>>;
+/**
+ * Policy names an API may reference: session-keyed policies only on session
+ * APIs, and apiInput-keyed policies only when the API's payload carries the
+ * key's fields.
+ */
+export type LambderAllowedPolicyNames<TPolicies, TPayload, TIncludeSession extends boolean> = {
+    [K in keyof TPolicies]:
+        TPolicies[K] extends { per: "session" }
+            ? (TIncludeSession extends true ? K : never)
+            : TPolicies[K] extends { per: { apiInput: infer S extends z.ZodTypeAny } }
+                ? (TPayload extends z.output<S> ? K : never)
+                : K
+}[keyof TPolicies] & string;
 
-/** Contract-input merge: the API's own input plus everything its rate limits and guards force clients to send. */
-export type LambderMergedInput<TIn, TReqA, TReqB> =
-    ([TReqA] extends [never] ? TIn : TIn & TReqA) extends infer TMid
-        ? ([TReqB] extends [never] ? TMid : TMid & TReqB)
-        : never;
+type GuardInputsEntries<TGuards, TOpt> = {
+    [K in Extract<NamesIn<TOpt>, keyof TGuards> as TGuards[K] extends { guardInput: any } ? K : never]:
+        TGuards[K] extends { guardInput: infer V } ? V : never
+};
+/** The guardInputs map an API's contract requires clients to send; never when no declared guard uses guardInput mode. */
+export type LambderGuardInputsOf<TGuards, TOpt> =
+    keyof GuardInputsEntries<TGuards, TOpt> extends never ? never : GuardInputsEntries<TGuards, TOpt>;
 
 const toList = (value?: string | readonly string[]): readonly string[] =>
     value === undefined ? [] : typeof value === "string" ? [value] : value;
@@ -137,7 +153,7 @@ export class LambderApiPolicyEngine {
         for(const [name, policy] of Object.entries(config.policies)){
             const per = policy.per as LambderRateLimitPer | undefined;
             if(!per || (per !== "ip" && per !== "session" && typeof per.handler !== "function")){
-                throw new Error(`Lambder: rate-limit policy "${name}" needs per: "ip", "session", or a { input?, handler } key.`);
+                throw new Error(`Lambder: rate-limit policy "${name}" needs per: "ip", "session", or a { apiInput?, handler } key.`);
             }
             if(!RATE_LIMIT_WINDOW_KEYS.some((key) => policy[key])){
                 throw new Error(`Lambder: rate-limit policy "${name}" declares no window (${RATE_LIMIT_WINDOW_KEYS.join("/")}).`);
@@ -151,6 +167,7 @@ export class LambderApiPolicyEngine {
         for(const [name, guardDef] of Object.entries(guards)){
             if(this.guards[name]) throw new Error(`Lambder: guard "${name}" is already defined.`);
             if(typeof guardDef?.handler !== "function") throw new Error(`Lambder: guard "${name}" has no handler function.`);
+            if(guardDef.apiInput && guardDef.guardInput) throw new Error(`Lambder: guard "${name}" declares both apiInput and guardInput; pick one.`);
             this.guards[name] = guardDef;
         }
     }
@@ -209,20 +226,25 @@ export class LambderApiPolicyEngine {
         for(const name of toList(options.guards)){
             const guardDef = this.guards[name];
             if(!guardDef) throw new Error(`Lambder: guard "${name}" is not configured.`);
-            const payload = this.parseSlice(guardDef.input, ctx, resolver);
+            const post = ctx.post as Record<string, unknown> | undefined;
+            let payload: unknown;
+            if(guardDef.apiInput){
+                payload = this.parseSlice(guardDef.apiInput, post?.payload, resolver);
+            }else if(guardDef.guardInput){
+                payload = this.parseSlice(guardDef.guardInput, (post?.guardInputs as Record<string, unknown> | undefined)?.[name], resolver);
+            }
             await guardDef.handler(ctx, payload as never, resolver);
         }
     }
 
     /**
-     * Validate a preflight input slice against the raw payload. Runs before
-     * the API's own validation, so guard/key requirements hold even when the
-     * API schema does not declare (and would strip) those fields. Failures
-     * answer the same 422 shape as regular input validation.
+     * Validate a preflight input slice (an apiInput slice of the raw payload,
+     * or a guardInput value from the raw guardInputs map). Runs before the
+     * API's own validation; failures answer the same 422 shape as regular
+     * input validation.
      */
-    private parseSlice(input: z.ZodTypeAny | undefined, ctx: LambderRenderContext, resolver: LambderResolver): unknown {
-        if(!input) return undefined;
-        const parsed = input.safeParse((ctx.post as Record<string, unknown> | undefined)?.payload);
+    private parseSlice(input: z.ZodTypeAny, value: unknown, resolver: LambderResolver): unknown {
+        const parsed = input.safeParse(value);
         if(!parsed.success){
             throw resolver.json({ error: "Input validation failed", zodError: parsed.error }, { statusCode: 422 });
         }
@@ -236,7 +258,9 @@ export class LambderApiPolicyEngine {
             if(!sessionKey) throw new Error('Lambder: rate-limit per "session" evaluated without a session on the context.');
             return `session:${sessionKey}`;
         }
-        const payload = this.parseSlice(per.input, ctx, resolver);
+        const payload = per.apiInput
+            ? this.parseSlice(per.apiInput, (ctx.post as Record<string, unknown> | undefined)?.payload, resolver)
+            : undefined;
         return `custom:${await per.handler(ctx, payload as never)}`;
     }
 

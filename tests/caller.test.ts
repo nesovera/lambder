@@ -193,6 +193,21 @@ describe('LambderCaller - createIdempotencyKey', () => {
     });
 });
 
+describe('LambderCaller - guardInputs transport', () => {
+    it('includes guardInputs in the POST body when provided, omits them otherwise', async () => {
+        const fetchMock = stubFetch(async () => mockResponse({ apiVersion: '1', payload: 'ok' }));
+        const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false });
+
+        await caller.api('doThing', { a: 1 }, { guardInputs: { captcha: { token: 't-1' } } });
+        await caller.api('doThing', { a: 1 });
+
+        const firstBody = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string);
+        const secondBody = JSON.parse(fetchMock.mock.calls[1]?.[1]?.body as string);
+        expect(firstBody.guardInputs).toEqual({ captcha: { token: 't-1' } });
+        expect('guardInputs' in secondBody).toBe(false);
+    });
+});
+
 describe('LambderCaller - idempotency key transport', () => {
     it('includes idempotencyKey in the POST body when provided, omits it otherwise', async () => {
         const fetchMock = stubFetch(async () => mockResponse({ apiVersion: '1', payload: 'ok' }));

@@ -2,7 +2,7 @@
 
 Lambder is a highly opinionated dynamic serverless framework designed to facilitate the management and implementation of routes and APIs within AWS Lambda functions, specifically tailored for TypeScript projects. It provides a streamlined approach to handling HTTP requests, managing sessions, and defining API routes, making serverless application development more intuitive and structured.
 
-**New in v3:** Public file serving with `servePublicFiles()` + `serveIndexHtml()`, unified `addAction()` for non-HTTP triggers, automatic gzip + ETag, thrown responses with a real `die`, the comment-based `LambderTemplatingEngine`, type-safe `html`/`xml` tagged templates, API Gateway HTTP API (payload v2) / Lambda Function URL support, the `LambderDdbCache` DynamoDB cache (3.1), typed translations with `createLambderI18n` (3.2), and in 3.5: typed API refusals with `LambderApiError`, caller outcomes/timeouts with `apiOutcome()`, plus declarative per-API rate limits, guards, and idempotency; 3.7 makes guards and custom rate-limit keys payload-sliced ({ input, handler }): the slice is validated pre-run, typed in the handler, and force-merged into the contract input.
+**New in v3:** Public file serving with `servePublicFiles()` + `serveIndexHtml()`, unified `addAction()` for non-HTTP triggers, automatic gzip + ETag, thrown responses with a real `die`, the comment-based `LambderTemplatingEngine`, type-safe `html`/`xml` tagged templates, API Gateway HTTP API (payload v2) / Lambda Function URL support, the `LambderDdbCache` DynamoDB cache (3.1), typed translations with `createLambderI18n` (3.2), and in 3.5: typed API refusals with `LambderApiError`, caller outcomes/timeouts with `apiOutcome()`, plus declarative per-API rate limits, guards, and idempotency; 3.8 gives guards and custom rate-limit keys two typed modes: apiInput (checks a slice of the API's own payload; declarable only where the schema carries those fields) and guardInput (a separate client-sent guardInputs channel the contract makes mandatory at the call site).
 
 ## Features
 
@@ -478,11 +478,11 @@ const lambder = new Lambder<SessionData>({ apiPath: "/api" })
             writePerUser: { perMin: 30, per: "session" },   // only referable from addSessionApi (also enforced at compile time)
             codePerEmail: {
                 perMin: 3,
-                // The key declares the payload slice it needs: validated before
-                // it runs, handed to the handler typed, and merged into the
-                // contract input of every API referencing this policy.
+                // apiInput key: derives from the API's OWN payload. Validated
+                // before it runs, typed in the handler, and the policy is only
+                // referable from APIs whose input schema carries `email`.
                 per: lambderRateLimitKey({
-                    input: z.object({ email: z.string() }),
+                    apiInput: z.object({ email: z.string() }),
                     handler: (_ctx, { email }) => email.trim().toLowerCase(),
                 }),
                 errorMessage: { type: "warning", content: "Too many attempts for this address." },
@@ -496,14 +496,15 @@ const lambder = new Lambder<SessionData>({ apiPath: "/api" })
         defaultTtlSeconds: 24 * 3600,
         failOpen: true,   // DynamoDB down => execute without dedupe instead of failing
     })
-    // 3. Named guards: { input?, handler } definitions run before input
-    //    validation and refuse by throwing. A guard's `input` slice is
-    //    validated against the raw payload, handed to the handler typed, and
-    //    merged into the contract input of every API declaring the guard, so
-    //    forgetting to send captchaToken is a compile error at the call site.
+    // 3. Named guards, two modes. apiInput checks a slice of the API's own
+    //    payload (the schema keeps the field; the guard is declarable only
+    //    where the payload type passes both). guardInput is the guard's OWN
+    //    value, sent separately by the caller via options.guardInputs and
+    //    made mandatory by the contract, so forgetting it is a compile error
+    //    at the call site. Both are validated pre-run and typed in the handler.
     .defineApiGuards({
         captcha: lambderGuard({
-            input: z.object({ captchaToken: z.string() }),
+            guardInput: z.object({ captchaToken: z.string() }),
             handler: async (ctx, { captchaToken }) => {
                 if (!await verifyCaptcha(captchaToken, ctx.ip)) refuse("Verification failed, please retry.");
             },
@@ -511,9 +512,10 @@ const lambder = new Lambder<SessionData>({ apiPath: "/api" })
     });
 
 lambder.addApi("public.resetPassword", {
-    // captchaToken is NOT declared here: the guard contributes it to the
-    // contract, the guard validates and consumes it, and the handler never
-    // sees it.
+    // captchaToken is NOT declared here: it travels in the separate
+    // guardInputs channel, so the guard validates and consumes it and the
+    // handler never sees it. `email` IS declared: the codePerEmail key runs
+    // in apiInput mode against the API's own payload.
     input: z.object({ email: z.string().email() }),
     output: z.object({ ok: z.boolean() }),
     rateLimit: ["authPerIp", "codePerEmail"],   // stacked: checked in order, first exceeded refuses (429 envelope)
@@ -636,6 +638,7 @@ Also available:
 
 - **Timeouts**: pass `timeoutMs` in the constructor for a default (API Gateway caps around 29s, so ~30000 is sensible) and/or per call; timed-out calls abort the fetch and report `reason: 'timeout'`. A per-call `signal` combines with the timeout.
 - **Per-call handler overrides**: every constructor handler (`errorHandler`, `sessionExpiredHandler`, `errorMessageHandler`, ...) can be overridden in the options of a single `api`/`apiRaw`/`apiOutcome` call.
+- **Guard inputs**: for APIs whose guards run in guardInput mode, pass their values per call as `guardInputs: { <guardName>: value }`; the typed contract makes the options argument (and the correct value shape) mandatory for those APIs.
 - **Idempotency keys**: pass `idempotencyKey` per call for APIs declared idempotent on the server (see Declarative API Policies). Generate it once per logical operation with `LambderCaller.createIdempotencyKey()` (safe in insecure contexts where `crypto.randomUUID` is missing) and send the same key on retries; rotate after a confirmed success.
 
 ### Benefits
