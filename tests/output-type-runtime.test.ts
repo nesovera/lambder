@@ -8,7 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import { APIGatewayProxyEvent, Context } from 'aws-lambda';
 import { z } from 'zod';
-import Lambder from '../src/Lambder.js';
+import Lambder from '../src/core/Lambder.js';
 
 // Mock AWS Lambda event and context
 const createMockEvent = (apiName: string, payload: any): APIGatewayProxyEvent => ({

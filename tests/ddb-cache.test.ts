@@ -9,7 +9,7 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { LambderDdbCache } from "../src/LambderDdbCache.js";
+import { LambderDdbCache } from "../src/stores/LambderDdbCache.js";
 
 type Item = Record<string, AttributeValue>;
 

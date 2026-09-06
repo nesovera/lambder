@@ -4,8 +4,8 @@
 
 import { describe, it, expect } from 'vitest';
 import path from 'node:path';
-import Lambder from '../src/Lambder.js';
-import { html, jsonScript } from '../src/LambderHtml.js';
+import Lambder from '../src/core/Lambder.js';
+import { html, jsonScript } from '../src/shared/LambderHtml.js';
 import { decodeBody, createMockEvent, createMockContext } from './helpers.js';
 describe('servePublicFiles + templateFile fallback (frontend hosting recipe)', () => {
     const spaRoot = path.resolve('./tests/fixtures/spa');

@@ -1,8 +1,18 @@
-# Lambder - Serverless NodeJS Web Framework (v3)
+# Lambder - Serverless NodeJS Web Framework (v4)
 
 Lambder is a highly opinionated dynamic serverless framework designed to facilitate the management and implementation of routes and APIs within AWS Lambda functions, specifically tailored for TypeScript projects. It provides a streamlined approach to handling HTTP requests, managing sessions, and defining API routes, making serverless application development more intuitive and structured.
 
-**New in v3:** Public file serving with `servePublicFiles()` + `serveIndexHtml()`, unified `addAction()` for non-HTTP triggers, automatic gzip + ETag, thrown responses with a real `die`, the comment-based `LambderTemplatingEngine`, type-safe `html`/`xml` tagged templates, API Gateway HTTP API (payload v2) / Lambda Function URL support, the `LambderDdbCache` DynamoDB cache (3.1), typed translations with `createLambderI18n` (3.2), and in 3.5: typed API refusals with `LambderApiError`, caller outcomes/timeouts with `apiOutcome()`, plus declarative per-API rate limits, guards, and idempotency; 3.8 gives guards and custom rate-limit keys two typed modes: apiInput (checks a slice of the API's own payload; declarable only where the schema carries those fields) and guardInput (a separate client-sent guardInputs channel the contract makes mandatory at the call site).
+**New in v4:**
+
+- **Declarative auth as guards**: guards take per-API params (`guards: { orgPermission: "SOME.PERMISSION" }`), can require a session (`session: true`, compile-checked), and RETURN typed values that land on the handler's `ctx.guardData[name]`. Together with the apiInput/guardInput input modes, permission checks and device auth become registration-time declarations instead of per-handler boilerplate.
+- **Hardened policy layer**: rate-limit policies can share one counter across APIs (`scope: "policy"`); idempotency replays answer before rate limits, survive client IP changes (key-scoped for public APIs, 16-char minimum keys), store full response headers, refuse to store Set-Cookie responses, and Brotli-compress stored bodies of 1KB+ so the ~350KB replay budget applies to compressed bytes.
+- **Secrets hashed at rest**: session records store only sha256 hashes of the bearer secrets, so a session-table read yields no usable cookies; `LambderSessionReadError` keeps a DynamoDB blip from reading as a logout.
+- **Three package entry points**: `lambder` (server), `lambder/client` (browser-safe by construction: no AWS SDK, no Node built-ins), `lambder/testing` (`LambderMSW`); sources organized into core/policies/session/stores/client/shared.
+- **Quality of life**: the `LambderApp` alias for annotating api modules, `LambderCaller.createIdempotencyKeyScope()` for one self-rotating key per logical operation, fail-open rate limiting logs its passes.
+
+**Breaking in v4** (from 3.x): session records are reshaped (hashes at rest; live sessions invalidate once on upgrade, clients just re-login) and the manager-level `createSession`/`regenerateSession` return `LambderCreatedSession` (`{ session, sessionToken, csrfToken }`; the controller API is unchanged); `LambderMSW` moved from the root entry to `lambder/testing`; `LambderCaller.apiRaw()` is removed (use `apiOutcome()`, whose failure outcomes carry the envelope on `response`); the `multiValueHeaders` alias on `res.raw()` is removed (use `headers`); `LambderDdbIdempotency.complete()` answers `"stored" | "too-large" | "lost"`; idempotency keys must be 16-200 chars.
+
+v3 (public file serving, `addAction()`, gzip + ETag, thrown responses, `LambderTemplatingEngine`, `html`/`xml` tags, payload v2 support, `LambderDdbCache`, `createLambderI18n`, `LambderApiError`/`refuse()`, `apiOutcome()`, the declarative policy foundations) is documented in the git history.
 
 ## Features
 
@@ -34,6 +44,20 @@ npm install lambder zod
 # or
 yarn add lambder zod
 ```
+
+## Package Entry Points
+
+The package ships three entry points; pick by where the code runs:
+
+| Entry | Runs in | Carries |
+|-------|---------|---------|
+| `lambder` | Server (Lambda) | The full framework: pipeline, sessions, DDB stores, policies, plus everything from `lambder/client` |
+| `lambder/client` | Browser and isomorphic shared code | `LambderCaller`, `LambderApiError`/`refuse`, the API contract and envelope types, `html`/`xml` tagged templates, `createLambderI18n` |
+| `lambder/testing` | Dev and test tooling | `LambderMSW`, the MSW adapter that serves your typed contract from mock handlers |
+
+Frontends and shared isomorphic packages should import from `lambder/client` only; the entry's module graph contains no AWS SDK, Node built-ins, or server pipeline, so the browser boundary is structural rather than left to tree-shaking.
+
+Source layout mirrors this: `src/core/` (request pipeline), `src/policies/` (declarative rate limits, guards, idempotency), `src/session/`, `src/stores/` (DynamoDB primitives), `src/client/`, and `src/shared/` (isomorphic modules both entries re-export).
 
 ## Backend Usage
 
@@ -275,6 +299,10 @@ lambder
 
 See [docs/DYNAMODB_SETUP.md](docs/DYNAMODB_SETUP.md) for detailed setup instructions.
 
+#### How the secrets are stored
+
+The session cookie is `pkHash:secret`: `pkHash = sha256(sessionKey + sessionSalt)` and `secret` is 256 random bits. At rest the record stores only HASHES of the bearer secrets: the range key is `sha256(secret)` (so the lookup itself proves possession of the raw secret) and the CSRF token is stored as `csrfTokenHash`. The raw values exist only in the client's cookies and, transiently, on the `LambderCreatedSession` result the manager returns at creation; a read of the session table (backup leak, over-broad IAM, insider) therefore yields no usable cookies. Fast sha256 is the correct construction here rather than a password KDF: the secrets are 256-bit random, so there is nothing to brute-force, while `sessionSalt` peppers the identity-to-partition-key mapping so partition keys and cookie prefixes cannot be derived from (or linked to) known user ids.
+
 #### Keeping session data fresh (`dataRefresh`)
 
 Session data often caches values derived from external state: roles, permissions, feature flags. Opt in to `dataRefresh` to give that data a shelf life. Every session read checks it, and once `ttlSeconds` have passed your `refresh` callback rebuilds the data, which is persisted onto the same session record: same tokens, same cookies, the session itself is untouched. Changes to the source of truth then reach every live session within `ttlSeconds`, with no mass session invalidation.
@@ -300,6 +328,7 @@ Semantics:
 - The callback must be a pure derivation of external state: concurrent reads may run it in parallel, last write wins.
 - Returning `null` deletes the session; the request is answered as session-expired.
 - Thrown errors fail the request as a `LambderSessionDataRefreshError` and leave the session untouched (they are never mistaken for a logout). Catch inside and return `session.data` to explicitly serve stale instead.
+- Similarly, a DynamoDB failure while READING a session fails the request as a `LambderSessionReadError` instead of reading as "no session": answering session-expired there would make LambderCaller clear the client's cookies, turning an infra blip into a forced logout.
 - The renewal write and the sliding-expiration write share a single DynamoDB put when both are due.
 - Records created before `dataRefresh` was enabled renew on their first read.
 - `updateSessionData()` marks data fresh (it was just written deliberately); `regenerateSession()` carries the old freshness stamp over.
@@ -478,6 +507,10 @@ const lambder = new Lambder<SessionData>({ apiPath: "/api" })
             writePerUser: { perMin: 30, per: "session" },   // only referable from addSessionApi (also enforced at compile time)
             codePerEmail: {
                 perMin: 3,
+                // scope "policy": ONE combined budget across every API that
+                // references this policy (send + register + reset share the
+                // 3/min). Default scope "api" gives each API its own counter.
+                scope: "policy",
                 // apiInput key: derives from the API's OWN payload. Validated
                 // before it runs, typed in the handler, and the policy is only
                 // referable from APIs whose input schema carries `email`.
@@ -496,18 +529,33 @@ const lambder = new Lambder<SessionData>({ apiPath: "/api" })
         defaultTtlSeconds: 24 * 3600,
         failOpen: true,   // DynamoDB down => execute without dedupe instead of failing
     })
-    // 3. Named guards, two modes. apiInput checks a slice of the API's own
+    // 3. Named guards. Input modes: apiInput checks a slice of the API's own
     //    payload (the schema keeps the field; the guard is declarable only
-    //    where the payload type passes both). guardInput is the guard's OWN
+    //    where the payload type passes both); guardInput is the guard's OWN
     //    value, sent separately by the caller via options.guardInputs and
     //    made mandatory by the contract, so forgetting it is a compile error
-    //    at the call site. Both are validated pre-run and typed in the handler.
+    //    at the call site; or neither. Both are validated pre-run and typed
+    //    in the handler. On top of that a guard may require a session
+    //    (session: true, declarable only on addSessionApi), take a per-API
+    //    PARAM (annotate a 4th handler argument), and RETURN a value that
+    //    lands typed on the API handler's ctx.guardData[name].
     .defineApiGuards({
         captcha: lambderGuard({
             guardInput: z.object({ captchaToken: z.string() }),
             handler: async (ctx, { captchaToken }) => {
                 if (!await verifyCaptcha(captchaToken, ctx.ip)) refuse("Verification failed, please retry.");
             },
+        }),
+        deviceAuth: lambderGuard({
+            apiInput: z.object({ deviceToken: z.string() }),
+            // Returns a value: the API handler reads ctx.guardData.deviceAuth.
+            handler: async (_ctx, { deviceToken }) => await resolveDeviceOrRefuse(deviceToken),
+        }),
+        orgPermission: lambderGuard({
+            session: true,
+            // Parameterized: APIs declare guards: { orgPermission: "SOME.PERMISSION" }.
+            handler: (ctx, _payload, _res, permission: PermissionString) =>
+                requirePermissionOrRefuse(ctx.session, permission),   // return value → ctx.guardData.orgPermission
         }),
     });
 
@@ -519,20 +567,37 @@ lambder.addApi("public.resetPassword", {
     input: z.object({ email: z.string().email() }),
     output: z.object({ ok: z.boolean() }),
     rateLimit: ["authPerIp", "codePerEmail"],   // stacked: checked in order, first exceeded refuses (429 envelope)
-    guards: "captcha",
+    guards: "captcha",                          // one name, a list of names, or a { name: param } map
 }, handler);
 
 lambder.addSessionApi("secure.order.create", {
     input: OrderSchema,
     output: OrderResultSchema,
     rateLimit: "writePerUser",
+    guards: { orgPermission: "ORDERS.CREATE" }, // param typed per guard; entries run in insertion order
     idempotency: true,                          // or { ttlSeconds: 3600 }; type error until enableApiIdempotency()
-}, handler);
+}, async (ctx, res) => {
+    const { organizationId } = ctx.guardData.orgPermission;  // typed guard output
+    // ...
+});
 ```
 
-Request flow per API: session (session APIs) → rate limits → guards → zod validation → idempotency claim → handler → idempotency store. Refusals ride the envelope via `LambderApiError` (429 rate limited, 409 duplicate in flight), so the caller's `errorMessageHandler` surfaces them with zero client code.
+Guard results are typed end to end: the handler's `ctx.guardData` carries exactly the declared guards that return a value, a session guard on a public API is a compile error (and a startup assert), an apiInput guard is declarable only where the API's schema carries its fields, and a parameterized guard's param is typechecked in the declaration.
 
-**Idempotency semantics**: the client sends an `idempotencyKey` per call (see LambderCaller below); generate it once per logical operation and reuse it on retries. The scope is identity (session key, or IP for public APIs) + API name + key: concurrent duplicates of an in-flight request refuse with 409, repeats of a completed one replay the stored response verbatim until the TTL, and a crashed original releases its claim so a retry actually retries. A response delivered by throwing (`res.die.*`, `throw res.api(...)`) counts as a completion and is stored like a returned one; thrown `LambderApiError` refusals release the claim instead. Responses with status ≥ 500 are never stored. Claims are owner-checked, so an original that stalls past the pending window can no longer overwrite or delete the claim a retry has since taken. Requests without a key execute normally.
+For api modules split across files, annotate their `lambder` parameter with the `LambderApp` alias instead of hand-writing the instance generics:
+
+```typescript
+export type AppLambder = LambderApp<SessionData, {
+    policies: typeof apiRateLimitPolicies;   // what enableApiRateLimits({ policies }) receives
+    guards: typeof apiGuards;                // what defineApiGuards(...) receives
+    idempotency: true;                       // enableApiIdempotency(...) is called
+}>;
+export const orderApi = (lambder: AppLambder) => lambder.addSessionApi(...);
+```
+
+Request flow per API: session (session APIs) → idempotency replay lookup → rate limits → guards → zod validation → idempotency claim → handler → idempotency store. The replay lookup runs first on purpose: a completed idempotent request answers its stored response without burning rate-limit quota or re-running guards (the original already passed them, and no handler executes either way). Refusals ride the envelope via `LambderApiError` (429 rate limited, 409 duplicate in flight), so the caller's `errorMessageHandler` surfaces them with zero client code.
+
+**Idempotency semantics**: the client sends an `idempotencyKey` per call (see LambderCaller below); generate it once per logical operation with `LambderCaller.createIdempotencyKey()` and reuse it on retries. Keys must be 16-200 characters and UNGUESSABLE random (shorter keys refuse with 400): on session APIs the scope is session + API name + key, and on public APIs it is the key itself + API name, deliberately NOT the client IP, because the retry idempotency exists for (a timeout followed by a network switch) frequently arrives from a new IP. Concurrent duplicates of an in-flight request refuse with 409, repeats of a completed one replay the stored response verbatim until the TTL (response headers included, so headers set via `res.setHeader`/`res.addHeader` replay too), and a crashed original releases its claim so a retry actually retries. The replay rule for failures: RESPONSES are stored and replayed, refusals returned as envelopes (`res.api(null, { errorMessage })`) and thrown responses (`res.die.*`) included; EXCEPTIONS are not, so a thrown `LambderApiError`/`refuse()` releases the claim and a retry re-executes and decides afresh. Stored bodies of 1KB or more are Brotli-compressed (the same scheme as LambderDdbCache; `compressionQuality` on the store, default 5): JSON envelopes typically shrink 5-10x, which cuts DynamoDB write cost, and the ~350KB item budget applies to the COMPRESSED bytes, so even large responses usually stay replayable. Responses with status ≥ 500, bodies over the budget even compressed, and responses that set cookies are never stored (replaying one request's Set-Cookie, e.g. session tokens, into another would be wrong; such APIs still get in-flight 409 dedupe, just not replays). Claims are owner-checked, so an original that stalls past the pending window can no longer overwrite or delete the claim a retry has since taken. Requests without a key execute normally.
 
 Also enforced at registration: **duplicate API names throw** (dispatch is first-match, so a second registration of the same name would be silently dead code).
 
@@ -583,12 +648,12 @@ cI18n.forLanguage("tr")("compute"); // explicit (per-request backend use)
 
 ## Frontend Usage with LambderCaller
 
-LambderCaller is a frontend companion library for Lambder (only 2kb compressed) designed to simplify making type-safe API requests to your Lambder backend.
+LambderCaller is a frontend companion library for Lambder (only 2kb compressed) designed to simplify making type-safe API requests to your Lambder backend. Import it from the `lambder/client` entry: everything reachable from there is browser-safe by construction (no AWS SDK, no Node built-ins, no server pipeline), so your bundle can never pick up server code.
 
 ### Basic Setup with Type Safety
 
 ```typescript
-import { LambderCaller } from "lambder";
+import { LambderCaller } from "lambder/client";
 import type { ApiContractType } from "./backend/handler"; // Import the inferred contract type
 
 const lambderCaller = new LambderCaller<ApiContractType>({
@@ -637,9 +702,9 @@ Every configured handler still fires on the matching failure, so global UX (toas
 Also available:
 
 - **Timeouts**: pass `timeoutMs` in the constructor for a default (API Gateway caps around 29s, so ~30000 is sensible) and/or per call; timed-out calls abort the fetch and report `reason: 'timeout'`. A per-call `signal` combines with the timeout.
-- **Per-call handler overrides**: every constructor handler (`errorHandler`, `sessionExpiredHandler`, `errorMessageHandler`, ...) can be overridden in the options of a single `api`/`apiRaw`/`apiOutcome` call.
+- **Per-call handler overrides**: every constructor handler (`errorHandler`, `sessionExpiredHandler`, `errorMessageHandler`, ...) can be overridden in the options of a single `api`/`apiOutcome` call.
 - **Guard inputs**: for APIs whose guards run in guardInput mode, pass their values per call as `guardInputs: { <guardName>: value }`; the typed contract makes the options argument (and the correct value shape) mandatory for those APIs.
-- **Idempotency keys**: pass `idempotencyKey` per call for APIs declared idempotent on the server (see Declarative API Policies). Generate it once per logical operation with `LambderCaller.createIdempotencyKey()` (safe in insecure contexts where `crypto.randomUUID` is missing) and send the same key on retries; rotate after a confirmed success.
+- **Idempotency keys**: pass `idempotencyKey` per call for APIs declared idempotent on the server (see Declarative API Policies). Generate it once per logical operation with `LambderCaller.createIdempotencyKey()` (safe in insecure contexts where `crypto.randomUUID` is missing) and send the same key on retries; rotate after a confirmed success. `LambderCaller.createIdempotencyKeyScope()` packages that pattern for a component performing one operation repeatedly: read `scope.current` on every attempt, call `scope.rotate()` after a confirmed success. Keys must be unguessable random and 16-200 characters (they scope the replay record for logged-out clients); the server refuses shorter keys with a 400.
 
 ### Benefits
 
@@ -657,7 +722,7 @@ Also available:
 LambderMSW provides seamless integration with [MSW (Mock Service Worker)](https://mswjs.io/) for testing your APIs with full type safety.
 
 ```typescript
-import { LambderMSW } from 'lambder';
+import { LambderMSW } from 'lambder/testing';
 import { setupServer } from 'msw/node';
 import type { ApiContractType } from './backend/handler';
 

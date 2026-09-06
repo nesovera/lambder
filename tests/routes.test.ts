@@ -12,11 +12,15 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
+import nodeCrypto from 'crypto';
 import { decodeBody } from './helpers.js';
 import { mockClient } from 'aws-sdk-client-mock';
 import { DynamoDBDocumentClient, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
-import Lambder from '../src/Lambder.js';
+import Lambder from '../src/core/Lambder.js';
 import type { APIGatewayProxyEvent, Context } from 'aws-lambda';
+
+// Session records store only hashes of the bearer secrets.
+const hashTok = (value: string) => nodeCrypto.createHash('sha256').update(value).digest('hex');
 
 // Mock DynamoDB
 const ddbMock = mockClient(DynamoDBDocumentClient);
@@ -311,9 +315,8 @@ describe('Routes - Session Protected Routes', () => {
     it('should protect routes with addSessionRoute', async () => {
         const mockSession = {
             pk: 'hash',
-            sk: 'sortkey',
-            sessionToken: 'hash:sortkey',
-            csrfToken: 'csrf-token',
+            sk: hashTok('sortkey'),
+            csrfTokenHash: hashTok('csrf-token'),
             sessionKey: 'user-123',
             data: { userId: '123', role: 'user' },
             createdAt: Math.floor(Date.now() / 1000),
@@ -386,9 +389,8 @@ describe('Routes - Session Protected Routes', () => {
     it('should access session data in session routes', async () => {
         const mockSession = {
             pk: 'hash',
-            sk: 'sortkey',
-            sessionToken: 'hash:sortkey',
-            csrfToken: 'csrf-token',
+            sk: hashTok('sortkey'),
+            csrfTokenHash: hashTok('csrf-token'),
             sessionKey: 'user-456',
             data: { userId: '456', username: 'testuser', role: 'admin' },
             createdAt: Math.floor(Date.now() / 1000),

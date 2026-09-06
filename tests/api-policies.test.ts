@@ -13,12 +13,14 @@ import {
     type AttributeValue,
 } from "@aws-sdk/client-dynamodb";
 import { describe, it, expect } from 'vitest';
+import nodeCrypto from 'crypto';
 import { z } from 'zod';
-import Lambder from '../src/Lambder.js';
-import { LambderApiError } from '../src/LambderApiError.js';
-import { LambderDdbRateLimiter } from '../src/LambderDdbRateLimiter.js';
-import { LambderDdbIdempotency } from '../src/LambderDdbIdempotency.js';
-import { lambderGuard, lambderRateLimitKey } from '../src/LambderApiPolicies.js';
+import Lambder from '../src/core/Lambder.js';
+import { LambderApiError } from '../src/shared/LambderApiError.js';
+import { LambderDdbRateLimiter } from '../src/stores/LambderDdbRateLimiter.js';
+import { LambderDdbIdempotency } from '../src/stores/LambderDdbIdempotency.js';
+import { lambderGuard } from '../src/policies/LambderApiGuards.js';
+import { lambderRateLimitKey } from '../src/policies/LambderApiRateLimits.js';
 import { createMockContext } from './helpers.js';
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
@@ -243,6 +245,35 @@ describe('API policies - rate limiting', () => {
         expect(result.statusCode).toBe(200);
         expect(JSON.parse(result.body || '{}').payload.result).toBe('through');
     });
+
+    it('scope "api" (the default) gives each API its own counter', async () => {
+        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+            .enableApiRateLimits({
+                limiter: makeLimiter(new MemoryDdb()),
+                policies: { one: { perMin: 1, per: 'ip' } },
+            })
+            .addApi('first', { ...testSchema, rateLimit: 'one' }, async (ctx, res) => res.api({ result: 'a' }))
+            .addApi('second', { ...testSchema, rateLimit: 'one' }, async (ctx, res) => res.api({ result: 'b' }));
+
+        expect((await lambder.render(createApiEvent('first', { value: 'x' }), createMockContext())).statusCode).toBe(200);
+        // Separate budget: the second API is untouched by the first one's counter.
+        expect((await lambder.render(createApiEvent('second', { value: 'x' }), createMockContext())).statusCode).toBe(200);
+        expect((await lambder.render(createApiEvent('first', { value: 'x' }), createMockContext())).statusCode).toBe(429);
+    });
+
+    it('scope "policy" shares one counter across every API referencing the policy', async () => {
+        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+            .enableApiRateLimits({
+                limiter: makeLimiter(new MemoryDdb()),
+                policies: { shared: { perMin: 1, per: 'ip', scope: 'policy' } },
+            })
+            .addApi('first', { ...testSchema, rateLimit: 'shared' }, async (ctx, res) => res.api({ result: 'a' }))
+            .addApi('second', { ...testSchema, rateLimit: 'shared' }, async (ctx, res) => res.api({ result: 'b' }));
+
+        expect((await lambder.render(createApiEvent('first', { value: 'x' }), createMockContext())).statusCode).toBe(200);
+        // One combined budget: the first API's call consumed it for both.
+        expect((await lambder.render(createApiEvent('second', { value: 'x' }), createMockContext())).statusCode).toBe(429);
+    });
 });
 
 describe('API policies - guards', () => {
@@ -355,9 +386,98 @@ describe('API policies - guards', () => {
         expect(order).toEqual(['first', 'second']);
         expect(JSON.parse(result.body || '{}').payload.result).toBe('ran');
     });
+
+    it("a guard's return value lands typed on ctx.guardData under its name", async () => {
+        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+            .defineApiGuards({
+                deviceAuth: lambderGuard({
+                    apiInput: z.object({ token: z.string() }),
+                    handler: async (_ctx, { token }) => ({ deviceId: `dev-${token}` }),
+                }),
+            })
+            .addApi('withData', {
+                input: z.object({ value: z.string(), token: z.string() }),
+                output: z.object({ result: z.string() }),
+                guards: 'deviceAuth',
+            }, async (ctx, res) => res.api({ result: ctx.guardData.deviceAuth.deviceId }));
+
+        const result = await lambder.render(createApiEvent('withData', { value: 'x', token: 'abc' }), createMockContext());
+        expect(JSON.parse(result.body || '{}').payload.result).toBe('dev-abc');
+    });
+
+    it('the object form passes params, runs in insertion order, and keeps void guards out of guardData', async () => {
+        const order: string[] = [];
+        let seenGuardData: Record<string, unknown> = {};
+        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+            .defineApiGuards({
+                perm: lambderGuard({
+                    handler: (_ctx, _payload, _res, permission: string) => {
+                        order.push(`perm:${permission}`);
+                        return { granted: permission };
+                    },
+                }),
+                audit: lambderGuard({
+                    handler: () => { order.push('audit'); },
+                }),
+            })
+            .addApi('paramed', {
+                ...testSchema,
+                guards: { perm: 'ADMIN.MANAGE', audit: true },
+            }, async (ctx, res) => {
+                seenGuardData = { ...ctx.guardData };
+                return res.api({ result: ctx.guardData.perm.granted });
+            });
+
+        const result = await lambder.render(createApiEvent('paramed', { value: 'x' }), createMockContext());
+        expect(order).toEqual(['perm:ADMIN.MANAGE', 'audit']);
+        expect(JSON.parse(result.body || '{}').payload.result).toBe('ADMIN.MANAGE');
+        // The check-only guard returned nothing, so it never appears.
+        expect(Object.keys(seenGuardData)).toEqual(['perm']);
+    });
+
+    it('a refusal from a parameterized guard blocks the handler', async () => {
+        let handlerRan = false;
+        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+            .defineApiGuards({
+                perm: lambderGuard({
+                    handler: (_ctx, _payload, _res, permission: string) => {
+                        throw new LambderApiError(`Denied: ${permission}`, { notAuthorized: true });
+                    },
+                }),
+            })
+            .addApi('denied', { ...testSchema, guards: { perm: 'ADMIN.NOPE' } }, async (ctx, res) => {
+                handlerRan = true;
+                return res.api({ result: 'never' });
+            });
+
+        const result = await lambder.render(createApiEvent('denied', { value: 'x' }), createMockContext());
+        expect(JSON.parse(result.body || '{}').notAuthorized).toBe(true);
+        expect(handlerRan).toBe(false);
+    });
+
+    it('session guards are rejected on public APIs at registration', () => {
+        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+            .defineApiGuards({
+                orgPermission: lambderGuard({
+                    session: true,
+                    handler: (ctx) => ({ orgId: ctx.session.sessionKey }),
+                }),
+            });
+        expect(() => lambder.addApi('pub', { ...testSchema, guards: 'orgPermission' } as any, async (ctx, res) => res.api(null)))
+            .toThrow(/guard "orgPermission" \(session: true\), which requires addSessionApi/);
+    });
 });
 
 describe('API policies - idempotency', () => {
+    // Keys must be at least 16 chars (they scope the replay record for
+    // logged-out clients, so they are required to be long and random).
+    const KEY_1 = 'k-1-abcdefabcdefabcdef';
+    const KEY_2 = 'k-2-abcdefabcdefabcdef';
+    const KEY_3 = 'k-3-abcdefabcdefabcdef';
+    const KEY_DIE = 'k-die-abcdefabcdefabcdef';
+    const KEY_BUSY = 'k-busy-abcdefabcdefabcdef';
+    const KEY_OLD = 'k-old-abcdefabcdefabcdef';
+
     const build = (client: MemoryDdb, onRun?: () => void) =>
         new Lambder({ publicPath: './public', apiPath: '/api' })
             .enableApiIdempotency({ store: makeStore(client) })
@@ -377,7 +497,7 @@ describe('API policies - idempotency', () => {
     it('replays the stored response for a repeated key without re-executing', async () => {
         let runs = 0;
         const lambder = build(new MemoryDdb(), () => { runs += 1; });
-        const call = () => lambder.render(createApiEvent('op', { value: 'a' }, { idempotencyKey: 'k-1' }), createMockContext());
+        const call = () => lambder.render(createApiEvent('op', { value: 'a' }, { idempotencyKey: KEY_1 }), createMockContext());
 
         const first = await call();
         const second = await call();
@@ -385,6 +505,30 @@ describe('API policies - idempotency', () => {
         expect(second.statusCode).toBe(first.statusCode);
         expect(second.body).toBe(first.body);
         expect(JSON.parse(second.body || '{}').payload.result).toBe('ran:a');
+    });
+
+    it('a replay answers before rate limits, so a retry does not burn quota', async () => {
+        let runs = 0;
+        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+            .enableApiRateLimits({
+                limiter: makeLimiter(new MemoryDdb()),
+                policies: { tight: { perMin: 1, per: 'ip' } },
+            })
+            .enableApiIdempotency({ store: makeStore(new MemoryDdb()) })
+            .addApi('op', { ...testSchema, rateLimit: 'tight', idempotency: true }, async (ctx, res) => {
+                runs += 1;
+                return res.api({ result: 'ok' });
+            });
+
+        const call = (key: string) => lambder.render(createApiEvent('op', { value: 'a' }, { idempotencyKey: key }), createMockContext());
+        expect((await call(KEY_1)).statusCode).toBe(200);
+        // Same key: replayed 200 even though the perMin: 1 budget is spent.
+        const retry = await call(KEY_1);
+        expect(retry.statusCode).toBe(200);
+        expect(JSON.parse(retry.body || '{}').payload.result).toBe('ok');
+        expect(runs).toBe(1);
+        // A NEW operation is properly rate limited.
+        expect((await call(KEY_2)).statusCode).toBe(429);
     });
 
     it('a response delivered by throwing (res.die.api) is stored and replayed', async () => {
@@ -397,12 +541,85 @@ describe('API policies - idempotency', () => {
                 return res.die.api({ result: 'thrown' });
             });
 
-        const call = () => lambder.render(createApiEvent('thrower', { value: 'a' }, { idempotencyKey: 'k-die' }), createMockContext());
+        const call = () => lambder.render(createApiEvent('thrower', { value: 'a' }, { idempotencyKey: KEY_DIE }), createMockContext());
         const first = await call();
         const second = await call();
         expect(runs).toBe(1);
         expect(second.body).toBe(first.body);
         expect(JSON.parse(second.body || '{}').payload.result).toBe('thrown');
+    });
+
+    it('stores response headers, including ones set via res.setHeader, and replays them', async () => {
+        let runs = 0;
+        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+            .enableApiIdempotency({ store: makeStore(new MemoryDdb()) })
+            .addApi('headed', { ...testSchema, idempotency: true }, async (ctx, res) => {
+                runs += 1;
+                res.setHeader('X-Custom', 'stored-value');
+                return res.api({ result: 'ok' });
+            });
+
+        const call = () => lambder.render(createApiEvent('headed', { value: 'a' }, { idempotencyKey: KEY_1 }), createMockContext());
+        const first = await call();
+        const second = await call();
+        expect(runs).toBe(1);
+        expect(first.multiValueHeaders?.['X-Custom']).toEqual(['stored-value']);
+        expect(second.multiValueHeaders?.['X-Custom']).toEqual(['stored-value']);
+        expect(second.multiValueHeaders?.['Content-Type']).toEqual(first.multiValueHeaders?.['Content-Type']);
+    });
+
+    it('never stores a response that sets cookies: the retry re-executes', async () => {
+        let runs = 0;
+        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+            .enableApiIdempotency({ store: makeStore(new MemoryDdb()) })
+            .addApi('cookied', { ...testSchema, idempotency: true }, async (ctx, res) => {
+                runs += 1;
+                res.addHeader('Set-Cookie', `run=${runs}`);
+                return res.api({ result: 'ok' });
+            });
+
+        const call = () => lambder.render(createApiEvent('cookied', { value: 'a' }, { idempotencyKey: KEY_1 }), createMockContext());
+        expect((await call()).statusCode).toBe(200);
+        // Not a 409 either: the claim was released, not left dangling.
+        const second = await call();
+        expect(second.statusCode).toBe(200);
+        expect(runs).toBe(2);
+        expect(second.multiValueHeaders?.['Set-Cookie']).toEqual(['run=2']);
+    });
+
+    it('compression lets large compressible bodies replay (450KB raw is far over a raw cap)', async () => {
+        let runs = 0;
+        // 150k euro signs: ~450KB UTF-8, but Brotli shrinks it to almost nothing.
+        const bigValue = '€'.repeat(150_000);
+        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+            .enableApiIdempotency({ store: makeStore(new MemoryDdb()) })
+            .addApi('big', { ...testSchema, idempotency: true }, async (ctx, res) => {
+                runs += 1;
+                return res.api({ result: bigValue });
+            });
+
+        const call = () => lambder.render(createApiEvent('big', { value: 'a' }, { idempotencyKey: KEY_1 }), createMockContext());
+        expect((await call()).statusCode).toBe(200);
+        const replay = await call();
+        expect(replay.statusCode).toBe(200);
+        expect(runs).toBe(1);
+    });
+
+    it('a body too large even compressed is not stored: the retry re-executes, with no dangling 409', async () => {
+        let runs = 0;
+        // Random base64 barely compresses: ~533KB stays well over the 350KB item budget.
+        const incompressible = nodeCrypto.randomBytes(400_000).toString('base64');
+        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+            .enableApiIdempotency({ store: makeStore(new MemoryDdb()) })
+            .addApi('huge', { ...testSchema, idempotency: true }, async (ctx, res) => {
+                runs += 1;
+                return res.api({ result: incompressible });
+            });
+
+        const call = () => lambder.render(createApiEvent('huge', { value: 'a' }, { idempotencyKey: KEY_1 }), createMockContext());
+        expect((await call()).statusCode).toBe(200);
+        expect((await call()).statusCode).toBe(200);
+        expect(runs).toBe(2);
     });
 
     it('a slow original that lost its claim cannot clobber the new owner', async () => {
@@ -420,27 +637,53 @@ describe('API policies - idempotency', () => {
         if(retry.state !== 'new') return;
 
         // The stalled original settles late: both paths must be silent no-ops.
-        const staleBody = { statusCode: 200, contentType: null, body: 'stale', ttlSeconds: 60 };
-        expect(await store.complete('scope-x', original.ownerToken, staleBody)).toBe(false);
+        const staleBody = { statusCode: 200, headers: {}, body: 'stale', ttlSeconds: 60 };
+        expect(await store.complete('scope-x', original.ownerToken, staleBody)).toBe('lost');
         await store.abandon('scope-x', original.ownerToken);
         expect(client.items.get(k)?.state?.S).toBe('pending');
 
         // The retry still owns the scope and settles normally.
-        expect(await store.complete('scope-x', retry.ownerToken, { ...staleBody, body: 'fresh' })).toBe(true);
+        expect(await store.complete('scope-x', retry.ownerToken, { ...staleBody, body: 'fresh' })).toBe('stored');
         expect(client.items.get(k)?.body?.S).toBe('fresh');
+    });
+
+    it('stores bodies of 1KB+ Brotli-compressed and replays them verbatim; small bodies stay plain', async () => {
+        const client = new MemoryDdb();
+        const store = makeStore(client);
+        const k = 'IDEM#scope-br|idem';
+
+        const big = JSON.stringify({ payload: { rows: Array.from({ length: 200 }, (_, i) => ({ i, name: `row-${i}` })) } });
+        expect(Buffer.byteLength(big)).toBeGreaterThan(1024);
+        const claim = await store.begin('scope-br', { pendingTtlSeconds: 300 });
+        if(claim.state !== 'new') throw new Error('expected fresh claim');
+        expect(await store.complete('scope-br', claim.ownerToken, { statusCode: 200, headers: {}, body: big, ttlSeconds: 60 })).toBe('stored');
+
+        const item = client.items.get(k)!;
+        expect(item.body).toBe(undefined);
+        expect(item.bodyBr?.B).toBeDefined();
+        expect((item.bodyBr!.B as Uint8Array).byteLength).toBeLessThan(Buffer.byteLength(big));
+        expect(Number(item.bodyBytes?.N)).toBe(Buffer.byteLength(big));
+        expect((await store.peek('scope-br'))?.body).toBe(big);
+
+        // Below the threshold: plain string attribute, no compression.
+        const claim2 = await store.begin('scope-plain', { pendingTtlSeconds: 300 });
+        if(claim2.state !== 'new') throw new Error('expected fresh claim');
+        await store.complete('scope-plain', claim2.ownerToken, { statusCode: 200, headers: {}, body: 'tiny', ttlSeconds: 60 });
+        expect(client.items.get('IDEM#scope-plain|idem')?.body?.S).toBe('tiny');
+        expect((await store.peek('scope-plain'))?.body).toBe('tiny');
     });
 
     it('refuses a duplicate while the original is still pending', async () => {
         const client = new MemoryDdb();
         const lambder = build(client);
         const now = Math.floor(Date.now() / 1000);
-        // Pre-seed an unexpired pending claim for this scope.
-        client.items.set('IDEM#ip:203.0.113.7|op|k-busy|idem', {
-            pk: { S: 'IDEM#ip:203.0.113.7|op|k-busy' }, sk: { S: 'idem' },
+        // Pre-seed an unexpired pending claim for this scope (public scope: key-only).
+        client.items.set(`IDEM#k|op|${KEY_BUSY}|idem`, {
+            pk: { S: `IDEM#k|op|${KEY_BUSY}` }, sk: { S: 'idem' },
             state: { S: 'pending' }, expiresAt: { N: String(now + 100) },
         });
 
-        const result = await lambder.render(createApiEvent('op', { value: 'a' }, { idempotencyKey: 'k-busy' }), createMockContext());
+        const result = await lambder.render(createApiEvent('op', { value: 'a' }, { idempotencyKey: KEY_BUSY }), createMockContext());
         expect(result.statusCode).toBe(409);
         expect(JSON.parse(result.body || '{}').errorMessage).toBe('This request is already being processed.');
     });
@@ -456,7 +699,7 @@ describe('API policies - idempotency', () => {
                 return res.api({ result: 'recovered' });
             });
 
-        const call = () => lambder.render(createApiEvent('crashy', { value: 'a' }, { idempotencyKey: 'k-2' }), createMockContext());
+        const call = () => lambder.render(createApiEvent('crashy', { value: 'a' }, { idempotencyKey: KEY_2 }), createMockContext());
         expect((await call()).statusCode).toBe(500);
         const retry = await call();
         expect(runs).toBe(2);
@@ -468,21 +711,23 @@ describe('API policies - idempotency', () => {
         const client = new MemoryDdb();
         const lambder = build(client, () => { runs += 1; });
         const now = Math.floor(Date.now() / 1000);
-        client.items.set('IDEM#ip:203.0.113.7|op|k-old|idem', {
-            pk: { S: 'IDEM#ip:203.0.113.7|op|k-old' }, sk: { S: 'idem' },
+        client.items.set(`IDEM#k|op|${KEY_OLD}|idem`, {
+            pk: { S: `IDEM#k|op|${KEY_OLD}` }, sk: { S: 'idem' },
             state: { S: 'done' }, statusCode: { N: '200' }, body: { S: '{"stale":true}' },
             expiresAt: { N: String(now - 10) },
         });
 
-        const result = await lambder.render(createApiEvent('op', { value: 'a' }, { idempotencyKey: 'k-old' }), createMockContext());
+        const result = await lambder.render(createApiEvent('op', { value: 'a' }, { idempotencyKey: KEY_OLD }), createMockContext());
         expect(runs).toBe(1);
         expect(JSON.parse(result.body || '{}').payload.result).toBe('ran:a');
     });
 
-    it('refuses malformed keys with a 400 envelope', async () => {
+    it('refuses malformed keys with a 400 envelope: too long, and too short to be unguessable', async () => {
         const lambder = build(new MemoryDdb());
-        const result = await lambder.render(createApiEvent('op', { value: 'a' }, { idempotencyKey: 'x'.repeat(201) }), createMockContext());
-        expect(result.statusCode).toBe(400);
+        const tooLong = await lambder.render(createApiEvent('op', { value: 'a' }, { idempotencyKey: 'x'.repeat(201) }), createMockContext());
+        expect(tooLong.statusCode).toBe(400);
+        const tooShort = await lambder.render(createApiEvent('op', { value: 'a' }, { idempotencyKey: 'short-key' }), createMockContext());
+        expect(tooShort.statusCode).toBe(400);
     });
 
     it('fails open by default when DynamoDB is down: the handler still runs, without dedupe', async () => {
@@ -490,7 +735,7 @@ describe('API policies - idempotency', () => {
         const client = new MemoryDdb();
         client.failAll = true;
         const lambder = build(client, () => { runs += 1; });
-        const call = () => lambder.render(createApiEvent('op', { value: 'a' }, { idempotencyKey: 'k-3' }), createMockContext());
+        const call = () => lambder.render(createApiEvent('op', { value: 'a' }, { idempotencyKey: KEY_3 }), createMockContext());
         expect((await call()).statusCode).toBe(200);
         expect((await call()).statusCode).toBe(200);
         expect(runs).toBe(2);

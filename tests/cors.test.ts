@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import Lambder from '../src/Lambder.js';
+import Lambder from '../src/core/Lambder.js';
 import { createMockEvent, createMockContext } from './helpers.js';
 describe('CORS', () => {
     it('answers preflight with configured origins', async () => {

@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import Lambder from '../src/Lambder.js';
+import Lambder from '../src/core/Lambder.js';
 import { decodeBody, gunzipBody, createMockContext } from './helpers.js';
 import type { APIGatewayProxyEventV2 } from 'aws-lambda';
 
