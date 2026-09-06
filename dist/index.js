@@ -2,7 +2,7 @@ import Lambder from './Lambder.js';
 export default Lambder;
 export { default as LambderCaller } from "./LambderCaller.js";
 // Typed API refusals (isomorphic: shared code may throw them from anywhere)
-export { LambderApiError, isLambderApiError } from "./LambderApiError.js";
+export { LambderApiError, isLambderApiError, refuse } from "./LambderApiError.js";
 export { default as LambderResponseBuilder } from "./LambderResponseBuilder.js";
 export { default as LambderResolver } from "./LambderResolver.js";
 export { default as LambderSessionManager } from "./LambderSessionManager.js";
