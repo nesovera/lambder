@@ -23,6 +23,8 @@ export { LambderDdbCache } from "./LambderDdbCache.js";
 export { LambderDdbRateLimiter } from "./LambderDdbRateLimiter.js";
 // DynamoDB-backed idempotency records (standalone, server-only)
 export { LambderDdbIdempotency } from "./LambderDdbIdempotency.js";
+// Declarative per-API policies (rate limits, guards, idempotency)
+export { lambderGuard, lambderRateLimitKey } from "./LambderApiPolicies.js";
 // Typed translations (standalone, isomorphic)
 export { createLambderI18n } from "./LambderI18n.js";
 export { createContext, isV2HttpEvent } from "./LambderContext.js";

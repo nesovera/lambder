@@ -2,7 +2,7 @@
 
 Lambder is a highly opinionated dynamic serverless framework designed to facilitate the management and implementation of routes and APIs within AWS Lambda functions, specifically tailored for TypeScript projects. It provides a streamlined approach to handling HTTP requests, managing sessions, and defining API routes, making serverless application development more intuitive and structured.
 
-**New in v3:** Public file serving with `servePublicFiles()` + `serveIndexHtml()`, unified `addAction()` for non-HTTP triggers, automatic gzip + ETag, thrown responses with a real `die`, the comment-based `LambderTemplatingEngine`, type-safe `html`/`xml` tagged templates, API Gateway HTTP API (payload v2) / Lambda Function URL support, the `LambderDdbCache` DynamoDB cache (3.1), typed translations with `createLambderI18n` (3.2), and in 3.5: typed API refusals with `LambderApiError`, caller outcomes/timeouts with `apiOutcome()`, plus declarative per-API rate limits, guards, and idempotency.
+**New in v3:** Public file serving with `servePublicFiles()` + `serveIndexHtml()`, unified `addAction()` for non-HTTP triggers, automatic gzip + ETag, thrown responses with a real `die`, the comment-based `LambderTemplatingEngine`, type-safe `html`/`xml` tagged templates, API Gateway HTTP API (payload v2) / Lambda Function URL support, the `LambderDdbCache` DynamoDB cache (3.1), typed translations with `createLambderI18n` (3.2), and in 3.5: typed API refusals with `LambderApiError`, caller outcomes/timeouts with `apiOutcome()`, plus declarative per-API rate limits, guards, and idempotency; 3.7 makes guards and custom rate-limit keys payload-sliced ({ input, handler }): the slice is validated pre-run, typed in the handler, and force-merged into the contract input.
 
 ## Features
 
@@ -466,7 +466,7 @@ Related: when an API call crashes with no `setGlobalErrorHandler` (or the handle
 Declare named building blocks once; reference them from API definitions with full type inference (unknown names are compile errors, and everything is re-asserted at registration time for plain-JS safety). Each piece is independent and optional.
 
 ```typescript
-import Lambder, { LambderDdbRateLimiter, LambderDdbIdempotency, LambderApiError } from "lambder";
+import Lambder, { LambderDdbRateLimiter, LambderDdbIdempotency, lambderGuard, lambderRateLimitKey, refuse } from "lambder";
 
 const lambder = new Lambder<SessionData>({ apiPath: "/api" })
     // 1. Rate limiting: your limiter instance + named policies. Each policy
@@ -476,8 +476,17 @@ const lambder = new Lambder<SessionData>({ apiPath: "/api" })
         policies: {
             authPerIp:    { perMin: 5, perHour: 30, per: "ip" },
             writePerUser: { perMin: 30, per: "session" },   // only referable from addSessionApi (also enforced at compile time)
-            codePerEmail: { perMin: 3, per: (ctx) => String(ctx.post?.payload?.email ?? "").toLowerCase(),
-                            errorMessage: { type: "warning", content: "Too many attempts for this address." } },
+            codePerEmail: {
+                perMin: 3,
+                // The key declares the payload slice it needs: validated before
+                // it runs, handed to the handler typed, and merged into the
+                // contract input of every API referencing this policy.
+                per: lambderRateLimitKey({
+                    input: z.object({ email: z.string() }),
+                    handler: (_ctx, { email }) => email.trim().toLowerCase(),
+                }),
+                errorMessage: { type: "warning", content: "Too many attempts for this address." },
+            },
         },
     })
     // 2. Idempotency: a store instance + replay defaults. May share the rate
@@ -487,18 +496,25 @@ const lambder = new Lambder<SessionData>({ apiPath: "/api" })
         defaultTtlSeconds: 24 * 3600,
         failOpen: true,   // DynamoDB down => execute without dedupe instead of failing
     })
-    // 3. Named guards: run before input validation, refuse by throwing.
-    //    Callable multiple times; domain modules can contribute their own.
+    // 3. Named guards: { input?, handler } definitions run before input
+    //    validation and refuse by throwing. A guard's `input` slice is
+    //    validated against the raw payload, handed to the handler typed, and
+    //    merged into the contract input of every API declaring the guard, so
+    //    forgetting to send captchaToken is a compile error at the call site.
     .defineApiGuards({
-        captcha: async (ctx) => {
-            if (!await verifyCaptcha(ctx.post?.payload?.captchaToken, ctx.ip)) {
-                throw new LambderApiError("Captcha failed", { errorMessage: "Verification failed, please retry." });
-            }
-        },
+        captcha: lambderGuard({
+            input: z.object({ captchaToken: z.string() }),
+            handler: async (ctx, { captchaToken }) => {
+                if (!await verifyCaptcha(captchaToken, ctx.ip)) refuse("Verification failed, please retry.");
+            },
+        }),
     });
 
 lambder.addApi("public.resetPassword", {
-    input: z.object({ email: z.string().email(), captchaToken: z.string() }),
+    // captchaToken is NOT declared here: the guard contributes it to the
+    // contract, the guard validates and consumes it, and the handler never
+    // sees it.
+    input: z.object({ email: z.string().email() }),
     output: z.object({ ok: z.boolean() }),
     rateLimit: ["authPerIp", "codePerEmail"],   // stacked: checked in order, first exceeded refuses (429 envelope)
     guards: "captcha",
