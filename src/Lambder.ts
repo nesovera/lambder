@@ -15,6 +15,16 @@ import { applyCorsHeaders, type LambderCorsConfig } from "./LambderCors.js";
 import LambderSessionManager, { type LambderSessionDataRefreshConfig } from "./LambderSessionManager.js";
 import LambderSessionController, { type LambderSessionCookieOptions } from "./LambderSessionController.js";
 import { LambderPublicFilesHandler, type LambderPublicFilesOptions } from "./LambderPublicFiles.js";
+import { isLambderApiError, type LambderApiError } from "./LambderApiError.js";
+import {
+    LambderApiPolicyEngine,
+    type LambderApiRateLimitPolicyConfig,
+    type LambderApiRateLimitsConfig,
+    type LambderApiIdempotencyConfig,
+    type LambderApiGuardFunction,
+    type LambderApiRegistrationOptions,
+    type LambderPublicRateLimitNames,
+} from "./LambderApiPolicies.js";
 import type { MergeContract } from "./LambderApiContract.js";
 import { createContext, isV2HttpEvent, type LambderHttpEvent, type LambderRenderContext, type LambderSessionRenderContext } from "./LambderContext.js";
 
@@ -36,7 +46,7 @@ type ActionObject = { match: CompiledMatcher, actionFn: ActionFunction };
 // Hooks
 // ---------------------------------------------------------------------------
 type HookEventType = "created" | "beforeRender" | "afterRender" | "fallback";
-type HookCreatedFunction = (lambderInstance: Lambder<any, any>) => void | Promise<void>;
+type HookCreatedFunction = (lambderInstance: Lambder<any, any, any, any, any>) => void | Promise<void>;
 /** Return the (possibly replaced) ctx to continue, a LambderResponse to short-circuit, or an Error to fail. */
 type HookBeforeRenderFunction = (ctx: LambderRenderContext, resolver: LambderResolver) => MaybePromise<LambderRenderContext | LambderResponse | Error>;
 type HookAfterRenderFunction = (ctx: LambderRenderContext, resolver: LambderResolver, response: LambderResponse) => MaybePromise<LambderResponse | Error>;
@@ -115,6 +125,9 @@ export type LambderConstructorOptions = {
  *
  * @typeParam TSessionData - Type of session data stored in DynamoDB
  * @typeParam _TContract - @internal Accumulates API contract during chaining (do not pass manually)
+ * @typeParam _TRateLimitPolicies - @internal Accumulated by enableApiRateLimits (do not pass manually)
+ * @typeParam _TGuardName - @internal Accumulated by defineApiGuards (do not pass manually)
+ * @typeParam _TIdempotencyEnabled - @internal Flipped by enableApiIdempotency (do not pass manually)
  *
  * @example
  * ```typescript
@@ -125,7 +138,13 @@ export type LambderConstructorOptions = {
  *   .addApi('createUser', { input: z.object({...}), output: z.object({...}) }, handler);
  * ```
  */
-export default class Lambder<TSessionData = any, _TContract extends Record<string, any> = {}> {
+export default class Lambder<
+    TSessionData = any,
+    _TContract extends Record<string, any> = {},
+    _TRateLimitPolicies extends Record<string, LambderApiRateLimitPolicyConfig> = {},
+    _TGuardName extends string = never,
+    _TIdempotencyEnabled extends boolean = false,
+> {
     public apiPath: string;
     public apiVersion: null | string;
     public publicPath: string;
@@ -143,6 +162,8 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
     public readonly ApiContract!: _TContract;
 
     private actionList: ActionObject[] = [];
+    private apiPolicyEngine: LambderApiPolicyEngine | null = null;
+    private registeredApiNames = new Set<string>();
     private hookList: {
         "beforeRender": { priority: number, hookFn: HookBeforeRenderFunction }[],
         "afterRender": { priority: number, hookFn: HookAfterRenderFunction }[],
@@ -308,6 +329,78 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
     }
 
     // ---------------------------------------------------------------------
+    // Declarative API policies (rate limits, guards, idempotency)
+    // ---------------------------------------------------------------------
+    /**
+     * Wire declarative per-API rate limiting: your LambderDdbRateLimiter
+     * instance plus named policies, each declaring its windows and what one
+     * counter tracks (`per`: "ip", "session", or a custom key function).
+     * APIs then reference policies by name via the `rateLimit` option; the
+     * returned type narrows so only declared names are accepted, and
+     * policies keyed per "session" are only referable from addSessionApi.
+     * Callable once; call it before the API registrations that use it.
+     */
+    enableApiRateLimits<const TPolicies extends Record<string, LambderApiRateLimitPolicyConfig>>(
+        config: LambderApiRateLimitsConfig<TPolicies>,
+    ): Lambder<TSessionData, _TContract, TPolicies, _TGuardName, _TIdempotencyEnabled> {
+        this.getOrCreatePolicyEngine().setRateLimits(config);
+        return this as any;
+    }
+
+    /**
+     * Wire declarative idempotency: your LambderDdbIdempotency instance plus
+     * replay defaults. APIs opt in via `idempotency: true | { ttlSeconds }`;
+     * the option is a type error until this is called. Requests carrying a
+     * client `idempotencyKey` (sent by LambderCaller) claim an
+     * identity+api+key scope atomically: concurrent duplicates refuse with
+     * 409, replays of a completed request return the stored response, and a
+     * crashed original releases its claim. Callable once.
+     */
+    enableApiIdempotency(
+        config: LambderApiIdempotencyConfig,
+    ): Lambder<TSessionData, _TContract, _TRateLimitPolicies, _TGuardName, true> {
+        this.getOrCreatePolicyEngine().setIdempotency(config);
+        return this as any;
+    }
+
+    /**
+     * Define named guards that APIs reference (typed) via the `guards`
+     * option. Guards run before input validation, in the order the API
+     * declares them; a guard refuses by throwing (typically LambderApiError).
+     * Callable multiple times so domain modules can contribute their own;
+     * names must not collide.
+     */
+    defineApiGuards<TGuards extends Record<string, LambderApiGuardFunction>>(
+        guards: TGuards,
+    ): Lambder<TSessionData, _TContract, _TRateLimitPolicies, _TGuardName | Extract<keyof TGuards, string>, _TIdempotencyEnabled> {
+        this.getOrCreatePolicyEngine().addGuards(guards);
+        return this as any;
+    }
+
+    private getOrCreatePolicyEngine(): LambderApiPolicyEngine {
+        if(!this.apiPolicyEngine) this.apiPolicyEngine = new LambderApiPolicyEngine();
+        return this.apiPolicyEngine;
+    }
+
+    /** Registration-time checks shared by addApi/addSessionApi. */
+    private assertApiRegistration(
+        name: string,
+        mode: "public" | "session",
+        options: { rateLimit?: string | readonly string[], guards?: string | readonly string[], idempotency?: unknown },
+    ): void {
+        if(this.registeredApiNames.has(name)){
+            throw new Error(`Lambder: duplicate API name "${name}". Dispatch is first-match, so the second registration would be silently dead code.`);
+        }
+        this.registeredApiNames.add(name);
+        const usesPolicies = options.rateLimit !== undefined || options.guards !== undefined || options.idempotency !== undefined;
+        if(!usesPolicies) return;
+        if(!this.apiPolicyEngine){
+            throw new Error(`Lambder: API "${name}" declares rateLimit/guards/idempotency, but none of enableApiRateLimits()/defineApiGuards()/enableApiIdempotency() was called first.`);
+        }
+        this.apiPolicyEngine.assertRegistration(name, mode, options);
+    }
+
+    // ---------------------------------------------------------------------
     // Routes and APIs
     // ---------------------------------------------------------------------
     addRoute<TPath extends Path>(
@@ -340,10 +433,16 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
     }
 
     // Plugin system
+    // The policy generics are `any` in the plugin signature on purpose: a
+    // module may annotate its parameter as the bare Lambder<SessionData> or
+    // as the app's narrowed alias, and both must chain. Registration-time
+    // assertions still verify every referenced policy/guard name at runtime.
     public use<_TNewContract extends Record<string, any>>(
-        plugin: (lambder: Lambder<TSessionData, _TContract>) => Lambder<TSessionData, _TNewContract>
-    ): Lambder<TSessionData, _TNewContract extends _TContract ? _TNewContract : (_TContract & _TNewContract)> {
-        return plugin(this) as any;
+        plugin: (
+            lambder: Lambder<TSessionData, _TContract, any, any, any>
+        ) => Lambder<TSessionData, _TNewContract, any, any, any>
+    ): Lambder<TSessionData, _TNewContract extends _TContract ? _TNewContract : (_TContract & _TNewContract), _TRateLimitPolicies, _TGuardName, _TIdempotencyEnabled> {
+        return plugin(this as any) as any;
     }
 
     // Typed API with Zod
@@ -353,15 +452,19 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
         TOutput extends z.ZodTypeAny
     >(
         name: TName,
-        schema: { input: TInput, output: TOutput },
+        schema: { input: TInput, output: TOutput }
+            & LambderApiRegistrationOptions<LambderPublicRateLimitNames<_TRateLimitPolicies>, _TGuardName, _TIdempotencyEnabled>,
         handler: (
             ctx: LambderRenderContext<z.infer<TInput>>,
             resolver: LambderResolver<z.infer<TOutput>>
         ) => MaybePromise<LambderResponse>
-    ): Lambder<TSessionData, MergeContract<_TContract, TName, z.infer<TInput>, z.infer<TOutput>>> {
+    ): Lambder<TSessionData, MergeContract<_TContract, TName, z.infer<TInput>, z.infer<TOutput>>, _TRateLimitPolicies, _TGuardName, _TIdempotencyEnabled> {
+        this.assertApiRegistration(name, "public", schema);
         this.actionList.push({
             match: (ctx) => ctx.apiName === name ? {} : false,
             actionFn: async (ctx, resolver) => {
+                if(this.apiPolicyEngine) await this.apiPolicyEngine.runPreflight(name, ctx, resolver, schema);
+
                 const inputResult = schema.input.safeParse(ctx.apiPayload);
                 if (!inputResult.success) {
                     if (this.apiInputValidationErrorHandler) {
@@ -371,7 +474,9 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
                 }
 
                 ctx.apiPayload = inputResult.data;
-                return await handler(ctx, resolver as LambderResolver<z.infer<TOutput>>);
+                const run = async () => await handler(ctx, resolver as LambderResolver<z.infer<TOutput>>);
+                if(this.apiPolicyEngine && schema.idempotency) return await this.apiPolicyEngine.withIdempotency(name, ctx, schema.idempotency, run);
+                return await run();
             },
         });
         return this as any;
@@ -384,16 +489,20 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
         TOutput extends z.ZodTypeAny
     >(
         name: TName,
-        schema: { input: TInput, output: TOutput },
+        schema: { input: TInput, output: TOutput }
+            & LambderApiRegistrationOptions<Extract<keyof _TRateLimitPolicies, string>, _TGuardName, _TIdempotencyEnabled>,
         handler: (
             ctx: LambderSessionRenderContext<z.infer<TInput>, TSessionData>,
             resolver: LambderResolver<z.infer<TOutput>>
         ) => MaybePromise<LambderResponse>
-    ): Lambder<TSessionData, MergeContract<_TContract, TName, z.infer<TInput>, z.infer<TOutput>>> {
+    ): Lambder<TSessionData, MergeContract<_TContract, TName, z.infer<TInput>, z.infer<TOutput>>, _TRateLimitPolicies, _TGuardName, _TIdempotencyEnabled> {
+        this.assertApiRegistration(name, "session", schema);
         this.actionList.push({
             match: (ctx) => ctx.apiName === name ? {} : false,
             actionFn: async (ctx, resolver) => {
                 await this.requireSession(ctx, resolver);
+
+                if(this.apiPolicyEngine) await this.apiPolicyEngine.runPreflight(name, ctx, resolver, schema);
 
                 const inputResult = schema.input.safeParse(ctx.apiPayload);
                 if (!inputResult.success) {
@@ -404,7 +513,9 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
                 }
 
                 ctx.apiPayload = inputResult.data;
-                return await handler(ctx as unknown as LambderSessionRenderContext<any, TSessionData>, resolver as LambderResolver<z.infer<TOutput>>);
+                const run = async () => await handler(ctx as unknown as LambderSessionRenderContext<any, TSessionData>, resolver as LambderResolver<z.infer<TOutput>>);
+                if(this.apiPolicyEngine && schema.idempotency) return await this.apiPolicyEngine.withIdempotency(name, ctx, schema.idempotency, run);
+                return await run();
             }
         });
         return this as any;
@@ -470,6 +581,15 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
             ctx,
         });
     };
+
+    /** Map a thrown LambderApiError onto the structured API envelope. */
+    private apiErrorResponse(err: LambderApiError, resolver: LambderResolver): LambderResponse {
+        return resolver.api(null, {
+            ...(err.errorMessage !== undefined ? { errorMessage: err.errorMessage } : {}),
+            ...(err.notAuthorized ? { notAuthorized: true } : {}),
+            ...(err.sessionExpired ? { sessionExpired: true } : {}),
+        }, err.statusCode !== undefined ? { statusCode: err.statusCode } : undefined);
+    }
 
     getHandler(): LambderHandler {
         return ((event: unknown, context: Context) =>
@@ -633,6 +753,9 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
             } catch(err){
                 // A thrown LambderResponse IS the response (res.die.*, throw res.html(...)).
                 if(err instanceof LambderResponse){ response = err; }
+                // A thrown LambderApiError on an API call IS a structured refusal
+                // (brand-checked, not instanceof, to survive duplicate installs).
+                else if(isLambderApiError(err) && ctx._otherInternal.isApiCall){ response = this.apiErrorResponse(err, resolver); }
                 else { throw err; }
             }
 
@@ -644,6 +767,7 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
                 }
             } catch(err){
                 if(err instanceof LambderResponse){ response = err; }
+                else if(isLambderApiError(err) && ctx._otherInternal.isApiCall){ response = this.apiErrorResponse(err, resolver); }
                 else { throw err; }
             }
 
@@ -677,6 +801,14 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
                 if(handlerErr instanceof LambderResponse){
                     try { return await finalizeResponse(ctx, handlerErr, this.finalizeOptions, eventFormat); } catch { /* fall through */ }
                 }
+            }
+            // Last-resort 500. API calls get the JSON envelope so clients can
+            // parse a structured failure; everything else keeps plain text.
+            if(ctx?._otherInternal.isApiCall){
+                const apiBody = JSON.stringify({ apiVersion: this.apiVersion, payload: null, errorMessage: "Internal server error." });
+                return eventFormat === "v2"
+                    ? { statusCode: 500, headers: { "Content-Type": "application/json; charset=utf-8" }, body: apiBody, isBase64Encoded: false }
+                    : { statusCode: 500, multiValueHeaders: { "Content-Type": ["application/json; charset=utf-8"] }, body: apiBody, isBase64Encoded: false };
             }
             return eventFormat === "v2"
                 ? { statusCode: 500, headers: {}, body: "Internal Server Error.", isBase64Encoded: false }
