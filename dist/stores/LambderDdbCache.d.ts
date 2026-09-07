@@ -1,4 +1,5 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { type LambderCompressionOption } from "./LambderDdbCompression.js";
 export interface LambderDdbCacheOptions {
     tableName: string;
     region?: string;
@@ -7,7 +8,13 @@ export interface LambderDdbCacheOptions {
     namespace?: string;
     defaultTtlSeconds?: number;
     chunkBytes?: number;
-    compressionQuality?: number;
+    /**
+     * Brotli compression of stored values. `true` (the default) is
+     * `{ minBytes: 0, quality: 5 }`: every value compressed; `false` stores
+     * values plain; an object overrides the defaults. The manifest records
+     * each value's encoding, so it can be switched on or off on a live table.
+     */
+    compression?: LambderCompressionOption;
     maxValueBytes?: number;
     memoryMaxBytes?: number;
     client?: DynamoDBClient;
@@ -22,8 +29,10 @@ export interface LambderDdbCacheGetOrSetOptions extends LambderDdbCacheSetOption
 /**
  * Persistent JSON cache backed by DynamoDB.
  *
- * Values are Brotli-compressed. Values within the safe DynamoDB item budget are
- * stored directly in the manifest for a single-request read; larger values are
+ * Values are Brotli-compressed by default (`compression` option; the manifest
+ * records each value's encoding, so the option can be switched on a live
+ * table). Values within the safe DynamoDB item budget are stored directly in
+ * the manifest for a single-request read; larger values are
  * split into versioned binary chunks. A manifest is written only after every
  * chunk succeeds, so readers see either the previous complete version or the
  * new complete version. DynamoDB TTL is cleanup only; every read also checks
@@ -41,7 +50,7 @@ export declare class LambderDdbCache {
     private readonly client;
     private readonly defaultTtlSeconds;
     private readonly chunkBytes;
-    private readonly compressionQuality;
+    private readonly compression;
     private readonly maxValueBytes;
     private readonly memory;
     private readonly inFlight;
@@ -64,6 +73,8 @@ export declare class LambderDdbCache {
     private readChunks;
     private invalidateManifest;
     private batchWrite;
+    /** The JSON text of a stored payload. */
+    private decode;
     private remember;
     private normalizeKey;
     private partitionKey;

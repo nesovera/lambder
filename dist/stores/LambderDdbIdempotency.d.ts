@@ -1,11 +1,17 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { type LambderCompressionOption } from "./LambderDdbCompression.js";
 export interface LambderDdbIdempotencyOptions {
     tableName: string;
     region?: string;
     /** Partition key prefix, keeps records separated from other systems in a shared table. Default: "IDEM". */
     keyPrefix?: string;
-    /** Brotli quality (0-11) for stored bodies, like LambderDdbCache. Default: 5. */
-    compressionQuality?: number;
+    /**
+     * Brotli compression of stored bodies. `true` (the default) is
+     * `{ minBytes: 1024, quality: 5 }`; `false` stores every body plain; an
+     * object overrides the defaults. Records of either shape read back, so
+     * it can be switched on or off on a live table.
+     */
+    compression?: LambderCompressionOption;
     client?: DynamoDBClient;
 }
 export type LambderIdempotencyDoneRecord = {
@@ -35,10 +41,11 @@ export type LambderIdempotencyBeginResult = {
  * and loses the scope to a retry can no longer overwrite or delete the
  * retry's claim (both settle calls become silent no-ops instead).
  *
- * Stored bodies of 1KB or more are Brotli-compressed (same scheme as
- * LambderDdbCache): the bodies are JSON envelopes that typically shrink
- * 5-10x, which cuts DynamoDB write units and lets large responses fit the
- * item budget instead of skipping replay storage.
+ * Stored bodies are Brotli-compressed from 1KB by default (same scheme as
+ * LambderDdbCache, see the `compression` option): the bodies are JSON
+ * envelopes that typically shrink 5-10x, which cuts DynamoDB write units
+ * and lets large responses fit the item budget instead of skipping replay
+ * storage.
  *
  * Table shape: string hash key `pk`, string range key `sk`, TTL on
  * `expiresAt`. Items are prefixed `IDEM#` by default, so the table can be
@@ -48,7 +55,7 @@ export type LambderIdempotencyBeginResult = {
 export declare class LambderDdbIdempotency {
     readonly tableName: string;
     readonly keyPrefix: string;
-    private readonly compressionQuality;
+    private readonly compression;
     private readonly client;
     constructor(options: LambderDdbIdempotencyOptions);
     private itemKey;
@@ -74,10 +81,11 @@ export declare class LambderDdbIdempotency {
     }): Promise<LambderIdempotencyBeginResult>;
     /**
      * Store the response for replays, overwriting the pending claim. Bodies
-     * of COMPRESS_MIN_BYTES or more are stored Brotli-compressed (they are
-     * JSON envelopes, which typically shrink 5-10x), cutting DynamoDB write
-     * units and letting large responses fit the item budget; smaller bodies
-     * stay plain. Returns:
+     * from the compression option's minBytes are stored Brotli-compressed
+     * (they are JSON envelopes, which typically shrink 5-10x), cutting
+     * DynamoDB write units and letting large responses fit the item budget;
+     * smaller bodies, or all of them with compression off, stay plain.
+     * Returns:
      *
      * - "stored": the record is in place and will replay.
      * - "too-large": even compressed, the body exceeds the item budget;

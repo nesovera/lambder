@@ -8,6 +8,36 @@ import { getZlib } from "../shared/node-polyfills.js";
 // lazily through node-polyfills so these modules can sit in a frontend
 // bundle's import graph (via the package root) without breaking.
 
+/**
+ * The compression option every store shares. `true` is on with the store's
+ * defaults, `false` is off, an object overrides the defaults: `minBytes` is
+ * the UTF-8 size from which a value is stored compressed (0: always),
+ * `quality` is Brotli 0-11. Values below minBytes are stored plain, and a
+ * store reads records of either shape, so the option can be switched on or
+ * off on a live table: records written under the other setting keep
+ * reading, and each is rewritten in the current shape on its next write.
+ */
+export type LambderCompressionConfig = { minBytes?: number; quality?: number };
+export type LambderCompressionOption = boolean | LambderCompressionConfig;
+export type LambderCompressionSettings = Required<LambderCompressionConfig>;
+
+/** Resolves a store's compression option against its defaults: null when off. */
+export const resolveCompressionOption = (
+    option: LambderCompressionOption | undefined,
+    defaults: LambderCompressionSettings,
+): LambderCompressionSettings | null => {
+    if (option === false) return null;
+    const config = option === true || option === undefined ? {} : option;
+    const settings = { minBytes: config.minBytes ?? defaults.minBytes, quality: config.quality ?? defaults.quality };
+    if (!Number.isSafeInteger(settings.minBytes) || settings.minBytes < 0) {
+        throw new Error("compression.minBytes must be a non-negative integer");
+    }
+    if (!Number.isInteger(settings.quality) || settings.quality < 0 || settings.quality > 11) {
+        throw new Error("compression.quality must be an integer from 0 to 11");
+    }
+    return settings;
+};
+
 const requireZlib = async () => {
     const zlib = await getZlib();
     if (!zlib) throw new Error("Lambder DDB stores require a Node.js environment.");

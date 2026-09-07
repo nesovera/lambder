@@ -5,7 +5,8 @@ import LambderResponseBuilder from "./LambderResponseBuilder.js";
 import { LambderResponse, type LambderHttpResponse } from "./LambderResponse.js";
 import { type ConditionFunction, type LambderRouteMatcher, type PathParamsOf } from "./LambderRouting.js";
 import { type LambderCorsConfig } from "./LambderCors.js";
-import { type LambderSessionDataRefreshConfig, type LambderSessionCompressionConfig } from "../session/LambderSessionManager.js";
+import { type LambderSessionDataRefreshConfig } from "../session/LambderSessionManager.js";
+import type { LambderCompressionOption } from "../stores/LambderDdbCompression.js";
 import LambderSessionController, { type LambderSessionCookieOptions } from "../session/LambderSessionController.js";
 import { type LambderPublicFilesOptions } from "./LambderPublicFiles.js";
 import type { LambderApiGuard, LambderGuardMetaMap, LambderGuardsOption, LambderGuardDataOf, LambderGuardInputsOf } from "../policies/LambderApiGuards.js";
@@ -95,7 +96,7 @@ export type LambderSessionOptions<TSessionData = any> = {
      * that many bytes. Records written under either setting read back, so
      * it can be switched on or off on a live table.
      */
-    compression?: boolean | LambderSessionCompressionConfig;
+    compression?: LambderCompressionOption;
 };
 /**
  * Everything an instance is configured with, in ONE declaration: base
@@ -109,8 +110,8 @@ export type LambderCreateOptions<TSessionData = any> = {
     publicPath?: string;
     apiPath?: string;
     apiVersion?: string;
-    /** Automatic gzip for compressible responses. Default: { minBytes: 860 }. Set false to disable. */
-    compression?: false | {
+    /** Automatic gzip for compressible responses. `true` (the default) is `{ minBytes: 860 }`; `false` disables it. */
+    compression?: boolean | {
         minBytes?: number;
     };
     /** Automatic ETag + If-None-Match 304 on GET/HEAD 200 responses. Default: true. */
