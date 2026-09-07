@@ -90,6 +90,7 @@ export default class Lambder {
                 enableSlidingExpiration: session.enableSlidingExpiration,
                 slidingWriteIntervalSeconds: session.slidingWriteIntervalSeconds,
                 dataRefresh: session.dataRefresh,
+                compression: session.compression,
             });
             this.sessionCookieOptions = session.cookie ?? {};
             if (session.tokenCookieKey)

@@ -10,6 +10,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import nodeCrypto from 'crypto';
+import zlib from 'zlib';
 import { decodeBody } from './helpers.js';
 import { mockClient } from 'aws-sdk-client-mock';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, DeleteCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
@@ -27,6 +28,15 @@ const ddbMock = mockClient(DynamoDBDocumentClient);
 // Sessions store only hashes of the bearer secrets: mock items carry
 // hashTok(<raw>) where the presented cookie carries <raw>.
 const hashTok = (value: string) => nodeCrypto.createHash('sha256').update(value).digest('hex');
+
+// Session data is stored Brotli-compressed by default (dataBr + dataBytes);
+// records below minBytes or with compression off keep a plain `data` map.
+const storedData = (item: Record<string, any>) =>
+    item.dataBr ? JSON.parse(zlib.brotliDecompressSync(item.dataBr).toString('utf8')) : item.data;
+const compressedItem = (data: unknown) => {
+    const raw = Buffer.from(JSON.stringify(data), 'utf8');
+    return { dataBr: zlib.brotliCompressSync(raw), dataBytes: raw.byteLength };
+};
 
 // Test session data types
 interface UserSessionData {
@@ -641,6 +651,25 @@ describe('LambderSessionController', () => {
             const session = await sessionController.fetchSessionIfExists();
             expect(session).toBeDefined();
             expect(session?.data.userId).toBe('123');
+        });
+
+        it('reads a compressed record that fails to decode as no session', async () => {
+            const { dataBr, dataBytes } = compressedItem({ userId: '123', username: 'testuser', role: 'user' });
+            ddbMock.on(GetCommand).resolves({ Item: {
+                pk: 'hash',
+                sk: hashTok('sortkey'),
+                csrfTokenHash: hashTok('csrf-token'),
+                sessionKey: 'user-123',
+                dataBr: dataBr.subarray(0, 8), // Truncated: the length check fails.
+                dataBytes,
+                createdAt: Math.floor(Date.now() / 1000),
+                expiresAt: Math.floor(Date.now() / 1000) + 3600,
+                lastAccessedAt: Math.floor(Date.now() / 1000),
+                ttlInSeconds: 3600,
+            } });
+
+            const session = await sessionController.fetchSessionIfExists();
+            expect(session).toBeNull();
         });
     });
 
@@ -1276,7 +1305,7 @@ describe('LambderSessionManager dataRefresh', () => {
 
         const puts = ddbMock.commandCalls(PutCommand);
         expect(puts.length).toBe(1);
-        expect(puts[0]!.args[0].input.Item?.data).toEqual({ role: 'admin' });
+        expect(storedData(puts[0]!.args[0].input.Item!)).toEqual({ role: 'admin' });
     });
 
     it('renews legacy records that predate dataRefresh on first read', async () => {
@@ -1462,5 +1491,187 @@ describe('LambderSessionController dataRefresh', () => {
         await controller.deleteSessionAllByKey('user-123');
 
         expect(ddbMock.commandCalls(DeleteCommand).length).toBe(1);
+    });
+});
+
+// ── compression: session.data at rest ───────────────────────────────────────
+
+describe('LambderSessionManager compression', () => {
+    const nowSec = () => Math.floor(Date.now() / 1000);
+    const baseOptions = {
+        tableName: 'test-sessions',
+        tableRegion: 'us-east-1',
+        partitionKey: 'pk',
+        sortKey: 'sk',
+        sessionSalt: 'test-salt-12345',
+    };
+    const makeItem = (overrides: Record<string, any> = {}) => ({
+        pk: 'hashed-key',
+        sk: hashTok('sort-key'),
+        csrfTokenHash: hashTok('csrf-token'),
+        sessionKey: 'user-123',
+        createdAt: nowSec() - 1000,
+        expiresAt: nowSec() + 3600,
+        lastAccessedAt: nowSec(), // Recent: no sliding write due
+        ttlInSeconds: 3600,
+        ...overrides,
+    });
+    const data = {
+        userId: '3f1c2b6e-9d1a-4f7e-8c1b-2a9d7e6f5c4b',
+        permissions: ['TRANSIT.LINES.VIEW', 'TRANSIT.LINES.EDIT', 'TRANSIT.STOPS.VIEW', 'TRANSIT.STOPS.EDIT'],
+    };
+    const dataJsonBytes = Buffer.byteLength(JSON.stringify(data), 'utf8');
+
+    beforeEach(() => { ddbMock.reset(); });
+
+    it('stores data Brotli-compressed by default, beside its JSON byte length', async () => {
+        ddbMock.on(PutCommand).resolves({});
+
+        const { session } = await new LambderSessionManager(baseOptions).createSession('user-123', data, 3600);
+
+        const item = ddbMock.commandCalls(PutCommand)[0]!.args[0].input.Item!;
+        expect(item.data).toBeUndefined();
+        expect(item.dataBytes).toBe(dataJsonBytes);
+        expect(Buffer.isBuffer(item.dataBr)).toBe(true);
+        expect((item.dataBr as Buffer).byteLength).toBeLessThan(dataJsonBytes);
+        expect(storedData(item)).toEqual(data);
+        // The in-memory session keeps the plain data and none of the storage fields.
+        expect(session.data).toEqual(data);
+        expect(session.dataBr).toBeUndefined();
+        expect(session.dataBytes).toBeUndefined();
+    });
+
+    it('compression: true is the default and equals { minBytes: 0 }', async () => {
+        ddbMock.on(PutCommand).resolves({});
+        const tiny = { role: 'user' }; // Far below any threshold: only minBytes 0 compresses it.
+
+        await new LambderSessionManager(baseOptions).createSession('user-123', tiny, 3600);
+        await new LambderSessionManager({ ...baseOptions, compression: true }).createSession('user-123', tiny, 3600);
+        await new LambderSessionManager({ ...baseOptions, compression: { minBytes: 0 } }).createSession('user-123', tiny, 3600);
+
+        const items = ddbMock.commandCalls(PutCommand).map((call) => call.args[0].input.Item!);
+        expect(items.length).toBe(3);
+        for (const item of items) {
+            expect(item.data).toBeUndefined();
+            expect(item.dataBytes).toBe(Buffer.byteLength(JSON.stringify(tiny), 'utf8'));
+            expect(storedData(item)).toEqual(tiny);
+        }
+    });
+
+    it('compression: false stores data as a plain attribute', async () => {
+        ddbMock.on(PutCommand).resolves({});
+
+        await new LambderSessionManager({ ...baseOptions, compression: false }).createSession('user-123', data, 3600);
+
+        const item = ddbMock.commandCalls(PutCommand)[0]!.args[0].input.Item!;
+        expect(item.data).toEqual(data);
+        expect(item.dataBr).toBeUndefined();
+        expect(item.dataBytes).toBeUndefined();
+    });
+
+    it('minBytes compresses only records whose JSON reaches the threshold', async () => {
+        ddbMock.on(PutCommand).resolves({});
+        const manager = new LambderSessionManager({ ...baseOptions, compression: { minBytes: dataJsonBytes } });
+
+        await manager.createSession('user-123', data, 3600);          // exactly at the threshold
+        await manager.createSession('user-123', { role: 'user' }, 3600); // below it
+
+        const [atThreshold, below] = ddbMock.commandCalls(PutCommand).map((call) => call.args[0].input.Item!);
+        expect(atThreshold!.dataBr).toBeDefined();
+        expect(atThreshold!.data).toBeUndefined();
+        expect(below!.data).toEqual({ role: 'user' });
+        expect(below!.dataBr).toBeUndefined();
+    });
+
+    it('decodes a compressed record on read and hands the caller plain data', async () => {
+        ddbMock.on(GetCommand).resolves({ Item: makeItem(compressedItem(data)) });
+
+        const session = await new LambderSessionManager(baseOptions).getSession('hashed-key:sort-key');
+
+        expect(session?.data).toEqual(data);
+        expect(session?.dataBr).toBeUndefined();
+        expect(session?.dataBytes).toBeUndefined();
+        expect(ddbMock.commandCalls(PutCommand).length).toBe(0);
+    });
+
+    it('after switching compression off, records written while it was on still read', async () => {
+        ddbMock.on(GetCommand).resolves({ Item: makeItem(compressedItem(data)) });
+
+        const session = await new LambderSessionManager({ ...baseOptions, compression: false }).getSession('hashed-key:sort-key');
+
+        expect(session?.data).toEqual(data);
+    });
+
+    it('after switching compression on, plain records still read and are rewritten compressed on their next write', async () => {
+        // A due sliding-expiration write on a record written while compression was off.
+        ddbMock.on(GetCommand).resolves({ Item: makeItem({ data, lastAccessedAt: nowSec() - 3000 }) });
+        ddbMock.on(PutCommand).resolves({});
+
+        const session = await new LambderSessionManager(baseOptions).getSession('hashed-key:sort-key');
+
+        expect(session?.data).toEqual(data);
+        const puts = ddbMock.commandCalls(PutCommand);
+        expect(puts.length).toBe(1);
+        const item = puts[0]!.args[0].input.Item!;
+        expect(item.data).toBeUndefined();
+        expect(storedData(item)).toEqual(data);
+    });
+
+    it('updateSessionData and regenerateSession persist compressed too', async () => {
+        ddbMock.on(GetCommand).resolves({ Item: makeItem(compressedItem(data)) });
+        ddbMock.on(PutCommand).resolves({});
+        ddbMock.on(DeleteCommand).resolves({});
+        const manager = new LambderSessionManager(baseOptions);
+
+        const session = (await manager.getSession('hashed-key:sort-key'))!;
+        await manager.updateSessionData(session, { ...data, theme: 'dark' });
+        const regenerated = await manager.regenerateSession(session);
+
+        const items = ddbMock.commandCalls(PutCommand).map((call) => call.args[0].input.Item!);
+        expect(items.length).toBe(2);
+        for (const item of items) {
+            expect(item.data).toBeUndefined();
+            expect(storedData(item)).toEqual({ ...data, theme: 'dark' });
+        }
+        expect(regenerated.session.data).toEqual({ ...data, theme: 'dark' });
+    });
+
+    it('a compressed record that fails to decode throws (the controller reads that as no session)', async () => {
+        const manager = new LambderSessionManager(baseOptions);
+        ddbMock.on(PutCommand).resolves({});
+        const { dataBr, dataBytes } = compressedItem(data);
+
+        // Truncated bytes with the original length: the length check fails.
+        ddbMock.on(GetCommand).resolves({ Item: makeItem({ dataBr: dataBr.subarray(0, 8), dataBytes }) });
+        await expect(manager.getSession('hashed-key:sort-key')).rejects.toThrow();
+
+        // Missing byte length: nothing bounds the decompression, so it is refused.
+        ddbMock.on(GetCommand).resolves({ Item: makeItem({ dataBr }) });
+        await expect(manager.getSession('hashed-key:sort-key')).rejects.toThrow();
+
+        expect(ddbMock.commandCalls(PutCommand).length).toBe(0);
+    });
+
+    it('rejects invalid compression options at construction', () => {
+        expect(() => new LambderSessionManager({ ...baseOptions, compression: { minBytes: -1 } })).toThrow();
+        expect(() => new LambderSessionManager({ ...baseOptions, compression: { minBytes: 1.5 } })).toThrow();
+        expect(() => new LambderSessionManager({ ...baseOptions, compression: { quality: 12 } })).toThrow();
+        expect(() => new LambderSessionManager({ ...baseOptions, compression: { quality: 1.5 } })).toThrow();
+        expect(() => new LambderSessionManager({ ...baseOptions, compression: { minBytes: 0, quality: 11 } })).not.toThrow();
+    });
+
+    it('is configurable through the session option of initLambder().create', async () => {
+        ddbMock.on(PutCommand).resolves({});
+        const plain = initLambder().create({
+            apiPath: '/api',
+            session: { ...baseOptions, compression: false },
+        });
+        const manager = (plain as any).lambderSessionManager as LambderSessionManager;
+
+        await manager.createSession('user-123', data, 3600);
+
+        const item = ddbMock.commandCalls(PutCommand)[0]!.args[0].input.Item!;
+        expect(item.data).toEqual(data);
+        expect(item.dataBr).toBeUndefined();
     });
 });

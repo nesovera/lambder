@@ -5,7 +5,7 @@ import LambderResponseBuilder from "./LambderResponseBuilder.js";
 import { LambderResponse, type LambderHttpResponse } from "./LambderResponse.js";
 import { type ConditionFunction, type LambderRouteMatcher, type PathParamsOf } from "./LambderRouting.js";
 import { type LambderCorsConfig } from "./LambderCors.js";
-import { type LambderSessionDataRefreshConfig } from "../session/LambderSessionManager.js";
+import { type LambderSessionDataRefreshConfig, type LambderSessionCompressionConfig } from "../session/LambderSessionManager.js";
 import LambderSessionController, { type LambderSessionCookieOptions } from "../session/LambderSessionController.js";
 import { type LambderPublicFilesOptions } from "./LambderPublicFiles.js";
 import type { LambderApiGuard, LambderGuardMetaMap, LambderGuardsOption, LambderGuardDataOf, LambderGuardInputsOf } from "../policies/LambderApiGuards.js";
@@ -88,6 +88,14 @@ export type LambderSessionOptions<TSessionData = any> = {
      * semantics.
      */
     dataRefresh?: LambderSessionDataRefreshConfig<TSessionData>;
+    /**
+     * Brotli compression of session.data at rest. `true` (the default)
+     * compresses every record, the same as `{ minBytes: 0 }`; `false` turns
+     * it off; `{ minBytes }` compresses only records whose JSON is at least
+     * that many bytes. Records written under either setting read back, so
+     * it can be switched on or off on a live table.
+     */
+    compression?: boolean | LambderSessionCompressionConfig;
 };
 /**
  * Everything an instance is configured with, in ONE declaration: base
