@@ -11,7 +11,8 @@ import { describe, it, expect } from 'vitest';
 import { decodeBody } from './helpers.js';
 import { vi } from 'vitest';
 import Lambder from '../src/core/Lambder.js';
-import type { LambderPublicFileSource } from '../src/core/LambderPublicFiles.js';
+import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
+import type { LambderFileSource, LambderFilesOption } from '../src/core/LambderFiles.js';
 import type { APIGatewayProxyEvent, Context } from 'aws-lambda';
 import path from 'path';
 
@@ -50,11 +51,12 @@ const createMockContext = (): Context => ({
 describe('File Serving with Fallback', () => {
     it('should serve main.css when it exists, NOT index.html', async () => {
         const lambder = new Lambder({
-            publicPath: path.resolve('./tests/fixtures/public'),
+            files: new LambderLocalFileSource({ root: path.resolve('./tests/fixtures/public') }),
             apiPath: '/api'
         })
-            .addRoute('/(.*)', (ctx, res) => {
-                return res.file(ctx.path, { fallback: 'index.html' });
+            .addRoute('/(.*)', async (ctx, res) => {
+                const file = await res.file(ctx.path);
+                return file.statusCode === 404 ? res.file('index.html') : file;
             });
 
         const handler = lambder.getHandler();
@@ -74,11 +76,12 @@ describe('File Serving with Fallback', () => {
 
     it('should serve index.html when requested file does not exist', async () => {
         const lambder = new Lambder({
-            publicPath: path.resolve('./tests/fixtures/public'),
+            files: new LambderLocalFileSource({ root: path.resolve('./tests/fixtures/public') }),
             apiPath: '/api'
         })
-            .addRoute('/(.*)', (ctx, res) => {
-                return res.file(ctx.path, { fallback: 'index.html' });
+            .addRoute('/(.*)', async (ctx, res) => {
+                const file = await res.file(ctx.path);
+                return file.statusCode === 404 ? res.file('index.html') : file;
             });
 
         const handler = lambder.getHandler();
@@ -97,11 +100,12 @@ describe('File Serving with Fallback', () => {
 
     it('should serve index.html when requested directly', async () => {
         const lambder = new Lambder({
-            publicPath: path.resolve('./tests/fixtures/public'),
+            files: new LambderLocalFileSource({ root: path.resolve('./tests/fixtures/public') }),
             apiPath: '/api'
         })
-            .addRoute('/(.*)', (ctx, res) => {
-                return res.file(ctx.path, { fallback: 'index.html' });
+            .addRoute('/(.*)', async (ctx, res) => {
+                const file = await res.file(ctx.path);
+                return file.statusCode === 404 ? res.file('index.html') : file;
             });
 
         const handler = lambder.getHandler();
@@ -120,11 +124,12 @@ describe('File Serving with Fallback', () => {
 
     it('should return error when both requested file and fallback do not exist', async () => {
         const lambder = new Lambder({
-            publicPath: path.resolve('./tests/fixtures/public'),
+            files: new LambderLocalFileSource({ root: path.resolve('./tests/fixtures/public') }),
             apiPath: '/api'
         })
-            .addRoute('/(.*)', (ctx, res) => {
-                return res.file(ctx.path, { fallback: 'non-existent-fallback.html' });
+            .addRoute('/(.*)', async (ctx, res) => {
+                const file = await res.file(ctx.path);
+                return file.statusCode === 404 ? res.file('non-existent-fallback.html') : file;
             });
 
         const handler = lambder.getHandler();
@@ -137,14 +142,15 @@ describe('File Serving with Fallback', () => {
 
     it('should serve correct file even when catch-all route is last', async () => {
         const lambder = new Lambder({
-            publicPath: path.resolve('./tests/fixtures/public'),
+            files: new LambderLocalFileSource({ root: path.resolve('./tests/fixtures/public') }),
             apiPath: '/api'
         })
             .addRoute('/specific', (ctx, res) => {
                 return res.html('Specific Route');
             })
-            .addRoute('/(.*)', (ctx, res) => {
-                return res.file(ctx.path, { fallback: 'index.html' });
+            .addRoute('/(.*)', async (ctx, res) => {
+                const file = await res.file(ctx.path);
+                return file.statusCode === 404 ? res.file('index.html') : file;
             });
 
         const handler = lambder.getHandler();
@@ -170,7 +176,7 @@ describe('File Serving with Fallback', () => {
 
     it('should serve CSS file with correct text/css MIME type', async () => {
         const lambder = new Lambder({
-            publicPath: path.resolve('./tests/fixtures/public'),
+            files: new LambderLocalFileSource({ root: path.resolve('./tests/fixtures/public') }),
             apiPath: '/api'
         })
             .addRoute('/(.*)', (ctx, res) => {
@@ -201,11 +207,11 @@ describe('Public file sources', () => {
     ]);
     const makeSource = () => {
         const read = vi.fn(async (relativePath: string) => files.get(relativePath) ?? null);
-        return { source: { read } satisfies LambderPublicFileSource, read };
+        return { source: { read } satisfies LambderFileSource, read };
     };
-    const makeLambder = (source: LambderPublicFileSource, options: Record<string, unknown> = {}) =>
-        new Lambder({ publicPath: path.resolve('./tests/fixtures/public'), apiPath: '/api' })
-            .servePublicFiles({ source, ...options })
+    const makeLambder = (files: LambderFilesOption, options: Parameters<Lambder["servePublicFiles"]>[0] = {}) =>
+        new Lambder({ files, apiPath: '/api' })
+            .servePublicFiles(options)
             .setRouteFallbackHandler((ctx, res) => res.text(`fallback:${ctx.path}`, { statusCode: 404 }));
     const request = async (lambder: Lambder, requestPath: string) =>
         await lambder.getHandler()(createMockEvent(requestPath), createMockContext());
@@ -245,7 +251,7 @@ describe('Public file sources', () => {
         expect(read).not.toHaveBeenCalled();
     });
 
-    it('serves repeat requests from the memory cache without re-reading the source', async () => {
+    it('serves repeat requests from the memory cache, configured beside the source', async () => {
         const { source, read } = makeSource();
         const lambder = makeLambder(source);
         await request(lambder, '/app.css');
@@ -253,7 +259,7 @@ describe('Public file sources', () => {
         expect(read).toHaveBeenCalledTimes(1);
 
         const { source: uncached, read: uncachedRead } = makeSource();
-        const noCache = makeLambder(uncached, { memoryCache: false });
+        const noCache = makeLambder({ source: uncached, memoryCache: false });
         await request(noCache, '/app.css');
         await request(noCache, '/app.css');
         expect(uncachedRead).toHaveBeenCalledTimes(2);
@@ -271,13 +277,59 @@ describe('Public file sources', () => {
         expect(hashed.multiValueHeaders?.['Cache-Control']).toContain('public, max-age=31536000, immutable');
     });
 
-    it('the default source is the publicPath folder', async () => {
-        const lambder = new Lambder({ publicPath: path.resolve('./tests/fixtures/public'), apiPath: '/api' })
+    it('a local folder source serves the bundled folder, traversal-safe', async () => {
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: path.resolve('./tests/fixtures/public') }), apiPath: '/api' })
             .servePublicFiles()
             .setRouteFallbackHandler((ctx, res) => res.text('fallback', { statusCode: 404 }));
         const result = await request(lambder, '/main.css');
         expect(result.statusCode).toBe(200);
         expect(decodeBody(result)).toContain('body { margin: 0; }');
         expect((await request(lambder, '/../package.json')).statusCode).toBe(404);
+    });
+});
+
+describe('Files option', () => {
+    it('servePublicFiles, res.file and res.templateFile require the files option', async () => {
+        expect(() => new Lambder({ apiPath: '/api' }).servePublicFiles()).toThrow(/files option/);
+
+        const res = new Lambder({ apiPath: '/api' }).getResponseBuilder();
+        await expect(res.file('/main.css')).rejects.toThrow(/files option/);
+        await expect(res.templateFile('index.html')).rejects.toThrow(/files option/);
+    });
+
+    it('res.file and res.templateFile read through the configured source', async () => {
+        const read = vi.fn(async (relativePath: string) => {
+            if (relativePath === 'legal/terms.html') return { body: Buffer.from('<h1>Terms</h1>') };
+            if (relativePath === 'index.html') return { body: Buffer.from('<title>Shell</title>') };
+            return null;
+        });
+        const lambder = new Lambder({ files: { read }, apiPath: '/api' })
+            .addRoute('/terms', (ctx, res) => res.file('/legal/terms.html'))
+            .addRoute('/nope', (ctx, res) => res.file('/nope.html'))
+            .addRoute('/shell', (ctx, res) => res.templateFile('index.html', { title: 'Hello' }, { htmlVirtualSlots: true }));
+        const handler = lambder.getHandler();
+
+        const terms = await handler(createMockEvent('/terms'), createMockContext());
+        expect(terms.statusCode).toBe(200);
+        expect(terms.multiValueHeaders?.['Content-Type']).toContain('text/html');
+        expect(decodeBody(terms)).toBe('<h1>Terms</h1>');
+        expect(read).toHaveBeenCalledWith('legal/terms.html'); // relative, no leading slash
+
+        const missing = await handler(createMockEvent('/nope'), createMockContext());
+        expect(missing.statusCode).toBe(404);
+
+        const shell = await handler(createMockEvent('/shell'), createMockContext());
+        expect(decodeBody(shell)).toBe('<title>Hello</title>');
+        await handler(createMockEvent('/shell'), createMockContext());
+        expect(read.mock.calls.filter(([p]) => p === 'index.html').length).toBe(1); // read and compiled once per instance
+    });
+
+    it('caches compiled templates per instance, not per path', async () => {
+        const sourceA = { read: async () => ({ body: Buffer.from('A') }) };
+        const sourceB = { read: async () => ({ body: Buffer.from('B') }) };
+        const a = new Lambder({ files: sourceA, apiPath: '/api' }).addRoute('/', (ctx, res) => res.templateFile('index.html')).getHandler();
+        const b = new Lambder({ files: sourceB, apiPath: '/api' }).addRoute('/', (ctx, res) => res.templateFile('index.html')).getHandler();
+        expect(decodeBody(await a(createMockEvent('/'), createMockContext()))).toBe('A');
+        expect(decodeBody(await b(createMockEvent('/'), createMockContext()))).toBe('B');
     });
 });

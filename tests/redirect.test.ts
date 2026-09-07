@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import Lambder from '../src/core/Lambder.js';
+import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
 import type { APIGatewayProxyEvent, Context } from 'aws-lambda';
 
 const createMockEvent = (path: string, method: string = 'GET'): APIGatewayProxyEvent => ({
@@ -37,7 +38,7 @@ const createMockContext = (): Context => ({
 describe('Redirect Response', () => {
     it('should redirect with default status code 302', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .addRoute('/old-path', (ctx, res) => {
@@ -54,7 +55,7 @@ describe('Redirect Response', () => {
 
     it('should redirect with custom status code', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .addRoute('/moved-permanently', (ctx, res) => {
@@ -71,7 +72,7 @@ describe('Redirect Response', () => {
 
     it('should redirect using die.redirect', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .addRoute('/die-redirect', (ctx, res) => {

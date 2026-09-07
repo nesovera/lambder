@@ -1,7 +1,8 @@
 import type { LambderRenderContext } from "./LambderContext.js";
+import type { LambderFiles } from "./LambderFiles.js";
 import { LambderResponse, type HttpStatusCode, type LambderHeadersInput } from "./LambderResponse.js";
 import { LambderSafeHtml } from "../shared/LambderHtml.js";
-import { type LambderTemplateData } from "./LambderTemplatingEngine.js";
+import type { LambderTemplateData } from "./LambderTemplatingEngine.js";
 import type { LambderApiResponseConfig } from "../shared/LambderApiContract.js";
 export type { LambderApiResponse, LambderApiResponseConfig } from "../shared/LambderApiContract.js";
 export type LambderResponseOptions = {
@@ -24,16 +25,17 @@ export type LambderRawResponseInit = {
     etag?: boolean | "auto";
 };
 export default class LambderResponseBuilder<TResponse = any> {
-    protected publicPath: string;
+    protected files: LambderFiles | null;
     protected apiVersion: string | null;
     protected ctx?: LambderRenderContext;
-    constructor({ publicPath, apiVersion, ctx }: {
-        publicPath: string;
+    constructor({ files, apiVersion, ctx }: {
+        files?: LambderFiles | null;
         apiVersion?: string | null;
         ctx?: LambderRenderContext;
     });
     private buildResponse;
-    private resolvePublicFilePath;
+    /** The instance's file reader, which res.file and res.templateFile need. */
+    private requireFiles;
     addHeader(key: string, value: string): void;
     setHeader(key: string, value: string | string[]): void;
     logToApiResponse(input: any): void;
@@ -47,15 +49,15 @@ export default class LambderResponseBuilder<TResponse = any> {
     redirect(url: string, statusCode?: HttpStatusCode, options?: LambderResponseOptions): LambderResponse;
     versionExpired(options?: LambderResponseOptions): LambderResponse;
     fileBase64(fileBase64: string, mimeType: string, options?: LambderResponseOptions): LambderResponse;
-    file(filePath: string, options?: LambderResponseOptions & {
-        fallback?: string;
-    }): Promise<LambderResponse>;
+    /** A file from the files source as a response; 404 when there is none. */
+    file(filePath: string, options?: LambderResponseOptions): Promise<LambderResponse>;
     /**
-     * Render an HTML file under publicPath through LambderTemplatingEngine
-     * (comment-based slots/conditionals) and return it as an HTML response.
-     * The compiled template is cached across warm invocations; a missing file
-     * throws (it is a server-side configuration error, not a client 404).
-     * Set htmlVirtualSlots to expose "title"/"head" slots on marker-less files.
+     * Render an HTML file from the files source through
+     * LambderTemplatingEngine (comment-based slots/conditionals) and return
+     * it as an HTML response. The compiled template is cached on the
+     * instance across warm invocations; a missing file throws (it is a
+     * server-side configuration error, not a client 404). Set
+     * htmlVirtualSlots to expose "title"/"head" slots on marker-less files.
      */
     templateFile(filePath: string, data?: LambderTemplateData, options?: LambderResponseOptions & {
         htmlVirtualSlots?: boolean;

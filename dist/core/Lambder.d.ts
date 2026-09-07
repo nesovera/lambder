@@ -9,6 +9,7 @@ import { type LambderSessionDataRefreshConfig } from "../session/LambderSessionM
 import type { LambderCompressionOption } from "../stores/LambderDdbCompression.js";
 import LambderSessionController, { type LambderSessionCookieOptions } from "../session/LambderSessionController.js";
 import { type LambderPublicFilesOptions } from "./LambderPublicFiles.js";
+import { LambderFiles, type LambderFilesOption } from "./LambderFiles.js";
 import type { LambderApiGuard, LambderGuardMetaMap, LambderGuardsOption, LambderGuardDataOf, LambderGuardInputsOf } from "../policies/LambderApiGuards.js";
 import type { LambderApiRateLimitPolicyConfig, LambderApiRateLimitsConfig, LambderRateLimitOption } from "../policies/LambderApiRateLimits.js";
 import type { LambderApiIdempotencyConfig } from "../policies/LambderApiIdempotency.js";
@@ -107,7 +108,14 @@ export type LambderSessionOptions<TSessionData = any> = {
  * instance type ever needs a name.
  */
 export type LambderCreateOptions<TSessionData = any> = {
-    publicPath?: string;
+    /**
+     * Where the app's files come from, for servePublicFiles, serveIndexHtml,
+     * res.file and res.templateFile: a LambderLocalFileSource over a folder
+     * (the build output bundled with the deployment), a LambderS3FileSource
+     * (S3, R2), or any LambderFileSource; or `{ source, memoryCache }` to
+     * tune or disable the in-memory file cache. Required by those features.
+     */
+    files?: LambderFilesOption;
     apiPath?: string;
     apiVersion?: string;
     /** Automatic gzip for compressible responses. `true` (the default) is `{ minBytes: 860 }`; `false` disables it. */
@@ -153,7 +161,8 @@ export type LambderCreateOptions<TSessionData = any> = {
 export default class Lambder<TSessionData = any, _TContract extends Record<string, any> = {}, _TRateLimitPolicies extends Record<string, LambderApiRateLimitPolicyConfig> = {}, _TGuards extends Record<string, any> = {}, _TIdempotencyEnabled extends boolean = false> {
     apiPath: string;
     apiVersion: null | string;
-    publicPath: string;
+    /** The instance's file reader (source + caches), or null without the files option. */
+    files: LambderFiles | null;
     /**
      * Type property for extracting the API contract
      * Use this to export your API types to the frontend
@@ -194,9 +203,8 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
     setSessionExpiredRouteHandler(handler: FallbackHandlerFunction): this;
     /**
      * Terminal public-file layer. Runs only when no route matched, so it can
-     * never shadow routes registered after it. Serves files from `source`
-     * (default: the publicPath folder; also LambderS3FileSource for S3 and
-     * R2, or any LambderPublicFileSource), traversal-safe, mime-typed,
+     * never shadow routes registered after it. Serves files from the `files`
+     * source configured at creation, traversal-safe, mime-typed,
      * memory-cached, with the immutable-cache heuristic for content-hashed
      * assets; when the source has no such file the request falls through to
      * setRouteFallbackHandler, where the app decides what remains (e.g.
@@ -209,8 +217,8 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
      * gone; everything left is an app route (option `skipFilePaths` opts back
      * into 404ing dotted paths). Only configured methods reach it, default
      * GET/HEAD. Gated-out requests fall through to setRouteFallbackHandler.
-     * Without a handler, publicPath/index.html is served via res.templateFile
-     * (markers optional) with no-cache.
+     * Without a handler, index.html from the files source is served via
+     * res.templateFile (markers optional) with no-cache.
      */
     serveIndexHtml(handler?: FallbackHandlerFunction, options?: LambderIndexHtmlOptions): this;
     /** Apply the serveIndexHtml gates; null means fall through. */

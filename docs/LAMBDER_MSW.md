@@ -53,7 +53,7 @@ When using TypeScript API contracts, LambderMSW provides full type safety:
 import { z } from 'zod';
 import Lambder from 'lambder';
 
-const lambder = new Lambder({ apiPath: '/secure', publicPath: './public' })
+const lambder = new Lambder({ apiPath: '/secure', files: new LambderLocalFileSource({ root: './public' }) })
     .addApi('getUserById', {
         input: z.object({ userId: z.string() }),
         output: z.object({ id: z.string(), name: z.string(), email: z.string() })

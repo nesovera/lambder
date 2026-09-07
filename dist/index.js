@@ -15,7 +15,8 @@ export { html, xml, raw, jsonScript, escapeHtml, renderHtmlValue, LambderSafeHtm
 // Comment-based HTML templating engine (build-pipeline-safe slots and conditionals, standalone)
 export { LambderTemplatingEngine } from "./core/LambderTemplatingEngine.js";
 // Public file serving
-export { LambderPublicFilesHandler, LambderLocalFileSource } from "./core/LambderPublicFiles.js";
+export { LambderPublicFilesHandler } from "./core/LambderPublicFiles.js";
+export { LambderFiles, LambderLocalFileSource } from "./core/LambderFiles.js";
 export { LambderS3FileSource } from "./stores/LambderS3FileSource.js";
 export { LambderSessionDataRefreshError, LambderSessionReadError } from "./session/LambderSessionManager.js";
 // DynamoDB-backed compressed cache (standalone, server-only)

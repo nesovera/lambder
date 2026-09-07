@@ -16,6 +16,7 @@ import { describe, it, expect } from 'vitest';
 import { decodeBody } from './helpers.js';
 import { z } from 'zod';
 import Lambder from '../src/core/Lambder.js';
+import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
 import type { APIGatewayProxyEvent, Context } from 'aws-lambda';
 
 const createMockEvent = (path: string, method: string = 'GET', apiName?: string, payload?: any): APIGatewayProxyEvent => ({
@@ -51,7 +52,7 @@ const createMockContext = (): Context => ({
 describe('Error Handling - Global Error Handler', () => {
     it('should catch errors in route handlers', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -73,7 +74,7 @@ describe('Error Handling - Global Error Handler', () => {
 
     it('should catch errors in API handlers', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -100,7 +101,7 @@ describe('Error Handling - Global Error Handler', () => {
 
     it('should catch async errors', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -122,7 +123,7 @@ describe('Error Handling - Global Error Handler', () => {
         let capturedContext: any = null;
 
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -145,7 +146,7 @@ describe('Error Handling - Global Error Handler', () => {
         let handlerCalled = false;
 
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -171,7 +172,7 @@ describe('Error Handling - Global Error Handler', () => {
 describe('Error Handling - Custom Error Responses', () => {
     it('should return custom error format for APIs', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -202,7 +203,7 @@ describe('Error Handling - Custom Error Responses', () => {
 
     it('should return HTML error for routes', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -223,7 +224,7 @@ describe('Error Handling - Custom Error Responses', () => {
 
     it('should return JSON error for routes if desired', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -250,7 +251,7 @@ describe('Error Handling - Custom Error Responses', () => {
 describe('Error Handling - Different Error Types', () => {
     it('should handle Error objects', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -268,7 +269,7 @@ describe('Error Handling - Different Error Types', () => {
 
     it('should handle TypeError', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -289,7 +290,7 @@ describe('Error Handling - Different Error Types', () => {
 
     it('should handle string throws as errors', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -310,7 +311,7 @@ describe('Error Handling - Different Error Types', () => {
 describe('Error Handling - Errors in Hooks', () => {
     it('should catch errors in beforeRender hooks', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -332,7 +333,7 @@ describe('Error Handling - Errors in Hooks', () => {
 
     it('should catch errors in afterRender hooks', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -354,7 +355,7 @@ describe('Error Handling - Errors in Hooks', () => {
 
     it('should handle Error returned from beforeRender hook', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -376,7 +377,7 @@ describe('Error Handling - Errors in Hooks', () => {
 
     it('should handle Error returned from afterRender hook', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -400,7 +401,7 @@ describe('Error Handling - Errors in Hooks', () => {
 describe('Error Handling - Default Error Behavior', () => {
     it('should return 500 when no global error handler is set', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .addRoute('/error', (ctx, res) => {
@@ -418,7 +419,7 @@ describe('Error Handling - Default Error Behavior', () => {
 describe('Error Handling - Input Validation Errors', () => {
     it('should return 400 for invalid API input', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .addApi('testApi', {
@@ -446,7 +447,7 @@ describe('Error Handling - Input Validation Errors', () => {
 
     it('should allow custom handling of validation errors', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -473,7 +474,7 @@ describe('Error Handling - Error with Additional Context', () => {
         let errorContext: any = null;
 
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -498,7 +499,7 @@ describe('Error Handling - Error with Additional Context', () => {
 
     it('should provide response builder in error handler', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, responseBuilder) => {
@@ -524,7 +525,7 @@ describe('Error Handling - Error with Additional Context', () => {
 describe('Error Handling - Complex Error Scenarios', () => {
     it('should handle errors in chained operations', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -550,7 +551,7 @@ describe('Error Handling - Complex Error Scenarios', () => {
         const errorTypes: string[] = [];
 
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {

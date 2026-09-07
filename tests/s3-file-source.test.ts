@@ -11,7 +11,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { mockClient } from 'aws-sdk-client-mock';
 import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
-import path from 'path';
 import { decodeBody } from './helpers.js';
 import Lambder from '../src/core/Lambder.js';
 import { LambderS3FileSource } from '../src/stores/LambderS3FileSource.js';
@@ -72,11 +71,31 @@ describe('LambderS3FileSource', () => {
         expect(() => new LambderS3FileSource({ bucket: '  ' })).toThrow();
     });
 
+    it('as the files option, the index fallback serves index.html from the bucket too', async () => {
+        s3Mock.on(GetObjectCommand, { Bucket: 'web', Key: 'app.css' }).resolves({ Body: bodyOf('body {}'), ContentType: 'text/css' });
+        s3Mock.on(GetObjectCommand, { Bucket: 'web', Key: 'index.html' }).resolves({ Body: bodyOf('<h1>shell</h1>'), ContentType: 'text/html' });
+        s3Mock.on(GetObjectCommand, { Bucket: 'web', Key: 'about' }).rejects(s3Error('NoSuchKey'));
+        const handler = new Lambder({ files: new LambderS3FileSource({ bucket: 'web', client: new S3Client({}) }), apiPath: '/api' })
+            .servePublicFiles()
+            .serveIndexHtml()
+            .getHandler();
+        const event = (requestPath: string): APIGatewayProxyEvent => ({
+            body: null, headers: { Host: 'localhost' }, multiValueHeaders: {}, httpMethod: 'GET', isBase64Encoded: false,
+            path: requestPath, pathParameters: null, queryStringParameters: null, multiValueQueryStringParameters: null,
+            stageVariables: null, requestContext: {} as any, resource: '',
+        });
+
+        expect(decodeBody(await handler(event('/app.css'), {} as Context))).toBe('body {}');
+        const shell = await handler(event('/about'), {} as Context);
+        expect(shell.statusCode).toBe(200);
+        expect(decodeBody(shell)).toBe('<h1>shell</h1>');
+    });
+
     it('serves through Lambder: extension mime for untyped objects, fallthrough for missing ones', async () => {
         s3Mock.on(GetObjectCommand, { Bucket: 'web', Key: 'site/app.css' }).resolves({ Body: bodyOf('body {}') });
         s3Mock.on(GetObjectCommand, { Bucket: 'web', Key: 'site/missing.js' }).rejects(s3Error('NoSuchKey'));
-        const lambder = new Lambder({ publicPath: path.resolve('./tests/fixtures/public'), apiPath: '/api' })
-            .servePublicFiles({ source: new LambderS3FileSource({ bucket: 'web', prefix: 'site/', client: new S3Client({}) }) })
+        const lambder = new Lambder({ files: new LambderS3FileSource({ bucket: 'web', prefix: 'site/', client: new S3Client({}) }), apiPath: '/api' })
+            .servePublicFiles()
             .setRouteFallbackHandler((ctx, res) => res.text('fallback', { statusCode: 404 }));
         const handler = lambder.getHandler();
         const event = (requestPath: string): APIGatewayProxyEvent => ({

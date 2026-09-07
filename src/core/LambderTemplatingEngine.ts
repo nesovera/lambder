@@ -6,7 +6,7 @@ import { renderHtmlValue, type LambderHtmlValue } from "../shared/LambderHtml.js
  *
  * Fully standalone: it has no dependency on Lambder routing or file serving,
  * and can template any HTML: app shells, emails, error pages. res.templateFile
- * uses it internally to render HTML files from publicPath per request.
+ * uses it internally to render HTML files from the files source per request.
  *
  * Every construct is an HTML comment. That is the whole point: templates
  * survive HTML build pipelines (e.g. Vite) untouched, and are invisible in the

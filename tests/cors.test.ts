@@ -4,10 +4,11 @@
 
 import { describe, it, expect } from 'vitest';
 import Lambder, { initLambder } from '../src/core/Lambder.js';
+import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
 import { createMockEvent, createMockContext } from './helpers.js';
 describe('CORS', () => {
     it('answers preflight with configured origins', async () => {
-        const lambder = initLambder().create({ publicPath: './public', cors: { origins: ['https://app.example.com'], credentials: true } });
+        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), cors: { origins: ['https://app.example.com'], credentials: true } });
 
         const result = await lambder.render(
             createMockEvent('/api', { httpMethod: 'OPTIONS', headers: { Host: 'localhost', Origin: 'https://app.example.com' } }),
@@ -20,7 +21,7 @@ describe('CORS', () => {
     });
 
     it('never combines a wildcard origin with credentials', async () => {
-        const lambder = initLambder().create({ publicPath: './public', cors: { credentials: true } })
+        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), cors: { credentials: true } })
             .addRoute('/data', (ctx, res) => res.json({ ok: true }));
 
         const result = await lambder.render(
@@ -31,7 +32,7 @@ describe('CORS', () => {
     });
 
     it('exposes Retry-After to cross-origin callers by default, or the configured list', async () => {
-        const call = async (cors: any) => (await initLambder().create({ publicPath: './public', cors })
+        const call = async (cors: any) => (await initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), cors })
             .addRoute('/data', (ctx, res) => res.json({ ok: true }))
             .render(createMockEvent('/data', { headers: { Host: 'localhost', Origin: 'https://site.example' } }), createMockContext()))
             .multiValueHeaders?.['Access-Control-Expose-Headers'];
@@ -41,7 +42,7 @@ describe('CORS', () => {
     });
 
     it('omits CORS headers for disallowed origins', async () => {
-        const lambder = initLambder().create({ publicPath: './public', cors: { origins: ['https://allowed.example'] } })
+        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), cors: { origins: ['https://allowed.example'] } })
             .addRoute('/data', (ctx, res) => res.json({ ok: true }));
 
         const result = await lambder.render(
