@@ -12,7 +12,8 @@ import {
 } from "./LambderResponse.js";
 import { compileRouteMatcher, type CompiledMatcher, type RouteCondition, type ConditionFunction, type LambderRouteMatcher, type PathParamsOf } from "./LambderRouting.js";
 import { applyCorsHeaders, type LambderCorsConfig } from "./LambderCors.js";
-import LambderSessionManager, { type LambderSessionDataRefreshConfig, type LambderSessionCompressionConfig } from "../session/LambderSessionManager.js";
+import LambderSessionManager, { type LambderSessionDataRefreshConfig } from "../session/LambderSessionManager.js";
+import type { LambderCompressionOption } from "../stores/LambderDdbCompression.js";
 import LambderSessionController, { type LambderSessionCookieOptions } from "../session/LambderSessionController.js";
 import { LambderPublicFilesHandler, type LambderPublicFilesOptions } from "./LambderPublicFiles.js";
 import { isLambderApiError, LAMBDER_REFUSAL_CODES, type LambderApiError, type LambderRefusalMessage } from "../shared/LambderApiError.js";
@@ -146,7 +147,7 @@ export type LambderSessionOptions<TSessionData = any> = {
      * that many bytes. Records written under either setting read back, so
      * it can be switched on or off on a live table.
      */
-    compression?: boolean | LambderSessionCompressionConfig;
+    compression?: LambderCompressionOption;
 };
 
 /**
@@ -161,8 +162,8 @@ export type LambderCreateOptions<TSessionData = any> = {
     publicPath?: string;
     apiPath?: string;
     apiVersion?: string;
-    /** Automatic gzip for compressible responses. Default: { minBytes: 860 }. Set false to disable. */
-    compression?: false | { minBytes?: number };
+    /** Automatic gzip for compressible responses. `true` (the default) is `{ minBytes: 860 }`; `false` disables it. */
+    compression?: boolean | { minBytes?: number };
     /** Automatic ETag + If-None-Match 304 on GET/HEAD 200 responses. Default: true. */
     etag?: boolean;
     /** Guard threshold for Lambda's ~6MB response cap. Default: 5,500,000. */
@@ -258,7 +259,8 @@ export default class Lambder<
         this.finalizeOptions = {
             compression: options.compression === false
                 ? false
-                : { minBytes: options.compression?.minBytes ?? (DEFAULT_FINALIZE_OPTIONS.compression as { minBytes: number }).minBytes },
+                : { minBytes: (typeof options.compression === "object" ? options.compression.minBytes : undefined)
+                    ?? (DEFAULT_FINALIZE_OPTIONS.compression as { minBytes: number }).minBytes },
             etag: options.etag ?? DEFAULT_FINALIZE_OPTIONS.etag,
             maxResponseBytes: options.maxResponseBytes ?? DEFAULT_FINALIZE_OPTIONS.maxResponseBytes,
         };

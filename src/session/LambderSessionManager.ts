@@ -1,7 +1,10 @@
 import crypto from "crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, QueryCommand, DeleteCommand, PutCommand, GetCommand } from "@aws-sdk/lib-dynamodb";
-import { brotliCompressText, brotliRestoreText } from "../stores/LambderDdbCompression.js";
+import {
+    brotliCompressText, brotliRestoreText, resolveCompressionOption,
+    type LambderCompressionOption, type LambderCompressionSettings,
+} from "../stores/LambderDdbCompression.js";
 
 export type LambderSessionContext<SessionData = any> = {
     [x: string]: any;
@@ -62,22 +65,14 @@ export type LambderSessionDataRefreshConfig<SessionData = any> = {
 };
 
 /**
- * Brotli compression of session.data at rest. The option is `true` by
- * default, which equals `{ minBytes: 0 }`: every record compressed. A
- * compressed record carries the data's JSON as Brotli bytes (`dataBr`)
+ * Session compression defaults: every record compressed (see
+ * LambderCompressionOption for the option's shape and toggle semantics).
+ * A compressed record carries the data's JSON as Brotli bytes (`dataBr`)
  * beside its byte length (`dataBytes`), the scheme LambderDdbCache and
- * LambderDdbIdempotency use. Below minBytes, or with compression off, the
- * record keeps a plain `data` attribute. Reads accept both shapes, so the
- * setting can be switched on or off on a live table: records written under
- * the other setting keep reading, and each is rewritten in the current
- * shape on its next write.
+ * LambderDdbIdempotency use; below minBytes, or with compression off, the
+ * record keeps a plain `data` attribute.
  */
-export type LambderSessionCompressionConfig = {
-    /** JSON byte length from which data is stored compressed. Default: 0 (always). */
-    minBytes?: number;
-    /** Brotli quality (0-11), like LambderDdbCache. Default: 5. */
-    quality?: number;
-};
+const SESSION_COMPRESSION_DEFAULTS: LambderCompressionSettings = { minBytes: 0, quality: 5 };
 
 /**
  * Wraps errors thrown by the dataRefresh callback so they stay
@@ -116,7 +111,7 @@ export default class LambderSessionManager{
     private enableSlidingExpiration: boolean;
     private slidingWriteIntervalSeconds: number | null;
     private dataRefresh: LambderSessionDataRefreshConfig | null;
-    private compression: Required<LambderSessionCompressionConfig> | null;
+    private compression: LambderCompressionSettings | null;
 
     constructor(
         {
@@ -126,7 +121,7 @@ export default class LambderSessionManager{
             enableSlidingExpiration = true,
             slidingWriteIntervalSeconds,
             dataRefresh,
-            compression = true,
+            compression,
         }: {
             tableName: string, tableRegion: string,
             partitionKey: string, sortKey: string,
@@ -134,7 +129,7 @@ export default class LambderSessionManager{
             enableSlidingExpiration?: boolean,
             slidingWriteIntervalSeconds?: number,
             dataRefresh?: LambderSessionDataRefreshConfig,
-            compression?: boolean | LambderSessionCompressionConfig,
+            compression?: LambderCompressionOption,
         }
     ){
         this.tableName = tableName;
@@ -144,19 +139,7 @@ export default class LambderSessionManager{
         this.enableSlidingExpiration = enableSlidingExpiration;
         this.slidingWriteIntervalSeconds = slidingWriteIntervalSeconds ?? null;
         this.dataRefresh = dataRefresh ?? null;
-        const compressionConfig = compression === true ? {} : compression;
-        this.compression = compressionConfig ? {
-            minBytes: compressionConfig.minBytes ?? 0,
-            quality: compressionConfig.quality ?? 5,
-        } : null;
-        if(this.compression){
-            if(!Number.isSafeInteger(this.compression.minBytes) || this.compression.minBytes < 0){
-                throw new Error("compression.minBytes must be a non-negative integer");
-            }
-            if(!Number.isInteger(this.compression.quality) || this.compression.quality < 0 || this.compression.quality > 11){
-                throw new Error("compression.quality must be an integer from 0 to 11");
-            }
-        }
+        this.compression = resolveCompressionOption(compression, SESSION_COMPRESSION_DEFAULTS);
 
         const ddbClient = new DynamoDBClient({ region: tableRegion });
         this.ddbDocumentClient = DynamoDBDocumentClient.from(ddbClient);
@@ -196,7 +179,6 @@ export default class LambderSessionManager{
      * Persists a session record. With compression on, `data` is stored as
      * Brotli bytes (`dataBr`) beside its JSON byte length (`dataBytes`)
      * once the JSON reaches minBytes; otherwise it stays a plain attribute.
-     * See LambderSessionCompressionConfig.
      */
     private async ddbPutItem(session: Record<string,any>){
         const { data, ...item } = session;

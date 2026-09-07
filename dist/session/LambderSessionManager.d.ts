@@ -1,3 +1,4 @@
+import { type LambderCompressionOption } from "../stores/LambderDdbCompression.js";
 export type LambderSessionContext<SessionData = any> = {
     [x: string]: any;
     /**
@@ -54,23 +55,6 @@ export type LambderSessionDataRefreshConfig<SessionData = any> = {
     refresh: (session: LambderSessionContext<SessionData>) => Promise<SessionData | null>;
 };
 /**
- * Brotli compression of session.data at rest. The option is `true` by
- * default, which equals `{ minBytes: 0 }`: every record compressed. A
- * compressed record carries the data's JSON as Brotli bytes (`dataBr`)
- * beside its byte length (`dataBytes`), the scheme LambderDdbCache and
- * LambderDdbIdempotency use. Below minBytes, or with compression off, the
- * record keeps a plain `data` attribute. Reads accept both shapes, so the
- * setting can be switched on or off on a live table: records written under
- * the other setting keep reading, and each is rewritten in the current
- * shape on its next write.
- */
-export type LambderSessionCompressionConfig = {
-    /** JSON byte length from which data is stored compressed. Default: 0 (always). */
-    minBytes?: number;
-    /** Brotli quality (0-11), like LambderDdbCache. Default: 5. */
-    quality?: number;
-};
-/**
  * Wraps errors thrown by the dataRefresh callback so they stay
  * distinguishable from "no session": fetchSessionIfExists() swallows missing
  * or invalid sessions but rethrows this, otherwise a transient failure in
@@ -108,7 +92,7 @@ export default class LambderSessionManager {
         enableSlidingExpiration?: boolean;
         slidingWriteIntervalSeconds?: number;
         dataRefresh?: LambderSessionDataRefreshConfig;
-        compression?: boolean | LambderSessionCompressionConfig;
+        compression?: LambderCompressionOption;
     });
     private sessionUserKeyHasher;
     /**
@@ -124,7 +108,6 @@ export default class LambderSessionManager {
      * Persists a session record. With compression on, `data` is stored as
      * Brotli bytes (`dataBr`) beside its JSON byte length (`dataBytes`)
      * once the JSON reaches minBytes; otherwise it stays a plain attribute.
-     * See LambderSessionCompressionConfig.
      */
     private ddbPutItem;
     private ddbDeleteItem;

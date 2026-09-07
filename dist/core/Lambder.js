@@ -72,7 +72,8 @@ export default class Lambder {
         this.finalizeOptions = {
             compression: options.compression === false
                 ? false
-                : { minBytes: options.compression?.minBytes ?? DEFAULT_FINALIZE_OPTIONS.compression.minBytes },
+                : { minBytes: (typeof options.compression === "object" ? options.compression.minBytes : undefined)
+                        ?? DEFAULT_FINALIZE_OPTIONS.compression.minBytes },
             etag: options.etag ?? DEFAULT_FINALIZE_OPTIONS.etag,
             maxResponseBytes: options.maxResponseBytes ?? DEFAULT_FINALIZE_OPTIONS.maxResponseBytes,
         };

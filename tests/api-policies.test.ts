@@ -727,6 +727,31 @@ describe('API policies - idempotency', () => {
         expect(client.items.get(k)?.body?.S).toBe('fresh');
     });
 
+    it('compression: false stores every body plain, { minBytes } moves the threshold, and either shape reads back', async () => {
+        const big = JSON.stringify({ payload: { rows: Array.from({ length: 200 }, (_, i) => ({ i, name: `row-${i}` })) } });
+        const settle = async (store: LambderDdbIdempotency, scope: string, body: string) => {
+            const claim = await store.begin(scope, { pendingTtlSeconds: 300 });
+            if(claim.state !== 'new') throw new Error('expected fresh claim');
+            expect(await store.complete(scope, claim.ownerToken, { statusCode: 200, headers: {}, body, ttlSeconds: 60 })).toBe('stored');
+        };
+
+        const offClient = new MemoryDdb();
+        await settle(new LambderDdbIdempotency({ tableName: 'test-table', client: offClient, compression: false }), 'scope-off', big);
+        expect(offClient.items.get('IDEM#scope-off|idem')?.body?.S).toBe(big);
+        expect(offClient.items.get('IDEM#scope-off|idem')?.bodyBr).toBe(undefined);
+        // Switched back on: the plain record still reads.
+        expect((await makeStore(offClient).peek('scope-off'))?.body).toBe(big);
+
+        const alwaysClient = new MemoryDdb();
+        await settle(new LambderDdbIdempotency({ tableName: 'test-table', client: alwaysClient, compression: { minBytes: 0 } }), 'scope-always', 'tiny');
+        expect(alwaysClient.items.get('IDEM#scope-always|idem')?.bodyBr?.B).toBeDefined();
+        // Switched off: the compressed record still reads.
+        const offReader = new LambderDdbIdempotency({ tableName: 'test-table', client: alwaysClient, compression: false });
+        expect((await offReader.peek('scope-always'))?.body).toBe('tiny');
+
+        expect(() => new LambderDdbIdempotency({ tableName: 'test-table', client: offClient, compression: { quality: 12 } })).toThrow();
+    });
+
     it('stores bodies of 1KB+ Brotli-compressed and replays them verbatim; small bodies stay plain', async () => {
         const client = new MemoryDdb();
         const store = makeStore(client);

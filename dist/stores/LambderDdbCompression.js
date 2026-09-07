@@ -1,11 +1,18 @@
 import { getZlib } from "../shared/node-polyfills.js";
-// Brotli compression shared by the DynamoDB-backed stores (LambderDdbCache,
-// LambderDdbIdempotency, LambderSessionManager). Values they persist are text
-// (JSON), so TEXT mode, and they all store it the same way: the Brotli bytes
-// beside the text's original UTF-8 byte length, which bounds the decompression
-// (a corrupt record cannot balloon memory) and verifies it. zlib is loaded
-// lazily through node-polyfills so these modules can sit in a frontend
-// bundle's import graph (via the package root) without breaking.
+/** Resolves a store's compression option against its defaults: null when off. */
+export const resolveCompressionOption = (option, defaults) => {
+    if (option === false)
+        return null;
+    const config = option === true || option === undefined ? {} : option;
+    const settings = { minBytes: config.minBytes ?? defaults.minBytes, quality: config.quality ?? defaults.quality };
+    if (!Number.isSafeInteger(settings.minBytes) || settings.minBytes < 0) {
+        throw new Error("compression.minBytes must be a non-negative integer");
+    }
+    if (!Number.isInteger(settings.quality) || settings.quality < 0 || settings.quality > 11) {
+        throw new Error("compression.quality must be an integer from 0 to 11");
+    }
+    return settings;
+};
 const requireZlib = async () => {
     const zlib = await getZlib();
     if (!zlib)

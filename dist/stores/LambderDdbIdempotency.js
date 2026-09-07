@@ -1,8 +1,8 @@
 import crypto from "crypto";
 import { DynamoDBClient, PutItemCommand, GetItemCommand, DeleteItemCommand, } from "@aws-sdk/client-dynamodb";
-import { brotliCompressText, brotliRestoreText } from "./LambderDdbCompression.js";
-/** Bodies at or above this size are stored Brotli-compressed; smaller ones stay plain. */
-const COMPRESS_MIN_BYTES = 1024;
+import { brotliCompressText, brotliRestoreText, resolveCompressionOption, } from "./LambderDdbCompression.js";
+/** Bodies of 1KB or more are stored Brotli-compressed by default; smaller ones stay plain. */
+const COMPRESSION_DEFAULTS = { minBytes: 1024, quality: 5 };
 /**
  * Stored-body budget inside DynamoDB's 400KB item limit (headers, keys and
  * attributes need headroom). Applies to the bytes actually stored, so a
@@ -22,10 +22,11 @@ const MAX_STORED_BODY_BYTES = 350_000;
  * and loses the scope to a retry can no longer overwrite or delete the
  * retry's claim (both settle calls become silent no-ops instead).
  *
- * Stored bodies of 1KB or more are Brotli-compressed (same scheme as
- * LambderDdbCache): the bodies are JSON envelopes that typically shrink
- * 5-10x, which cuts DynamoDB write units and lets large responses fit the
- * item budget instead of skipping replay storage.
+ * Stored bodies are Brotli-compressed from 1KB by default (same scheme as
+ * LambderDdbCache, see the `compression` option): the bodies are JSON
+ * envelopes that typically shrink 5-10x, which cuts DynamoDB write units
+ * and lets large responses fit the item budget instead of skipping replay
+ * storage.
  *
  * Table shape: string hash key `pk`, string range key `sk`, TTL on
  * `expiresAt`. Items are prefixed `IDEM#` by default, so the table can be
@@ -35,17 +36,14 @@ const MAX_STORED_BODY_BYTES = 350_000;
 export class LambderDdbIdempotency {
     tableName;
     keyPrefix;
-    compressionQuality;
+    compression;
     client;
     constructor(options) {
         if (!options.tableName.trim())
             throw new Error("tableName is required");
         this.tableName = options.tableName;
         this.keyPrefix = options.keyPrefix ?? "IDEM";
-        this.compressionQuality = options.compressionQuality ?? 5;
-        if (!Number.isInteger(this.compressionQuality) || this.compressionQuality < 0 || this.compressionQuality > 11) {
-            throw new Error("compressionQuality must be an integer from 0 to 11");
-        }
+        this.compression = resolveCompressionOption(options.compression, COMPRESSION_DEFAULTS);
         this.client = options.client ?? new DynamoDBClient(options.region ? { region: options.region } : {});
     }
     itemKey(scopeKey) {
@@ -142,10 +140,11 @@ export class LambderDdbIdempotency {
     }
     /**
      * Store the response for replays, overwriting the pending claim. Bodies
-     * of COMPRESS_MIN_BYTES or more are stored Brotli-compressed (they are
-     * JSON envelopes, which typically shrink 5-10x), cutting DynamoDB write
-     * units and letting large responses fit the item budget; smaller bodies
-     * stay plain. Returns:
+     * from the compression option's minBytes are stored Brotli-compressed
+     * (they are JSON envelopes, which typically shrink 5-10x), cutting
+     * DynamoDB write units and letting large responses fit the item budget;
+     * smaller bodies, or all of them with compression off, stay plain.
+     * Returns:
      *
      * - "stored": the record is in place and will replay.
      * - "too-large": even compressed, the body exceeds the item budget;
@@ -157,8 +156,8 @@ export class LambderDdbIdempotency {
         const nowSeconds = Math.floor(Date.now() / 1000);
         const rawBody = Buffer.from(body, "utf8");
         let bodyAttributes;
-        if (rawBody.byteLength >= COMPRESS_MIN_BYTES) {
-            const compressed = await brotliCompressText(rawBody, this.compressionQuality);
+        if (this.compression && rawBody.byteLength >= this.compression.minBytes) {
+            const compressed = await brotliCompressText(rawBody, this.compression.quality);
             if (compressed.byteLength > MAX_STORED_BODY_BYTES)
                 return "too-large";
             // bodyBytes bounds and verifies decompression on read.
