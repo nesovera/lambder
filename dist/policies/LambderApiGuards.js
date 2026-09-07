@@ -14,14 +14,14 @@ const toGuardEntries = (value) => {
 /**
  * Validate a preflight input slice (an apiInput slice of the raw payload, or
  * a guardInput value from the raw guardInputs map). Runs before the API's
- * own validation; failures answer the same 422 shape as regular input
- * validation. Shared with the rate-limit engine's apiInput-keyed policies.
+ * own validation; a failure throws the response `onInvalid` decides, the
+ * same one regular input validation answers. Shared with the rate-limit
+ * engine's apiInput-keyed policies.
  */
-export const parsePreflightSlice = (input, value, resolver) => {
+export const parsePreflightSlice = async (input, value, ctx, resolver, onInvalid) => {
     const parsed = input.safeParse(value);
-    if (!parsed.success) {
-        throw resolver.json({ error: "Input validation failed", zodError: parsed.error }, { statusCode: 422 });
-    }
+    if (!parsed.success)
+        throw await onInvalid(ctx, resolver, parsed.error);
     return parsed.data;
 };
 /**
@@ -30,7 +30,11 @@ export const parsePreflightSlice = (input, value, resolver) => {
  * guards during preflight. Composed into LambderApiPolicyEngine.
  */
 export class LambderApiGuardsEngine {
+    onInvalidInput;
     guards = {};
+    constructor(onInvalidInput) {
+        this.onInvalidInput = onInvalidInput;
+    }
     addGuards(guards) {
         for (const [name, guardDef] of Object.entries(guards)) {
             if (this.guards[name])
@@ -63,10 +67,10 @@ export class LambderApiGuardsEngine {
             const post = ctx.post;
             let payload;
             if (guardDef.apiInput) {
-                payload = parsePreflightSlice(guardDef.apiInput, post?.payload, resolver);
+                payload = await parsePreflightSlice(guardDef.apiInput, post?.payload, ctx, resolver, this.onInvalidInput);
             }
             else if (guardDef.guardInput) {
-                payload = parsePreflightSlice(guardDef.guardInput, post?.guardInputs?.[name], resolver);
+                payload = await parsePreflightSlice(guardDef.guardInput, post?.guardInputs?.[name], ctx, resolver, this.onInvalidInput);
             }
             // A guard's return value becomes the handler's typed
             // ctx.guardData[name]; check-only guards return undefined.

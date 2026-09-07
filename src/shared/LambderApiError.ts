@@ -19,6 +19,8 @@ export type LambderApiErrorOptions = {
      * 422 (reserved for input validation).
      */
     statusCode?: HttpStatusCode;
+    /** Extra response headers on the refusal (e.g. Retry-After on a rate limit). */
+    headers?: Record<string, string>;
     /** Underlying cause, preserved on the standard Error `cause` property. */
     cause?: unknown;
 };
@@ -51,6 +53,7 @@ export class LambderApiError extends Error {
     readonly notAuthorized?: boolean;
     readonly sessionExpired?: boolean;
     readonly statusCode?: HttpStatusCode;
+    readonly headers?: Record<string, string>;
 
     constructor(message: string, options: LambderApiErrorOptions = {}){
         super(message, options.cause !== undefined ? { cause: options.cause } : undefined);
@@ -59,6 +62,7 @@ export class LambderApiError extends Error {
         this.notAuthorized = options.notAuthorized;
         this.sessionExpired = options.sessionExpired;
         this.statusCode = options.statusCode;
+        this.headers = options.headers;
     }
 }
 
@@ -88,6 +92,8 @@ export type LambderRefuseOptions = {
     sessionExpired?: boolean;
     /** HTTP status of the refusal. Default 200; avoid 5xx (caller treats as crash) and 422 (reserved for validation). */
     statusCode?: HttpStatusCode;
+    /** Extra response headers on the refusal (e.g. Retry-After). */
+    headers?: Record<string, string>;
     /** Underlying cause, preserved on the Error cause property. */
     cause?: unknown;
 };
@@ -114,6 +120,7 @@ export const refuse: (content: string, options?: LambderRefuseOptions) => never 
         notAuthorized: options.notAuthorized,
         sessionExpired: options.sessionExpired,
         statusCode: options.statusCode,
+        headers: options.headers,
         cause: options.cause,
     });
 };

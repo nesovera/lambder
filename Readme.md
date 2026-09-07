@@ -2,10 +2,18 @@
 
 Lambder is a highly opinionated dynamic serverless framework designed to facilitate the management and implementation of routes and APIs within AWS Lambda functions, specifically tailored for TypeScript projects. It provides a streamlined approach to handling HTTP requests, managing sessions, and defining API routes, making serverless application development more intuitive and structured.
 
+**New in 4.2:**
+
+- **Rate-limit budgets are explicit**: every policy declares `budget: "perApi"` (each referencing API gets its own counter, so the numbers are a per-API ceiling) or `budget: "perPolicy"` (one counter shared by every API referencing the policy). There is no default, so a declaration always says what its numbers span; the policy is the group, and two separate shared budgets are two policies.
+- **Per-API tuning**: the `rateLimit` option gained a map form like guards, `rateLimit: { lookupPerIp: { perMin: 20 } }`, which merges window overrides over a perApi policy's own (a tighter burst keeps the policy's daily cap). Overriding the windows of a perPolicy policy is a startup error; `errorMessage` is overridable on either.
+- **Retry-After**: a 429 carries the exceeded window's reset as a `Retry-After` header (CORS exposes it by default via the new `exposeHeaders` option), `LambderCaller` failure outcomes surface it as `retryAfterSeconds`, `LambderDdbRateLimiter.isRateLimited()` answers `false | { window, limit, resetAt }`, and `LambderApiError`/`refuse()` accept `headers`.
+- **One refusal shape**: every refusal the framework itself authors (rate limit 429, idempotency 409 and 400, unknown API) is a `LambderRefusalMessage` (`{ type, content }`), and a policy's `errorMessage` is typed as one, so an `errorMessageHandler` reading `.content` works everywhere.
+- **One validation path**: preflight slices (guard `apiInput`/`guardInput`, rate-limit `apiInput` keys) answer through `setApiInputValidationErrorHandler` exactly like the API's own schema.
+
 **New in v4:**
 
 - **Declarative auth as guards**: guards take per-API params (`guards: { orgPermission: "SOME.PERMISSION" }`), can require a session (`session: true`, compile-checked), and RETURN typed values that land on the handler's `ctx.guardData[name]`. Together with the apiInput/guardInput input modes, permission checks and device auth become registration-time declarations instead of per-handler boilerplate.
-- **Hardened policy layer**: rate-limit policies can share one counter across APIs (`scope: "policy"`); idempotency replays answer before rate limits, survive client IP changes (key-scoped for public APIs, 16-char minimum keys), store full response headers, refuse to store Set-Cookie responses, and Brotli-compress stored bodies of 1KB+ so the ~350KB replay budget applies to compressed bytes.
+- **Hardened policy layer**: rate-limit policies can share one counter across APIs (now `budget: "perPolicy"`); idempotency replays answer before rate limits, survive client IP changes (key-scoped for public APIs, 16-char minimum keys), store full response headers, refuse to store Set-Cookie responses, and Brotli-compress stored bodies of 1KB+ so the ~350KB replay budget applies to compressed bytes.
 - **Secrets hashed at rest**: session records store only sha256 hashes of the bearer secrets, so a session-table read yields no usable cookies; `LambderSessionReadError` keeps a DynamoDB blip from reading as a logout.
 - **Three package entry points**: `lambder` (server), `lambder/client` (browser-safe by construction: no AWS SDK, no Node built-ins), `lambder/testing` (`LambderMSW`); sources organized into core/policies/session/stores/client/shared.
 - **Configuration at creation**: `initLambder<SessionData>().create({...})` takes the WHOLE configuration (serving options, session, cors, rate limits, guards, idempotency) in one declaration; the enable/define chain methods are gone, so nothing can be half-configured or wired in the wrong order, and api modules annotate with `typeof lambderApp` derived from the real instance. Plus `LambderCaller.createIdempotencyKeyScope()` for one self-rotating key per logical operation, and fail-open rate limiting logs its passes.
@@ -512,18 +520,22 @@ import { initLambder, LambderDdbRateLimiter, LambderDdbIdempotency, lambderGuard
 const lambder = initLambder<SessionData>().create({
     apiPath: "/api",
     // 1. Rate limiting: your limiter instance + named policies. Each policy
-    //    declares its windows AND what one counter tracks ("per").
+    //    declares its windows, what one counter tracks ("per"), and what one
+    //    budget spans ("budget", required so the numbers are never ambiguous):
+    //    "perApi" gives every referencing API its own counter (three APIs on a
+    //    60/min policy allow one IP 180/min in total), "perPolicy" makes every
+    //    referencing API share ONE counter. The policy IS the group: separate
+    //    shared budgets for, say, user APIs and report APIs are two policies.
     rateLimits: {
         limiter: new LambderDdbRateLimiter({ tableName: "app-rate-limiter", region: "us-east-1", failOpen: true }),
         policies: {
-            authPerIp:    { perMin: 5, perHour: 30, per: "ip" },
-            writePerUser: { perMin: 30, per: "session" },   // only referable from addSessionApi (also enforced at compile time)
+            authPerIp:    { perMin: 5, perHour: 30, per: "ip", budget: "perApi" },
+            writePerUser: { perMin: 30, per: "session", budget: "perApi" },   // only referable from addSessionApi (also enforced at compile time)
             codePerEmail: {
                 perMin: 3,
-                // scope "policy": ONE combined budget across every API that
-                // references this policy (send + register + reset share the
-                // 3/min). Default scope "api" gives each API its own counter.
-                scope: "policy",
+                // ONE combined budget across every API that references this
+                // policy: send + register + reset share the 3/min.
+                budget: "perPolicy",
                 // apiInput key: derives from the API's OWN payload. Validated
                 // before it runs, typed in the handler, and the policy is only
                 // referable from APIs whose input schema carries `email`.
@@ -580,14 +592,18 @@ lambder.addApi("public.resetPassword", {
     // in apiInput mode against the API's own payload.
     input: z.object({ email: z.string().email() }),
     output: z.object({ ok: z.boolean() }),
-    rateLimit: ["authPerIp", "codePerEmail"],   // stacked: checked in order, first exceeded refuses (429 envelope)
+    rateLimit: ["authPerIp", "codePerEmail"],   // stacked: checked in order, first exceeded refuses (429 envelope + Retry-After)
     guards: "captcha",                          // one name, a list of names, or a { name: param } map
 }, handler);
 
 lambder.addSessionApi("secure.order.create", {
     input: OrderSchema,
     output: OrderResultSchema,
-    rateLimit: "writePerUser",
+    // Map form: tune a perApi policy for this API. Overrides merge over the
+    // policy's windows (perMin here, the policy's other windows still apply)
+    // and errorMessage is overridable too. Window overrides on a perPolicy
+    // policy are a startup error: one shared counter has one set of limits.
+    rateLimit: { writePerUser: { perMin: 10 } },
     guards: { orgPermission: "ORDERS.CREATE" }, // param typed per guard; entries run in insertion order
     idempotency: true,                          // or { ttlSeconds: 3600 }; type error unless created with idempotency
 }, async (ctx, res) => {
@@ -619,7 +635,11 @@ const lambder = lambderApp.addHook(...).use(orderApi)...;
 export const handler = lambder.getHandler();
 ```
 
-Request flow per API: session (session APIs) → idempotency replay lookup → rate limits → guards → zod validation → idempotency claim → handler → idempotency store. The replay lookup runs first on purpose: a completed idempotent request answers its stored response without burning rate-limit quota or re-running guards (the original already passed them, and no handler executes either way). Refusals ride the envelope via `LambderApiError` (429 rate limited, 409 duplicate in flight), so the caller's `errorMessageHandler` surfaces them with zero client code.
+Request flow per API: session (session APIs) → idempotency replay lookup → rate limits → guards → zod validation → idempotency claim → handler → idempotency store. The replay lookup runs first on purpose: a completed idempotent request answers its stored response without burning rate-limit quota or re-running guards (the original already passed them, and no handler executes either way). Refusals ride the envelope via `LambderApiError` (429 rate limited, 409 duplicate in flight), carrying the standard `LambderRefusalMessage` shape unless a policy names its own `errorMessage`, so the caller's `errorMessageHandler` surfaces them with zero client code. A 429 also carries `Retry-After` (the exceeded fixed window's reset; `LambderCaller` outcomes expose it as `retryAfterSeconds`, and the CORS layer lists it in `Access-Control-Expose-Headers` by default).
+
+**Rate limits count attempts, not successes.** Each window is one atomic conditional increment, and a refused request keeps every increment made before the refusal: the smaller windows of the refusing policy, every policy listed before it, and all of them when a later guard or the input validation refuses. There is no compensating decrement (it would give up the conditional-ADD atomicity and add a write per refusal). So order stacked policies by which counter you want charged on refusals: `["authPerIp", "codePerEmail"]` still charges the IP when the per-email cap refuses, which is the abuse-resistant direction.
+
+Preflight input slices (guard `apiInput`/`guardInput` values, rate-limit `apiInput` keys) answer a rejection through the same path as the API's own schema: `setApiInputValidationErrorHandler` when set, otherwise the standard 422 body. One failure, one shape, whichever schema rejected it.
 
 **Idempotency semantics**: the client sends an `idempotencyKey` per call (see LambderCaller below); generate it once per logical operation with `LambderCaller.createIdempotencyKey()` and reuse it on retries. Keys must be 16-200 characters and UNGUESSABLE random (shorter keys refuse with 400): on session APIs the scope is session + API name + key, and on public APIs it is the key itself + API name, deliberately NOT the client IP, because the retry idempotency exists for (a timeout followed by a network switch) frequently arrives from a new IP. Concurrent duplicates of an in-flight request refuse with 409, repeats of a completed one replay the stored response verbatim until the TTL (response headers included, so headers set via `res.setHeader`/`res.addHeader` replay too), and a crashed original releases its claim so a retry actually retries. The replay rule for failures: RESPONSES are stored and replayed, refusals returned as envelopes (`res.api(null, { errorMessage })`) and thrown responses (`res.die.*`) included; EXCEPTIONS are not, so a thrown `LambderApiError`/`refuse()` releases the claim and a retry re-executes and decides afresh. Stored bodies of 1KB or more are Brotli-compressed (the same scheme as LambderDdbCache; `compressionQuality` on the store, default 5): JSON envelopes typically shrink 5-10x, which cuts DynamoDB write cost, and the ~350KB item budget applies to the COMPRESSED bytes, so even large responses usually stay replayable. Responses with status ≥ 500, bodies over the budget even compressed, and responses that set cookies are never stored (replaying one request's Set-Cookie, e.g. session tokens, into another would be wrong; such APIs still get in-flight 409 dedupe, just not replays). Claims are owner-checked, so an original that stalls past the pending window can no longer overwrite or delete the claim a retry has since taken. Requests without a key execute normally.
 

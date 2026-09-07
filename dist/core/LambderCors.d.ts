@@ -6,6 +6,12 @@ export type LambderCorsConfig = {
     credentials?: boolean;
     methods?: string[];
     allowHeaders?: string[];
+    /**
+     * Response headers a cross-origin browser caller may read. Default:
+     * ["Retry-After"], so rate-limit refusals stay readable (it is not on the
+     * CORS safelist, and a hidden header reads as null, not as an error).
+     */
+    exposeHeaders?: string[];
     maxAge?: number;
 };
 /** Mutate the response with the CORS headers the config allows for this request. */

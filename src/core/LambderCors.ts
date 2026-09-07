@@ -7,6 +7,12 @@ export type LambderCorsConfig = {
     credentials?: boolean;
     methods?: string[];
     allowHeaders?: string[];
+    /**
+     * Response headers a cross-origin browser caller may read. Default:
+     * ["Retry-After"], so rate-limit refusals stay readable (it is not on the
+     * CORS safelist, and a hidden header reads as null, not as an error).
+     */
+    exposeHeaders?: string[];
     maxAge?: number;
 };
 
@@ -38,5 +44,8 @@ export const applyCorsHeaders = (
         response.setHeader("Access-Control-Allow-Methods", (config.methods ?? ["GET", "POST", "OPTIONS"]).join(","));
         response.setHeader("Access-Control-Allow-Headers", (config.allowHeaders ?? ["Origin", "X-Requested-With", "Content-Type", "Accept"]).join(", "));
         if(config.maxAge !== undefined) response.setHeader("Access-Control-Max-Age", String(config.maxAge));
+    }else{
+        const exposeHeaders = config.exposeHeaders ?? ["Retry-After"];
+        if(exposeHeaders.length) response.setHeader("Access-Control-Expose-Headers", exposeHeaders.join(", "));
     }
 };
