@@ -8,8 +8,8 @@
  */
 export { default as LambderCaller } from "./client/LambderCaller.js";
 export type { LambderApiOutcome, LambderApiFailureReason, LambderCallOptions, LambderIdempotencyKeyScope, } from "./client/LambderCaller.js";
-export { LambderApiError, isLambderApiError, refuse } from "./shared/LambderApiError.js";
-export type { LambderApiErrorOptions, LambderRefusalMessage, LambderRefuseOptions } from "./shared/LambderApiError.js";
+export { LambderApiError, isLambderApiError, refuse, LAMBDER_REFUSAL_CODES } from "./shared/LambderApiError.js";
+export type { LambderApiErrorOptions, LambderRefusalMessage, LambderRefusalCode, LambderRefuseOptions } from "./shared/LambderApiError.js";
 export type { ApiContractShape, LambderApiResponse, LambderApiResponseConfig } from "./shared/LambderApiContract.js";
 export { html, xml, raw, jsonScript, escapeHtml, renderHtmlValue, LambderSafeHtml, type LambderHtmlValue } from "./shared/LambderHtml.js";
 export { createLambderI18n } from "./shared/LambderI18n.js";

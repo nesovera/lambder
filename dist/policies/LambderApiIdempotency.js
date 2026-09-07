@@ -1,4 +1,4 @@
-import { LambderApiError } from "../shared/LambderApiError.js";
+import { LambderApiError, LAMBDER_REFUSAL_CODES } from "../shared/LambderApiError.js";
 import { LambderResponse, normalizeHeaders } from "../core/LambderResponse.js";
 /** A crashed original must not block retries forever: pending claims expire on their own. */
 const IDEMPOTENCY_PENDING_TTL_SECONDS = 300;
@@ -40,7 +40,7 @@ export class LambderApiIdempotencyEngine {
             const content = `Invalid idempotency key: must be a string of ${IDEMPOTENCY_MIN_KEY_LENGTH}-${IDEMPOTENCY_MAX_KEY_LENGTH} characters.`;
             throw new LambderApiError(content, {
                 statusCode: 400,
-                errorMessage: { type: "error", content },
+                errorMessage: { type: "error", code: LAMBDER_REFUSAL_CODES.invalidIdempotencyKey, content },
             });
         }
         return rawKey;
@@ -116,7 +116,7 @@ export class LambderApiIdempotencyEngine {
         if (begun.state === "pending") {
             throw new LambderApiError(`Duplicate request for "${apiName}": the original is still processing.`, {
                 statusCode: 409,
-                errorMessage: { type: "warning", content: "This request is already being processed." },
+                errorMessage: { type: "warning", code: LAMBDER_REFUSAL_CODES.duplicateInFlight, content: "This request is already being processed." },
             });
         }
         if (begun.state === "done") {

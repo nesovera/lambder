@@ -1,9 +1,9 @@
 import { RATE_LIMIT_WINDOWS } from "../stores/LambderDdbRateLimiter.js";
-import { LambderApiError } from "../shared/LambderApiError.js";
+import { LambderApiError, LAMBDER_REFUSAL_CODES } from "../shared/LambderApiError.js";
 import { parsePreflightSlice } from "./LambderApiGuards.js";
 const RATE_LIMIT_WINDOW_KEYS = RATE_LIMIT_WINDOWS.map((window) => window.key);
 /** Refusal a rate-limited request answers unless the policy or the API's override names its own. */
-const DEFAULT_RATE_LIMIT_REFUSAL = { type: "warning", content: "Too many requests. Please try again later." };
+const DEFAULT_RATE_LIMIT_REFUSAL = { type: "warning", code: LAMBDER_REFUSAL_CODES.rateLimited, content: "Too many requests. Please try again later." };
 export function lambderRateLimitKey(key) { return key; }
 /** Normalize the three rateLimit-option forms into ordered entries; an explicit `undefined` map value declares nothing. */
 const toRateLimitEntries = (value) => {
@@ -41,8 +41,8 @@ export class LambderApiRateLimitsEngine {
                 throw new Error(`Lambder: rate-limit policy "${name}" declares no window (${RATE_LIMIT_WINDOW_KEYS.join("/")}).`);
             }
             const budget = policy.budget;
-            if (budget !== "perApi" && budget !== "perPolicy") {
-                throw new Error(`Lambder: rate-limit policy "${name}" needs budget: "perApi" (each referencing API counts separately) or "perPolicy" (one counter shared by every referencing API).`);
+            if (budget !== undefined && budget !== "perApi" && budget !== "perPolicy") {
+                throw new Error(`Lambder: rate-limit policy "${name}" has budget "${String(budget)}"; use "perApi" (default: each referencing API counts separately) or "perPolicy" (one counter shared by every referencing API).`);
             }
         }
         this.limiter = config.limiter;
@@ -91,8 +91,11 @@ export class LambderApiRateLimitsEngine {
             const exceeded = await this.limiter.isRateLimited(trackerKey, limits);
             if (exceeded) {
                 const retryAfterSeconds = Math.max(1, exceeded.resetAt - Math.floor(Date.now() / 1000));
+                // A policy's (or override's) own message inherits the framework
+                // code unless it sets a more specific one of its own.
+                const message = override?.errorMessage ?? policy.errorMessage;
                 throw new LambderApiError(`Rate limited: "${apiName}" exceeded policy "${name}" (${exceeded.window}: ${exceeded.limit}).`, {
-                    errorMessage: override?.errorMessage ?? policy.errorMessage ?? DEFAULT_RATE_LIMIT_REFUSAL,
+                    errorMessage: message ? { code: LAMBDER_REFUSAL_CODES.rateLimited, ...message } : DEFAULT_RATE_LIMIT_REFUSAL,
                     statusCode: 429,
                     headers: { "Retry-After": String(retryAfterSeconds) },
                 });

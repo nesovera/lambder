@@ -16,7 +16,7 @@ import { describe, it, expect } from 'vitest';
 import nodeCrypto from 'crypto';
 import { z } from 'zod';
 import Lambder, { initLambder } from '../src/core/Lambder.js';
-import { LambderApiError } from '../src/shared/LambderApiError.js';
+import { LambderApiError, LAMBDER_REFUSAL_CODES } from '../src/shared/LambderApiError.js';
 import { LambderDdbRateLimiter } from '../src/stores/LambderDdbRateLimiter.js';
 import { LambderDdbIdempotency } from '../src/stores/LambderDdbIdempotency.js';
 import { lambderGuard } from '../src/policies/LambderApiGuards.js';
@@ -152,10 +152,10 @@ describe('API policies - registration assertions', () => {
             .toThrow(/needs per/);
     });
 
-    it('requires budget on every policy: a declaration always says what its numbers span', () => {
+    it('rejects an unknown budget value', () => {
         const client = new MemoryDdb();
-        expect(() => initLambder().create({ publicPath: './public', apiPath: '/api', rateLimits: { limiter: makeLimiter(client), policies: { bad: { perMin: 1, per: 'ip' } as any } } }))
-            .toThrow(/needs budget: "perApi" .* or "perPolicy"/);
+        expect(() => initLambder().create({ publicPath: './public', apiPath: '/api', rateLimits: { limiter: makeLimiter(client), policies: { bad: { perMin: 1, per: 'ip', budget: 'global' } as any } } }))
+            .toThrow(/has budget "global"; use "perApi" \(default/);
     });
 
     it('rejects window overrides on a perPolicy policy (one shared counter has one set of limits)', () => {
@@ -187,7 +187,7 @@ describe('API policies - rate limiting', () => {
         expect(third.statusCode).toBe(429);
         // The default is the standard refusal shape, so errorMessageHandlers
         // that read .content work for rate limits like for refuse().
-        expect(JSON.parse(third.body || '{}').errorMessage).toEqual({ type: 'warning', content: 'Too many requests. Please try again later.' });
+        expect(JSON.parse(third.body || '{}').errorMessage).toEqual({ type: 'warning', code: 'lambder/rate-limited', content: 'Too many requests. Please try again later.' });
         // Retry-After is the exceeded window's reset, which the fixed window already knows.
         const retryAfter = Number(third.multiValueHeaders?.['Retry-After']?.[0]);
         expect(retryAfter).toBeGreaterThanOrEqual(1);
@@ -216,7 +216,20 @@ describe('API policies - rate limiting', () => {
         expect((await call('b@x.com')).statusCode).toBe(200);   // different bucket
         const blocked = await call('a@x.com');
         expect(blocked.statusCode).toBe(429);
-        expect(JSON.parse(blocked.body || '{}').errorMessage).toEqual({ type: 'warning', content: 'Too many attempts for this address.' });
+        // A policy's own message inherits the framework code.
+        expect(JSON.parse(blocked.body || '{}').errorMessage).toEqual({ type: 'warning', code: LAMBDER_REFUSAL_CODES.rateLimited, content: 'Too many attempts for this address.' });
+    });
+
+    it('a policy message with its own code keeps it (fill, not override)', async () => {
+        const lambder = initLambder().create({ publicPath: './public', apiPath: '/api', rateLimits: {
+                limiter: makeLimiter(new MemoryDdb()),
+                policies: { coded: { perMin: 1, per: 'ip', errorMessage: { type: 'warning', code: 'EMAIL_CODE_RATE_LIMITED', content: 'Slow down.' } } },
+            } })
+            .addApi('coded', { ...testSchema, rateLimit: 'coded' }, async (ctx, res) => res.api({ result: 'ok' }));
+
+        const call = () => lambder.render(createApiEvent('coded', { value: 'x' }), createMockContext());
+        await call();
+        expect(JSON.parse((await call()).body || '{}').errorMessage).toEqual({ type: 'warning', code: 'EMAIL_CODE_RATE_LIMITED', content: 'Slow down.' });
     });
 
     it('stacked policies are checked in order and any of them can refuse', async () => {
@@ -233,7 +246,7 @@ describe('API policies - rate limiting', () => {
         expect((await call()).statusCode).toBe(200);
         const second = await call();
         expect(second.statusCode).toBe(429);
-        expect(JSON.parse(second.body || '{}').errorMessage).toEqual({ type: 'error', content: 'strict says no' });
+        expect(JSON.parse(second.body || '{}').errorMessage).toEqual({ type: 'error', code: 'lambder/rate-limited', content: 'strict says no' });
     });
 
     it('fails open when the limiter instance says so and DynamoDB is down', async () => {
@@ -247,10 +260,10 @@ describe('API policies - rate limiting', () => {
         expect(JSON.parse(result.body || '{}').payload.result).toBe('through');
     });
 
-    it('budget "perApi" gives each API its own counter', async () => {
+    it('budget "perApi" (the default) gives each API its own counter', async () => {
         const lambder = initLambder().create({ publicPath: './public', apiPath: '/api', rateLimits: {
                 limiter: makeLimiter(new MemoryDdb()),
-                policies: { one: { perMin: 1, per: 'ip', budget: 'perApi' } },
+                policies: { one: { perMin: 1, per: 'ip' } },
             } })
             .addApi('first', { ...testSchema, rateLimit: 'one' }, async (ctx, res) => res.api({ result: 'a' }))
             .addApi('second', { ...testSchema, rateLimit: 'one' }, async (ctx, res) => res.api({ result: 'b' }));
@@ -277,7 +290,7 @@ describe('API policies - rate limiting', () => {
     it('the map form tunes a perApi policy per API: overrides merge over the policy windows and never touch other APIs', async () => {
         const lambder = initLambder().create({ publicPath: './public', apiPath: '/api', rateLimits: {
                 limiter: makeLimiter(new MemoryDdb()),
-                policies: { lookup: { perMin: 1, perHour: 2, per: 'ip', budget: 'perApi' } },
+                policies: { lookup: { perMin: 1, perHour: 2, per: 'ip' } },   // budget defaults to perApi, so it is tunable
             } })
             .addApi('tuned', { ...testSchema, rateLimit: { lookup: { perMin: 5, errorMessage: { type: 'warning', content: 'tuned says no' } } } }, async (ctx, res) => res.api({ result: 'a' }))
             .addApi('plain', { ...testSchema, rateLimit: 'lookup' }, async (ctx, res) => res.api({ result: 'b' }));
@@ -288,7 +301,7 @@ describe('API policies - rate limiting', () => {
         // perMin raised to 5, but the policy's perHour: 2 still applies (merge, not replace).
         const third = await call('tuned');
         expect(third.statusCode).toBe(429);
-        expect(JSON.parse(third.body || '{}').errorMessage).toEqual({ type: 'warning', content: 'tuned says no' });
+        expect(JSON.parse(third.body || '{}').errorMessage).toEqual({ type: 'warning', code: 'lambder/rate-limited', content: 'tuned says no' });
         // The plain API keeps the declared perMin: 1 on its own counter.
         expect((await call('plain')).statusCode).toBe(200);
         expect((await call('plain')).statusCode).toBe(429);
@@ -305,7 +318,7 @@ describe('API policies - rate limiting', () => {
         expect((await lambder.render(createApiEvent('second', { value: 'x' }), createMockContext())).statusCode).toBe(200);
         const blocked = await lambder.render(createApiEvent('first', { value: 'x' }), createMockContext());
         expect(blocked.statusCode).toBe(429);
-        expect(JSON.parse(blocked.body || '{}').errorMessage).toEqual({ type: 'error', content: 'first is closed' });
+        expect(JSON.parse(blocked.body || '{}').errorMessage).toEqual({ type: 'error', code: 'lambder/rate-limited', content: 'first is closed' });
     });
 
     it('stacked policies charge every counter checked before the refusing one (attempts count)', async () => {
@@ -752,7 +765,7 @@ describe('API policies - idempotency', () => {
 
         const result = await lambder.render(createApiEvent('op', { value: 'a' }, { idempotencyKey: KEY_BUSY }), createMockContext());
         expect(result.statusCode).toBe(409);
-        expect(JSON.parse(result.body || '{}').errorMessage).toEqual({ type: 'warning', content: 'This request is already being processed.' });
+        expect(JSON.parse(result.body || '{}').errorMessage).toEqual({ type: 'warning', code: 'lambder/duplicate-in-flight', content: 'This request is already being processed.' });
     });
 
     it('releases the claim when the handler crashes, so a retry re-executes', async () => {

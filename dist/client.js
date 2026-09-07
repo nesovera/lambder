@@ -10,7 +10,7 @@
 export { default as LambderCaller } from "./client/LambderCaller.js";
 // Typed API refusals (isomorphic: shared code may throw them from anywhere;
 // in the browser they are plain Errors).
-export { LambderApiError, isLambderApiError, refuse } from "./shared/LambderApiError.js";
+export { LambderApiError, isLambderApiError, refuse, LAMBDER_REFUSAL_CODES } from "./shared/LambderApiError.js";
 // Type-safe templating (tagged templates with auto-escaping)
 export { html, xml, raw, jsonScript, escapeHtml, renderHtmlValue, LambderSafeHtml } from "./shared/LambderHtml.js";
 // Typed translations (standalone, isomorphic)

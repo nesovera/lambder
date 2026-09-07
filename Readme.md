@@ -4,10 +4,10 @@ Lambder is a highly opinionated dynamic serverless framework designed to facilit
 
 **New in 4.2:**
 
-- **Rate-limit budgets are explicit**: every policy declares `budget: "perApi"` (each referencing API gets its own counter, so the numbers are a per-API ceiling) or `budget: "perPolicy"` (one counter shared by every API referencing the policy). There is no default, so a declaration always says what its numbers span; the policy is the group, and two separate shared budgets are two policies.
+- **Rate-limit budgets**: a policy's `budget` is `"perApi"` (default: each referencing API gets its own counter, so the numbers are a per-API ceiling and three APIs on a 60/min policy allow one IP 180/min in total) or `"perPolicy"` (one counter shared by every API referencing the policy). The policy is the group, and two separate shared budgets are two policies.
 - **Per-API tuning**: the `rateLimit` option gained a map form like guards, `rateLimit: { lookupPerIp: { perMin: 20 } }`, which merges window overrides over a perApi policy's own (a tighter burst keeps the policy's daily cap). Overriding the windows of a perPolicy policy is a startup error; `errorMessage` is overridable on either.
 - **Retry-After**: a 429 carries the exceeded window's reset as a `Retry-After` header (CORS exposes it by default via the new `exposeHeaders` option), `LambderCaller` failure outcomes surface it as `retryAfterSeconds`, `LambderDdbRateLimiter.isRateLimited()` answers `false | { window, limit, resetAt }`, and `LambderApiError`/`refuse()` accept `headers`.
-- **One refusal shape**: every refusal the framework itself authors (rate limit 429, idempotency 409 and 400, unknown API) is a `LambderRefusalMessage` (`{ type, content }`), and a policy's `errorMessage` is typed as one, so an `errorMessageHandler` reading `.content` works everywhere.
+- **One refusal shape, with codes**: `LambderRefusalMessage` gained an optional machine-readable `code` (`refuse(content, { code })`), so clients branch and translate on an identifier instead of string-matching prose. Every refusal the framework itself authors (rate limit 429, idempotency 409 and 400, unknown API) is a `LambderRefusalMessage` stamped with a `LAMBDER_REFUSAL_CODES` constant under the reserved `lambder/` prefix; a rate-limit policy's own `errorMessage` (typed as a refusal message) inherits `lambder/rate-limited` unless it sets a code.
 - **One validation path**: preflight slices (guard `apiInput`/`guardInput`, rate-limit `apiInput` keys) answer through `setApiInputValidationErrorHandler` exactly like the API's own schema.
 
 **New in v4:**
@@ -479,7 +479,7 @@ Responses are finalized once at the end of the request: automatic gzip (when the
 
 ### Typed API Refusals (refuse / LambderApiError)
 
-A refusal ("you are not allowed", "quota exceeded") is not a crash. `res.die.*` covers refusals where you hold the resolver, but shared helpers (permission checks, validators) usually don't. The one-liner for the common case is `refuse()`: callable from anywhere in an API call's stack, it throws a typed refusal carrying the standard `LambderRefusalMessage` shape (`{ type, title?, content }`) that the pipeline maps onto the envelope's `errorMessage`, so refusals never pollute crash logging and clients get a parseable response:
+A refusal ("you are not allowed", "quota exceeded") is not a crash. `res.die.*` covers refusals where you hold the resolver, but shared helpers (permission checks, validators) usually don't. The one-liner for the common case is `refuse()`: callable from anywhere in an API call's stack, it throws a typed refusal carrying the standard `LambderRefusalMessage` shape (`{ type, code?, title?, content }`) that the pipeline maps onto the envelope's `errorMessage`, so refusals never pollute crash logging and clients get a parseable response:
 
 ```typescript
 import { refuse } from "lambder";
@@ -487,8 +487,11 @@ import { refuse } from "lambder";
 if (!row) refuse("Record not found.");                                  // { type: "warning", content }
 if (!isAdmin) refuse("Admins only.", { notAuthorized: true });          // + envelope flag
 refuse("Too many attempts.", { type: "error", statusCode: 429 });       // custom rendering intent + status
+if (exists) refuse("Already reported.", { code: "ALREADY_REPORTED" }); // + machine-readable identity
 // TypeScript applies never-return narrowing: after `if (!row) refuse(...)`, row is defined.
 ```
+
+`code` is the refusal's identity for machines: clients branch and translate on it (a translated client never displays `content`, it looks the code up), and `content` stays the human-readable fallback for codes a client does not know yet. Keep your app's codes as one typed vocabulary in shared code. The framework stamps the refusals it authors itself with `LAMBDER_REFUSAL_CODES` (exported from `lambder` and `lambder/client`) under the reserved `lambder/` prefix, so app codes never collide: `rateLimited`, `duplicateInFlight`, `invalidIdempotencyKey`, `apiNotFound`. A rate-limit policy's own `errorMessage` inherits `lambder/rate-limited` unless it sets a code, so an `errorMessageHandler` can treat every rate limit alike and still special-case the ones you name.
 
 For full control of the errorMessage payload (apps with their own message vocabulary), throw `LambderApiError` directly; `refuse()` is sugar over it:
 
@@ -521,16 +524,16 @@ const lambder = initLambder<SessionData>().create({
     apiPath: "/api",
     // 1. Rate limiting: your limiter instance + named policies. Each policy
     //    declares its windows, what one counter tracks ("per"), and what one
-    //    budget spans ("budget", required so the numbers are never ambiguous):
-    //    "perApi" gives every referencing API its own counter (three APIs on a
-    //    60/min policy allow one IP 180/min in total), "perPolicy" makes every
-    //    referencing API share ONE counter. The policy IS the group: separate
-    //    shared budgets for, say, user APIs and report APIs are two policies.
+    //    budget spans ("budget"): "perApi" (default) gives every referencing
+    //    API its own counter, so three APIs on a 60/min policy allow one IP
+    //    180/min in total; "perPolicy" makes every referencing API share ONE
+    //    counter. The policy IS the group: separate shared budgets for, say,
+    //    user APIs and report APIs are two policies.
     rateLimits: {
         limiter: new LambderDdbRateLimiter({ tableName: "app-rate-limiter", region: "us-east-1", failOpen: true }),
         policies: {
-            authPerIp:    { perMin: 5, perHour: 30, per: "ip", budget: "perApi" },
-            writePerUser: { perMin: 30, per: "session", budget: "perApi" },   // only referable from addSessionApi (also enforced at compile time)
+            authPerIp:    { perMin: 5, perHour: 30, per: "ip" },
+            writePerUser: { perMin: 30, per: "session" },   // only referable from addSessionApi (also enforced at compile time)
             codePerEmail: {
                 perMin: 3,
                 // ONE combined budget across every API that references this
