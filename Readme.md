@@ -2,6 +2,10 @@
 
 Lambder is a highly opinionated dynamic serverless framework designed to facilitate the management and implementation of routes and APIs within AWS Lambda functions, specifically tailored for TypeScript projects. It provides a streamlined approach to handling HTTP requests, managing sessions, and defining API routes, making serverless application development more intuitive and structured.
 
+**New in 4.3:**
+
+- **Compressed sessions**: `session.data` is stored Brotli-compressed by default, as `dataBr` + `dataBytes` on the record, the same scheme LambderDdbCache and LambderDdbIdempotency use (one shared implementation). A session that caches roles, permissions or product lists shrinks 2-3x and stays within one DynamoDB read unit for longer. `session.compression` is `true` by default (the same as `{ minBytes: 0 }`: every record compressed); `false` turns it off and `{ minBytes }` compresses only from that JSON size. Records written under either setting read back, so it can be switched on or off on a live table.
+
 **New in 4.2:**
 
 - **Rate-limit budgets**: a policy's `budget` is `"perApi"` (default: each referencing API gets its own counter, so the numbers are a per-API ceiling and three APIs on a 60/min policy allow one IP 180/min in total) or `"perPolicy"` (one counter shared by every API referencing the policy). The policy is the group, and two separate shared budgets are two policies.
@@ -302,6 +306,7 @@ const lambder = initLambder<SessionData>().create({
         tableRegion: "us-east-1",
         sessionSalt: "CHANGE-THIS-TO-A-SECURE-RANDOM-STRING",
         enableSlidingExpiration: true, // Optional: extend session on each access
+        compression: true,             // Optional: Brotli-compress session.data at rest (default true; false to disable, or { minBytes })
         // Optionally customize cookie names (defaults: LMDRSESSIONTKID, LMDRSESSIONCSTK)
         tokenCookieKey: "MY_SESSION_TOKEN",
         csrfCookieKey: "MY_CSRF_TOKEN",
@@ -352,6 +357,21 @@ Semantics:
 - The renewal write and the sliding-expiration write share a single DynamoDB put when both are due.
 - Records created before `dataRefresh` was enabled renew on their first read.
 - `updateSessionData()` marks data fresh (it was just written deliberately); `regenerateSession()` carries the old freshness stamp over.
+
+#### Session data at rest (`compression`)
+
+`session.data` is stored Brotli-compressed by default: the record carries the data's JSON as Brotli bytes in `dataBr` beside its byte length in `dataBytes`, in place of a plain `data` attribute. It is the scheme `LambderDdbCache` and `LambderDdbIdempotency` already use, from one shared implementation, and the byte length both bounds the decompression and verifies it, so a truncated record fails to decode rather than decoding to something else. Session data that caches roles, permissions or product lists typically shrinks 2-3x, which keeps a growing session within one DynamoDB read unit (4KB for the consistent reads sessions use) and one write unit (1KB) for longer.
+
+```typescript
+session: {
+    // ...
+    compression: true, // default: every record compressed, the same as { minBytes: 0 }
+    // compression: { minBytes: 1024 } compresses only records whose JSON is 1KB+
+    // compression: false stores data as a plain attribute
+}
+```
+
+`quality` (Brotli 0-11, default 5) is also accepted. Reads accept both record shapes, so the setting can be switched on or off on a live table: records written under the other setting keep reading, and each is rewritten in the current shape on its next write (a sliding-expiration or `dataRefresh` write included). A compressed record that fails to decode is treated like any malformed record: no session.
 
 #### Session Controller
 

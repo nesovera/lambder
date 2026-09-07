@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import { DynamoDBClient, PutItemCommand, GetItemCommand, DeleteItemCommand, } from "@aws-sdk/client-dynamodb";
-import { brotliCompressText, brotliDecompressText } from "./LambderDdbCompression.js";
+import { brotliCompressText, brotliRestoreText } from "./LambderDdbCompression.js";
 /** Bodies at or above this size are stored Brotli-compressed; smaller ones stay plain. */
 const COMPRESS_MIN_BYTES = 1024;
 /**
@@ -67,16 +67,8 @@ export class LambderDdbIdempotency {
     /** A stored item's response body: plain (`body`) or Brotli (`bodyBr` + `bodyBytes`). */
     static async readItemBody(item) {
         const compressed = item.bodyBr?.B;
-        if (compressed) {
-            const declaredBytes = Number(item.bodyBytes?.N ?? 0);
-            if (!declaredBytes)
-                throw new Error("LambderDdbIdempotency: compressed record is missing bodyBytes.");
-            const output = await brotliDecompressText(Buffer.from(compressed), declaredBytes);
-            if (output.length !== declaredBytes) {
-                throw new Error("LambderDdbIdempotency: stored body length does not match its record.");
-            }
-            return output.toString("utf8");
-        }
+        if (compressed)
+            return await brotliRestoreText(compressed, Number(item.bodyBytes?.N ?? 0));
         return item.body?.S ?? "";
     }
     /**

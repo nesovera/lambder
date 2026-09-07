@@ -78,19 +78,17 @@ Each session is stored as:
 
 ```json
 {
-  "pk": "hash_of_user_id",
-  "sk": "random_64_char_hex",
-  "sessionToken": "hash_of_user_id:random_64_char_hex",
-  "csrfToken": "random_64_char_hex",
+  "pk": "sha256(sessionKey + sessionSalt)",
+  "sk": "sha256(cookie secret)",
+  "csrfTokenHash": "sha256(csrf token)",
   "sessionKey": "user_123",
-  "data": {
-    "userId": "user_123",
-    "username": "john_doe",
-    "role": "admin"
-  },
+  "dataBr": "<binary: Brotli of the data JSON>",
+  "dataBytes": 61,
   "createdAt": 1697712000,
   "lastAccessedAt": 1697712300,
   "expiresAt": 1700304000,
   "ttlInSeconds": 2592000
 }
 ```
+
+The bearer secrets are stored only as hashes (see "How the secrets are stored" in the Readme). Session data is Brotli-compressed by default, `dataBr` beside its JSON byte length `dataBytes`; with `session.compression` off, or below its `minBytes`, the data is a plain `data` map attribute instead. Records written under either setting read back, so the setting can be switched on or off on a live table. Sessions configured with `dataRefresh` also carry `dataExpiresAt`.

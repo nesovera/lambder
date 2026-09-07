@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, QueryCommand, DeleteCommand, PutCommand, GetCommand } from "@aws-sdk/lib-dynamodb";
+import { brotliCompressText, brotliRestoreText } from "../stores/LambderDdbCompression.js";
 /**
  * Wraps errors thrown by the dataRefresh callback so they stay
  * distinguishable from "no session": fetchSessionIfExists() swallows missing
@@ -35,7 +36,8 @@ export default class LambderSessionManager {
     enableSlidingExpiration;
     slidingWriteIntervalSeconds;
     dataRefresh;
-    constructor({ tableName, tableRegion, partitionKey, sortKey, sessionSalt, enableSlidingExpiration = true, slidingWriteIntervalSeconds, dataRefresh, }) {
+    compression;
+    constructor({ tableName, tableRegion, partitionKey, sortKey, sessionSalt, enableSlidingExpiration = true, slidingWriteIntervalSeconds, dataRefresh, compression = true, }) {
         this.tableName = tableName;
         this.sessionSalt = sessionSalt;
         this.partitionKey = partitionKey;
@@ -43,6 +45,19 @@ export default class LambderSessionManager {
         this.enableSlidingExpiration = enableSlidingExpiration;
         this.slidingWriteIntervalSeconds = slidingWriteIntervalSeconds ?? null;
         this.dataRefresh = dataRefresh ?? null;
+        const compressionConfig = compression === true ? {} : compression;
+        this.compression = compressionConfig ? {
+            minBytes: compressionConfig.minBytes ?? 0,
+            quality: compressionConfig.quality ?? 5,
+        } : null;
+        if (this.compression) {
+            if (!Number.isSafeInteger(this.compression.minBytes) || this.compression.minBytes < 0) {
+                throw new Error("compression.minBytes must be a non-negative integer");
+            }
+            if (!Number.isInteger(this.compression.quality) || this.compression.quality < 0 || this.compression.quality > 11) {
+                throw new Error("compression.quality must be an integer from 0 to 11");
+            }
+        }
         const ddbClient = new DynamoDBClient({ region: tableRegion });
         this.ddbDocumentClient = DynamoDBDocumentClient.from(ddbClient);
     }
@@ -74,7 +89,22 @@ export default class LambderSessionManager {
         return null;
     }
     ;
-    async ddbPutItem(item) {
+    /**
+     * Persists a session record. With compression on, `data` is stored as
+     * Brotli bytes (`dataBr`) beside its JSON byte length (`dataBytes`)
+     * once the JSON reaches minBytes; otherwise it stays a plain attribute.
+     * See LambderSessionCompressionConfig.
+     */
+    async ddbPutItem(session) {
+        const { data, ...item } = session;
+        const raw = this.compression && Buffer.from(JSON.stringify(data), "utf8");
+        if (this.compression && raw && raw.byteLength >= this.compression.minBytes) {
+            item.dataBr = await brotliCompressText(raw, this.compression.quality);
+            item.dataBytes = raw.byteLength;
+        }
+        else {
+            item.data = data;
+        }
         return await this.ddbDocumentClient.send(new PutCommand({ TableName: this.tableName, Item: item, }));
     }
     ;
@@ -169,6 +199,14 @@ export default class LambderSessionManager {
         }
         if (!session)
             return null;
+        // A compressed record (see ddbPutItem) decodes back into `data`. One
+        // that fails to decode throws, which the controller treats like any
+        // malformed record: no session.
+        if (session.dataBr) {
+            session.data = JSON.parse(await brotliRestoreText(session.dataBr, session.dataBytes));
+            delete session.dataBr;
+            delete session.dataBytes;
+        }
         if (!session.csrfTokenHash)
             return null;
         if (!session.sessionKey)

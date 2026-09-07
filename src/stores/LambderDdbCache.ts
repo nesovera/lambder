@@ -9,7 +9,7 @@ import {
     type WriteRequest,
 } from "@aws-sdk/client-dynamodb";
 import { getCrypto } from "../shared/node-polyfills.js";
-import { brotliCompressText, brotliDecompressText } from "./LambderDdbCompression.js";
+import { brotliCompressText, brotliRestoreText } from "./LambderDdbCompression.js";
 import { LRUCache } from "lru-cache";
 
 const DEFAULT_TTL_SECONDS = 365 * 24 * 60 * 60;
@@ -64,7 +64,8 @@ export interface LambderDdbCacheGetOrSetOptions extends LambderDdbCacheSetOption
 // Node builtins are loaded lazily through node-polyfills so this module can
 // sit in a frontend bundle's import graph (via the package root) without
 // breaking; using the cache at runtime still requires Node. Brotli helpers
-// are shared with LambderDdbIdempotency via ./LambderDdbCompression.js.
+// are shared with LambderDdbIdempotency and LambderSessionManager via
+// ./LambderDdbCompression.js.
 const requireCrypto = async () => {
     const crypto = await getCrypto();
     if (!crypto) throw new Error("LambderDdbCache requires a Node.js environment.");
@@ -162,10 +163,7 @@ export class LambderDdbCache {
         const nowSeconds = this.nowSeconds();
         if (cached && cached.expiresAt > nowSeconds) {
             try {
-                const output = await brotliDecompressText(cached.compressed, this.maxValueBytes);
-                if (output.length === cached.uncompressedBytes) {
-                    return JSON.parse(output.toString("utf8")) as T;
-                }
+                return JSON.parse(await brotliRestoreText(cached.compressed, cached.uncompressedBytes)) as T;
             } catch {
                 // Fall through to DynamoDB; the in-memory copy is disposable.
             }
@@ -185,13 +183,9 @@ export class LambderDdbCache {
                 throw new Error("compressed checksum does not match manifest");
             }
 
-            const output = await brotliDecompressText(compressed, this.maxValueBytes);
-            if (output.length !== manifest.uncompressedBytes) {
-                throw new Error("uncompressed byte length does not match manifest");
-            }
-            const json = output.toString("utf8");
+            const json = await brotliRestoreText(compressed, manifest.uncompressedBytes);
             const parsed = JSON.parse(json) as T;
-            this.remember(normalizedKey, compressed, output.length, manifest.expiresAt);
+            this.remember(normalizedKey, compressed, manifest.uncompressedBytes, manifest.expiresAt);
             return parsed;
         } catch (error) {
             await this.invalidateManifest(pk, manifest.version);
