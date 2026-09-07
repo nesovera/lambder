@@ -13,7 +13,7 @@ import nodeCrypto from 'crypto';
 import zlib from 'zlib';
 import { decodeBody } from './helpers.js';
 import { mockClient } from 'aws-sdk-client-mock';
-import { DynamoDBDocumentClient, GetCommand, PutCommand, DeleteCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, PutCommand, DeleteCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { z } from 'zod';
 import LambderSessionManager, { LambderSessionDataRefreshError, LambderSessionReadError, type LambderSessionContext } from '../src/session/LambderSessionManager.js';
 import LambderSessionController from '../src/session/LambderSessionController.js';
@@ -1673,5 +1673,100 @@ describe('LambderSessionManager compression', () => {
         const item = ddbMock.commandCalls(PutCommand)[0]!.args[0].input.Item!;
         expect(item.data).toEqual(data);
         expect(item.dataBr).toBeUndefined();
+    });
+});
+
+// ── expireSessionDataAllByKey: apply a subject's auth change now ────────────
+
+describe('LambderSessionManager expireSessionDataAllByKey', () => {
+    const nowSec = () => Math.floor(Date.now() / 1000);
+    const baseOptions = {
+        tableName: 'test-sessions',
+        tableRegion: 'us-east-1',
+        partitionKey: 'pk',
+        sortKey: 'sk',
+        sessionSalt: 'test-salt-12345',
+    };
+    // The partition key is sha256(sessionKey + salt).
+    const pkOf = (sessionKey: string) => hashTok(`${sessionKey}${baseOptions.sessionSalt}`);
+    const makeManager = () => new LambderSessionManager({
+        ...baseOptions,
+        dataRefresh: { ttlSeconds: 600, refresh: async (session) => session.data },
+    });
+
+    beforeEach(() => { ddbMock.reset(); });
+
+    it('stamps dataExpiresAt to now on every session of the key, only if the record still exists', async () => {
+        ddbMock.on(QueryCommand).resolves({ Items: [{ sk: 'sk-1' }, { sk: 'sk-2' }] });
+        ddbMock.on(UpdateCommand).resolves({});
+
+        await expect(makeManager().expireSessionDataAllByKey('user-123')).resolves.toBe(true);
+
+        const query = ddbMock.commandCalls(QueryCommand)[0]!.args[0].input;
+        expect(query.ExpressionAttributeValues?.[':pv']).toBe(pkOf('user-123'));
+        const updates = ddbMock.commandCalls(UpdateCommand).map((call) => call.args[0].input);
+        expect(updates.map((update) => update.Key?.sk)).toEqual(['sk-1', 'sk-2']);
+        for (const update of updates) {
+            expect(update.Key?.pk).toBe(pkOf('user-123'));
+            expect(update.UpdateExpression).toBe('SET #dataExpiresAt = :now');
+            expect(update.ConditionExpression).toBe('attribute_exists(#sk)');
+            expect(update.ExpressionAttributeNames).toEqual({ '#dataExpiresAt': 'dataExpiresAt', '#sk': 'sk' });
+            expect(update.ExpressionAttributeValues?.[':now']).toBeGreaterThanOrEqual(nowSec() - 1);
+            expect(update.ExpressionAttributeValues?.[':now']).toBeLessThanOrEqual(nowSec());
+        }
+    });
+
+    it('skips a session deleted between the query and the update; other failures propagate', async () => {
+        ddbMock.on(QueryCommand).resolves({ Items: [{ sk: 'sk-1' }] });
+        ddbMock.on(UpdateCommand).rejects(Object.assign(new Error('gone'), { name: 'ConditionalCheckFailedException' }));
+        await expect(makeManager().expireSessionDataAllByKey('user-123')).resolves.toBe(true);
+
+        ddbMock.on(UpdateCommand).rejects(new Error('ddb down'));
+        await expect(makeManager().expireSessionDataAllByKey('user-123')).rejects.toThrow('ddb down');
+    });
+
+    it('requires dataRefresh to be configured', async () => {
+        await expect(new LambderSessionManager(baseOptions).expireSessionDataAllByKey('user-123'))
+            .rejects.toThrow(/dataRefresh is not configured/);
+        expect(ddbMock.commandCalls(QueryCommand).length).toBe(0);
+    });
+
+    it('a stamped session renews its data on the next read', async () => {
+        // The stamp is dataExpiresAt = now, and getSession renews once dataExpiresAt <= now.
+        const refresh = vi.fn(async () => ({ role: 'admin' }));
+        ddbMock.on(GetCommand).resolves({ Item: {
+            pk: 'hashed-key',
+            sk: hashTok('sort-key'),
+            csrfTokenHash: hashTok('csrf-token'),
+            sessionKey: 'user-123',
+            data: { role: 'user' },
+            createdAt: nowSec() - 1000,
+            expiresAt: nowSec() + 3600,
+            lastAccessedAt: nowSec(),
+            ttlInSeconds: 3600,
+            dataExpiresAt: nowSec(),
+        } });
+        ddbMock.on(PutCommand).resolves({});
+
+        const session = await new LambderSessionManager({ ...baseOptions, dataRefresh: { ttlSeconds: 600, refresh } })
+            .getSession('hashed-key:sort-key');
+
+        expect(refresh).toHaveBeenCalledOnce();
+        expect(session?.data).toEqual({ role: 'admin' });
+    });
+
+    it('is exposed on the session controller without a fetched session', async () => {
+        ddbMock.on(QueryCommand).resolves({ Items: [{ sk: 'sk-1' }] });
+        ddbMock.on(UpdateCommand).resolves({});
+        const controller = new LambderSessionController({
+            lambderSessionManager: makeManager(),
+            sessionTokenCookieKey: 'sessionToken',
+            sessionCsrfCookieKey: 'csrfToken',
+            ctx: { cookie: {}, session: null, _otherInternal: { isApiCall: true } } as any,
+        });
+
+        await controller.expireSessionDataAllByKey('user-123');
+
+        expect(ddbMock.commandCalls(UpdateCommand).length).toBe(1);
     });
 });

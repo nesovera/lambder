@@ -3,7 +3,7 @@ import Lambder from './core/Lambder.js';
 export default Lambder;
 export { initLambder } from './core/Lambder.js';
 export { default as LambderCaller } from "./client/LambderCaller.js";
-export type { LambderApiOutcome, LambderApiFailureReason, LambderCallOptions, LambderIdempotencyKeyScope } from "./client/LambderCaller.js";
+export type { LambderApiOutcome, LambderApiFailureReason, LambderCallOptions, LambderCallerOptions, LambderGuardInputsProvider, LambderProvidedGuardInputs, LambderIdempotencyKeyScope } from "./client/LambderCaller.js";
 
 // Typed API refusals (isomorphic: shared code may throw them from anywhere)
 export { LambderApiError, isLambderApiError, refuse, LAMBDER_REFUSAL_CODES } from "./shared/LambderApiError.js";
@@ -51,8 +51,10 @@ export type {
 } from "./core/Lambder.js";
 
 // Public file serving
-export { LambderPublicFilesHandler } from "./core/LambderPublicFiles.js";
-export type { LambderPublicFilesOptions } from "./core/LambderPublicFiles.js";
+export { LambderPublicFilesHandler, LambderLocalFileSource } from "./core/LambderPublicFiles.js";
+export type { LambderPublicFilesOptions, LambderPublicFileSource, LambderPublicFile } from "./core/LambderPublicFiles.js";
+export { LambderS3FileSource } from "./stores/LambderS3FileSource.js";
+export type { LambderS3FileSourceOptions } from "./stores/LambderS3FileSource.js";
 
 // Session types
 export type { LambderSessionCookieOptions } from "./session/LambderSessionController.js";

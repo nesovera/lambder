@@ -49,6 +49,13 @@ export default class LambderSessionController<TSessionData = any> {
      * session and touches no cookies, so it works on any subject.
      */
     deleteSessionAllByKey(sessionKey: string): Promise<void>;
+    /**
+     * Marks the data of every session of the given sessionKey stale, so each
+     * renews via dataRefresh on its next read: the way to apply a change to
+     * a subject's roles or permissions immediately, without logging them
+     * out. Needs no fetched session; requires dataRefresh.
+     */
+    expireSessionDataAllByKey(sessionKey: string): Promise<void>;
     endSession(): Promise<void>;
     endSessionAll(): Promise<void>;
 }

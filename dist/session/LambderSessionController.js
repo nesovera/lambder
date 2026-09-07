@@ -151,6 +151,16 @@ export default class LambderSessionController {
         await this.lambderSessionManager.deleteSessionAllByKey(sessionKey);
     }
     ;
+    /**
+     * Marks the data of every session of the given sessionKey stale, so each
+     * renews via dataRefresh on its next read: the way to apply a change to
+     * a subject's roles or permissions immediately, without logging them
+     * out. Needs no fetched session; requires dataRefresh.
+     */
+    async expireSessionDataAllByKey(sessionKey) {
+        await this.lambderSessionManager.expireSessionDataAllByKey(sessionKey);
+    }
+    ;
     async endSession() {
         if (!this.ctx.session)
             throw new Error("Session not found.");

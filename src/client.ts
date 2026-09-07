@@ -13,6 +13,9 @@ export type {
     LambderApiOutcome,
     LambderApiFailureReason,
     LambderCallOptions,
+    LambderCallerOptions,
+    LambderGuardInputsProvider,
+    LambderProvidedGuardInputs,
     LambderIdempotencyKeyScope,
 } from "./client/LambderCaller.js";
 

@@ -1,6 +1,6 @@
 {
   "name": "lambder",
-  "version": "4.3.2",
+  "version": "4.4.1",
   "description": "",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -61,6 +61,7 @@
     "zod": "^4.1.12"
   },
   "peerDependencies": {
+    "@aws-sdk/client-s3": "^3.574.0",
     "msw": "^2.0.0"
   },
   "peerDependenciesMeta": {
@@ -69,6 +70,7 @@
     }
   },
   "devDependencies": {
+    "@aws-sdk/client-s3": "^3.1127.0",
     "@types/aws-lambda": "^8.10.136",
     "@types/cookie": "^0.6.0",
     "@types/js-cookie": "^3.0.6",
