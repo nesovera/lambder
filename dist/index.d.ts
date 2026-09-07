@@ -41,3 +41,5 @@ export type { LambderLanguageMeta, LambderI18nConfig, LambderI18nInstance, Lambd
 export { type ApiContractShape, type LambderApiResponse, type LambderApiResponseConfig, } from "./shared/LambderApiContract.js";
 export type { LambderRenderContext, LambderSessionRenderContext, LambderHttpEvent } from "./core/LambderContext.js";
 export { createContext, isV2HttpEvent } from "./core/LambderContext.js";
+export { serializeCookie, serializeClearCookie, resolveCookieDomain } from "./core/LambderCookie.js";
+export type { LambderCookieOptions, LambderClearCookieOptions, LambderCookieDomain } from "./core/LambderCookie.js";

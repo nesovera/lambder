@@ -1,18 +1,22 @@
 import { LambderRenderContext, LambderSessionRenderContext } from "../core/LambderContext.js";
+import { resolveCookieDomain, serializeCookie, serializeClearCookie, type LambderCookieOptions } from "../core/LambderCookie.js";
 import type LambderSessionManager from "./LambderSessionManager.js";
 import { LambderSessionDataRefreshError, LambderSessionReadError, type LambderCreatedSession, type LambderSessionContext } from "./LambderSessionManager.js";
 
-export type LambderSessionCookieOptions = {
-    /**
-     * e.g. ".example.com" to share sessions across subdomains. Pass a function to
-     * derive it from the request hostname when one deployment serves several
-     * apex domains; return undefined for a host-only cookie.
-     */
-    domain?: string | ((hostname: string) => string | undefined | null);
-    path?: string;
-    sameSite?: "Strict" | "Lax" | "None";
-    secure?: boolean;
-};
+/**
+ * Scope of the session cookies. `domain` is e.g. ".example.com" to share
+ * sessions across subdomains, or a function of the request hostname when
+ * one deployment serves several apex domains (return undefined for a
+ * host-only cookie). Changing `domain` or `path` on a live deployment is a
+ * migration: browsers keep the cookie under the old scope beside the new
+ * one, and both arrive on every request. fetchSession tolerates that by
+ * trying every copy and evicting the stale host-only twin; a copy at a
+ * parent domain this host cannot name outlives its own Expires.
+ */
+export type LambderSessionCookieOptions = Pick<LambderCookieOptions, "domain" | "path" | "sameSite" | "secure">;
+
+/** The tokens are hex, so the cookie carries them as they are (the format existing browsers hold). */
+const rawValue = (value: string): string => value;
 
 export default class LambderSessionController<TSessionData = any> {
     lambderSessionManager: LambderSessionManager;
@@ -43,39 +47,37 @@ export default class LambderSessionController<TSessionData = any> {
         this.ctx = ctx;
     };
 
-    private buildCookie(key: string, value: string, expiresAtMs: number, httpOnly: boolean): string {
-        const { domain, path = "/", sameSite = "Lax", secure = true } = this.cookieOptions;
-        // Host header can carry a port; browsers match the Domain attribute on hostname only.
-        const hostname = (this.ctx.host || "").split(":")[0];
-        const resolvedDomain = typeof domain === "function" ? domain(hostname) : domain;
-        const parts = [
-            `${key}=${value}`,
-            `Expires=${new Date(expiresAtMs).toUTCString()}`,
-            `Path=${path}`,
-            ...(resolvedDomain ? [`Domain=${resolvedDomain}`] : []),
-            ...(httpOnly ? ["HttpOnly"] : []),
-            `SameSite=${sameSite}`,
-            ...(secure ? ["Secure"] : []),
-        ];
-        return parts.join("; ");
+    /** The configured scope with the domain resolved for this request, or the host-only scope. */
+    private cookieScope(hostOnly = false): LambderCookieOptions {
+        const { domain, path, sameSite, secure } = this.cookieOptions;
+        return { domain: hostOnly ? undefined : resolveCookieDomain(domain, this.ctx.host), path, sameSite, secure };
     };
 
     /** Raw secrets exist only on the LambderCreatedSession result and in these cookies; the record stores hashes. */
     private setSessionCookies(created: LambderCreatedSession<TSessionData>): void {
-        const expiresAtMs = created.session.expiresAt * 1000;
-        this.ctx._otherInternal.addHeaderFnAccumulator.push({ key: "Set-Cookie", value: this.buildCookie(this.sessionTokenCookieKey, created.sessionToken, expiresAtMs, true) });
-        this.ctx._otherInternal.addHeaderFnAccumulator.push({ key: "Set-Cookie", value: this.buildCookie(this.sessionCsrfCookieKey, created.csrfToken, expiresAtMs, false) });
+        const scope = this.cookieScope();
+        const expires = new Date(created.session.expiresAt * 1000);
+        this.ctx._otherInternal.addHeaderFnAccumulator.push({ key: "Set-Cookie", value: serializeCookie(this.sessionTokenCookieKey, created.sessionToken, { ...scope, expires, httpOnly: true, encode: rawValue }) });
+        this.ctx._otherInternal.addHeaderFnAccumulator.push({ key: "Set-Cookie", value: serializeCookie(this.sessionCsrfCookieKey, created.csrfToken, { ...scope, expires, encode: rawValue }) });
     };
 
-    private clearSessionCookies(): void {
-        const expired = Date.now() - 100000;
-        this.ctx._otherInternal.addHeaderFnAccumulator.push({ key: "Set-Cookie", value: this.buildCookie(this.sessionTokenCookieKey, "0", expired, true) });
-        this.ctx._otherInternal.addHeaderFnAccumulator.push({ key: "Set-Cookie", value: this.buildCookie(this.sessionCsrfCookieKey, "0", expired, false) });
+    private clearSessionCookies(hostOnly = false): void {
+        const scope = this.cookieScope(hostOnly);
+        this.ctx._otherInternal.addHeaderFnAccumulator.push({ key: "Set-Cookie", value: serializeClearCookie(this.sessionTokenCookieKey, { ...scope, httpOnly: true }) });
+        this.ctx._otherInternal.addHeaderFnAccumulator.push({ key: "Set-Cookie", value: serializeClearCookie(this.sessionCsrfCookieKey, scope) });
+    };
+
+    /**
+     * Every well-formed value the request carried under the session cookie
+     * name. More than one means the browser holds the cookie at several
+     * scopes, and the order says nothing about which copy is current.
+     */
+    private sessionTokenCandidates(): string[] {
+        return (this.ctx.cookieList?.[this.sessionTokenCookieKey] ?? []).filter((token) => token.split(":").length === 2);
     };
 
     private areRequestSessionTokensValid(): boolean {
-        const sessionToken = this.ctx.cookie?.[this.sessionTokenCookieKey];
-        const isSessionTokenValid = !!sessionToken && sessionToken.split(":").length === 2;
+        const isSessionTokenValid = this.sessionTokenCandidates().length > 0;
 
         if(this.ctx._otherInternal.isApiCall){
             const csrfToken = this.ctx.post?.token;
@@ -104,15 +106,21 @@ export default class LambderSessionController<TSessionData = any> {
     async fetchSession (): Promise<LambderSessionContext<TSessionData>>{
         if(!this.areRequestSessionTokensValid()){ throw new Error("Session tokens are invalid"); }
 
-        const sessionToken = this.ctx.cookie?.[this.sessionTokenCookieKey];
-        if(!sessionToken) throw new Error("Session token not found");
-        
-        const session = await this.lambderSessionManager.getSession(sessionToken);
-        if(!session) throw new Error("Session not found");
-        
-        if(!this.isSessionValid(session)) throw new Error("Invalid session");
-        this.ctx.session = session;
-        return session;
+        const candidates = this.sessionTokenCandidates();
+        if(candidates.length > 1){
+            console.warn(`Lambder session: ${candidates.length} "${this.sessionTokenCookieKey}" cookies arrived from ${this.ctx.host}; the browser holds the cookie at several scopes and a stale copy may shadow the live one. Trying each.`);
+        }
+        for(const sessionToken of candidates){
+            const session = await this.lambderSessionManager.getSession(sessionToken);
+            if(!session || !this.isSessionValid(session, sessionToken)) continue;
+            // The other copies are stale. This response can evict the
+            // host-only twin of a Domain= cookie; a copy at a parent domain
+            // this host cannot name is out of reach and expires on its own.
+            if(candidates.length > 1 && this.cookieScope().domain) this.clearSessionCookies(true);
+            this.ctx.session = session;
+            return session;
+        }
+        throw new Error("Session not found");
     };
 
     async fetchSessionIfExists (): Promise<LambderSessionContext<TSessionData>|null> {
@@ -128,13 +136,12 @@ export default class LambderSessionController<TSessionData = any> {
         }
     };
 
-    isSessionValid(session: any): boolean {
+    /** Checks the record against a presented token (the request's first session cookie by default) and, on API calls, the posted CSRF token. */
+    isSessionValid(session: any, sessionToken: string | undefined = this.ctx.cookie?.[this.sessionTokenCookieKey]): boolean {
         if(this.ctx._otherInternal.isApiCall){
-            const sessionToken = this.ctx.cookie?.[this.sessionTokenCookieKey];
             const csrfToken = this.ctx.post?.token;
             return this.lambderSessionManager.isSessionValid(session, sessionToken, csrfToken);
         }else{
-            const sessionToken = this.ctx.cookie?.[this.sessionTokenCookieKey];
             return this.lambderSessionManager.isSessionValid(session, sessionToken, null, true);
         }
     };
