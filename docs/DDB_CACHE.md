@@ -21,7 +21,7 @@ const city = await cache.getOrSet(`city:${slug}`, async () => fetchCityFromDb(sl
 
 ## How it works
 
-- Values are JSON-serialized and **Brotli-compressed**.
+- Values are JSON-serialized and **Brotli-compressed** by default (`compression` option, the same one `LambderDdbIdempotency` and sessions take); the manifest records each value's encoding, so the option can be switched on or off on a live table and values written under either setting keep reading.
 - Small values (≤ ~350KB compressed) are stored inline in a single manifest item; larger values are split into **versioned binary chunks** written before the manifest, so readers only ever see complete versions (no torn reads).
 - Integrity is verified with SHA-256 checksums.
 - An **in-memory LRU layer** serves repeat reads within warm Lambda invocations.
@@ -61,5 +61,6 @@ Required IAM actions on the table: `dynamodb:GetItem`, `PutItem`, `DeleteItem`, 
 | `namespace` | `"default"` | Key-space isolation prefix |
 | `defaultTtlSeconds` | 1 year | TTL applied when `set`/`getOrSet` omit `ttlSeconds` |
 | `memoryMaxBytes` | 16MB | In-memory LRU budget; `0` disables the memory layer |
+| `compression` | `true` (`{ minBytes: 0, quality: 5 }`) | Brotli compression of stored values: `false` stores them plain, `{ minBytes, quality }` overrides the defaults; switchable on a live table |
 
-Exported types: `LambderDdbCacheOptions`, `LambderDdbCacheSetOptions`, `LambderDdbCacheGetOrSetOptions`.
+Exported types: `LambderDdbCacheOptions`, `LambderDdbCacheSetOptions`, `LambderDdbCacheGetOrSetOptions`, `LambderCompressionOption`.

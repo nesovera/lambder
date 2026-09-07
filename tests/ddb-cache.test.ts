@@ -141,13 +141,18 @@ class MemoryDynamoClient extends DynamoDBClient {
     }
 }
 
-const createCache = (client: MemoryDynamoClient, chunkBytes = 512): LambderDdbCache =>
+const createCache = (
+    client: MemoryDynamoClient,
+    chunkBytes = 512,
+    extra: Pick<ConstructorParameters<typeof LambderDdbCache>[0], "compression"> = {},
+): LambderDdbCache =>
     new LambderDdbCache({
         tableName: "test-cache",
         namespace: "unit",
         client,
         chunkBytes,
         memoryMaxBytes: 1024 * 1024,
+        ...extra,
     });
 
 const largePayload = () => ({
@@ -228,7 +233,7 @@ describe("LambderDdbCache", () => {
         const stored = [...client.items.values()];
         const manifest = stored.find((item) => item.sk?.S === "meta");
         const chunks = stored.filter((item) => item.sk?.S?.startsWith("chunk#"));
-        const compressedBytes = Number(manifest?.compressedBytes?.N);
+        const compressedBytes = Number(manifest?.storedBytes?.N);
         expect(Buffer.byteLength(JSON.stringify(value), "utf8")).toBeGreaterThan(1024 * 1024);
         expect(compressedBytes).toBeGreaterThan(400 * 1024);
         expect(compressedBytes).toBeLessThan(1024 * 1024);
@@ -266,6 +271,62 @@ describe("LambderDdbCache", () => {
         await expect(reader.has("cities")).resolves.toBe(true);
         await expect(writer.delete("cities")).resolves.toBe(true);
         await expect(writer.has("cities")).resolves.toBe(false);
+    });
+
+    it("compression: false stores values plain, chunked and verified the same way", async () => {
+        const client = new MemoryDynamoClient();
+        const writer = createCache(client, 512, { compression: false });
+        const value = largePayload();
+        const json = JSON.stringify(value);
+
+        await writer.set("cities", value, { ttlSeconds: 60 });
+
+        const stored = [...client.items.values()];
+        const manifest = stored.find((item) => item.sk?.S === "meta");
+        expect(manifest?.encoding?.S).toBe("identity");
+        expect(Number(manifest?.storedBytes?.N)).toBe(Buffer.byteLength(json));
+        expect(Number(manifest?.uncompressedBytes?.N)).toBe(Buffer.byteLength(json));
+        const chunks = stored.filter((item) => item.sk?.S?.startsWith("chunk#"));
+        expect(chunks.length).toBeGreaterThan(1);
+        expect(Buffer.concat(chunks.map((item) => Buffer.from(item.data!.B!))).toString("utf8")).toBe(json);
+
+        // Memory layer, then a fresh instance reading DynamoDB.
+        await expect(writer.get<typeof value>("cities")).resolves.toEqual(value);
+        await expect(createCache(client, 512, { compression: false }).get<typeof value>("cities")).resolves.toEqual(value);
+    });
+
+    it("minBytes stores small values plain and large ones compressed", async () => {
+        const client = new MemoryDynamoClient();
+        const cache = createCache(client, 512, { compression: { minBytes: 1024 } });
+        const large = largePayload();
+
+        await cache.set("small", { city: "Istanbul" });
+        await cache.set("large", large);
+
+        const manifests = [...client.items.values()].filter((item) => item.sk?.S === "meta");
+        expect(manifests.map((item) => item.encoding?.S)).toEqual(["identity", "br"]);
+        await expect(cache.get("small")).resolves.toEqual({ city: "Istanbul" });
+        await expect(cache.get("large")).resolves.toEqual(large);
+    });
+
+    it("reads values written under the other compression setting", async () => {
+        const client = new MemoryDynamoClient();
+        const value = largePayload();
+        await createCache(client, 512, { compression: false }).set("plain", value);
+        await createCache(client, 512).set("brotli", value);
+
+        // Fresh instances: the reads come from DynamoDB, not the memory layer.
+        await expect(createCache(client, 512).get("plain")).resolves.toEqual(value);
+        await expect(createCache(client, 512, { compression: false }).get("brotli")).resolves.toEqual(value);
+    });
+
+    it("ignores an identity manifest whose stored and uncompressed lengths differ", async () => {
+        const client = new MemoryDynamoClient();
+        await createCache(client, 512, { compression: false }).set("city", { city: "Istanbul" });
+        const manifest = [...client.items.values()].find((item) => item.sk?.S === "meta")!;
+        manifest.uncompressedBytes = { N: String(Number(manifest.storedBytes!.N) + 1) };
+
+        await expect(createCache(client, 512, { compression: false }).get("city")).resolves.toBeUndefined();
     });
 
     it("caps batch writes at 25 items and retries only unprocessed chunks", async () => {
@@ -524,8 +585,9 @@ describe("LambderDdbCache", () => {
         expect(() => new LambderDdbCache({ ...base, tableName: "  " })).toThrow();
         expect(() => new LambderDdbCache({ ...base, chunkBytes: 512 * 1024 })).toThrow();
         expect(() => new LambderDdbCache({ ...base, chunkBytes: 0 })).toThrow();
-        expect(() => new LambderDdbCache({ ...base, compressionQuality: 12 })).toThrow();
-        expect(() => new LambderDdbCache({ ...base, compressionQuality: 1.5 })).toThrow();
+        expect(() => new LambderDdbCache({ ...base, compression: { quality: 12 } })).toThrow();
+        expect(() => new LambderDdbCache({ ...base, compression: { quality: 1.5 } })).toThrow();
+        expect(() => new LambderDdbCache({ ...base, compression: { minBytes: -1 } })).toThrow();
         expect(() => new LambderDdbCache({ ...base, namespace: "n".repeat(129) })).toThrow();
         expect(() => new LambderDdbCache({ ...base, defaultTtlSeconds: 0 })).toThrow();
         expect(() => new LambderDdbCache({ ...base, memoryMaxBytes: -1 })).toThrow();

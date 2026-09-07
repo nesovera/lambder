@@ -1,6 +1,6 @@
 import { BatchWriteItemCommand, DeleteItemCommand, DynamoDBClient, GetItemCommand, PutItemCommand, QueryCommand, } from "@aws-sdk/client-dynamodb";
 import { getCrypto } from "../shared/node-polyfills.js";
-import { brotliCompressText, brotliRestoreText } from "./LambderDdbCompression.js";
+import { brotliCompressText, brotliRestoreText, resolveCompressionOption, } from "./LambderDdbCompression.js";
 import { LRUCache } from "lru-cache";
 const DEFAULT_TTL_SECONDS = 365 * 24 * 60 * 60;
 const DEFAULT_CHUNK_BYTES = 350 * 1024;
@@ -11,6 +11,8 @@ const META_SORT_KEY = "meta";
 const LOCK_SORT_KEY = "lock";
 const BATCH_WRITE_LIMIT = 25;
 const MAX_BATCH_RETRIES = 8;
+/** Every value compressed by default; see the `compression` option. */
+const COMPRESSION_DEFAULTS = { minBytes: 0, quality: 5 };
 // Node builtins are loaded lazily through node-polyfills so this module can
 // sit in a frontend bundle's import graph (via the package root) without
 // breaking; using the cache at runtime still requires Node. Brotli helpers
@@ -40,8 +42,10 @@ const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mil
 /**
  * Persistent JSON cache backed by DynamoDB.
  *
- * Values are Brotli-compressed. Values within the safe DynamoDB item budget are
- * stored directly in the manifest for a single-request read; larger values are
+ * Values are Brotli-compressed by default (`compression` option; the manifest
+ * records each value's encoding, so the option can be switched on a live
+ * table). Values within the safe DynamoDB item budget are stored directly in
+ * the manifest for a single-request read; larger values are
  * split into versioned binary chunks. A manifest is written only after every
  * chunk succeeds, so readers see either the previous complete version or the
  * new complete version. DynamoDB TTL is cleanup only; every read also checks
@@ -59,7 +63,7 @@ export class LambderDdbCache {
     client;
     defaultTtlSeconds;
     chunkBytes;
-    compressionQuality;
+    compression;
     maxValueBytes;
     memory;
     inFlight = new Map();
@@ -77,17 +81,14 @@ export class LambderDdbCache {
         if (this.chunkBytes > MAX_SAFE_CHUNK_BYTES) {
             throw new Error(`chunkBytes must not exceed ${MAX_SAFE_CHUNK_BYTES}`);
         }
-        this.compressionQuality = options.compressionQuality ?? 5;
-        if (!Number.isInteger(this.compressionQuality) || this.compressionQuality < 0 || this.compressionQuality > 11) {
-            throw new Error("compressionQuality must be an integer from 0 to 11");
-        }
+        this.compression = resolveCompressionOption(options.compression, COMPRESSION_DEFAULTS);
         this.maxValueBytes = positiveInteger(options.maxValueBytes ?? DEFAULT_MAX_VALUE_BYTES, "maxValueBytes");
         const memoryMaxBytes = options.memoryMaxBytes ?? DEFAULT_MEMORY_BYTES;
         this.memory = memoryMaxBytes === 0
             ? null
             : new LRUCache({
                 maxSize: positiveInteger(memoryMaxBytes, "memoryMaxBytes"),
-                sizeCalculation: (entry) => entry.compressed.length,
+                sizeCalculation: (entry) => entry.stored.length,
             });
         this.client = options.client ?? new DynamoDBClient({ region: options.region ?? "us-east-1" });
     }
@@ -97,7 +98,7 @@ export class LambderDdbCache {
         const nowSeconds = this.nowSeconds();
         if (cached && cached.expiresAt > nowSeconds) {
             try {
-                return JSON.parse(await brotliRestoreText(cached.compressed, cached.uncompressedBytes));
+                return JSON.parse(await this.decode(cached.stored, cached.encoding, cached.uncompressedBytes));
             }
             catch {
                 // Fall through to DynamoDB; the in-memory copy is disposable.
@@ -110,16 +111,16 @@ export class LambderDdbCache {
         if (!manifest || manifest.expiresAt <= nowSeconds)
             return undefined;
         try {
-            const compressed = manifest.inlineData ?? await this.readChunks(pk, manifest);
-            if (compressed.length !== manifest.compressedBytes) {
-                throw new Error("compressed byte length does not match manifest");
+            const stored = manifest.inlineData ?? await this.readChunks(pk, manifest);
+            if (stored.length !== manifest.storedBytes) {
+                throw new Error("stored byte length does not match manifest");
             }
-            if (await sha256(compressed) !== manifest.checksum) {
-                throw new Error("compressed checksum does not match manifest");
+            if (await sha256(stored) !== manifest.checksum) {
+                throw new Error("stored checksum does not match manifest");
             }
-            const json = await brotliRestoreText(compressed, manifest.uncompressedBytes);
+            const json = await this.decode(stored, manifest.encoding, manifest.uncompressedBytes);
             const parsed = JSON.parse(json);
-            this.remember(normalizedKey, compressed, manifest.uncompressedBytes, manifest.expiresAt);
+            this.remember(normalizedKey, stored, manifest.encoding, manifest.uncompressedBytes, manifest.expiresAt);
             return parsed;
         }
         catch (error) {
@@ -149,18 +150,20 @@ export class LambderDdbCache {
         if (input.length > this.maxValueBytes) {
             throw new Error(`Cache value exceeds maxValueBytes (${input.length} > ${this.maxValueBytes})`);
         }
-        const compressed = await brotliCompressText(input, this.compressionQuality);
-        if (compressed.length > this.maxValueBytes) {
-            throw new Error(`Compressed cache value exceeds maxValueBytes (${compressed.length} > ${this.maxValueBytes})`);
+        const brotli = this.compression && input.length >= this.compression.minBytes ? this.compression : null;
+        const encoding = brotli ? "br" : "identity";
+        const stored = brotli ? await brotliCompressText(input, brotli.quality) : input;
+        if (stored.length > this.maxValueBytes) {
+            throw new Error(`Stored cache value exceeds maxValueBytes (${stored.length} > ${this.maxValueBytes})`);
         }
         const pk = await this.partitionKey(normalizedKey);
         const version = `${Date.now().toString(36)}-${await randomUUID()}`;
         const expiresAt = this.nowSeconds() + ttlSeconds;
         const chunks = [];
-        const inline = compressed.length <= this.chunkBytes;
+        const inline = stored.length <= this.chunkBytes;
         if (!inline) {
-            for (let offset = 0; offset < compressed.length; offset += this.chunkBytes) {
-                chunks.push(compressed.subarray(offset, offset + this.chunkBytes));
+            for (let offset = 0; offset < stored.length; offset += this.chunkBytes) {
+                chunks.push(stored.subarray(offset, offset + this.chunkBytes));
             }
         }
         const writes = chunks.map((chunk, index) => ({
@@ -181,16 +184,16 @@ export class LambderDdbCache {
                 sk: { S: META_SORT_KEY },
                 version: { S: version },
                 chunkCount: { N: String(chunks.length) },
-                compressedBytes: { N: String(compressed.length) },
+                storedBytes: { N: String(stored.length) },
                 uncompressedBytes: { N: String(input.length) },
-                checksum: { S: await sha256(compressed) },
-                encoding: { S: "br" },
+                checksum: { S: await sha256(stored) },
+                encoding: { S: encoding },
                 createdAt: { N: String(this.nowSeconds()) },
                 expiresAt: { N: String(expiresAt) },
-                ...(inline ? { data: { B: compressed } } : {}),
+                ...(inline ? { data: { B: stored } } : {}),
             },
         }));
-        this.remember(normalizedKey, compressed, input.length, expiresAt);
+        this.remember(normalizedKey, stored, encoding, input.length, expiresAt);
     }
     async delete(key) {
         const normalizedKey = this.normalizeKey(key);
@@ -344,37 +347,39 @@ export class LambderDdbCache {
         const version = item.version?.S;
         const encoding = item.encoding?.S;
         const chunkCount = Number(item.chunkCount?.N);
-        const compressedBytes = Number(item.compressedBytes?.N);
+        const storedBytes = Number(item.storedBytes?.N);
         const uncompressedBytes = Number(item.uncompressedBytes?.N);
         const expiresAt = Number(item.expiresAt?.N);
         const checksum = item.checksum?.S;
         const inlineData = item.data?.B == null ? undefined : Buffer.from(item.data.B);
         const validInline = inlineData !== undefined &&
             chunkCount === 0 &&
-            inlineData.length === compressedBytes &&
-            compressedBytes <= this.chunkBytes;
+            inlineData.length === storedBytes &&
+            storedBytes <= this.chunkBytes;
         const validChunks = inlineData === undefined &&
             chunkCount > 0 &&
-            chunkCount === Math.ceil(compressedBytes / this.chunkBytes);
+            chunkCount === Math.ceil(storedBytes / this.chunkBytes);
         if (!version ||
-            encoding !== "br" ||
+            (encoding !== "br" && encoding !== "identity") ||
             !checksum ||
             !Number.isSafeInteger(chunkCount) ||
             chunkCount < 0 ||
-            !Number.isSafeInteger(compressedBytes) ||
-            compressedBytes < 0 ||
-            compressedBytes > this.maxValueBytes ||
+            !Number.isSafeInteger(storedBytes) ||
+            storedBytes < 0 ||
+            storedBytes > this.maxValueBytes ||
             !Number.isSafeInteger(uncompressedBytes) ||
             uncompressedBytes < 0 ||
             uncompressedBytes > this.maxValueBytes ||
+            (encoding === "identity" && storedBytes !== uncompressedBytes) ||
             !Number.isSafeInteger(expiresAt) ||
             (!validInline && !validChunks)) {
             return undefined;
         }
         return {
             version,
+            encoding,
             chunkCount,
-            compressedBytes,
+            storedBytes,
             uncompressedBytes,
             checksum,
             expiresAt,
@@ -411,7 +416,7 @@ export class LambderDdbCache {
                 throw new Error(`DynamoDB cache entry has an invalid chunk index at ${index}`);
             }
         }
-        return Buffer.concat(chunks.map((chunk) => chunk.data), manifest.compressedBytes);
+        return Buffer.concat(chunks.map((chunk) => chunk.data), manifest.storedBytes);
     }
     async invalidateManifest(pk, version) {
         try {
@@ -445,13 +450,17 @@ export class LambderDdbCache {
             }
         }
     }
-    remember(key, compressed, uncompressedBytes, expiresAt) {
+    /** The JSON text of a stored payload. */
+    async decode(stored, encoding, uncompressedBytes) {
+        return encoding === "br" ? await brotliRestoreText(stored, uncompressedBytes) : stored.toString("utf8");
+    }
+    remember(key, stored, encoding, uncompressedBytes, expiresAt) {
         if (!this.memory)
             return;
         const ttl = expiresAt * 1000 - Date.now();
         if (ttl <= 0)
             return;
-        this.memory.set(key, { compressed, uncompressedBytes, expiresAt }, { ttl });
+        this.memory.set(key, { stored, encoding, uncompressedBytes, expiresAt }, { ttl });
     }
     normalizeKey(key) {
         if (typeof key !== "string" || !key.trim())
