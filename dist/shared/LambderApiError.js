@@ -39,6 +39,22 @@ export class LambderApiError extends Error {
 /** Brand-based type guard (see LambderApiError.isLambderApiError). */
 export const isLambderApiError = (err) => err instanceof Error && err.isLambderApiError === true;
 /**
+ * Codes the framework stamps on the refusals it authors itself, under the
+ * reserved `lambder/` prefix so app codes never collide. Compare against
+ * these constants on the client (exported from `lambder/client` too) rather
+ * than retyping the strings.
+ */
+export const LAMBDER_REFUSAL_CODES = {
+    /** A rate-limit policy refused (429). A policy's own errorMessage inherits this unless it sets a code. */
+    rateLimited: "lambder/rate-limited",
+    /** The original of an idempotent request is still processing (409). */
+    duplicateInFlight: "lambder/duplicate-in-flight",
+    /** The idempotencyKey is malformed (400). */
+    invalidIdempotencyKey: "lambder/invalid-idempotency-key",
+    /** No API is registered under the requested name. */
+    apiNotFound: "lambder/api-not-found",
+};
+/**
  * Refuse the current API call: a routine business "no" (not found, invalid
  * input, not allowed) with a user-facing message. Throws a LambderApiError
  * carrying the standard LambderRefusalMessage shape, so the pipeline maps it
@@ -54,6 +70,7 @@ export const refuse = (content, options = {}) => {
     throw new LambderApiError(content, {
         errorMessage: {
             type: options.type ?? "warning",
+            ...(options.code !== undefined ? { code: options.code } : {}),
             ...(options.title !== undefined ? { title: options.title } : {}),
             content,
         },

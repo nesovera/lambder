@@ -6,8 +6,8 @@ export { default as LambderCaller } from "./client/LambderCaller.js";
 export type { LambderApiOutcome, LambderApiFailureReason, LambderCallOptions, LambderIdempotencyKeyScope } from "./client/LambderCaller.js";
 
 // Typed API refusals (isomorphic: shared code may throw them from anywhere)
-export { LambderApiError, isLambderApiError, refuse } from "./shared/LambderApiError.js";
-export type { LambderApiErrorOptions, LambderRefusalMessage, LambderRefuseOptions } from "./shared/LambderApiError.js";
+export { LambderApiError, isLambderApiError, refuse, LAMBDER_REFUSAL_CODES } from "./shared/LambderApiError.js";
+export type { LambderApiErrorOptions, LambderRefusalMessage, LambderRefusalCode, LambderRefuseOptions } from "./shared/LambderApiError.js";
 export { default as LambderResponseBuilder } from "./core/LambderResponseBuilder.js";
 export { default as LambderResolver } from "./core/LambderResolver.js";
 export { default as LambderSessionManager } from "./session/LambderSessionManager.js";

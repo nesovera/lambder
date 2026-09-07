@@ -15,7 +15,7 @@ import { applyCorsHeaders, type LambderCorsConfig } from "./LambderCors.js";
 import LambderSessionManager, { type LambderSessionDataRefreshConfig } from "../session/LambderSessionManager.js";
 import LambderSessionController, { type LambderSessionCookieOptions } from "../session/LambderSessionController.js";
 import { LambderPublicFilesHandler, type LambderPublicFilesOptions } from "./LambderPublicFiles.js";
-import { isLambderApiError, type LambderApiError, type LambderRefusalMessage } from "../shared/LambderApiError.js";
+import { isLambderApiError, LAMBDER_REFUSAL_CODES, type LambderApiError, type LambderRefusalMessage } from "../shared/LambderApiError.js";
 import { LambderApiPolicyEngine } from "../policies/LambderApiPolicies.js";
 import type {
     LambderApiGuard,
@@ -714,7 +714,7 @@ export default class Lambder<
         const isAPI = ctx._otherInternal.isApiCall || ctx.path === this.apiPath;
         if(isAPI){
             if(this.apiFallbackHandler) return await this.apiFallbackHandler(ctx, resolver);
-            return resolver.api(null, { errorMessage: { type: "warning", content: "API not found." } satisfies LambderRefusalMessage });
+            return resolver.api(null, { errorMessage: { type: "warning", code: LAMBDER_REFUSAL_CODES.apiNotFound, content: "API not found." } satisfies LambderRefusalMessage });
         }
         if(this.publicFilesHandler){
             const fileResponse = await this.publicFilesHandler.handle(ctx);
