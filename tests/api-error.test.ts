@@ -13,7 +13,7 @@
 import { describe, it, expect } from 'vitest';
 import { z } from 'zod';
 import Lambder from '../src/core/Lambder.js';
-import { LambderApiError, isLambderApiError, refuse } from '../src/shared/LambderApiError.js';
+import { LambderApiError, isLambderApiError, refuse, LAMBDER_REFUSAL_CODES } from '../src/shared/LambderApiError.js';
 import { decodeBody, createMockContext } from './helpers.js';
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
@@ -171,7 +171,15 @@ describe('refuse() - the standard refusal shape', () => {
     it('is the shape of the framework\'s own refusals too (unknown API)', async () => {
         const lambder = new Lambder({ publicPath: './public', apiPath: '/api' });
         const result = await lambder.render(createApiEvent('missing', {}), createMockContext());
-        expect(JSON.parse(decodeBody(result)).errorMessage).toEqual({ type: 'warning', content: 'API not found.' });
+        expect(JSON.parse(decodeBody(result)).errorMessage).toEqual({ type: 'warning', code: LAMBDER_REFUSAL_CODES.apiNotFound, content: 'API not found.' });
+    });
+
+    it('carries a machine-readable code for clients to branch and translate on', async () => {
+        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+            .addApi('dup', testSchema, async () => refuse('Already reported.', { code: 'ALREADY_REPORTED' }));
+
+        const result = await lambder.render(createApiEvent('dup', { value: 'x' }), createMockContext());
+        expect(JSON.parse(decodeBody(result)).errorMessage).toEqual({ type: 'warning', code: 'ALREADY_REPORTED', content: 'Already reported.' });
     });
 
     it('carries extra headers onto the refusal response', async () => {

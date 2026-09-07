@@ -2,13 +2,13 @@ import type { z } from "zod";
 import type { LambderRenderContext } from "../core/LambderContext.js";
 import type LambderResolver from "../core/LambderResolver.js";
 import { RATE_LIMIT_WINDOWS, type LambderRateLimitPolicy, type LambderRateLimitWindow, type LambderDdbRateLimiter } from "../stores/LambderDdbRateLimiter.js";
-import { LambderApiError, type LambderRefusalMessage } from "../shared/LambderApiError.js";
+import { LambderApiError, LAMBDER_REFUSAL_CODES, type LambderRefusalMessage } from "../shared/LambderApiError.js";
 import { parsePreflightSlice, type LambderInputValidationRefusal } from "./LambderApiGuards.js";
 
 const RATE_LIMIT_WINDOW_KEYS: readonly LambderRateLimitWindow[] = RATE_LIMIT_WINDOWS.map((window) => window.key);
 
 /** Refusal a rate-limited request answers unless the policy or the API's override names its own. */
-const DEFAULT_RATE_LIMIT_REFUSAL = { type: "warning", content: "Too many requests. Please try again later." } satisfies LambderRefusalMessage;
+const DEFAULT_RATE_LIMIT_REFUSAL = { type: "warning", code: LAMBDER_REFUSAL_CODES.rateLimited, content: "Too many requests. Please try again later." } satisfies LambderRefusalMessage;
 
 /**
  * A custom rate-limit key. `apiInput` names the fields of the API's OWN
@@ -37,13 +37,12 @@ export function lambderRateLimitKey(key: LambderRateLimitKeyFn<any>): LambderRat
 export type LambderRateLimitPer = "ip" | "session" | LambderRateLimitKeyFn<any>;
 
 /**
- * What one budget spans. Required on every policy, so a declaration always
- * says what its numbers mean:
+ * What one budget spans:
  *
- * - "perApi": every API referencing the policy gets its own counter, so the
- *   windows are a per-API ceiling (three APIs referencing a 60/min policy
- *   allow one subject 180/min in total). An API may tune the windows in its
- *   declaration: `rateLimit: { name: { perMin: 20 } }`.
+ * - "perApi" (default): every API referencing the policy gets its own
+ *   counter, so the windows are a per-API ceiling (three APIs referencing a
+ *   60/min policy allow one subject 180/min in total). An API may tune the
+ *   windows in its declaration: `rateLimit: { name: { perMin: 20 } }`.
  * - "perPolicy": every API referencing the policy shares ONE counter, so the
  *   windows are one combined budget (e.g. one per-email allowance across
  *   send, register, and reset). The policy IS the group: to give user APIs
@@ -54,9 +53,9 @@ export type LambderRateLimitBudget = "perApi" | "perPolicy";
 /** A named rate-limit policy: fixed windows, the key one counter tracks, and what one budget spans. */
 export type LambderApiRateLimitPolicyConfig = LambderRateLimitPolicy & {
     per: LambderRateLimitPer;
-    /** Whether the windows are a per-API ceiling or one budget shared by every referencing API. See LambderRateLimitBudget. */
-    budget: LambderRateLimitBudget;
-    /** Envelope errorMessage for refused requests. Default: a warning saying too many requests. */
+    /** Whether the windows are a per-API ceiling (default) or one budget shared by every referencing API. See LambderRateLimitBudget. */
+    budget?: LambderRateLimitBudget;
+    /** Envelope errorMessage for refused requests; inherits code "lambder/rate-limited" unless it sets its own. Default: a warning saying too many requests. */
     errorMessage?: LambderRefusalMessage;
 };
 
@@ -91,7 +90,7 @@ export type LambderAllowedPolicyNames<TPolicies, TPayload, TIncludeSession exten
 export type LambderRateLimitOverride = LambderRateLimitPolicy & { errorMessage?: LambderRefusalMessage };
 
 type LambderRateLimitOverrideFor<TPolicy> =
-    TPolicy extends { budget: "perApi" } ? LambderRateLimitOverride : Pick<LambderRateLimitOverride, "errorMessage">;
+    TPolicy extends { budget: "perPolicy" } ? Pick<LambderRateLimitOverride, "errorMessage"> : LambderRateLimitOverride;
 
 /**
  * The per-API `rateLimit` option: one policy name, an ordered list of names,
@@ -143,8 +142,8 @@ export class LambderApiRateLimitsEngine {
                 throw new Error(`Lambder: rate-limit policy "${name}" declares no window (${RATE_LIMIT_WINDOW_KEYS.join("/")}).`);
             }
             const budget = policy.budget as LambderRateLimitBudget | undefined;
-            if(budget !== "perApi" && budget !== "perPolicy"){
-                throw new Error(`Lambder: rate-limit policy "${name}" needs budget: "perApi" (each referencing API counts separately) or "perPolicy" (one counter shared by every referencing API).`);
+            if(budget !== undefined && budget !== "perApi" && budget !== "perPolicy"){
+                throw new Error(`Lambder: rate-limit policy "${name}" has budget "${String(budget)}"; use "perApi" (default: each referencing API counts separately) or "perPolicy" (one counter shared by every referencing API).`);
             }
         }
         this.limiter = config.limiter;
@@ -193,8 +192,11 @@ export class LambderApiRateLimitsEngine {
             const exceeded = await this.limiter.isRateLimited(trackerKey, limits);
             if(exceeded){
                 const retryAfterSeconds = Math.max(1, exceeded.resetAt - Math.floor(Date.now() / 1000));
+                // A policy's (or override's) own message inherits the framework
+                // code unless it sets a more specific one of its own.
+                const message = override?.errorMessage ?? policy.errorMessage;
                 throw new LambderApiError(`Rate limited: "${apiName}" exceeded policy "${name}" (${exceeded.window}: ${exceeded.limit}).`, {
-                    errorMessage: override?.errorMessage ?? policy.errorMessage ?? DEFAULT_RATE_LIMIT_REFUSAL,
+                    errorMessage: message ? { code: LAMBDER_REFUSAL_CODES.rateLimited, ...message } satisfies LambderRefusalMessage : DEFAULT_RATE_LIMIT_REFUSAL,
                     statusCode: 429,
                     headers: { "Retry-After": String(retryAfterSeconds) },
                 });

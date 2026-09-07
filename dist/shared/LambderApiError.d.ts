@@ -57,17 +57,43 @@ export declare class LambderApiError extends Error {
 export declare const isLambderApiError: (err: unknown) => err is LambderApiError;
 /**
  * The standard shape refusals carry on the envelope's errorMessage field.
- * The caller's errorMessageHandler receives it as-is; apps with their own
- * errorMessage vocabulary can keep using LambderApiError directly instead.
+ * `code` is the refusal's machine-readable identity: clients branch and
+ * translate on it and never string-match `content`, which stays the
+ * human-readable fallback for codes a client does not know yet. Apps keep
+ * their own typed code vocabulary; the framework's own refusals carry a
+ * LambderRefusalCode. The caller's errorMessageHandler receives the object
+ * as-is; apps with their own errorMessage vocabulary can keep using
+ * LambderApiError directly instead.
  */
 export type LambderRefusalMessage = {
     type: "warning" | "error" | "info";
+    /** Machine-readable identity of the refusal (the app's own vocabulary, or a LambderRefusalCode). */
+    code?: string;
     title?: string;
     content: string;
 };
+/**
+ * Codes the framework stamps on the refusals it authors itself, under the
+ * reserved `lambder/` prefix so app codes never collide. Compare against
+ * these constants on the client (exported from `lambder/client` too) rather
+ * than retyping the strings.
+ */
+export declare const LAMBDER_REFUSAL_CODES: {
+    /** A rate-limit policy refused (429). A policy's own errorMessage inherits this unless it sets a code. */
+    readonly rateLimited: "lambder/rate-limited";
+    /** The original of an idempotent request is still processing (409). */
+    readonly duplicateInFlight: "lambder/duplicate-in-flight";
+    /** The idempotencyKey is malformed (400). */
+    readonly invalidIdempotencyKey: "lambder/invalid-idempotency-key";
+    /** No API is registered under the requested name. */
+    readonly apiNotFound: "lambder/api-not-found";
+};
+export type LambderRefusalCode = (typeof LAMBDER_REFUSAL_CODES)[keyof typeof LAMBDER_REFUSAL_CODES];
 export type LambderRefuseOptions = {
     /** Rendering intent for the client's errorMessageHandler. Default: "warning". */
     type?: LambderRefusalMessage["type"];
+    /** Machine-readable identity of the refusal, for clients to branch and translate on. */
+    code?: string;
     /** Optional heading shown above the content. */
     title?: string;
     /** Sets the envelope's notAuthorized flag (routed to the caller's notAuthorizedHandler). */

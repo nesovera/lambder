@@ -6,7 +6,7 @@ import { applyCorsHeaders } from "./LambderCors.js";
 import LambderSessionManager from "../session/LambderSessionManager.js";
 import LambderSessionController from "../session/LambderSessionController.js";
 import { LambderPublicFilesHandler } from "./LambderPublicFiles.js";
-import { isLambderApiError } from "../shared/LambderApiError.js";
+import { isLambderApiError, LAMBDER_REFUSAL_CODES } from "../shared/LambderApiError.js";
 import { LambderApiPolicyEngine } from "../policies/LambderApiPolicies.js";
 import { createContext, isV2HttpEvent } from "./LambderContext.js";
 /**
@@ -423,7 +423,7 @@ export default class Lambder {
         if (isAPI) {
             if (this.apiFallbackHandler)
                 return await this.apiFallbackHandler(ctx, resolver);
-            return resolver.api(null, { errorMessage: { type: "warning", content: "API not found." } });
+            return resolver.api(null, { errorMessage: { type: "warning", code: LAMBDER_REFUSAL_CODES.apiNotFound, content: "API not found." } });
         }
         if (this.publicFilesHandler) {
             const fileResponse = await this.publicFilesHandler.handle(ctx);
