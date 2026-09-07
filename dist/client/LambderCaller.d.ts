@@ -60,6 +60,8 @@ export type LambderApiOutcome<T> = {
     status?: number;
     /** Envelope errorMessage, when the server provided one. */
     errorMessage?: any;
+    /** Seconds to wait before retrying, from the response's Retry-After header (rate-limit refusals send it). */
+    retryAfterSeconds?: number;
     /** Underlying Error for network/timeout/server/unknown failures. */
     error?: Error;
     /** Zod issue detail for 'validation'. */

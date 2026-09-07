@@ -1,6 +1,7 @@
 import type { z } from "zod";
 import type { LambderRenderContext, LambderSessionRenderContext } from "../core/LambderContext.js";
 import type LambderResolver from "../core/LambderResolver.js";
+import type { LambderResponse } from "../core/LambderResponse.js";
 /**
  * A named guard, run before the API's own input validation. Three input
  * modes:
@@ -30,9 +31,10 @@ import type LambderResolver from "../core/LambderResolver.js";
  *   the API handler's context as `ctx.guardData[guardName]`, fully typed.
  *   Guards that return nothing never appear in guardData.
  *
- * A validation failure answers the standard 422 shape, and the handler
- * refuses by throwing (typically refuse()/LambderApiError). Build with
- * lambderGuard() so the handler's payload/ctx/param types line up.
+ * A validation failure answers like the API's own input validation (the
+ * app's setApiInputValidationErrorHandler when set, else the standard 422),
+ * and the handler refuses by throwing (typically refuse()/LambderApiError).
+ * Build with lambderGuard() so the handler's payload/ctx/param types line up.
  */
 export type LambderApiGuard<TInput extends z.ZodTypeAny = z.ZodTypeAny, TParam = any, TOutput = any> = {
     apiInput: TInput;
@@ -199,19 +201,28 @@ export type LambderGuardInputsOf<TGuards, TOpt> = keyof GuardInputsEntries<TGuar
 /** The guards option's runtime shape: a name, ordered names, or a name-to-param map. */
 export type LambderGuardsOptionValue = string | readonly string[] | Readonly<Record<string, unknown>>;
 /**
+ * How a rejected input answers. Lambder binds this to its own decision
+ * (setApiInputValidationErrorHandler when set, else the standard 422 body),
+ * so the API's schema and every preflight slice refuse with one shape.
+ */
+export type LambderInputValidationRefusal = (ctx: LambderRenderContext, resolver: LambderResolver, zodError: z.ZodError) => Promise<LambderResponse>;
+/**
  * Validate a preflight input slice (an apiInput slice of the raw payload, or
  * a guardInput value from the raw guardInputs map). Runs before the API's
- * own validation; failures answer the same 422 shape as regular input
- * validation. Shared with the rate-limit engine's apiInput-keyed policies.
+ * own validation; a failure throws the response `onInvalid` decides, the
+ * same one regular input validation answers. Shared with the rate-limit
+ * engine's apiInput-keyed policies.
  */
-export declare const parsePreflightSlice: (input: z.ZodTypeAny, value: unknown, resolver: LambderResolver) => unknown;
+export declare const parsePreflightSlice: (input: z.ZodTypeAny, value: unknown, ctx: LambderRenderContext, resolver: LambderResolver, onInvalid: LambderInputValidationRefusal) => Promise<unknown>;
 /**
  * Runtime side of the guards subsystem: holds the defined guards, asserts
  * API registrations against them at startup, and executes an API's declared
  * guards during preflight. Composed into LambderApiPolicyEngine.
  */
 export declare class LambderApiGuardsEngine {
+    private readonly onInvalidInput;
     private guards;
+    constructor(onInvalidInput: LambderInputValidationRefusal);
     addGuards(guards: Record<string, LambderApiGuard<any, any, any>>): void;
     /** Startup validation of one API registration's guards option. */
     assertRegistration(apiName: string, mode: "public" | "session", guardsOption?: LambderGuardsOptionValue): void;

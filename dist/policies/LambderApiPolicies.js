@@ -11,9 +11,14 @@ import { LambderApiIdempotencyEngine } from "./LambderApiIdempotency.js";
  * per-API options.
  */
 export class LambderApiPolicyEngine {
-    rateLimits = new LambderApiRateLimitsEngine();
-    guards = new LambderApiGuardsEngine();
+    rateLimits;
+    guards;
     idempotency = new LambderApiIdempotencyEngine();
+    /** `onInvalidInput` is Lambder's input-validation refusal, so preflight slices answer exactly like the API's own schema. */
+    constructor(onInvalidInput) {
+        this.rateLimits = new LambderApiRateLimitsEngine(onInvalidInput);
+        this.guards = new LambderApiGuardsEngine(onInvalidInput);
+    }
     setRateLimits(config) {
         this.rateLimits.configure(config);
     }

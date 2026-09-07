@@ -1,12 +1,12 @@
 import type { LambderRenderContext } from "../core/LambderContext.js";
 import type LambderResolver from "../core/LambderResolver.js";
 import type { LambderResponse } from "../core/LambderResponse.js";
-import { type LambderApiGuard, type LambderGuardsOptionValue } from "./LambderApiGuards.js";
-import { type LambderApiRateLimitPolicyConfig, type LambderApiRateLimitsConfig } from "./LambderApiRateLimits.js";
+import { type LambderApiGuard, type LambderGuardsOptionValue, type LambderInputValidationRefusal } from "./LambderApiGuards.js";
+import { type LambderApiRateLimitPolicyConfig, type LambderApiRateLimitsConfig, type LambderRateLimitOptionValue } from "./LambderApiRateLimits.js";
 import { type LambderApiIdempotencyConfig } from "./LambderApiIdempotency.js";
 /** The declarative options one API registration may carry. */
 type LambderApiPolicyOptions = {
-    rateLimit?: string | readonly string[];
+    rateLimit?: LambderRateLimitOptionValue;
     guards?: LambderGuardsOptionValue;
     idempotency?: unknown;
 };
@@ -23,6 +23,8 @@ export declare class LambderApiPolicyEngine {
     private rateLimits;
     private guards;
     private idempotency;
+    /** `onInvalidInput` is Lambder's input-validation refusal, so preflight slices answer exactly like the API's own schema. */
+    constructor(onInvalidInput: LambderInputValidationRefusal);
     setRateLimits(config: LambderApiRateLimitsConfig<Record<string, LambderApiRateLimitPolicyConfig>>): void;
     addGuards(guards: Record<string, LambderApiGuard<any, any, any>>): void;
     setIdempotency(config: LambderApiIdempotencyConfig): void;

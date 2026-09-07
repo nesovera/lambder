@@ -37,7 +37,11 @@ export class LambderApiIdempotencyEngine {
         if (rawKey === undefined || rawKey === null)
             return null;
         if (typeof rawKey !== "string" || rawKey.length < IDEMPOTENCY_MIN_KEY_LENGTH || rawKey.length > IDEMPOTENCY_MAX_KEY_LENGTH) {
-            throw new LambderApiError(`Invalid idempotency key: must be a string of ${IDEMPOTENCY_MIN_KEY_LENGTH}-${IDEMPOTENCY_MAX_KEY_LENGTH} characters.`, { statusCode: 400 });
+            const content = `Invalid idempotency key: must be a string of ${IDEMPOTENCY_MIN_KEY_LENGTH}-${IDEMPOTENCY_MAX_KEY_LENGTH} characters.`;
+            throw new LambderApiError(content, {
+                statusCode: 400,
+                errorMessage: { type: "error", content },
+            });
         }
         return rawKey;
     }
@@ -112,7 +116,7 @@ export class LambderApiIdempotencyEngine {
         if (begun.state === "pending") {
             throw new LambderApiError(`Duplicate request for "${apiName}": the original is still processing.`, {
                 statusCode: 409,
-                errorMessage: "This request is already being processed.",
+                errorMessage: { type: "warning", content: "This request is already being processed." },
             });
         }
         if (begun.state === "done") {

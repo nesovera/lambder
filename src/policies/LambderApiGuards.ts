@@ -1,6 +1,7 @@
 import type { z } from "zod";
 import type { LambderRenderContext, LambderSessionRenderContext } from "../core/LambderContext.js";
 import type LambderResolver from "../core/LambderResolver.js";
+import type { LambderResponse } from "../core/LambderResponse.js";
 
 /**
  * A named guard, run before the API's own input validation. Three input
@@ -31,9 +32,10 @@ import type LambderResolver from "../core/LambderResolver.js";
  *   the API handler's context as `ctx.guardData[guardName]`, fully typed.
  *   Guards that return nothing never appear in guardData.
  *
- * A validation failure answers the standard 422 shape, and the handler
- * refuses by throwing (typically refuse()/LambderApiError). Build with
- * lambderGuard() so the handler's payload/ctx/param types line up.
+ * A validation failure answers like the API's own input validation (the
+ * app's setApiInputValidationErrorHandler when set, else the standard 422),
+ * and the handler refuses by throwing (typically refuse()/LambderApiError).
+ * Build with lambderGuard() so the handler's payload/ctx/param types line up.
  */
 export type LambderApiGuard<TInput extends z.ZodTypeAny = z.ZodTypeAny, TParam = any, TOutput = any> =
     | { apiInput: TInput; guardInput?: undefined; session?: boolean; handler: (ctx: any, payload: z.output<TInput>, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput> }
@@ -145,16 +147,28 @@ const toGuardEntries = (value?: LambderGuardsOptionValue): { name: string, param
 };
 
 /**
+ * How a rejected input answers. Lambder binds this to its own decision
+ * (setApiInputValidationErrorHandler when set, else the standard 422 body),
+ * so the API's schema and every preflight slice refuse with one shape.
+ */
+export type LambderInputValidationRefusal = (ctx: LambderRenderContext, resolver: LambderResolver, zodError: z.ZodError) => Promise<LambderResponse>;
+
+/**
  * Validate a preflight input slice (an apiInput slice of the raw payload, or
  * a guardInput value from the raw guardInputs map). Runs before the API's
- * own validation; failures answer the same 422 shape as regular input
- * validation. Shared with the rate-limit engine's apiInput-keyed policies.
+ * own validation; a failure throws the response `onInvalid` decides, the
+ * same one regular input validation answers. Shared with the rate-limit
+ * engine's apiInput-keyed policies.
  */
-export const parsePreflightSlice = (input: z.ZodTypeAny, value: unknown, resolver: LambderResolver): unknown => {
+export const parsePreflightSlice = async (
+    input: z.ZodTypeAny,
+    value: unknown,
+    ctx: LambderRenderContext,
+    resolver: LambderResolver,
+    onInvalid: LambderInputValidationRefusal,
+): Promise<unknown> => {
     const parsed = input.safeParse(value);
-    if(!parsed.success){
-        throw resolver.json({ error: "Input validation failed", zodError: parsed.error }, { statusCode: 422 });
-    }
+    if(!parsed.success) throw await onInvalid(ctx, resolver, parsed.error);
     return parsed.data;
 };
 
@@ -165,6 +179,8 @@ export const parsePreflightSlice = (input: z.ZodTypeAny, value: unknown, resolve
  */
 export class LambderApiGuardsEngine {
     private guards: Record<string, LambderApiGuard<any, any, any>> = {};
+
+    constructor(private readonly onInvalidInput: LambderInputValidationRefusal){}
 
     addGuards(guards: Record<string, LambderApiGuard<any, any, any>>): void {
         for(const [name, guardDef] of Object.entries(guards)){
@@ -196,9 +212,9 @@ export class LambderApiGuardsEngine {
             const post = ctx.post as Record<string, unknown> | undefined;
             let payload: unknown;
             if(guardDef.apiInput){
-                payload = parsePreflightSlice(guardDef.apiInput, post?.payload, resolver);
+                payload = await parsePreflightSlice(guardDef.apiInput, post?.payload, ctx, resolver, this.onInvalidInput);
             }else if(guardDef.guardInput){
-                payload = parsePreflightSlice(guardDef.guardInput, (post?.guardInputs as Record<string, unknown> | undefined)?.[name], resolver);
+                payload = await parsePreflightSlice(guardDef.guardInput, (post?.guardInputs as Record<string, unknown> | undefined)?.[name], ctx, resolver, this.onInvalidInput);
             }
             // A guard's return value becomes the handler's typed
             // ctx.guardData[name]; check-only guards return undefined.

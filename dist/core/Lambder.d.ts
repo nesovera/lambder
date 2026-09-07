@@ -9,7 +9,7 @@ import { type LambderSessionDataRefreshConfig } from "../session/LambderSessionM
 import LambderSessionController, { type LambderSessionCookieOptions } from "../session/LambderSessionController.js";
 import { type LambderPublicFilesOptions } from "./LambderPublicFiles.js";
 import type { LambderApiGuard, LambderGuardMetaMap, LambderGuardsOption, LambderGuardDataOf, LambderGuardInputsOf } from "../policies/LambderApiGuards.js";
-import type { LambderApiRateLimitPolicyConfig, LambderApiRateLimitsConfig, LambderAllowedPolicyNames } from "../policies/LambderApiRateLimits.js";
+import type { LambderApiRateLimitPolicyConfig, LambderApiRateLimitsConfig, LambderRateLimitOption } from "../policies/LambderApiRateLimits.js";
 import type { LambderApiIdempotencyConfig } from "../policies/LambderApiIdempotency.js";
 import type { MergeContract } from "../shared/LambderApiContract.js";
 import { type LambderHttpEvent, type LambderRenderContext, type LambderSessionRenderContext } from "./LambderContext.js";
@@ -205,6 +205,13 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
     /** Apply the serveIndexHtml gates; null means fall through. */
     private tryServeIndexHtml;
     private getOrCreatePolicyEngine;
+    /**
+     * The response for a rejected input: the app's
+     * setApiInputValidationErrorHandler when set, otherwise the standard 422
+     * body. The API's own schema and every preflight slice (guard inputs,
+     * rate-limit keys) answer through here, so one failure has one shape.
+     */
+    private inputValidationRefusal;
     /** Registration-time checks shared by addApi/addSessionApi. */
     private assertApiRegistration;
     addRoute<TPath extends Path>(condition: TPath, actionFn: (ctx: LambderRenderContext<any, PathParamsOf<TPath>>, resolver: LambderResolver) => MaybePromise<LambderResponse>): this;
@@ -212,11 +219,11 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
     addSessionRoute<TPath extends Path>(condition: TPath, actionFn: (ctx: LambderSessionRenderContext<any, TSessionData, PathParamsOf<TPath>>, resolver: LambderResolver) => MaybePromise<LambderResponse>): this;
     addSessionRoute(condition: RegExp | ConditionFunction | LambderRouteMatcher, actionFn: SessionActionFunction<TSessionData>): this;
     use<_TNewContract extends Record<string, any>>(plugin: (lambder: Lambder<TSessionData, _TContract, any, any, any>) => Lambder<TSessionData, _TNewContract, any, any, any>): Lambder<TSessionData, _TNewContract extends _TContract ? _TNewContract : (_TContract & _TNewContract), _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled>;
-    addApi<TName extends string, TInput extends z.ZodTypeAny, TOutput extends z.ZodTypeAny, const TRateOpt extends LambderAllowedPolicyNames<_TRateLimitPolicies, z.infer<TInput>, false> | readonly LambderAllowedPolicyNames<_TRateLimitPolicies, z.infer<TInput>, false>[] = never, const TGuardsOpt extends LambderGuardsOption<_TGuards, z.infer<TInput>, false> = never>(name: TName, schema: {
+    addApi<TName extends string, TInput extends z.ZodTypeAny, TOutput extends z.ZodTypeAny, const TRateOpt extends LambderRateLimitOption<_TRateLimitPolicies, z.infer<TInput>, false> = never, const TGuardsOpt extends LambderGuardsOption<_TGuards, z.infer<TInput>, false> = never>(name: TName, schema: {
         input: TInput;
         output: TOutput;
     } & {
-        /** Named rate limits, checked in declared order before guards and validation; the first exceeded one refuses (429 envelope). */
+        /** Named rate limits, checked in declared order before guards and validation: a name, a list of names, or a { name: true | override } map (windows overridable on perApi budgets, errorMessage on any). The first exceeded one refuses (429 envelope + Retry-After); attempts count on every counter checked before it. */
         rateLimit?: TRateOpt;
         /** Named guards, run in declared order before input validation: a name, a list of names, or a { name: param } map for parameterized guards. Their input requirements merge into this API's contract input; their return values land typed on ctx.guardData. */
         guards?: TGuardsOpt;
@@ -225,11 +232,11 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
             ttlSeconds?: number;
         }) : never;
     }, handler: (ctx: LambderRenderContext<z.infer<TInput>, Record<string, string>, LambderGuardDataOf<_TGuards, TGuardsOpt>>, resolver: LambderResolver<z.infer<TOutput>>) => MaybePromise<LambderResponse>): Lambder<TSessionData, MergeContract<_TContract, TName, z.infer<TInput>, z.infer<TOutput>, LambderGuardInputsOf<_TGuards, TGuardsOpt>>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled>;
-    addSessionApi<TName extends string, TInput extends z.ZodTypeAny, TOutput extends z.ZodTypeAny, const TRateOpt extends LambderAllowedPolicyNames<_TRateLimitPolicies, z.infer<TInput>, true> | readonly LambderAllowedPolicyNames<_TRateLimitPolicies, z.infer<TInput>, true>[] = never, const TGuardsOpt extends LambderGuardsOption<_TGuards, z.infer<TInput>, true> = never>(name: TName, schema: {
+    addSessionApi<TName extends string, TInput extends z.ZodTypeAny, TOutput extends z.ZodTypeAny, const TRateOpt extends LambderRateLimitOption<_TRateLimitPolicies, z.infer<TInput>, true> = never, const TGuardsOpt extends LambderGuardsOption<_TGuards, z.infer<TInput>, true> = never>(name: TName, schema: {
         input: TInput;
         output: TOutput;
     } & {
-        /** Named rate limits, checked in declared order before guards and validation; the first exceeded one refuses (429 envelope). */
+        /** Named rate limits, checked in declared order before guards and validation: a name, a list of names, or a { name: true | override } map (windows overridable on perApi budgets, errorMessage on any). The first exceeded one refuses (429 envelope + Retry-After); attempts count on every counter checked before it. */
         rateLimit?: TRateOpt;
         /** Named guards, run in declared order before input validation: a name, a list of names, or a { name: param } map for parameterized guards. Their input requirements merge into this API's contract input; their return values land typed on ctx.guardData. */
         guards?: TGuardsOpt;

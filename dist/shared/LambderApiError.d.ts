@@ -18,6 +18,8 @@ export type LambderApiErrorOptions = {
      * 422 (reserved for input validation).
      */
     statusCode?: HttpStatusCode;
+    /** Extra response headers on the refusal (e.g. Retry-After on a rate limit). */
+    headers?: Record<string, string>;
     /** Underlying cause, preserved on the standard Error `cause` property. */
     cause?: unknown;
 };
@@ -48,6 +50,7 @@ export declare class LambderApiError extends Error {
     readonly notAuthorized?: boolean;
     readonly sessionExpired?: boolean;
     readonly statusCode?: HttpStatusCode;
+    readonly headers?: Record<string, string>;
     constructor(message: string, options?: LambderApiErrorOptions);
 }
 /** Brand-based type guard (see LambderApiError.isLambderApiError). */
@@ -73,6 +76,8 @@ export type LambderRefuseOptions = {
     sessionExpired?: boolean;
     /** HTTP status of the refusal. Default 200; avoid 5xx (caller treats as crash) and 422 (reserved for validation). */
     statusCode?: HttpStatusCode;
+    /** Extra response headers on the refusal (e.g. Retry-After). */
+    headers?: Record<string, string>;
     /** Underlying cause, preserved on the Error cause property. */
     cause?: unknown;
 };

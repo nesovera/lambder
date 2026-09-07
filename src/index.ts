@@ -71,8 +71,9 @@ export type {
 export { LambderDdbRateLimiter } from "./stores/LambderDdbRateLimiter.js";
 export type {
     LambderDdbRateLimiterOptions,
+    LambderRateLimitWindow,
     LambderRateLimitPolicy,
-    LambderRateLimitExceededMap,
+    LambderRateLimitExceeded,
     LambderRateLimitResult,
 } from "./stores/LambderDdbRateLimiter.js";
 
@@ -103,9 +104,13 @@ export { lambderRateLimitKey } from "./policies/LambderApiRateLimits.js";
 export type {
     LambderRateLimitKeyFn,
     LambderRateLimitPer,
+    LambderRateLimitBudget,
     LambderApiRateLimitPolicyConfig,
     LambderApiRateLimitsConfig,
     LambderAllowedPolicyNames,
+    LambderRateLimitOverride,
+    LambderRateLimitOption,
+    LambderRateLimitOptionValue,
 } from "./policies/LambderApiRateLimits.js";
 
 // Declarative per-API policies: idempotency

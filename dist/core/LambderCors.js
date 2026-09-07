@@ -27,4 +27,9 @@ export const applyCorsHeaders = (config, ctx, response, isPreflight) => {
         if (config.maxAge !== undefined)
             response.setHeader("Access-Control-Max-Age", String(config.maxAge));
     }
+    else {
+        const exposeHeaders = config.exposeHeaders ?? ["Retry-After"];
+        if (exposeHeaders.length)
+            response.setHeader("Access-Control-Expose-Headers", exposeHeaders.join(", "));
+    }
 };

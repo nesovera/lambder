@@ -173,9 +173,22 @@ export default class Lambder {
         return response;
     }
     getOrCreatePolicyEngine() {
+        // Late-bound: the handler may be set after creation, so the engine
+        // asks at request time rather than capturing it here.
         if (!this.apiPolicyEngine)
-            this.apiPolicyEngine = new LambderApiPolicyEngine();
+            this.apiPolicyEngine = new LambderApiPolicyEngine((ctx, resolver, zodError) => this.inputValidationRefusal(ctx, resolver, zodError));
         return this.apiPolicyEngine;
+    }
+    /**
+     * The response for a rejected input: the app's
+     * setApiInputValidationErrorHandler when set, otherwise the standard 422
+     * body. The API's own schema and every preflight slice (guard inputs,
+     * rate-limit keys) answer through here, so one failure has one shape.
+     */
+    async inputValidationRefusal(ctx, resolver, zodError) {
+        if (this.apiInputValidationErrorHandler)
+            return await this.apiInputValidationErrorHandler(ctx, resolver, zodError);
+        return resolver.json({ error: "Input validation failed", zodError }, { statusCode: 422 });
     }
     /** Registration-time checks shared by addApi/addSessionApi. */
     assertApiRegistration(name, mode, options) {
@@ -233,12 +246,8 @@ export default class Lambder {
                 if (this.apiPolicyEngine)
                     await this.apiPolicyEngine.runPreflight(name, ctx, resolver, schema);
                 const inputResult = schema.input.safeParse(ctx.apiPayload);
-                if (!inputResult.success) {
-                    if (this.apiInputValidationErrorHandler) {
-                        return await this.apiInputValidationErrorHandler(ctx, resolver, inputResult.error);
-                    }
-                    return resolver.json({ error: "Input validation failed", zodError: inputResult.error }, { statusCode: 422 });
-                }
+                if (!inputResult.success)
+                    return await this.inputValidationRefusal(ctx, resolver, inputResult.error);
                 ctx.apiPayload = inputResult.data;
                 const run = async () => await handler(ctx, resolver);
                 if (this.apiPolicyEngine && schema.idempotency)
@@ -265,12 +274,8 @@ export default class Lambder {
                 if (this.apiPolicyEngine)
                     await this.apiPolicyEngine.runPreflight(name, ctx, resolver, schema);
                 const inputResult = schema.input.safeParse(ctx.apiPayload);
-                if (!inputResult.success) {
-                    if (this.apiInputValidationErrorHandler) {
-                        return await this.apiInputValidationErrorHandler(ctx, resolver, inputResult.error);
-                    }
-                    return resolver.json({ error: "Input validation failed", zodError: inputResult.error }, { statusCode: 422 });
-                }
+                if (!inputResult.success)
+                    return await this.inputValidationRefusal(ctx, resolver, inputResult.error);
                 ctx.apiPayload = inputResult.data;
                 const run = async () => await handler(ctx, resolver);
                 if (this.apiPolicyEngine && schema.idempotency)
@@ -341,7 +346,10 @@ export default class Lambder {
             ...(err.errorMessage !== undefined ? { errorMessage: err.errorMessage } : {}),
             ...(err.notAuthorized ? { notAuthorized: true } : {}),
             ...(err.sessionExpired ? { sessionExpired: true } : {}),
-        }, err.statusCode !== undefined ? { statusCode: err.statusCode } : undefined);
+        }, {
+            ...(err.statusCode !== undefined ? { statusCode: err.statusCode } : {}),
+            ...(err.headers ? { headers: err.headers } : {}),
+        });
     }
     getHandler() {
         return ((event, context) => Lambder.isHttpEvent(event)
@@ -415,7 +423,7 @@ export default class Lambder {
         if (isAPI) {
             if (this.apiFallbackHandler)
                 return await this.apiFallbackHandler(ctx, resolver);
-            return resolver.api(null, { errorMessage: "API not found." });
+            return resolver.api(null, { errorMessage: { type: "warning", content: "API not found." } });
         }
         if (this.publicFilesHandler) {
             const fileResponse = await this.publicFilesHandler.handle(ctx);

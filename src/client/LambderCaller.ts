@@ -74,6 +74,8 @@ export type LambderApiOutcome<T> =
         status?: number;
         /** Envelope errorMessage, when the server provided one. */
         errorMessage?: any;
+        /** Seconds to wait before retrying, from the response's Retry-After header (rate-limit refusals send it). */
+        retryAfterSeconds?: number;
         /** Underlying Error for network/timeout/server/unknown failures. */
         error?: Error;
         /** Zod issue detail for 'validation'. */
@@ -373,6 +375,11 @@ export default class LambderCaller<TContract extends ApiContractShape = any> {
                 return { ok: false, reason: 'validation', status: res.status, zodError };
             }
 
+            // Retry-After (delta-seconds) rides every refusal that knows its
+            // reset time, e.g. a rate limit; absent or unreadable is undefined.
+            const retryAfterValue = Number(res.headers.get("retry-after") ?? NaN);
+            const retryAfter = Number.isFinite(retryAfterValue) && retryAfterValue >= 0 ? { retryAfterSeconds: retryAfterValue } : {};
+
             let data: LambderApiResponse<TOutput>;
             try {
                 data = await res.json();
@@ -395,25 +402,25 @@ export default class LambderCaller<TContract extends ApiContractShape = any> {
             if(data.versionExpired){
                 if(versionExpiredHandler){ await versionExpiredHandler(); }
                 else{ await reportError(new Error("Version Expired; Please refresh;")); }
-                return { ok: false, reason: 'versionExpired', status: res.status, errorMessage: data.errorMessage, response: data };
+                return { ok: false, reason: 'versionExpired', status: res.status, errorMessage: data.errorMessage, response: data, ...retryAfter };
             }
             if(data.sessionExpired){
                 this.clearSessionCookies();
                 if(sessionExpiredHandler){ await sessionExpiredHandler(); }
                 else{ await reportError(new Error("Session Expired; Please log in again;")); }
-                return { ok: false, reason: 'sessionExpired', status: res.status, errorMessage: data.errorMessage, response: data };
+                return { ok: false, reason: 'sessionExpired', status: res.status, errorMessage: data.errorMessage, response: data, ...retryAfter };
             }
             if(data.notAuthorized){
                 if(notAuthorizedHandler){ await notAuthorizedHandler(); }
                 else{ await reportError(new Error("Not Authorized;")); }
-                return { ok: false, reason: 'notAuthorized', status: res.status, errorMessage: data.errorMessage, response: data };
+                return { ok: false, reason: 'notAuthorized', status: res.status, errorMessage: data.errorMessage, response: data, ...retryAfter };
             }
             if(data.message && messageHandler){
                 await messageHandler(data.message);
             }
             if(data.errorMessage){
                 if(errorMessageHandler){ await errorMessageHandler(data.errorMessage); }
-                return { ok: false, reason: 'errorMessage', status: res.status, errorMessage: data.errorMessage, response: data };
+                return { ok: false, reason: 'errorMessage', status: res.status, errorMessage: data.errorMessage, response: data, ...retryAfter };
             }
             return { ok: true, payload: data.payload, response: data };
         }catch(err){
