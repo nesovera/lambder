@@ -23,13 +23,13 @@ export { LambderSessionDataRefreshError, LambderSessionReadError } from "./sessi
 export { LambderDdbCache } from "./stores/LambderDdbCache.js";
 export type { LambderDdbCacheOptions, LambderDdbCacheSetOptions, LambderDdbCacheGetOrSetOptions, } from "./stores/LambderDdbCache.js";
 export { LambderDdbRateLimiter } from "./stores/LambderDdbRateLimiter.js";
-export type { LambderDdbRateLimiterOptions, LambderRateLimitPolicy, LambderRateLimitExceededMap, LambderRateLimitResult, } from "./stores/LambderDdbRateLimiter.js";
+export type { LambderDdbRateLimiterOptions, LambderRateLimitWindow, LambderRateLimitPolicy, LambderRateLimitExceeded, LambderRateLimitResult, } from "./stores/LambderDdbRateLimiter.js";
 export { LambderDdbIdempotency } from "./stores/LambderDdbIdempotency.js";
 export type { LambderDdbIdempotencyOptions, LambderIdempotencyBeginResult, LambderIdempotencyDoneRecord, } from "./stores/LambderDdbIdempotency.js";
 export { lambderGuard } from "./policies/LambderApiGuards.js";
 export type { LambderApiGuard, LambderGuardMeta, LambderGuardMetaMap, LambderAllowedGuardNames, LambderParamlessGuardNames, LambderGuardsOption, LambderGuardsOptionValue, LambderGuardDataOf, LambderGuardInputsOf, } from "./policies/LambderApiGuards.js";
 export { lambderRateLimitKey } from "./policies/LambderApiRateLimits.js";
-export type { LambderRateLimitKeyFn, LambderRateLimitPer, LambderApiRateLimitPolicyConfig, LambderApiRateLimitsConfig, LambderAllowedPolicyNames, } from "./policies/LambderApiRateLimits.js";
+export type { LambderRateLimitKeyFn, LambderRateLimitPer, LambderRateLimitBudget, LambderApiRateLimitPolicyConfig, LambderApiRateLimitsConfig, LambderAllowedPolicyNames, LambderRateLimitOverride, LambderRateLimitOption, LambderRateLimitOptionValue, } from "./policies/LambderApiRateLimits.js";
 export type { LambderApiIdempotencyConfig } from "./policies/LambderApiIdempotency.js";
 export { createLambderI18n } from "./shared/LambderI18n.js";
 export type { LambderLanguageMeta, LambderI18nConfig, LambderI18nInstance, LambderI18nTranslator, LambderI18nExtractParams, LambderI18nCodes, LambderI18nKeys, LambderI18nTranslatorFor, } from "./shared/LambderI18n.js";

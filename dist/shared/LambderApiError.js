@@ -25,6 +25,7 @@ export class LambderApiError extends Error {
     notAuthorized;
     sessionExpired;
     statusCode;
+    headers;
     constructor(message, options = {}) {
         super(message, options.cause !== undefined ? { cause: options.cause } : undefined);
         this.name = "LambderApiError";
@@ -32,6 +33,7 @@ export class LambderApiError extends Error {
         this.notAuthorized = options.notAuthorized;
         this.sessionExpired = options.sessionExpired;
         this.statusCode = options.statusCode;
+        this.headers = options.headers;
     }
 }
 /** Brand-based type guard (see LambderApiError.isLambderApiError). */
@@ -58,6 +60,7 @@ export const refuse = (content, options = {}) => {
         notAuthorized: options.notAuthorized,
         sessionExpired: options.sessionExpired,
         statusCode: options.statusCode,
+        headers: options.headers,
         cause: options.cause,
     });
 };

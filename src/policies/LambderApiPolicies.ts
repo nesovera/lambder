@@ -1,13 +1,13 @@
 import type { LambderRenderContext } from "../core/LambderContext.js";
 import type LambderResolver from "../core/LambderResolver.js";
 import type { LambderResponse } from "../core/LambderResponse.js";
-import { LambderApiGuardsEngine, type LambderApiGuard, type LambderGuardsOptionValue } from "./LambderApiGuards.js";
-import { LambderApiRateLimitsEngine, type LambderApiRateLimitPolicyConfig, type LambderApiRateLimitsConfig } from "./LambderApiRateLimits.js";
+import { LambderApiGuardsEngine, type LambderApiGuard, type LambderGuardsOptionValue, type LambderInputValidationRefusal } from "./LambderApiGuards.js";
+import { LambderApiRateLimitsEngine, type LambderApiRateLimitPolicyConfig, type LambderApiRateLimitsConfig, type LambderRateLimitOptionValue } from "./LambderApiRateLimits.js";
 import { LambderApiIdempotencyEngine, type LambderApiIdempotencyConfig } from "./LambderApiIdempotency.js";
 
 /** The declarative options one API registration may carry. */
 type LambderApiPolicyOptions = {
-    rateLimit?: string | readonly string[];
+    rateLimit?: LambderRateLimitOptionValue;
     guards?: LambderGuardsOptionValue;
     idempotency?: unknown;
 };
@@ -22,9 +22,15 @@ type LambderApiPolicyOptions = {
  * per-API options.
  */
 export class LambderApiPolicyEngine {
-    private rateLimits = new LambderApiRateLimitsEngine();
-    private guards = new LambderApiGuardsEngine();
+    private rateLimits: LambderApiRateLimitsEngine;
+    private guards: LambderApiGuardsEngine;
     private idempotency = new LambderApiIdempotencyEngine();
+
+    /** `onInvalidInput` is Lambder's input-validation refusal, so preflight slices answer exactly like the API's own schema. */
+    constructor(onInvalidInput: LambderInputValidationRefusal){
+        this.rateLimits = new LambderApiRateLimitsEngine(onInvalidInput);
+        this.guards = new LambderApiGuardsEngine(onInvalidInput);
+    }
 
     setRateLimits(config: LambderApiRateLimitsConfig<Record<string, LambderApiRateLimitPolicyConfig>>): void {
         this.rateLimits.configure(config);

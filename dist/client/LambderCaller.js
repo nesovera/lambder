@@ -222,6 +222,10 @@ export default class LambderCaller {
                 }
                 return { ok: false, reason: 'validation', status: res.status, zodError };
             }
+            // Retry-After (delta-seconds) rides every refusal that knows its
+            // reset time, e.g. a rate limit; absent or unreadable is undefined.
+            const retryAfterValue = Number(res.headers.get("retry-after") ?? NaN);
+            const retryAfter = Number.isFinite(retryAfterValue) && retryAfterValue >= 0 ? { retryAfterSeconds: retryAfterValue } : {};
             let data;
             try {
                 data = await res.json();
@@ -248,7 +252,7 @@ export default class LambderCaller {
                 else {
                     await reportError(new Error("Version Expired; Please refresh;"));
                 }
-                return { ok: false, reason: 'versionExpired', status: res.status, errorMessage: data.errorMessage, response: data };
+                return { ok: false, reason: 'versionExpired', status: res.status, errorMessage: data.errorMessage, response: data, ...retryAfter };
             }
             if (data.sessionExpired) {
                 this.clearSessionCookies();
@@ -258,7 +262,7 @@ export default class LambderCaller {
                 else {
                     await reportError(new Error("Session Expired; Please log in again;"));
                 }
-                return { ok: false, reason: 'sessionExpired', status: res.status, errorMessage: data.errorMessage, response: data };
+                return { ok: false, reason: 'sessionExpired', status: res.status, errorMessage: data.errorMessage, response: data, ...retryAfter };
             }
             if (data.notAuthorized) {
                 if (notAuthorizedHandler) {
@@ -267,7 +271,7 @@ export default class LambderCaller {
                 else {
                     await reportError(new Error("Not Authorized;"));
                 }
-                return { ok: false, reason: 'notAuthorized', status: res.status, errorMessage: data.errorMessage, response: data };
+                return { ok: false, reason: 'notAuthorized', status: res.status, errorMessage: data.errorMessage, response: data, ...retryAfter };
             }
             if (data.message && messageHandler) {
                 await messageHandler(data.message);
@@ -276,7 +280,7 @@ export default class LambderCaller {
                 if (errorMessageHandler) {
                     await errorMessageHandler(data.errorMessage);
                 }
-                return { ok: false, reason: 'errorMessage', status: res.status, errorMessage: data.errorMessage, response: data };
+                return { ok: false, reason: 'errorMessage', status: res.status, errorMessage: data.errorMessage, response: data, ...retryAfter };
             }
             return { ok: true, payload: data.payload, response: data };
         }

@@ -1,5 +1,10 @@
 import { DynamoDBClient, UpdateItemCommand, } from "@aws-sdk/client-dynamodb";
-const WINDOW_CONFIG = [
+/**
+ * The fixed windows a policy may cap, smallest first (the evaluation order),
+ * with their length. The policy type derives from this table, so the two can
+ * never drift.
+ */
+export const RATE_LIMIT_WINDOWS = [
     { key: "perMin", seconds: 60 },
     { key: "per10Min", seconds: 10 * 60 },
     { key: "perHour", seconds: 60 * 60 },
@@ -13,8 +18,11 @@ const WINDOW_CONFIG = [
  * Each window is a single item counted with a conditional `ADD`, so the
  * increment and the limit check happen atomically in one request. Windows are
  * evaluated from smallest to largest and evaluation stops at the first
- * exceeded window, which keeps blocked requests cheap and avoids inflating the
- * larger counters. Items carry an `expiresAt` attribute for DynamoDB TTL.
+ * exceeded window, which keeps blocked requests cheap and spares the larger
+ * counters. Attempts count, not successes: a counter checked before the
+ * refusing one keeps its increment (there is no compensating decrement, which
+ * would give up the conditional-ADD atomicity). Items carry an `expiresAt`
+ * attribute for DynamoDB TTL.
  *
  * Table shape: string hash key `pk`, string range key `sk`, TTL on `expiresAt`.
  * Items are prefixed `RL#` by default, so the table can be shared with
@@ -41,23 +49,24 @@ export class LambderDdbRateLimiter {
     }
     /**
      * Increment every configured window for `trackerKey` (IP, session, user id, ...)
-     * and report whether any of them is over its limit.
+     * and report whether any of them is over its limit, with the window's
+     * reset time when so.
      */
     async isRateLimited(trackerKey, policy) {
-        for (const { key, seconds } of WINDOW_CONFIG) {
+        const nowSeconds = Math.floor(Date.now() / 1000);
+        for (const { key, seconds } of RATE_LIMIT_WINDOWS) {
             const limit = policy[key];
             if (!limit)
                 continue;
-            const exceeded = await this.incrementWindow(trackerKey, key, seconds, limit);
+            const windowStart = Math.floor(nowSeconds / seconds) * seconds;
+            const exceeded = await this.incrementWindow(trackerKey, key, windowStart, seconds, limit, nowSeconds);
             if (exceeded)
-                return { [key]: limit };
+                return { window: key, limit, resetAt: windowStart + seconds };
         }
         return false;
     }
     /** Increments one window counter. Returns true when the limit was already reached. */
-    async incrementWindow(trackerKey, sortKeyPrefix, windowSeconds, limit) {
-        const nowSeconds = Math.floor(Date.now() / 1000);
-        const windowStart = Math.floor(nowSeconds / windowSeconds) * windowSeconds;
+    async incrementWindow(trackerKey, sortKeyPrefix, windowStart, windowSeconds, limit, nowSeconds) {
         const expiresAt = nowSeconds + Math.ceil(windowSeconds * this.ttlWindowMultiplier);
         const input = {
             TableName: this.tableName,

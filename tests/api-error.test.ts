@@ -168,6 +168,21 @@ describe('LambderApiError - envelope mapping on API calls', () => {
 });
 
 describe('refuse() - the standard refusal shape', () => {
+    it('is the shape of the framework\'s own refusals too (unknown API)', async () => {
+        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' });
+        const result = await lambder.render(createApiEvent('missing', {}), createMockContext());
+        expect(JSON.parse(decodeBody(result)).errorMessage).toEqual({ type: 'warning', content: 'API not found.' });
+    });
+
+    it('carries extra headers onto the refusal response', async () => {
+        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+            .addApi('later', testSchema, async () => refuse('Come back later.', { statusCode: 429, headers: { 'Retry-After': '30' } }));
+
+        const result = await lambder.render(createApiEvent('later', { value: 'x' }), createMockContext());
+        expect(result.statusCode).toBe(429);
+        expect(result.multiValueHeaders?.['Retry-After']).toEqual(['30']);
+    });
+
     it('maps to a warning envelope by default', async () => {
         const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
             .addApi('nope', testSchema, async () => refuse('Record not found.'));

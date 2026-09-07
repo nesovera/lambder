@@ -15,7 +15,7 @@ import { applyCorsHeaders, type LambderCorsConfig } from "./LambderCors.js";
 import LambderSessionManager, { type LambderSessionDataRefreshConfig } from "../session/LambderSessionManager.js";
 import LambderSessionController, { type LambderSessionCookieOptions } from "../session/LambderSessionController.js";
 import { LambderPublicFilesHandler, type LambderPublicFilesOptions } from "./LambderPublicFiles.js";
-import { isLambderApiError, type LambderApiError } from "../shared/LambderApiError.js";
+import { isLambderApiError, type LambderApiError, type LambderRefusalMessage } from "../shared/LambderApiError.js";
 import { LambderApiPolicyEngine } from "../policies/LambderApiPolicies.js";
 import type {
     LambderApiGuard,
@@ -28,7 +28,8 @@ import type {
 import type {
     LambderApiRateLimitPolicyConfig,
     LambderApiRateLimitsConfig,
-    LambderAllowedPolicyNames,
+    LambderRateLimitOption,
+    LambderRateLimitOptionValue,
 } from "../policies/LambderApiRateLimits.js";
 import type { LambderApiIdempotencyConfig } from "../policies/LambderApiIdempotency.js";
 import type { MergeContract } from "../shared/LambderApiContract.js";
@@ -358,15 +359,28 @@ export default class Lambder<
     }
 
     private getOrCreatePolicyEngine(): LambderApiPolicyEngine {
-        if(!this.apiPolicyEngine) this.apiPolicyEngine = new LambderApiPolicyEngine();
+        // Late-bound: the handler may be set after creation, so the engine
+        // asks at request time rather than capturing it here.
+        if(!this.apiPolicyEngine) this.apiPolicyEngine = new LambderApiPolicyEngine((ctx, resolver, zodError) => this.inputValidationRefusal(ctx, resolver, zodError));
         return this.apiPolicyEngine;
+    }
+
+    /**
+     * The response for a rejected input: the app's
+     * setApiInputValidationErrorHandler when set, otherwise the standard 422
+     * body. The API's own schema and every preflight slice (guard inputs,
+     * rate-limit keys) answer through here, so one failure has one shape.
+     */
+    private async inputValidationRefusal(ctx: LambderRenderContext, resolver: LambderResolver, zodError: z.ZodError): Promise<LambderResponse> {
+        if(this.apiInputValidationErrorHandler) return await this.apiInputValidationErrorHandler(ctx, resolver, zodError);
+        return resolver.json({ error: "Input validation failed", zodError }, { statusCode: 422 });
     }
 
     /** Registration-time checks shared by addApi/addSessionApi. */
     private assertApiRegistration(
         name: string,
         mode: "public" | "session",
-        options: { rateLimit?: string | readonly string[], guards?: LambderGuardsOptionValue, idempotency?: unknown },
+        options: { rateLimit?: LambderRateLimitOptionValue, guards?: LambderGuardsOptionValue, idempotency?: unknown },
     ): void {
         if(this.registeredApiNames.has(name)){
             throw new Error(`Lambder: duplicate API name "${name}". Dispatch is first-match, so the second registration would be silently dead code.`);
@@ -430,12 +444,12 @@ export default class Lambder<
         TName extends string,
         TInput extends z.ZodTypeAny,
         TOutput extends z.ZodTypeAny,
-        const TRateOpt extends LambderAllowedPolicyNames<_TRateLimitPolicies, z.infer<TInput>, false> | readonly LambderAllowedPolicyNames<_TRateLimitPolicies, z.infer<TInput>, false>[] = never,
+        const TRateOpt extends LambderRateLimitOption<_TRateLimitPolicies, z.infer<TInput>, false> = never,
         const TGuardsOpt extends LambderGuardsOption<_TGuards, z.infer<TInput>, false> = never,
     >(
         name: TName,
         schema: { input: TInput, output: TOutput } & {
-            /** Named rate limits, checked in declared order before guards and validation; the first exceeded one refuses (429 envelope). */
+            /** Named rate limits, checked in declared order before guards and validation: a name, a list of names, or a { name: true | override } map (windows overridable on perApi budgets, errorMessage on any). The first exceeded one refuses (429 envelope + Retry-After); attempts count on every counter checked before it. */
             rateLimit?: TRateOpt;
             /** Named guards, run in declared order before input validation: a name, a list of names, or a { name: param } map for parameterized guards. Their input requirements merge into this API's contract input; their return values land typed on ctx.guardData. */
             guards?: TGuardsOpt;
@@ -464,12 +478,7 @@ export default class Lambder<
                 if(this.apiPolicyEngine) await this.apiPolicyEngine.runPreflight(name, ctx, resolver, schema);
 
                 const inputResult = schema.input.safeParse(ctx.apiPayload);
-                if (!inputResult.success) {
-                    if (this.apiInputValidationErrorHandler) {
-                        return await this.apiInputValidationErrorHandler(ctx, resolver, inputResult.error);
-                    }
-                    return resolver.json({ error: "Input validation failed", zodError: inputResult.error }, { statusCode: 422 });
-                }
+                if (!inputResult.success) return await this.inputValidationRefusal(ctx, resolver, inputResult.error);
 
                 ctx.apiPayload = inputResult.data;
                 const run = async () => await handler(ctx as never, resolver as LambderResolver<z.infer<TOutput>>);
@@ -485,12 +494,12 @@ export default class Lambder<
         TName extends string,
         TInput extends z.ZodTypeAny,
         TOutput extends z.ZodTypeAny,
-        const TRateOpt extends LambderAllowedPolicyNames<_TRateLimitPolicies, z.infer<TInput>, true> | readonly LambderAllowedPolicyNames<_TRateLimitPolicies, z.infer<TInput>, true>[] = never,
+        const TRateOpt extends LambderRateLimitOption<_TRateLimitPolicies, z.infer<TInput>, true> = never,
         const TGuardsOpt extends LambderGuardsOption<_TGuards, z.infer<TInput>, true> = never,
     >(
         name: TName,
         schema: { input: TInput, output: TOutput } & {
-            /** Named rate limits, checked in declared order before guards and validation; the first exceeded one refuses (429 envelope). */
+            /** Named rate limits, checked in declared order before guards and validation: a name, a list of names, or a { name: true | override } map (windows overridable on perApi budgets, errorMessage on any). The first exceeded one refuses (429 envelope + Retry-After); attempts count on every counter checked before it. */
             rateLimit?: TRateOpt;
             /** Named guards, run in declared order before input validation: a name, a list of names, or a { name: param } map for parameterized guards. Their input requirements merge into this API's contract input; their return values land typed on ctx.guardData. */
             guards?: TGuardsOpt;
@@ -520,12 +529,7 @@ export default class Lambder<
                 if(this.apiPolicyEngine) await this.apiPolicyEngine.runPreflight(name, ctx, resolver, schema);
 
                 const inputResult = schema.input.safeParse(ctx.apiPayload);
-                if (!inputResult.success) {
-                    if (this.apiInputValidationErrorHandler) {
-                        return await this.apiInputValidationErrorHandler(ctx, resolver, inputResult.error);
-                    }
-                    return resolver.json({ error: "Input validation failed", zodError: inputResult.error }, { statusCode: 422 });
-                }
+                if (!inputResult.success) return await this.inputValidationRefusal(ctx, resolver, inputResult.error);
 
                 ctx.apiPayload = inputResult.data;
                 const run = async () => await handler(ctx as never, resolver as LambderResolver<z.infer<TOutput>>);
@@ -603,7 +607,10 @@ export default class Lambder<
             ...(err.errorMessage !== undefined ? { errorMessage: err.errorMessage } : {}),
             ...(err.notAuthorized ? { notAuthorized: true } : {}),
             ...(err.sessionExpired ? { sessionExpired: true } : {}),
-        }, err.statusCode !== undefined ? { statusCode: err.statusCode } : undefined);
+        }, {
+            ...(err.statusCode !== undefined ? { statusCode: err.statusCode } : {}),
+            ...(err.headers ? { headers: err.headers } : {}),
+        });
     }
 
     getHandler(): LambderHandler {
@@ -707,7 +714,7 @@ export default class Lambder<
         const isAPI = ctx._otherInternal.isApiCall || ctx.path === this.apiPath;
         if(isAPI){
             if(this.apiFallbackHandler) return await this.apiFallbackHandler(ctx, resolver);
-            return resolver.api(null, { errorMessage: "API not found." });
+            return resolver.api(null, { errorMessage: { type: "warning", content: "API not found." } satisfies LambderRefusalMessage });
         }
         if(this.publicFilesHandler){
             const fileResponse = await this.publicFilesHandler.handle(ctx);

@@ -30,6 +30,16 @@ describe('CORS', () => {
         expect(result.multiValueHeaders?.['Access-Control-Allow-Origin']).toEqual(['https://site.example']);
     });
 
+    it('exposes Retry-After to cross-origin callers by default, or the configured list', async () => {
+        const call = async (cors: any) => (await initLambder().create({ publicPath: './public', cors })
+            .addRoute('/data', (ctx, res) => res.json({ ok: true }))
+            .render(createMockEvent('/data', { headers: { Host: 'localhost', Origin: 'https://site.example' } }), createMockContext()))
+            .multiValueHeaders?.['Access-Control-Expose-Headers'];
+        expect(await call(true)).toEqual(['Retry-After']);
+        expect(await call({ exposeHeaders: ['Retry-After', 'X-Request-Id'] })).toEqual(['Retry-After, X-Request-Id']);
+        expect(await call({ exposeHeaders: [] })).toBeUndefined();
+    });
+
     it('omits CORS headers for disallowed origins', async () => {
         const lambder = initLambder().create({ publicPath: './public', cors: { origins: ['https://allowed.example'] } })
             .addRoute('/data', (ctx, res) => res.json({ ok: true }));

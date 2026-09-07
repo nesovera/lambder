@@ -1,6 +1,6 @@
 import type { LambderRenderContext } from "../core/LambderContext.js";
 import type { LambderDdbIdempotency, LambderIdempotencyBeginResult } from "../stores/LambderDdbIdempotency.js";
-import { LambderApiError } from "../shared/LambderApiError.js";
+import { LambderApiError, type LambderRefusalMessage } from "../shared/LambderApiError.js";
 import { LambderResponse, normalizeHeaders, type HttpStatusCode } from "../core/LambderResponse.js";
 
 /** A crashed original must not block retries forever: pending claims expire on their own. */
@@ -51,7 +51,11 @@ export class LambderApiIdempotencyEngine {
         const rawKey = (ctx.post as Record<string, unknown> | undefined)?.idempotencyKey;
         if(rawKey === undefined || rawKey === null) return null;
         if(typeof rawKey !== "string" || rawKey.length < IDEMPOTENCY_MIN_KEY_LENGTH || rawKey.length > IDEMPOTENCY_MAX_KEY_LENGTH){
-            throw new LambderApiError(`Invalid idempotency key: must be a string of ${IDEMPOTENCY_MIN_KEY_LENGTH}-${IDEMPOTENCY_MAX_KEY_LENGTH} characters.`, { statusCode: 400 });
+            const content = `Invalid idempotency key: must be a string of ${IDEMPOTENCY_MIN_KEY_LENGTH}-${IDEMPOTENCY_MAX_KEY_LENGTH} characters.`;
+            throw new LambderApiError(content, {
+                statusCode: 400,
+                errorMessage: { type: "error", content } satisfies LambderRefusalMessage,
+            });
         }
         return rawKey;
     }
@@ -126,7 +130,7 @@ export class LambderApiIdempotencyEngine {
         if(begun.state === "pending"){
             throw new LambderApiError(`Duplicate request for "${apiName}": the original is still processing.`, {
                 statusCode: 409,
-                errorMessage: "This request is already being processed.",
+                errorMessage: { type: "warning", content: "This request is already being processed." } satisfies LambderRefusalMessage,
             });
         }
         if(begun.state === "done"){
