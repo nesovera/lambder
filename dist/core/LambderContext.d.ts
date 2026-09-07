@@ -11,7 +11,16 @@ export type LambderRenderContext<TApiPayload = any, TPathParams extends Record<s
     method: string;
     get: Record<string, string | undefined>;
     post: Record<string, any>;
+    /** Cookies by name (the first value when a name arrived more than once; see cookieList). */
     cookie: Record<string, string>;
+    /**
+     * Every value the request carried per cookie name, in header order. A
+     * name normally maps to one value; several arrive when the browser holds
+     * that name at more than one scope (host-only beside Domain=, or two
+     * paths), typically after a cookie's Domain or Path was changed. The
+     * browser's order says nothing about which copy is current.
+     */
+    cookieList: Record<string, string[]>;
     session: null;
     apiName: string | null;
     apiPayload: TApiPayload;

@@ -295,6 +295,9 @@ export default class LambderCaller<TContract extends ApiContractShape = any, TPr
         const resolvedDomain = typeof domainOption === "function" ? domainOption(hostname) : domainOption;
         for(const key of [this.sessionTokenCookieKey, this.sessionCsrfCookieKey]){
             // Host-only and domain-scoped cookies are distinct entries; clear both.
+            // Only the CSRF cookie is reachable from here: the token cookie is
+            // HttpOnly, so its removal is the server's (a Set-Cookie on the
+            // session-expired or logout response).
             Cookies.remove(key);
             if(resolvedDomain) Cookies.remove(key, { domain: resolvedDomain, path: "/" });
         }

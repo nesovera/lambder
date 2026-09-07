@@ -1,4 +1,5 @@
 import type { LambderRenderContext } from "./LambderContext.js";
+import { type LambderCookieOptions, type LambderClearCookieOptions } from "./LambderCookie.js";
 import type { LambderFiles } from "./LambderFiles.js";
 import { LambderResponse, type HttpStatusCode, type LambderHeadersInput } from "./LambderResponse.js";
 import { LambderSafeHtml } from "../shared/LambderHtml.js";
@@ -38,6 +39,19 @@ export default class LambderResponseBuilder<TResponse = any> {
     private requireFiles;
     addHeader(key: string, value: string): void;
     setHeader(key: string, value: string | string[]): void;
+    /**
+     * Adds a Set-Cookie header. A function-form `domain` is resolved against
+     * the request hostname. Defaults: Path=/, SameSite=Lax, Secure, not
+     * HttpOnly, browser-session lifetime.
+     */
+    setCookie(name: string, value: string, options?: LambderCookieOptions): void;
+    /**
+     * Adds a Set-Cookie header that deletes the cookie. Pass the same
+     * `domain` and `path` the cookie was set with: a cookie's identity is
+     * (name, domain, path), and a deletion under a different scope targets a
+     * different cookie and deletes nothing.
+     */
+    clearCookie(name: string, options?: LambderClearCookieOptions): void;
     logToApiResponse(input: any): void;
     raw(init: LambderRawResponseInit): LambderResponse;
     json(data: Record<string, any>, options?: LambderResponseOptions): LambderResponse;

@@ -10,7 +10,7 @@ export const createContext = (event, lambdaContext, apiPath) => {
     let path;
     let method;
     let get;
-    let cookieHeader;
+    let cookiePairs;
     let sourceIp;
     const headers = event.headers ?? {};
     if (isV2HttpEvent(event)) {
@@ -26,7 +26,8 @@ export const createContext = (event, lambdaContext, apiPath) => {
         for (const [key, value] of new URLSearchParams(event.rawQueryString ?? "").entries()) {
             get[key] = value;
         }
-        cookieHeader = (event.cookies ?? []).join("; ");
+        // v2 delivers the Cookie header pre-split into name=value pairs.
+        cookiePairs = event.cookies ?? [];
         sourceIp = event.requestContext.http.sourceIp || "";
     }
     else {
@@ -34,10 +35,19 @@ export const createContext = (event, lambdaContext, apiPath) => {
         path = event.path;
         method = event.httpMethod;
         get = event.queryStringParameters || {};
-        cookieHeader = headers.Cookie || headers.cookie || "";
+        cookiePairs = (headers.Cookie || headers.cookie || "").split(";");
         sourceIp = event.requestContext?.identity?.sourceIp || "";
     }
-    const cookie = cookieParser.parse(cookieHeader);
+    // Parsed pair by pair so a name that arrived more than once keeps every
+    // value; a whole-header parse keeps only the first.
+    const cookieList = {};
+    for (const pair of cookiePairs) {
+        for (const [name, value] of Object.entries(cookieParser.parse(pair))) {
+            if (value !== undefined)
+                (cookieList[name] ??= []).push(value);
+        }
+    }
+    const cookie = Object.fromEntries(Object.entries(cookieList).map(([name, values]) => [name, values[0]]));
     const lowercasedHeaders = {};
     for (const [key, value] of Object.entries(headers)) {
         if (value !== undefined)
@@ -74,7 +84,7 @@ export const createContext = (event, lambdaContext, apiPath) => {
     const requestVersion = isApiCall ? (post.version ?? null) : null;
     return {
         host, path, pathParams: {}, method,
-        get, post, cookie, event,
+        get, post, cookie, cookieList, event,
         session: null,
         apiName, apiPayload,
         guardData: {},

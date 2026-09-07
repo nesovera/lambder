@@ -22,7 +22,16 @@ export type LambderRenderContext<
     method: string;
     get: Record<string, string | undefined>;
     post: Record<string, any>;
+    /** Cookies by name (the first value when a name arrived more than once; see cookieList). */
     cookie: Record<string, string>;
+    /**
+     * Every value the request carried per cookie name, in header order. A
+     * name normally maps to one value; several arrive when the browser holds
+     * that name at more than one scope (host-only beside Domain=, or two
+     * paths), typically after a cookie's Domain or Path was changed. The
+     * browser's order says nothing about which copy is current.
+     */
+    cookieList: Record<string, string[]>;
     session: null;
     apiName: string | null;
     apiPayload: TApiPayload;
@@ -69,7 +78,7 @@ export const createContext = (
     let path: string;
     let method: string;
     let get: Record<string, string | undefined>;
-    let cookieHeader: string;
+    let cookiePairs: string[];
     let sourceIp: string;
     const headers: APIGatewayProxyEventHeaders = event.headers ?? {};
 
@@ -86,18 +95,29 @@ export const createContext = (
         for(const [key, value] of new URLSearchParams(event.rawQueryString ?? "").entries()){
             get[key] = value;
         }
-        cookieHeader = (event.cookies ?? []).join("; ");
+        // v2 delivers the Cookie header pre-split into name=value pairs.
+        cookiePairs = event.cookies ?? [];
         sourceIp = event.requestContext.http.sourceIp || "";
     }else{
         host = headers.Host || headers.host || "";
         path = event.path;
         method = event.httpMethod;
         get = event.queryStringParameters || {};
-        cookieHeader = headers.Cookie || headers.cookie || "";
+        cookiePairs = (headers.Cookie || headers.cookie || "").split(";");
         sourceIp = event.requestContext?.identity?.sourceIp || "";
     }
 
-    const cookie = cookieParser.parse(cookieHeader) as Record<string, string>;
+    // Parsed pair by pair so a name that arrived more than once keeps every
+    // value; a whole-header parse keeps only the first.
+    const cookieList: Record<string, string[]> = {};
+    for(const pair of cookiePairs){
+        for(const [name, value] of Object.entries(cookieParser.parse(pair))){
+            if(value !== undefined) (cookieList[name] ??= []).push(value);
+        }
+    }
+    const cookie: Record<string, string> = Object.fromEntries(
+        Object.entries(cookieList).map(([name, values]) => [name, values[0]!])
+    );
 
     const lowercasedHeaders: Record<string, string> = {};
     for(const [key, value] of Object.entries(headers)){
@@ -135,7 +155,7 @@ export const createContext = (
 
     return {
         host, path, pathParams: {}, method,
-        get, post, cookie, event,
+        get, post, cookie, cookieList, event,
         session: null,
         apiName, apiPayload,
         guardData: {},

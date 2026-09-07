@@ -144,3 +144,7 @@ export {
 // Context types and utilities
 export type { LambderRenderContext, LambderSessionRenderContext, LambderHttpEvent } from "./core/LambderContext.js";
 export { createContext, isV2HttpEvent } from "./core/LambderContext.js";
+
+// Cookies (res.setCookie / res.clearCookie build on these; exported for code holding a LambderResponse)
+export { serializeCookie, serializeClearCookie, resolveCookieDomain } from "./core/LambderCookie.js";
+export type { LambderCookieOptions, LambderClearCookieOptions, LambderCookieDomain } from "./core/LambderCookie.js";

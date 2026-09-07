@@ -1,4 +1,5 @@
 import type { LambderRenderContext } from "./LambderContext.js";
+import { serializeCookie, serializeClearCookie, type LambderCookieOptions, type LambderClearCookieOptions } from "./LambderCookie.js";
 import type { LambderFiles } from "./LambderFiles.js";
 import { LambderResponse, type HttpStatusCode, type LambderHeadersInput } from "./LambderResponse.js";
 import { LambderSafeHtml } from "../shared/LambderHtml.js";
@@ -85,6 +86,27 @@ export default class LambderResponseBuilder<TResponse = any> {
         this.ctx._otherInternal.addHeaderFnAccumulator = this.ctx._otherInternal.addHeaderFnAccumulator
             .filter((header) => header.key !== key);
         this.ctx._otherInternal.setHeaderFnAccumulator.push({ key, value });
+    };
+
+    /**
+     * Adds a Set-Cookie header. A function-form `domain` is resolved against
+     * the request hostname. Defaults: Path=/, SameSite=Lax, Secure, not
+     * HttpOnly, browser-session lifetime.
+     */
+    setCookie(name: string, value: string, options?: LambderCookieOptions){
+        if(!this.ctx) throw new Error(".setCookie function is not available within this hook");
+        this.addHeader("Set-Cookie", serializeCookie(name, value, options, this.ctx.host));
+    };
+
+    /**
+     * Adds a Set-Cookie header that deletes the cookie. Pass the same
+     * `domain` and `path` the cookie was set with: a cookie's identity is
+     * (name, domain, path), and a deletion under a different scope targets a
+     * different cookie and deletes nothing.
+     */
+    clearCookie(name: string, options?: LambderClearCookieOptions){
+        if(!this.ctx) throw new Error(".clearCookie function is not available within this hook");
+        this.addHeader("Set-Cookie", serializeClearCookie(name, options, this.ctx.host));
     };
 
     logToApiResponse(input: any){

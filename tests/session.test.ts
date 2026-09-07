@@ -543,6 +543,7 @@ describe('LambderSessionController', () => {
             get: {},
             post: { token: 'csrf-token' },
             cookie: { sessionToken: 'hash:sortkey' },
+            cookieList: { sessionToken: ['hash:sortkey'] },
             session: null,
             apiName: 'test.api',
             apiPayload: {},
@@ -619,7 +620,7 @@ describe('LambderSessionController', () => {
         });
 
         it('should throw error if session tokens are invalid', async () => {
-            mockCtx.cookie = {}; // No session token
+            mockCtx.cookie = {}; mockCtx.cookieList = {}; // No session token
 
             await expect(sessionController.fetchSession()).rejects.toThrow('Session tokens are invalid');
         });
@@ -627,7 +628,7 @@ describe('LambderSessionController', () => {
 
     describe('fetchSessionIfExists', () => {
         it('should return null if session does not exist', async () => {
-            mockCtx.cookie = {}; // No session token
+            mockCtx.cookie = {}; mockCtx.cookieList = {}; // No session token
 
             const session = await sessionController.fetchSessionIfExists();
             expect(session).toBeNull();
@@ -1400,6 +1401,7 @@ describe('LambderSessionController dataRefresh', () => {
         get: {},
         post: { token: 'csrf-token' },
         cookie: { sessionToken: 'hashed-key:sort-key' },
+        cookieList: { sessionToken: ['hashed-key:sort-key'] },
         session: null,
         apiName: 'test.api',
         apiPayload: {},
