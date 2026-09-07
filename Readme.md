@@ -2,6 +2,12 @@
 
 Lambder is a highly opinionated dynamic serverless framework designed to facilitate the management and implementation of routes and APIs within AWS Lambda functions, specifically tailored for TypeScript projects. It provides a streamlined approach to handling HTTP requests, managing sessions, and defining API routes, making serverless application development more intuitive and structured.
 
+**New in 4.4:**
+
+- **`guardInputsProvider`** on `LambderCaller`: supply guardInput-mode guard values for every call from one place (the organization the UI is on, a device token) instead of at each call site; per-call `guardInputs` merge on top. Name the covered guards in the caller's second type parameter, `new LambderCaller<Contract, "orgPermission">({ guardInputsProvider, ... })`: calls to APIs whose guardInput guards are all covered no longer require the options argument, uncovered ones (a Turnstile token) still do, and naming guards makes the provider itself mandatory.
+- **Public file sources**: `servePublicFiles({ source })` serves from any `LambderPublicFileSource`: `LambderLocalFileSource` (a folder; the default, over `publicPath`), `LambderS3FileSource` (S3, or Cloudflare R2 and other S3-compatible stores via `clientConfig.endpoint`; `@aws-sdk/client-s3` is an optional peer dependency loaded on first read), or your own `{ read(relativePath) }`. The handler's traversal check, memory cache, mime fallback from the extension, Cache-Control, ETag and compression apply to every source. The `cacheControl` callback receives the relative file path.
+- **`expireSessionDataAllByKey(sessionKey)`** on the session manager and controller: marks the data of every session of a subject stale, so each renews via `dataRefresh` on its next read. The way to apply a role or permission change to a user immediately, without logging them out (`deleteSessionAllByKey`) and without waiting for the data TTL.
+
 **New in 4.3:**
 
 - **Compressed sessions**: `session.data` is stored Brotli-compressed by default, as `dataBr` + `dataBytes` on the record, the same scheme LambderDdbCache and LambderDdbIdempotency use (one shared implementation). A session that caches roles, permissions or product lists shrinks 2-3x and stays within one DynamoDB read unit for longer. `session.compression` is `true` by default (the same as `{ minBytes: 0 }`: every record compressed); `false` turns it off and `{ minBytes }` compresses only from that JSON size. Records written under either setting read back, so it can be switched on or off on a live table.
@@ -160,8 +166,9 @@ lambder
     .addRoute({ path: "/stripe-webhook", method: "POST" }, (ctx, res) => {
         return res.json({ received: true });
     })
-    // Serve real files from publicPath. This is a terminal fallback slot, NOT
-    // a catch-all route, so it can never shadow routes registered after it.
+    // Serve real files (from publicPath by default; see "Public file sources"
+    // below for S3/R2). This is a terminal fallback slot, NOT a catch-all
+    // route, so it can never shadow routes registered after it.
     .servePublicFiles()
     // Serve the app shell for GET/HEAD page requests nothing else handled
     // (see "Hosting a frontend build" below).
@@ -359,6 +366,7 @@ Semantics:
 - The renewal write and the sliding-expiration write share a single DynamoDB put when both are due.
 - Records created before `dataRefresh` was enabled renew on their first read.
 - `updateSessionData()` marks data fresh (it was just written deliberately); `regenerateSession()` carries the old freshness stamp over.
+- `expireSessionDataAllByKey(sessionKey)` stamps every session of a subject stale at once: call it after changing that subject's roles or permissions, and the change applies on their next request instead of within `ttlSeconds`, with no logout. It updates only `dataExpiresAt`, conditionally on the record still existing, so it neither resurrects a deleted session nor clobbers a concurrent write.
 
 #### Session data at rest (`compression`)
 
@@ -389,6 +397,7 @@ Access the session controller with `lambder.getSessionController(ctx)`:
 | `endSession()` | End session, delete from DDB |
 | `endSessionAll()` | End all sessions for this sessionKey (all devices) |
 | `deleteSessionAllByKey(sessionKey)` | Delete all sessions of any sessionKey (e.g. "log user X out everywhere") |
+| `expireSessionDataAllByKey(sessionKey)` | Mark the data of all sessions of a sessionKey stale, so each renews via `dataRefresh` on its next read (no logout) |
 | `regenerateSession()` | Regenerate token (use after password change) |
 
 ### Type-Safe Templating (html / xml)
@@ -431,6 +440,33 @@ const output = template.render({
 ### Hosting a frontend build (servePublicFiles + templateFile)
 
 Lambder has no SPA-specific machinery; hosting a frontend build is a recipe built from three generic primitives: `servePublicFiles()` (terminal slot serving real files: memory-cached, immutable Cache-Control for hashed assets, ETag/gzip, falls through when missing), `serveIndexHtml()` (next fallback slot, GET/HEAD + non-file-path gated) and `res.templateFile()` (render an HTML file through the templating engine, compiled once and cached). **Full guide with the multi-tenant recipe: [docs/TEMPLATING.md](./docs/TEMPLATING.md).**
+
+#### Public file sources
+
+`servePublicFiles` reads through a `LambderPublicFileSource`, an object with one method, `read(relativePath)`, returning `{ body, mimeType? }` or `null` (the request then falls through). The handler does everything else for every source: traversal check, memory cache for warm invocations, mime fallback from the extension, Cache-Control (immutable for content-hashed names), ETag and compression. Built in:
+
+```typescript
+// Default: the publicPath folder bundled with the deployment.
+lambder.servePublicFiles();
+
+// S3. @aws-sdk/client-s3 is an optional peer dependency, loaded on first read.
+lambder.servePublicFiles({
+    source: new LambderS3FileSource({ bucket: "myapp-web", prefix: "v42/", clientConfig: { region: "eu-central-1" } }),
+});
+
+// Cloudflare R2, or any S3-compatible store: point the client at its endpoint.
+lambder.servePublicFiles({
+    source: new LambderS3FileSource({
+        bucket: "myapp-web",
+        clientConfig: { region: "auto", endpoint: "https://<account>.r2.cloudflarestorage.com", credentials: { accessKeyId, secretAccessKey } },
+    }),
+});
+
+// Anything else: implement read().
+lambder.servePublicFiles({ source: { read: async (relativePath) => myStore.get(relativePath) } });
+```
+
+A missing S3 object reads as null; grant `s3:ListBucket` besides `s3:GetObject`, otherwise S3 answers a missing key with AccessDenied, which propagates as an error instead of falling through. The object's Content-Type is used unless it is a generic octet-stream, in which case the extension decides. Lambda's ~6MB response cap still applies to anything proxied this way: redirect large downloads to the bucket or CDN URL instead of serving them.
 
 ```typescript
 // Zero-config single-tenant hosting:
@@ -772,7 +808,7 @@ Also available:
 
 - **Timeouts**: pass `timeoutMs` in the constructor for a default (API Gateway caps around 29s, so ~30000 is sensible) and/or per call; timed-out calls abort the fetch and report `reason: 'timeout'`. A per-call `signal` combines with the timeout.
 - **Per-call handler overrides**: every constructor handler (`errorHandler`, `sessionExpiredHandler`, `errorMessageHandler`, ...) can be overridden in the options of a single `api`/`apiOutcome` call.
-- **Guard inputs**: for APIs whose guards run in guardInput mode, pass their values per call as `guardInputs: { <guardName>: value }`; the typed contract makes the options argument (and the correct value shape) mandatory for those APIs.
+- **Guard inputs**: for APIs whose guards run in guardInput mode, pass their values per call as `guardInputs: { <guardName>: value }`; the typed contract makes the options argument (and the correct value shape) mandatory for those APIs. A `guardInputsProvider` on the caller supplies values for every call from one place, keyed by guard name, with per-call `guardInputs` merged on top; name the guards it covers in the caller's second type parameter, `new LambderCaller<Contract, "orgPermission">({ guardInputsProvider: () => ({ orgPermission: { orgSlug } }), ... })`, and calls to APIs whose guardInput guards are all covered take an optional options argument again.
 - **Idempotency keys**: pass `idempotencyKey` per call for APIs declared idempotent on the server (see Declarative API Policies). Generate it once per logical operation with `LambderCaller.createIdempotencyKey()` (safe in insecure contexts where `crypto.randomUUID` is missing) and send the same key on retries; rotate after a confirmed success. `LambderCaller.createIdempotencyKeyScope()` packages that pattern for a component performing one operation repeatedly: read `scope.current` on every attempt, call `scope.rotate()` after a confirmed success. Keys must be unguessable random and 16-200 characters (they scope the replay record for logged-out clients); the server refuses shorter keys with a 400.
 
 ### Benefits

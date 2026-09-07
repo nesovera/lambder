@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, QueryCommand, DeleteCommand, PutCommand, GetCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, QueryCommand, DeleteCommand, PutCommand, GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import {
     brotliCompressText, brotliRestoreText, resolveCompressionOption,
     type LambderCompressionOption, type LambderCompressionSettings,
@@ -200,11 +200,13 @@ export default class LambderSessionManager{
         );
     };
 
+    /** Sort keys of every session under a partition (the callers only need the keys). */
     private async ddbQueryAllByPartitionKey (partitionValue: string){
         const params: any = {
             TableName: this.tableName,
             KeyConditionExpression: "#pk = :pv",
-            ExpressionAttributeNames:{ "#pk": this.partitionKey },
+            ProjectionExpression: "#sk",
+            ExpressionAttributeNames:{ "#pk": this.partitionKey, "#sk": this.sortKey },
             ExpressionAttributeValues: { ":pv": partitionValue },
         }
         const queryResults: any[] = [];
@@ -430,6 +432,37 @@ export default class LambderSessionManager{
      */
     public async deleteSessionAllByKey (sessionKey: string): Promise<boolean>{
         await this.ddbDeleteAllByPartitionKey(this.sessionUserKeyHasher(sessionKey));
+        return true;
+    };
+
+    /**
+     * Marks the data of every session of the given sessionKey stale, so each
+     * renews via dataRefresh on its next read: "this subject's roles or
+     * permissions changed, apply it now", without logging the subject out
+     * (deleteSessionAllByKey) and without waiting for the data TTL. Stamps
+     * dataExpiresAt only, conditionally on the record still existing, so it
+     * neither resurrects a session deleted in between nor overwrites a
+     * concurrent write. Requires dataRefresh to be configured.
+     */
+    public async expireSessionDataAllByKey (sessionKey: string): Promise<boolean>{
+        if(!this.dataRefresh) throw new Error("dataRefresh is not configured. Pass session.dataRefresh at creation to enable.");
+        const partitionValue = this.sessionUserKeyHasher(sessionKey);
+        const now = Math.floor(Date.now()/1000);
+        for(const item of await this.ddbQueryAllByPartitionKey(partitionValue)){
+            try{
+                await this.ddbDocumentClient.send(new UpdateCommand({
+                    TableName: this.tableName,
+                    Key: { [this.partitionKey]: partitionValue, [this.sortKey]: item[this.sortKey] },
+                    UpdateExpression: "SET #dataExpiresAt = :now",
+                    ConditionExpression: "attribute_exists(#sk)",
+                    ExpressionAttributeNames: { "#dataExpiresAt": "dataExpiresAt", "#sk": this.sortKey },
+                    ExpressionAttributeValues: { ":now": now },
+                }));
+            }catch(err){
+                // Deleted between the query and the update: nothing left to expire.
+                if((err as { name?: string }).name !== "ConditionalCheckFailedException") throw err;
+            }
+        }
         return true;
     };
 
