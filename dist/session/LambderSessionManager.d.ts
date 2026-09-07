@@ -111,6 +111,7 @@ export default class LambderSessionManager {
      */
     private ddbPutItem;
     private ddbDeleteItem;
+    /** Sort keys of every session under a partition (the callers only need the keys). */
     private ddbQueryAllByPartitionKey;
     private ddbDeleteAllByPartitionKey;
     createSession(sessionKey: string, data?: any, ttlInSeconds?: number, options?: {
@@ -135,5 +136,15 @@ export default class LambderSessionManager {
      * session record.
      */
     deleteSessionAllByKey(sessionKey: string): Promise<boolean>;
+    /**
+     * Marks the data of every session of the given sessionKey stale, so each
+     * renews via dataRefresh on its next read: "this subject's roles or
+     * permissions changed, apply it now", without logging the subject out
+     * (deleteSessionAllByKey) and without waiting for the data TTL. Stamps
+     * dataExpiresAt only, conditionally on the record still existing, so it
+     * neither resurrects a session deleted in between nor overwrites a
+     * concurrent write. Requires dataRefresh to be configured.
+     */
+    expireSessionDataAllByKey(sessionKey: string): Promise<boolean>;
     regenerateSession(session: LambderSessionContext): Promise<LambderCreatedSession>;
 }

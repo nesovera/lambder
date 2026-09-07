@@ -1,4 +1,8 @@
 import Cookies from 'js-cookie';
+/**
+ * @typeParam TContract - The API contract, for typed names, payloads and guard inputs.
+ * @typeParam TProvidedGuards - Guard names guardInputsProvider covers; those APIs' options argument becomes optional.
+ */
 export default class LambderCaller {
     isCorsEnabled;
     apiPath;
@@ -15,10 +19,14 @@ export default class LambderCaller {
     apiInputValidationErrorHandler;
     fetchStartedHandler;
     fetchEndedHandler;
+    guardInputsProvider;
     sessionTokenCookieKey = "LMDRSESSIONTKID";
     sessionCsrfCookieKey = "LMDRSESSIONCSTK";
     sessionCookieDomain;
-    constructor({ apiPath, apiVersion, isCorsEnabled = false, timeoutMs, versionExpiredHandler, sessionExpiredHandler, messageHandler, errorMessageHandler, notAuthorizedHandler, errorHandler, fetchStartedHandler, fetchEndedHandler, apiInputValidationErrorHandler, sessionCookieDomain, }) {
+    constructor(options) {
+        // The conditional provider option is resolved per instantiation;
+        // inside the class it is read through the plain shape.
+        const { apiPath, apiVersion, isCorsEnabled = false, timeoutMs, versionExpiredHandler, sessionExpiredHandler, messageHandler, errorMessageHandler, notAuthorizedHandler, errorHandler, fetchStartedHandler, fetchEndedHandler, apiInputValidationErrorHandler, sessionCookieDomain, guardInputsProvider, } = options;
         this.apiPath = apiPath ?? "/api";
         this.apiVersion = apiVersion;
         this.isCorsEnabled = isCorsEnabled;
@@ -33,6 +41,7 @@ export default class LambderCaller {
         this.apiInputValidationErrorHandler = apiInputValidationErrorHandler;
         this.fetchStartedHandler = fetchStartedHandler;
         this.fetchEndedHandler = fetchEndedHandler;
+        this.guardInputsProvider = guardInputsProvider;
     }
     ;
     setSessionCookieKey(sessionTokenCookieKey, sessionCsrfCookieKey) {
@@ -159,6 +168,13 @@ export default class LambderCaller {
             const version = this.apiVersion;
             const token = Cookies.get(this.sessionCsrfCookieKey) || "";
             const siteHost = window.location.hostname;
+            // Provider values underneath, per-call values on top.
+            const providedGuardInputs = this.guardInputsProvider
+                ? await this.guardInputsProvider(apiName)
+                : undefined;
+            const guardInputs = providedGuardInputs !== undefined || options?.guardInputs !== undefined
+                ? { ...providedGuardInputs, ...options?.guardInputs }
+                : undefined;
             let res;
             try {
                 res = await fetch(this.apiPath, {
@@ -170,7 +186,7 @@ export default class LambderCaller {
                     headers: { 'Content-Type': 'application/json', ...(headers || {}) },
                     body: JSON.stringify({
                         apiName, version, token, siteHost, payload,
-                        ...(options?.guardInputs !== undefined ? { guardInputs: options.guardInputs } : {}),
+                        ...(guardInputs !== undefined ? { guardInputs } : {}),
                         ...(options?.idempotencyKey !== undefined ? { idempotencyKey: options.idempotencyKey } : {}),
                     }),
                     ...(signal ? { signal } : {}),

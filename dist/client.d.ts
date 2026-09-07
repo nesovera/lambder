@@ -7,7 +7,7 @@
  * the root entry (`"lambder"`) is the server surface.
  */
 export { default as LambderCaller } from "./client/LambderCaller.js";
-export type { LambderApiOutcome, LambderApiFailureReason, LambderCallOptions, LambderIdempotencyKeyScope, } from "./client/LambderCaller.js";
+export type { LambderApiOutcome, LambderApiFailureReason, LambderCallOptions, LambderCallerOptions, LambderGuardInputsProvider, LambderProvidedGuardInputs, LambderIdempotencyKeyScope, } from "./client/LambderCaller.js";
 export { LambderApiError, isLambderApiError, refuse, LAMBDER_REFUSAL_CODES } from "./shared/LambderApiError.js";
 export type { LambderApiErrorOptions, LambderRefusalMessage, LambderRefusalCode, LambderRefuseOptions } from "./shared/LambderApiError.js";
 export type { ApiContractShape, LambderApiResponse, LambderApiResponseConfig } from "./shared/LambderApiContract.js";

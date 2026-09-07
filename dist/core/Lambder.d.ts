@@ -194,11 +194,13 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
     setSessionExpiredRouteHandler(handler: FallbackHandlerFunction): this;
     /**
      * Terminal public-file layer. Runs only when no route matched, so it can
-     * never shadow routes registered after it. Serves real files under
-     * publicPath (traversal-safe, mime-typed, memory-cached, immutable-cache
-     * heuristic for content-hashed assets); when the file does not exist the
-     * request falls through to setRouteFallbackHandler, where the app decides
-     * what remains (e.g. render an app shell with res.templateFile).
+     * never shadow routes registered after it. Serves files from `source`
+     * (default: the publicPath folder; also LambderS3FileSource for S3 and
+     * R2, or any LambderPublicFileSource), traversal-safe, mime-typed,
+     * memory-cached, with the immutable-cache heuristic for content-hashed
+     * assets; when the source has no such file the request falls through to
+     * setRouteFallbackHandler, where the app decides what remains (e.g.
+     * render an app shell with res.templateFile).
      */
     servePublicFiles(options?: LambderPublicFilesOptions): this;
     /**

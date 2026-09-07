@@ -347,3 +347,86 @@ describe('LambderCaller - lifecycle handlers and resilience', () => {
         if(!outcome.ok) expect(outcome.error?.message).toBe('handler bug');
     });
 });
+
+describe('LambderCaller - guardInputsProvider', () => {
+    it('sends the provider\'s guardInputs on every call, per-call inputs merged on top', async () => {
+        const fetchMock = stubFetch(async () => mockResponse({ apiVersion: '1', payload: 'ok' }));
+        const provider = vi.fn((apiName: string) => ({ orgPermission: { orgSlug: `org-for-${apiName}` } }));
+        const caller = new LambderCaller<any, 'orgPermission'>({ apiPath: '/api', isCorsEnabled: false, guardInputsProvider: provider });
+
+        await caller.api('doThing', { a: 1 });
+        await caller.api('doThing', { a: 1 }, { guardInputs: { captcha: { token: 't-1' } } });
+        await caller.api('doThing', { a: 1 }, { guardInputs: { orgPermission: { orgSlug: 'explicit' } } });
+
+        const bodies = fetchMock.mock.calls.map((call) => JSON.parse(call[1]?.body as string));
+        expect(provider).toHaveBeenCalledWith('doThing');
+        expect(bodies[0].guardInputs).toEqual({ orgPermission: { orgSlug: 'org-for-doThing' } });
+        expect(bodies[1].guardInputs).toEqual({ orgPermission: { orgSlug: 'org-for-doThing' }, captcha: { token: 't-1' } });
+        expect(bodies[2].guardInputs).toEqual({ orgPermission: { orgSlug: 'explicit' } });
+    });
+
+    it('accepts an async provider', async () => {
+        const fetchMock = stubFetch(async () => mockResponse({ apiVersion: '1', payload: 'ok' }));
+        const caller = new LambderCaller<any, 'orgPermission'>({
+            apiPath: '/api', isCorsEnabled: false,
+            guardInputsProvider: async () => ({ orgPermission: { orgSlug: 'async-org' } }),
+        });
+
+        await caller.api('doThing', { a: 1 });
+
+        expect(JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string).guardInputs).toEqual({ orgPermission: { orgSlug: 'async-org' } });
+    });
+
+    it('a throwing provider fails the call before anything is sent', async () => {
+        const fetchMock = stubFetch(async () => mockResponse({ apiVersion: '1', payload: 'ok' }));
+        const errorHandler = vi.fn();
+        const caller = new LambderCaller<any, 'orgPermission'>({
+            apiPath: '/api', isCorsEnabled: false, errorHandler,
+            guardInputsProvider: () => { throw new Error('no organization selected'); },
+        });
+
+        const outcome = await caller.apiOutcome('doThing', { a: 1 });
+
+        expect(outcome.ok).toBe(false);
+        expect(fetchMock).not.toHaveBeenCalled();
+        expect(errorHandler).toHaveBeenCalledOnce();
+    });
+
+    it('typed contract: provided guards drop the options requirement, uncovered guards keep it', async () => {
+        stubFetch(async () => mockResponse({ apiVersion: '1', payload: 'ok' }));
+        type Contract = {
+            'org.list': { input: { page: number }, output: string[], guardInputs: { orgPermission: { orgSlug: string } } },
+            'org.contact': { input: { text: string }, output: null, guardInputs: { orgPermission: { orgSlug: string }, turnstile: { turnstileToken: string } } },
+            'public.ping': { input: undefined, output: string },
+        };
+        const caller = new LambderCaller<Contract, 'orgPermission'>({
+            apiPath: '/api', isCorsEnabled: false,
+            guardInputsProvider: () => ({ orgPermission: { orgSlug: 'acme' } }),
+        });
+
+        // Fully provided: options optional, and the provided guard may still be overridden.
+        await caller.api('org.list', { page: 1 });
+        await caller.api('org.list', { page: 1 }, { guardInputs: { orgPermission: { orgSlug: 'other' } } });
+        // Partly provided: the uncovered guard is still mandatory, the covered one optional.
+        await caller.api('org.contact', { text: 'hi' }, { guardInputs: { turnstile: { turnstileToken: 't' } } });
+        // @ts-expect-error the turnstile token cannot be omitted
+        await caller.api('org.contact', { text: 'hi' });
+        // @ts-expect-error the turnstile token cannot be omitted even with the provided guard given explicitly
+        await caller.api('org.contact', { text: 'hi' }, { guardInputs: { orgPermission: { orgSlug: 'x' } } });
+        await caller.api('public.ping');
+
+        // Naming guards makes the provider mandatory, and its return type is checked.
+        // @ts-expect-error guardInputsProvider is required once guards are named
+        new LambderCaller<Contract, 'orgPermission'>({ apiPath: '/api', isCorsEnabled: false });
+        new LambderCaller<Contract, 'orgPermission'>({
+            apiPath: '/api', isCorsEnabled: false,
+            // @ts-expect-error the provider must return the guard's declared input shape
+            guardInputsProvider: () => ({ orgPermission: { orgId: 42 } }),
+        });
+        // Without named guards, the plain contract rule applies: options mandatory for guardInput APIs.
+        const plain = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false });
+        // @ts-expect-error orgPermission must be sent per call
+        await plain.api('org.list', { page: 1 });
+        await plain.api('org.list', { page: 1 }, { guardInputs: { orgPermission: { orgSlug: 'acme' } } });
+    });
+});

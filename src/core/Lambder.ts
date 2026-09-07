@@ -15,7 +15,7 @@ import { applyCorsHeaders, type LambderCorsConfig } from "./LambderCors.js";
 import LambderSessionManager, { type LambderSessionDataRefreshConfig } from "../session/LambderSessionManager.js";
 import type { LambderCompressionOption } from "../stores/LambderDdbCompression.js";
 import LambderSessionController, { type LambderSessionCookieOptions } from "../session/LambderSessionController.js";
-import { LambderPublicFilesHandler, type LambderPublicFilesOptions } from "./LambderPublicFiles.js";
+import { LambderPublicFilesHandler, LambderLocalFileSource, type LambderPublicFilesOptions } from "./LambderPublicFiles.js";
 import { isLambderApiError, LAMBDER_REFUSAL_CODES, type LambderApiError, type LambderRefusalMessage } from "../shared/LambderApiError.js";
 import { LambderApiPolicyEngine } from "../policies/LambderApiPolicies.js";
 import type {
@@ -316,14 +316,17 @@ export default class Lambder<
 
     /**
      * Terminal public-file layer. Runs only when no route matched, so it can
-     * never shadow routes registered after it. Serves real files under
-     * publicPath (traversal-safe, mime-typed, memory-cached, immutable-cache
-     * heuristic for content-hashed assets); when the file does not exist the
-     * request falls through to setRouteFallbackHandler, where the app decides
-     * what remains (e.g. render an app shell with res.templateFile).
+     * never shadow routes registered after it. Serves files from `source`
+     * (default: the publicPath folder; also LambderS3FileSource for S3 and
+     * R2, or any LambderPublicFileSource), traversal-safe, mime-typed,
+     * memory-cached, with the immutable-cache heuristic for content-hashed
+     * assets; when the source has no such file the request falls through to
+     * setRouteFallbackHandler, where the app decides what remains (e.g.
+     * render an app shell with res.templateFile).
      */
     servePublicFiles(options: LambderPublicFilesOptions = {}): this {
-        this.publicFilesHandler = new LambderPublicFilesHandler(this.publicPath, options);
+        const source = options.source ?? new LambderLocalFileSource({ root: this.publicPath });
+        this.publicFilesHandler = new LambderPublicFilesHandler(source, options);
         return this;
     }
 
