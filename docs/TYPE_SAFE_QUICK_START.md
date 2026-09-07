@@ -8,11 +8,11 @@ Use Zod schemas to define your API contract inline. Lambder will automatically v
 
 ```typescript
 import { z } from "zod";
-import Lambder from "lambder";
+import Lambder, { LambderLocalFileSource } from "lambder";
 
 // Initialize
 const lambder = new Lambder({
-    publicPath: "./public",
+    files: new LambderLocalFileSource({ root: "./public" }),
     apiPath: "/api"
 })
 // Chain APIs
@@ -58,7 +58,7 @@ For larger apps, split your APIs into modules using `.use()`.
 ```typescript
 // api.user.ts
 import { z } from "zod";
-import Lambder from "lambder";
+import Lambder, { LambderLocalFileSource } from "lambder";
 
 export const userApi = <T>(l: Lambder<T>) => {
     return l.addApi("login", {
@@ -72,6 +72,6 @@ export const userApi = <T>(l: Lambder<T>) => {
 // index.ts
 import { userApi } from "./api.user";
 
-const lambder = new Lambder({ publicPath: './public' })
+const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) })
     .use(userApi); // Types are preserved!
 ```

@@ -4,10 +4,11 @@
 
 import { describe, it, expect } from 'vitest';
 import Lambder from '../src/core/Lambder.js';
+import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
 import { decodeBody, createMockEvent, createMockContext } from './helpers.js';
 describe('Context additions', () => {
     it('exposes rawBody, case-insensitive header(), and ip', async () => {
-        const lambder = new Lambder({ publicPath: './public' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) })
             .addRoute({ path: '/echo', method: 'POST' }, (ctx, res) => res.json({
                 rawBody: ctx.rawBody,
                 contentType: ctx.header('content-type'),

@@ -16,6 +16,7 @@ import { mockClient } from 'aws-sdk-client-mock';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, DeleteCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { z } from 'zod';
 import LambderSessionManager, { LambderSessionDataRefreshError, LambderSessionReadError, type LambderSessionContext } from '../src/session/LambderSessionManager.js';
+import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
 import LambderSessionController from '../src/session/LambderSessionController.js';
 import { lambderGuard } from '../src/policies/LambderApiGuards.js';
 import Lambder, { initLambder } from '../src/core/Lambder.js';
@@ -855,7 +856,7 @@ describe('Session Endpoint Protection', () => {
     beforeEach(() => {
         ddbMock.reset();
         
-        lambder = initLambder().create({ publicPath: '/public',
+        lambder = initLambder().create({ files: new LambderLocalFileSource({ root: '/public' }),
             apiPath: '/api', session: {
                     tableName: 'test-sessions',
                     tableRegion: 'us-east-1',
@@ -1020,7 +1021,7 @@ describe('Session Endpoint Protection', () => {
             ddbMock.on(PutCommand).resolves({});
 
             const guardedLambder = initLambder().create({
-                publicPath: '/public',
+                files: new LambderLocalFileSource({ root: '/public' }),
                 apiPath: '/api',
                 session: {
                     tableName: 'test-sessions',
@@ -1173,7 +1174,7 @@ describe('Session Endpoint Protection', () => {
         });
 
         const makeRefreshingLambder = (refresh: (session: LambderSessionContext<UserSessionData>) => Promise<UserSessionData | null>) =>
-            initLambder<UserSessionData>().create({ publicPath: '/public', apiPath: '/api', session: {
+            initLambder<UserSessionData>().create({ files: new LambderLocalFileSource({ root: '/public' }), apiPath: '/api', session: {
                     tableName: 'test-sessions',
                     tableRegion: 'us-east-1',
                     sessionSalt: 'test-salt',

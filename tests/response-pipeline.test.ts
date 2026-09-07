@@ -4,12 +4,13 @@
 
 import { describe, it, expect } from 'vitest';
 import Lambder from '../src/core/Lambder.js';
+import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
 import { decodeBody, gunzipBody, createMockEvent, createMockContext } from './helpers.js';
 describe('Compression (gzip)', () => {
     const bigHtml = '<p>' + 'lambder '.repeat(500) + '</p>';
 
     it('gzips large compressible responses when the client accepts gzip', async () => {
-        const lambder = new Lambder({ publicPath: './public' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) })
             .addRoute('/big', (ctx, res) => res.html(bigHtml));
 
         const result = await lambder.render(
@@ -24,7 +25,7 @@ describe('Compression (gzip)', () => {
     });
 
     it('does not gzip when the client does not accept gzip', async () => {
-        const lambder = new Lambder({ publicPath: './public' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) })
             .addRoute('/big', (ctx, res) => res.html(bigHtml));
 
         const result = await lambder.render(createMockEvent('/big'), createMockContext());
@@ -34,7 +35,7 @@ describe('Compression (gzip)', () => {
     });
 
     it('does not gzip small responses in auto mode', async () => {
-        const lambder = new Lambder({ publicPath: './public' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) })
             .addRoute('/small', (ctx, res) => res.html('<p>small</p>'));
 
         const result = await lambder.render(
@@ -47,7 +48,7 @@ describe('Compression (gzip)', () => {
     });
 
     it('compress: true forces gzip even below the size threshold', async () => {
-        const lambder = new Lambder({ publicPath: './public' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) })
             .addRoute('/forced', (ctx, res) => res.xml('<x/>', { compress: true }));
 
         const result = await lambder.render(
@@ -60,7 +61,7 @@ describe('Compression (gzip)', () => {
     });
 
     it('compress: false opts out entirely', async () => {
-        const lambder = new Lambder({ publicPath: './public' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) })
             .addRoute('/opt-out', (ctx, res) => res.html(bigHtml, { compress: false }));
 
         const result = await lambder.render(
@@ -72,7 +73,7 @@ describe('Compression (gzip)', () => {
     });
 
     it('compression: false disables auto gzip globally', async () => {
-        const lambder = new Lambder({ publicPath: './public', compression: false })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }), compression: false })
             .addRoute('/big', (ctx, res) => res.html(bigHtml));
 
         const result = await lambder.render(
@@ -84,7 +85,7 @@ describe('Compression (gzip)', () => {
     });
 
     it('apiBinary responses are gzipped for accepting clients', async () => {
-        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api' })
             .addRoute('/bin', (ctx, res) => res.apiBinary({ ok: true }));
 
         const result = await lambder.render(
@@ -99,7 +100,7 @@ describe('Compression (gzip)', () => {
 
 describe('ETag / conditional requests', () => {
     it('sets an ETag on GET 200 responses and answers If-None-Match with 304', async () => {
-        const lambder = new Lambder({ publicPath: './public' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) })
             .addRoute('/page', (ctx, res) => res.html('<p>etag me</p>'));
 
         const first = await lambder.render(createMockEvent('/page'), createMockContext());
@@ -116,7 +117,7 @@ describe('ETag / conditional requests', () => {
     });
 
     it('does not set ETags on POST responses', async () => {
-        const lambder = new Lambder({ publicPath: './public' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) })
             .addRoute('/submit', (ctx, res) => res.html('ok'));
 
         const result = await lambder.render(
@@ -127,7 +128,7 @@ describe('ETag / conditional requests', () => {
     });
 
     it('etag: false disables the ETag per response', async () => {
-        const lambder = new Lambder({ publicPath: './public' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) })
             .addRoute('/page', (ctx, res) => res.html('x', { etag: false }));
 
         const result = await lambder.render(createMockEvent('/page'), createMockContext());
