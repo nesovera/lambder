@@ -2,6 +2,11 @@
 
 Lambder is a highly opinionated dynamic serverless framework designed to facilitate the management and implementation of routes and APIs within AWS Lambda functions, specifically tailored for TypeScript projects. It provides a streamlined approach to handling HTTP requests, managing sessions, and defining API routes, making serverless application development more intuitive and structured.
 
+**New in 4.6:**
+
+- **Cookies as a first-class concern**: `res.setCookie(name, value, options)` and `res.clearCookie(name, options)` serialize Set-Cookie headers through the `cookie` package (defaults Path=/, SameSite=Lax, Secure; a function-form `domain` resolves against the request hostname, the same option the session takes), replacing hand-built header strings; `serializeCookie`/`serializeClearCookie` are exported for code holding a response. `ctx.cookieList` keeps every value a cookie name arrived with beside the first-wins `ctx.cookie`.
+- **Session cookie scope changes heal**: a cookie's identity is (name, domain, path), so changing the session's `cookie.domain` or `path` on a live deployment leaves the old copy in every browser beside the new one, and a whole-header parse silently picks whichever the browser lists first. The controller now tries every copy of the session cookie (record and CSRF pairing checked per copy), logs the ambiguity, and evicts the stale host-only twin from the response, so a migrated browser recovers on its first request instead of answering `sessionExpired` until the old cookie expires.
+
 **New in 4.5:**
 
 - **`files` at creation replaces `publicPath`** (and `servePublicFiles({ source })`): one `LambderFileSource` configured once, `files: new LambderLocalFileSource({ root: path.resolve("./public") })` for the folder bundled with the deployment, `new LambderS3FileSource({...})` for S3 or R2, or your own `{ read(relativePath) }`. The instance owns one reader over it (`lambder.files`): path rule, in-memory file cache and compiled-template cache in one place, shared by `servePublicFiles`, `serveIndexHtml`, `res.file` and `res.templateFile`, so a build hosted from a bucket serves its index.html and templates from the bucket too, cached the same way as its assets. The cache is tuned or disabled beside the source, `files: { source, memoryCache }`, and `memoryCache` leaves `servePublicFiles`; `res.file` loses its SPA-era `fallback` option (the fallback chain replaced it).
@@ -335,6 +340,12 @@ const lambder = initLambder<SessionData>().create({
 
 See [docs/DYNAMODB_SETUP.md](docs/DYNAMODB_SETUP.md) for detailed setup instructions.
 
+#### Cookie scope
+
+`session.cookie` sets the scope of the two session cookies: `{ domain: ".example.com" }` shares a login across subdomains, and `domain` may be a `(hostname) => string | undefined` function when one deployment serves several apex domains (return undefined for a host-only cookie); `path`, `sameSite` (default `Lax`) and `secure` (default true) complete it. `LambderCaller` takes the same `sessionCookieDomain` so it can clear the CSRF cookie where the server set it.
+
+Changing `domain` or `path` on a live deployment is a migration, because a browser identifies a cookie by (name, domain, path): the old copy stays beside the new one, both arrive on every request, and the browser's order says nothing about which is current. The controller handles the overlap: when the session cookie name arrives more than once it tries every copy (record lookup and CSRF pairing per copy), takes the live one, logs the ambiguity, and evicts the stale host-only twin from the response when a domain is configured. The reverse move, from a domain cookie back to host-only, cannot be evicted (this host cannot name the parent domain), so that copy is tolerated on every request until its own expiry. Renaming the cookies (`tokenCookieKey`, `csrfCookieKey`) alongside the scope change avoids the overlap entirely.
+
 #### How the secrets are stored
 
 The session cookie is `pkHash:secret`: `pkHash = sha256(sessionKey + sessionSalt)` and `secret` is 256 random bits. At rest the record stores only HASHES of the bearer secrets: the range key is `sha256(secret)` (so the lookup itself proves possession of the raw secret) and the CSRF token is stored as `csrfTokenHash`. The raw values exist only in the client's cookies and, transiently, on the `LambderCreatedSession` result the manager returns at creation; a read of the session table (backup leak, over-broad IAM, insider) therefore yields no usable cookies. Fast sha256 is the correct construction here rather than a password KDF: the secrets are 256-bit random, so there is nothing to brute-force, while `sessionSalt` peppers the identity-to-partition-key mapping so partition keys and cookie prefixes cannot be derived from (or linked to) known user ids.
@@ -504,7 +515,8 @@ The `ctx` object provides access to request data:
 | `rawBody` | Decoded request body as received (webhook signatures) | `'{"a":1}'` |
 | `ip` | Client IP (CF-Connecting-IP / X-Forwarded-For / source IP) | `"1.2.3.4"` |
 | `header(name)` | Case-insensitive request header lookup | `ctx.header("accept-language")` |
-| `cookie` | Cookies | `{ rememberMe: "true" }` |
+| `cookie` | Cookies (the first value when a name arrived more than once) | `{ rememberMe: "true" }` |
+| `cookieList` | Every value per cookie name, in header order (a name held at several scopes arrives several times) | `{ rememberMe: ["true"] }` |
 | `headers` | Request headers | `{ "Content-Type": "..." }` |
 | `event` | Raw Lambda event (APIGatewayProxyEvent or APIGatewayProxyEventV2) | - |
 | `lambdaContext` | AWS Lambda Context | - |
@@ -517,6 +529,8 @@ The `ctx` object provides access to request data:
 **Header Manipulation** (call before returning response):
 - `res.addHeader(key, value)` - Adds a header value (can be called multiple times for same key)
 - `res.setHeader(key, value)` - Sets a header (replaces existing values)
+- `res.setCookie(name, value, options?)` - Adds a Set-Cookie header. Options: `domain` (a string, or a `(hostname) => string | undefined` function resolved against the request host), `path` (default `/`), `sameSite` (default `Lax`), `secure` (default true), `httpOnly`, `maxAge` (seconds), `expires` (Date), `encode` (default encodeURIComponent, which `ctx.cookie` reverses)
+- `res.clearCookie(name, options?)` - Adds a Set-Cookie header that deletes the cookie. Pass the `domain` and `path` it was set with: a cookie's identity is (name, domain, path), so a deletion under another scope deletes nothing
 - `res.logToApiResponse(data)` - Adds data to logList in API responses (debugging)
 
 **Response Methods** (all accept an options object: `{ statusCode?, headers?, cacheControl?, compress?, etag? }`):

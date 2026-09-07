@@ -1,17 +1,18 @@
 import { LambderRenderContext, LambderSessionRenderContext } from "../core/LambderContext.js";
+import { type LambderCookieOptions } from "../core/LambderCookie.js";
 import type LambderSessionManager from "./LambderSessionManager.js";
 import { type LambderSessionContext } from "./LambderSessionManager.js";
-export type LambderSessionCookieOptions = {
-    /**
-     * e.g. ".example.com" to share sessions across subdomains. Pass a function to
-     * derive it from the request hostname when one deployment serves several
-     * apex domains; return undefined for a host-only cookie.
-     */
-    domain?: string | ((hostname: string) => string | undefined | null);
-    path?: string;
-    sameSite?: "Strict" | "Lax" | "None";
-    secure?: boolean;
-};
+/**
+ * Scope of the session cookies. `domain` is e.g. ".example.com" to share
+ * sessions across subdomains, or a function of the request hostname when
+ * one deployment serves several apex domains (return undefined for a
+ * host-only cookie). Changing `domain` or `path` on a live deployment is a
+ * migration: browsers keep the cookie under the old scope beside the new
+ * one, and both arrive on every request. fetchSession tolerates that by
+ * trying every copy and evicting the stale host-only twin; a copy at a
+ * parent domain this host cannot name outlives its own Expires.
+ */
+export type LambderSessionCookieOptions = Pick<LambderCookieOptions, "domain" | "path" | "sameSite" | "secure">;
 export default class LambderSessionController<TSessionData = any> {
     lambderSessionManager: LambderSessionManager;
     sessionTokenCookieKey: string;
@@ -25,16 +26,24 @@ export default class LambderSessionController<TSessionData = any> {
         cookieOptions?: LambderSessionCookieOptions;
         ctx: LambderRenderContext<any> | LambderSessionRenderContext<any, TSessionData>;
     });
-    private buildCookie;
+    /** The configured scope with the domain resolved for this request, or the host-only scope. */
+    private cookieScope;
     /** Raw secrets exist only on the LambderCreatedSession result and in these cookies; the record stores hashes. */
     private setSessionCookies;
     private clearSessionCookies;
+    /**
+     * Every well-formed value the request carried under the session cookie
+     * name. More than one means the browser holds the cookie at several
+     * scopes, and the order says nothing about which copy is current.
+     */
+    private sessionTokenCandidates;
     private areRequestSessionTokensValid;
     createSession(sessionKey: string, data?: TSessionData, ttlInSeconds?: number): Promise<LambderSessionContext<TSessionData>>;
     regenerateSession(): Promise<LambderSessionContext<TSessionData>>;
     fetchSession(): Promise<LambderSessionContext<TSessionData>>;
     fetchSessionIfExists(): Promise<LambderSessionContext<TSessionData> | null>;
-    isSessionValid(session: any): boolean;
+    /** Checks the record against a presented token (the request's first session cookie by default) and, on API calls, the posted CSRF token. */
+    isSessionValid(session: any, sessionToken?: string | undefined): boolean;
     updateSessionData(newData: any): Promise<LambderSessionContext>;
     /**
      * Force-runs the dataRefresh callback now (see the session option of create) and

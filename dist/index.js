@@ -32,3 +32,5 @@ export { lambderRateLimitKey } from "./policies/LambderApiRateLimits.js";
 // Typed translations (standalone, isomorphic)
 export { createLambderI18n } from "./shared/LambderI18n.js";
 export { createContext, isV2HttpEvent } from "./core/LambderContext.js";
+// Cookies (res.setCookie / res.clearCookie build on these; exported for code holding a LambderResponse)
+export { serializeCookie, serializeClearCookie, resolveCookieDomain } from "./core/LambderCookie.js";
