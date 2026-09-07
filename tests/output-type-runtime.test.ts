@@ -9,6 +9,7 @@ import { describe, it, expect } from 'vitest';
 import { APIGatewayProxyEvent, Context } from 'aws-lambda';
 import { z } from 'zod';
 import Lambder from '../src/core/Lambder.js';
+import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
 
 // Mock AWS Lambda event and context
 const createMockEvent = (apiName: string, payload: any): APIGatewayProxyEvent => ({
@@ -48,7 +49,7 @@ const createMockContext = (): Context => ({
 describe('Output Type Enforcement - Runtime', () => {
     it('should return correct primitive types', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api',
         })
         .addApi('add', {
@@ -71,7 +72,7 @@ describe('Output Type Enforcement - Runtime', () => {
 
     it('should return correct object types', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api',
         })
         .addApi('getUser', {
@@ -102,7 +103,7 @@ describe('Output Type Enforcement - Runtime', () => {
 
     it('should return correct array types', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api',
         })
         .addApi('listUsers', {
@@ -129,7 +130,7 @@ describe('Output Type Enforcement - Runtime', () => {
 
     it('should handle null returns correctly', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api',
         })
         .addApi('findUser', {
@@ -164,7 +165,7 @@ describe('Output Type Enforcement - Runtime', () => {
 
     it('should return boolean types correctly', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api',
         })
         .addApi('deleteUser', {
@@ -188,7 +189,7 @@ describe('Output Type Enforcement - Runtime', () => {
 
     it('should work with die.api()', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api',
         })
         .addApi('echo', {
@@ -209,7 +210,7 @@ describe('Output Type Enforcement - Runtime', () => {
 
     it('should work with session APIs', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api',
         })
         .addSessionApi('getUser', {
@@ -245,7 +246,7 @@ describe('Output Type Enforcement - Runtime', () => {
 describe('Input Type Enforcement - Runtime', () => {
     it('should receive correctly typed input', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api',
         })
         .addApi('echo', {
@@ -265,7 +266,7 @@ describe('Input Type Enforcement - Runtime', () => {
 
     it('should handle void input correctly', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api',
         })
         .addApi('listUsers', {
@@ -284,7 +285,7 @@ describe('Input Type Enforcement - Runtime', () => {
 
     it('should handle complex input objects', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api',
         })
         .addApi('add', {
@@ -313,7 +314,7 @@ describe('Input Type Enforcement - Runtime', () => {
 describe('Edge Cases', () => {
     it('should handle empty arrays', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api',
         })
         .addApi('listUsers', {
@@ -334,7 +335,7 @@ describe('Edge Cases', () => {
 
     it('should handle zero as a valid number', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api',
         })
         .addApi('add', {
@@ -355,7 +356,7 @@ describe('Edge Cases', () => {
 
     it('should handle empty strings in objects', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api',
         })
         .addApi('getUser', {

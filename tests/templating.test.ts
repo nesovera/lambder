@@ -4,6 +4,7 @@
 
 import { describe, it, expect } from 'vitest';
 import Lambder from '../src/core/Lambder.js';
+import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
 import { html, xml, raw } from '../src/shared/LambderHtml.js';
 import { LambderTemplatingEngine } from '../src/core/LambderTemplatingEngine.js';
 import { decodeBody, createMockEvent, createMockContext } from './helpers.js';
@@ -36,7 +37,7 @@ describe('Type-safe templating (html/xml tagged templates)', () => {
         const sitemap = xml`<?xml version="1.0" encoding="UTF-8"?>
 <urlset>${urls.map((loc) => xml`<url><loc>${loc}</loc></url>`)}</urlset>`;
 
-        const lambder = new Lambder({ publicPath: './public' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) })
             .addRoute('/sitemap', (ctx, res) => res.xml(sitemap));
 
         const result = await lambder.render(createMockEvent('/sitemap'), createMockContext());

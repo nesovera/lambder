@@ -51,8 +51,10 @@ export type {
 } from "./core/Lambder.js";
 
 // Public file serving
-export { LambderPublicFilesHandler, LambderLocalFileSource } from "./core/LambderPublicFiles.js";
-export type { LambderPublicFilesOptions, LambderPublicFileSource, LambderPublicFile } from "./core/LambderPublicFiles.js";
+export { LambderPublicFilesHandler } from "./core/LambderPublicFiles.js";
+export type { LambderPublicFilesOptions } from "./core/LambderPublicFiles.js";
+export { LambderFiles, LambderLocalFileSource } from "./core/LambderFiles.js";
+export type { LambderFileSource, LambderFile, LambderFilesOption, LambderFileMemoryCacheOption, LambderReadFile } from "./core/LambderFiles.js";
 export { LambderS3FileSource } from "./stores/LambderS3FileSource.js";
 export type { LambderS3FileSourceOptions } from "./stores/LambderS3FileSource.js";
 

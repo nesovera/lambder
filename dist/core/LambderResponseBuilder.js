@@ -1,15 +1,10 @@
-import mimeTypeResolver from "mime-types";
-import { getFS, getPath } from "../shared/node-polyfills.js";
 import { LambderResponse } from "./LambderResponse.js";
-import { LambderTemplatingEngine } from "./LambderTemplatingEngine.js";
-// Compiled templates survive across requests (builder instances are per-request).
-const templateFileCache = new Map();
 export default class LambderResponseBuilder {
-    publicPath;
+    files;
     apiVersion;
     ctx;
-    constructor({ publicPath, apiVersion, ctx }) {
-        this.publicPath = publicPath;
+    constructor({ files, apiVersion, ctx }) {
+        this.files = files ?? null;
         this.apiVersion = apiVersion ?? null;
         this.ctx = ctx;
     }
@@ -30,25 +25,12 @@ export default class LambderResponseBuilder {
             response.setHeader("Cache-Control", options.cacheControl);
         return response;
     }
-    async resolvePublicFilePath(filePath) {
-        const fs = await getFS();
-        const path = await getPath();
-        if (!fs || !path)
-            return null;
-        const publicPath = path.resolve(this.publicPath);
-        const normalizedFilePath = filePath.startsWith('/') ? filePath.slice(1) : filePath;
-        const absolutePath = path.resolve(publicPath, normalizedFilePath);
-        if (absolutePath !== publicPath && !absolutePath.startsWith(publicPath + path.sep))
-            return null;
-        try {
-            const stat = await fs.promises.stat(absolutePath);
-            return stat.isFile() ? absolutePath : null;
-        }
-        catch {
-            return null;
-        }
+    /** The instance's file reader, which res.file and res.templateFile need. */
+    requireFiles(method) {
+        if (!this.files)
+            throw new Error(`${method} requires the files option at creation (e.g. files: new LambderLocalFileSource({ root }))`);
+        return this.files;
     }
-    ;
     addHeader(key, value) {
         if (!this.ctx)
             throw new Error(".addHeader function is not available within this hook");
@@ -130,41 +112,24 @@ export default class LambderResponseBuilder {
         return response;
     }
     ;
+    /** A file from the files source as a response; 404 when there is none. */
     async file(filePath, options) {
-        let resolvedPath = await this.resolvePublicFilePath(filePath);
-        let effectivePath = filePath;
-        if (!resolvedPath && options?.fallback) {
-            resolvedPath = await this.resolvePublicFilePath(options.fallback);
-            effectivePath = options.fallback;
-        }
-        if (!resolvedPath) {
+        const file = await this.requireFiles("res.file").read(filePath);
+        if (!file)
             return this.status404("File not found", { etag: false });
-        }
-        const fs = await getFS();
-        if (!fs)
-            return this.status404("File not found", { etag: false });
-        const body = await fs.promises.readFile(resolvedPath);
-        const mimeType = mimeTypeResolver.lookup(effectivePath) || "application/octet-stream";
-        return this.buildResponse(200, mimeType, body, options);
+        return this.buildResponse(200, file.mimeType, file.body, options);
     }
     ;
     /**
-     * Render an HTML file under publicPath through LambderTemplatingEngine
-     * (comment-based slots/conditionals) and return it as an HTML response.
-     * The compiled template is cached across warm invocations; a missing file
-     * throws (it is a server-side configuration error, not a client 404).
-     * Set htmlVirtualSlots to expose "title"/"head" slots on marker-less files.
+     * Render an HTML file from the files source through
+     * LambderTemplatingEngine (comment-based slots/conditionals) and return
+     * it as an HTML response. The compiled template is cached on the
+     * instance across warm invocations; a missing file throws (it is a
+     * server-side configuration error, not a client 404). Set
+     * htmlVirtualSlots to expose "title"/"head" slots on marker-less files.
      */
     async templateFile(filePath, data, options) {
-        const resolvedPath = await this.resolvePublicFilePath(filePath);
-        if (!resolvedPath)
-            throw new Error(`templateFile: file not found under publicPath: ${filePath}`);
-        const cacheKey = `${resolvedPath}|${options?.htmlVirtualSlots ? "v" : ""}`;
-        let template = templateFileCache.get(cacheKey);
-        if (!template) {
-            template = await LambderTemplatingEngine.fromFile(resolvedPath, { htmlVirtualSlots: options?.htmlVirtualSlots });
-            templateFileCache.set(cacheKey, template);
-        }
+        const template = await this.requireFiles("res.templateFile").template(filePath, { htmlVirtualSlots: options?.htmlVirtualSlots });
         return this.buildResponse(200, "text/html; charset=utf-8", template.render(data), options);
     }
     ;

@@ -17,6 +17,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { decodeBody } from './helpers.js';
 import { z } from 'zod';
 import Lambder from '../src/core/Lambder.js';
+import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
 import type { APIGatewayProxyEvent, Context } from 'aws-lambda';
 
 const createMockEvent = (path: string, method: string = 'GET', apiName?: string, payload?: any): APIGatewayProxyEvent => ({
@@ -54,7 +55,7 @@ describe('Hooks - beforeRender Hook', () => {
         const executionOrder: string[] = [];
 
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         });
 
@@ -76,7 +77,7 @@ describe('Hooks - beforeRender Hook', () => {
 
     it('should allow context modification in beforeRender', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         });
 
@@ -101,7 +102,7 @@ describe('Hooks - beforeRender Hook', () => {
         const executionOrder: number[] = [];
 
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         });
 
@@ -132,7 +133,7 @@ describe('Hooks - beforeRender Hook', () => {
         let routeHandlerCalled = false;
 
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -162,7 +163,7 @@ describe('Hooks - afterRender Hook', () => {
         const executionOrder: string[] = [];
 
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         });
 
@@ -184,7 +185,7 @@ describe('Hooks - afterRender Hook', () => {
 
     it('should allow response modification in afterRender', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         });
 
@@ -212,7 +213,7 @@ describe('Hooks - afterRender Hook', () => {
         const executionOrder: number[] = [];
 
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         });
 
@@ -241,7 +242,7 @@ describe('Hooks - afterRender Hook', () => {
 
     it('should add custom headers in afterRender', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         });
 
@@ -260,7 +261,7 @@ describe('Hooks - afterRender Hook', () => {
 
     it('should stop execution if afterRender returns Error', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -286,7 +287,7 @@ describe('Hooks - fallback Hook', () => {
         let fallbackCalled = false;
 
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         });
 
@@ -310,7 +311,7 @@ describe('Hooks - fallback Hook', () => {
         const executionOrder: number[] = [];
 
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         });
 
@@ -334,7 +335,7 @@ describe('Hooks - fallback Hook', () => {
         let fallbackCalled = false;
 
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         });
 
@@ -357,7 +358,7 @@ describe('Hooks - created Hook', () => {
         let lambderInstance: Lambder | null = null;
 
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         });
 
@@ -379,7 +380,7 @@ describe('Hooks - created Hook', () => {
 
     it('should allow configuration in created hook', async () => {
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         });
 
@@ -398,7 +399,7 @@ describe('Hooks - Priority Ordering', () => {
         const executionOrder: number[] = [];
 
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         });
 
@@ -430,7 +431,7 @@ describe('Hooks - Priority Ordering', () => {
         const executionOrder: number[] = [];
 
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         });
 
@@ -461,7 +462,7 @@ describe('Hooks - Priority Ordering', () => {
         const executionOrder: string[] = [];
 
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         });
 
@@ -494,7 +495,7 @@ describe('Hooks - Combined Workflow', () => {
         const executionOrder: string[] = [];
 
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         });
 
@@ -539,7 +540,7 @@ describe('Hooks - Combined Workflow', () => {
         const executionOrder: string[] = [];
 
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         });
 

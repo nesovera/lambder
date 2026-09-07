@@ -5,6 +5,7 @@
 import { describe, it, expect } from 'vitest';
 import path from 'node:path';
 import Lambder from '../src/core/Lambder.js';
+import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
 import { html, jsonScript } from '../src/shared/LambderHtml.js';
 import { decodeBody, createMockEvent, createMockContext } from './helpers.js';
 describe('servePublicFiles + templateFile fallback (frontend hosting recipe)', () => {
@@ -12,7 +13,7 @@ describe('servePublicFiles + templateFile fallback (frontend hosting recipe)', (
 
     // The recipe: real files from the terminal slot, everything else decided in
     // the app's own fallback (404 for file-like paths, shell for GET pages).
-    const buildHost = () => new Lambder({ publicPath: spaRoot })
+    const buildHost = () => new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
         .servePublicFiles()
         .setRouteFallbackHandler(async (ctx, res) => {
             if(ctx.method !== 'GET' && ctx.method !== 'HEAD') return res.status404('Not found');
@@ -60,7 +61,7 @@ describe('servePublicFiles + templateFile fallback (frontend hosting recipe)', (
 
     it('renders marker-based shells with slots, conditionals and json data', async () => {
         const payload = { message: '</script><script>alert(1)</script>', count: 2 };
-        const lambder = new Lambder({ publicPath: spaRoot })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
             .servePublicFiles()
             .setRouteFallbackHandler((ctx, res) => res.templateFile('marked.html', {
                 title: 'My <Page> & Co',
@@ -85,7 +86,7 @@ describe('servePublicFiles + templateFile fallback (frontend hosting recipe)', (
     });
 
     it('keeps shell defaults when data omits a slot', async () => {
-        const lambder = new Lambder({ publicPath: spaRoot })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
             .servePublicFiles()
             .setRouteFallbackHandler((ctx, res) => res.templateFile('marked.html', {}));
 
@@ -94,7 +95,7 @@ describe('servePublicFiles + templateFile fallback (frontend hosting recipe)', (
     });
 
     it('supports per-tenant roots through the path mapper', async () => {
-        const lambder = new Lambder({ publicPath: spaRoot })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
             .servePublicFiles({
                 path: (ctx) => ctx.host.startsWith('brandx.') ? `brandx${ctx.path}` : ctx.path,
             })
@@ -116,7 +117,7 @@ describe('servePublicFiles + templateFile fallback (frontend hosting recipe)', (
     });
 
     it('never shadows routes registered after servePublicFiles', async () => {
-        const lambder = new Lambder({ publicPath: spaRoot })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
             .servePublicFiles()
             .addRoute('/registered-later', (ctx, res) => res.html('Later Route'));
 
@@ -125,7 +126,7 @@ describe('servePublicFiles + templateFile fallback (frontend hosting recipe)', (
     });
 
     it('templateFile throws on missing files (server config error, not a 404)', async () => {
-        const lambder = new Lambder({ publicPath: spaRoot })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
             .setGlobalErrorHandler((err, ctx, res) => res.status(500, err.message))
             .setRouteFallbackHandler((ctx, res) => res.templateFile('nope.html'));
 
@@ -144,7 +145,7 @@ describe('servePublicFiles + templateFile fallback (frontend hosting recipe)', (
     });
 
     it('compress option: function decides per file (force small css, skip js)', async () => {
-        const lambder = new Lambder({ publicPath: spaRoot })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
             .servePublicFiles({
                 compress: (ctx) => ctx.path.endsWith('.css'),
             });
@@ -169,7 +170,7 @@ describe('serveIndexHtml', () => {
     const spaRoot = path.resolve('./tests/fixtures/spa');
 
     it('zero-config: serves index.html with no-cache for GET page routes', async () => {
-        const lambder = new Lambder({ publicPath: spaRoot })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
             .servePublicFiles()
             .serveIndexHtml();
 
@@ -181,7 +182,7 @@ describe('serveIndexHtml', () => {
     });
 
     it('gates on method: non-GET/HEAD falls through to the route fallback', async () => {
-        const lambder = new Lambder({ publicPath: spaRoot })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
             .serveIndexHtml()
             .setRouteFallbackHandler((ctx, res) => res.status(405, 'nope'));
 
@@ -190,7 +191,7 @@ describe('serveIndexHtml', () => {
     });
 
     it('does not guess at files: a missing dotted path reaches the shell', async () => {
-        const lambder = new Lambder({ publicPath: spaRoot })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
             .servePublicFiles()
             .serveIndexHtml();
 
@@ -200,7 +201,7 @@ describe('serveIndexHtml', () => {
     });
 
     it('skipFilePaths: true opts back into 404s for dotted paths', async () => {
-        const lambder = new Lambder({ publicPath: spaRoot })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
             .servePublicFiles()
             .serveIndexHtml(undefined, { skipFilePaths: true });
 
@@ -209,7 +210,7 @@ describe('serveIndexHtml', () => {
     });
 
     it('dotted app routes reach the shell', async () => {
-        const lambder = new Lambder({ publicPath: spaRoot })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
             .servePublicFiles()
             .serveIndexHtml((ctx, res) => res.html(`page ${ctx.path}`));
 
@@ -227,7 +228,7 @@ describe('serveIndexHtml', () => {
     });
 
     it('real files still win over the shell', async () => {
-        const lambder = new Lambder({ publicPath: spaRoot })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
             .servePublicFiles()
             .serveIndexHtml((ctx, res) => res.html(`page ${ctx.path}`));
 
@@ -237,7 +238,7 @@ describe('serveIndexHtml', () => {
     });
 
     it('custom handler has full control (templating, per-brand shells)', async () => {
-        const lambder = new Lambder({ publicPath: spaRoot })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
             .serveIndexHtml((ctx, res) => res.templateFile('marked.html', {
                 title: `Page ${ctx.path}`,
                 showBanner: true,
@@ -250,11 +251,11 @@ describe('serveIndexHtml', () => {
     });
 
     it('redirectTrailingSlash is off by default, and 301s with query when enabled', async () => {
-        const noRedirect = new Lambder({ publicPath: spaRoot }).serveIndexHtml();
+        const noRedirect = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) }).serveIndexHtml();
         const kept = await noRedirect.render(createMockEvent('/about/'), createMockContext());
         expect(kept.statusCode).toBe(200);
 
-        const withRedirect = new Lambder({ publicPath: spaRoot })
+        const withRedirect = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
             .serveIndexHtml(undefined, { redirectTrailingSlash: true });
         const redirected = await withRedirect.render(
             createMockEvent('/about/', { queryStringParameters: { a: '1' } }),
@@ -265,7 +266,7 @@ describe('serveIndexHtml', () => {
     });
 
     it('indexFile option picks the shell per request', async () => {
-        const lambder = new Lambder({ publicPath: spaRoot })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
             .serveIndexHtml(undefined, {
                 indexFile: (ctx) => ctx.host.startsWith('brandx.') ? 'brandx/index.html' : 'index.html',
             });
@@ -279,7 +280,7 @@ describe('serveIndexHtml', () => {
 
     it('compress option forces or disables shell compression, like servePublicFiles', async () => {
         // The fixture shell is tiny (below the auto threshold): compress: true still gzips it.
-        const forced = new Lambder({ publicPath: spaRoot }).serveIndexHtml(undefined, { compress: true });
+        const forced = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) }).serveIndexHtml(undefined, { compress: true });
         const forcedResult = await forced.render(
             createMockEvent('/page', { headers: { Host: 'localhost', 'Accept-Encoding': 'gzip' } }),
             createMockContext(),
@@ -287,7 +288,7 @@ describe('serveIndexHtml', () => {
         expect(forcedResult.multiValueHeaders?.['Content-Encoding']).toEqual(['gzip']);
 
         // compress also applies to custom handlers, and functions decide per request.
-        const perRequest = new Lambder({ publicPath: spaRoot })
+        const perRequest = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
             .serveIndexHtml((ctx, res) => res.templateFile('index.html'), { compress: (ctx) => ctx.get.z === '1' });
         const off = await perRequest.render(
             createMockEvent('/page', { headers: { Host: 'localhost', 'Accept-Encoding': 'gzip' } }),

@@ -2,6 +2,10 @@
 
 Lambder is a highly opinionated dynamic serverless framework designed to facilitate the management and implementation of routes and APIs within AWS Lambda functions, specifically tailored for TypeScript projects. It provides a streamlined approach to handling HTTP requests, managing sessions, and defining API routes, making serverless application development more intuitive and structured.
 
+**New in 4.5:**
+
+- **`files` at creation replaces `publicPath`** (and `servePublicFiles({ source })`): one `LambderFileSource` configured once, `files: new LambderLocalFileSource({ root: path.resolve("./public") })` for the folder bundled with the deployment, `new LambderS3FileSource({...})` for S3 or R2, or your own `{ read(relativePath) }`. The instance owns one reader over it (`lambder.files`): path rule, in-memory file cache and compiled-template cache in one place, shared by `servePublicFiles`, `serveIndexHtml`, `res.file` and `res.templateFile`, so a build hosted from a bucket serves its index.html and templates from the bucket too, cached the same way as its assets. The cache is tuned or disabled beside the source, `files: { source, memoryCache }`, and `memoryCache` leaves `servePublicFiles`; `res.file` loses its SPA-era `fallback` option (the fallback chain replaced it).
+
 **New in 4.4:**
 
 - **`guardInputsProvider`** on `LambderCaller`: supply guardInput-mode guard values for every call from one place (the organization the UI is on, a device token) instead of at each call site; per-call `guardInputs` merge on top. Name the covered guards in the caller's second type parameter, `new LambderCaller<Contract, "orgPermission">({ guardInputsProvider, ... })`: calls to APIs whose guardInput guards are all covered no longer require the options argument, uncovered ones (a Turnstile token) still do, and naming guards makes the provider itself mandatory.
@@ -92,7 +96,7 @@ would silently widen the inferred policy types, which is why the curried
 creator is the canonical entry.
 
 ```typescript
-import { initLambder } from 'lambder';
+import { initLambder, LambderLocalFileSource } from 'lambder';
 import { z } from 'zod';
 import * as path from 'path';
 
@@ -100,7 +104,7 @@ interface SessionData { userId: string; }
 
 const lambder = initLambder<SessionData>().create({
     apiPath: "/api",
-    publicPath: path.resolve(`./public`),
+    files: new LambderLocalFileSource({ root: path.resolve(`./public`) }),
     session: {
         tableName: "website-session",
         tableRegion: "us-east-1",
@@ -166,9 +170,9 @@ lambder
     .addRoute({ path: "/stripe-webhook", method: "POST" }, (ctx, res) => {
         return res.json({ received: true });
     })
-    // Serve real files (from publicPath by default; see "Public file sources"
-    // below for S3/R2). This is a terminal fallback slot, NOT a catch-all
-    // route, so it can never shadow routes registered after it.
+    // Serve real files from the files source (see "Public file sources"
+    // below). This is a terminal fallback slot, NOT a catch-all route, so it
+    // can never shadow routes registered after it.
     .servePublicFiles()
     // Serve the app shell for GET/HEAD page requests nothing else handled
     // (see "Hosting a frontend build" below).
@@ -216,7 +220,7 @@ For larger applications, split your APIs into separate modules:
 ```typescript
 // user-api.ts
 import { z } from "zod";
-import Lambder from "lambder";
+import Lambder, { LambderLocalFileSource } from "lambder";
 
 export const userApi = <T>(l: Lambder<T>) => {
     return l
@@ -237,7 +241,7 @@ export const userApi = <T>(l: Lambder<T>) => {
 // index.ts
 import { userApi } from "./user-api";
 
-const lambder = new Lambder({ publicPath: './public' })
+const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) })
     .use(userApi);
 
 export type ApiContractType = typeof lambder.ApiContract;
@@ -443,27 +447,31 @@ Lambder has no SPA-specific machinery; hosting a frontend build is a recipe buil
 
 #### Public file sources
 
-`servePublicFiles` reads through a `LambderPublicFileSource`, an object with one method, `read(relativePath)`, returning `{ body, mimeType? }` or `null` (the request then falls through). The handler does everything else for every source: traversal check, memory cache for warm invocations, mime fallback from the extension, Cache-Control (immutable for content-hashed names), ETag and compression. Built in:
+The `files` option at creation is a `LambderFileSource`, an object with one method, `read(relativePath)`, returning `{ body, mimeType? }` or `null`. The instance owns one reader over it, `lambder.files`, and `servePublicFiles`, `serveIndexHtml`, `res.file` and `res.templateFile` all go through that reader, which does everything else for every source: traversal check, in-memory file cache for warm invocations (default 32MB, 2MB per file), compiled-template cache, mime fallback from the extension. Cache-Control (immutable for content-hashed names), ETag and compression are applied by the serving slot and the response pipeline. Built in:
 
 ```typescript
-// Default: the publicPath folder bundled with the deployment.
-lambder.servePublicFiles();
+// A folder, typically the build output bundled with the deployment.
+initLambder().create({ files: new LambderLocalFileSource({ root: path.resolve("./public") }) });
 
 // S3. @aws-sdk/client-s3 is an optional peer dependency, loaded on first read.
-lambder.servePublicFiles({
-    source: new LambderS3FileSource({ bucket: "myapp-web", prefix: "v42/", clientConfig: { region: "eu-central-1" } }),
+initLambder().create({
+    files: new LambderS3FileSource({ bucket: "myapp-web", prefix: "v42/", clientConfig: { region: "eu-central-1" } }),
 });
 
 // Cloudflare R2, or any S3-compatible store: point the client at its endpoint.
-lambder.servePublicFiles({
-    source: new LambderS3FileSource({
+initLambder().create({
+    files: new LambderS3FileSource({
         bucket: "myapp-web",
         clientConfig: { region: "auto", endpoint: "https://<account>.r2.cloudflarestorage.com", credentials: { accessKeyId, secretAccessKey } },
     }),
 });
 
 // Anything else: implement read().
-lambder.servePublicFiles({ source: { read: async (relativePath) => myStore.get(relativePath) } });
+initLambder().create({ files: { read: async (relativePath) => myStore.get(relativePath) } });
+
+// The in-memory file cache, tuned or off, beside any source.
+initLambder().create({ files: { source: new LambderS3FileSource({ bucket: "myapp-web" }), memoryCache: { maxBytes: 64_000_000, maxFileBytes: 4_000_000 } } });
+initLambder().create({ files: { source: new LambderLocalFileSource({ root }), memoryCache: false } });
 ```
 
 A missing S3 object reads as null; grant `s3:ListBucket` besides `s3:GetObject`, otherwise S3 answers a missing key with AccessDenied, which propagates as an error instead of falling through. The object's Content-Type is used unless it is a generic octet-stream, in which case the extension decides. Lambda's ~6MB response cap still applies to anything proxied this way: redirect large downloads to the bucket or CDN URL instead of serving them.

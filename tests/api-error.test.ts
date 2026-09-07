@@ -13,6 +13,7 @@
 import { describe, it, expect } from 'vitest';
 import { z } from 'zod';
 import Lambder from '../src/core/Lambder.js';
+import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
 import { LambderApiError, isLambderApiError, refuse, LAMBDER_REFUSAL_CODES } from '../src/shared/LambderApiError.js';
 import { decodeBody, createMockContext } from './helpers.js';
 import type { APIGatewayProxyEvent } from 'aws-lambda';
@@ -47,7 +48,7 @@ const testSchema = {
 describe('LambderApiError - envelope mapping on API calls', () => {
     it('maps a thrown refusal to the structured envelope and skips the global error handler', async () => {
         let globalHandlerCalled = false;
-        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api' })
             .setGlobalErrorHandler((err, ctx, res) => {
                 globalHandlerCalled = true;
                 return res.raw({ statusCode: 500, body: 'crash' });
@@ -69,7 +70,7 @@ describe('LambderApiError - envelope mapping on API calls', () => {
         const requireAdmin = (role: string) => {
             if(role !== 'admin') throw new LambderApiError('Permission denied.', { notAuthorized: true });
         };
-        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api' })
             .addApi('guarded', testSchema, async (ctx, res) => {
                 requireAdmin('member');
                 return res.api({ result: 'never' });
@@ -84,7 +85,7 @@ describe('LambderApiError - envelope mapping on API calls', () => {
     });
 
     it('carries structured errorMessage objects verbatim', async () => {
-        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api' })
             .addApi('refuse', testSchema, async () => {
                 throw new LambderApiError('Quota exceeded', {
                     errorMessage: { type: 'warning', content: 'Daily quota exceeded.' },
@@ -97,7 +98,7 @@ describe('LambderApiError - envelope mapping on API calls', () => {
     });
 
     it('sets the sessionExpired flag when requested', async () => {
-        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api' })
             .addApi('refuse', testSchema, async () => {
                 throw new LambderApiError('Session gone', { sessionExpired: true });
             });
@@ -108,7 +109,7 @@ describe('LambderApiError - envelope mapping on API calls', () => {
     });
 
     it('honors a statusCode override', async () => {
-        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api' })
             .addApi('refuse', testSchema, async () => {
                 throw new LambderApiError('Forbidden', { statusCode: 403 });
             });
@@ -121,7 +122,7 @@ describe('LambderApiError - envelope mapping on API calls', () => {
 
     it('maps refusals thrown from beforeRender hooks on API calls', async () => {
         let handlerRan = false;
-        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' });
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api' });
         lambder.addHook('beforeRender', (ctx) => {
             if(ctx.apiName === 'guarded') throw new LambderApiError('Blocked by hook');
             return ctx;
@@ -139,7 +140,7 @@ describe('LambderApiError - envelope mapping on API calls', () => {
     });
 
     it('maps refusals thrown from afterRender hooks on API calls', async () => {
-        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api' })
             .addApi('ok', testSchema, async (ctx, res) => res.api({ result: 'fine' }));
         lambder.addHook('afterRender', () => {
             throw new LambderApiError('Rejected after render');
@@ -156,7 +157,7 @@ describe('LambderApiError - envelope mapping on API calls', () => {
             errorMessage: 'Foreign refusal',
             notAuthorized: true,
         });
-        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api' })
             .addApi('refuse', testSchema, async () => { throw foreign; });
 
         const result = await lambder.render(createApiEvent('refuse', { value: 'x' }), createMockContext());
@@ -169,13 +170,13 @@ describe('LambderApiError - envelope mapping on API calls', () => {
 
 describe('refuse() - the standard refusal shape', () => {
     it('is the shape of the framework\'s own refusals too (unknown API)', async () => {
-        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' });
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api' });
         const result = await lambder.render(createApiEvent('missing', {}), createMockContext());
         expect(JSON.parse(decodeBody(result)).errorMessage).toEqual({ type: 'warning', code: LAMBDER_REFUSAL_CODES.apiNotFound, content: 'API not found.' });
     });
 
     it('carries a machine-readable code for clients to branch and translate on', async () => {
-        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api' })
             .addApi('dup', testSchema, async () => refuse('Already reported.', { code: 'ALREADY_REPORTED' }));
 
         const result = await lambder.render(createApiEvent('dup', { value: 'x' }), createMockContext());
@@ -183,7 +184,7 @@ describe('refuse() - the standard refusal shape', () => {
     });
 
     it('carries extra headers onto the refusal response', async () => {
-        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api' })
             .addApi('later', testSchema, async () => refuse('Come back later.', { statusCode: 429, headers: { 'Retry-After': '30' } }));
 
         const result = await lambder.render(createApiEvent('later', { value: 'x' }), createMockContext());
@@ -192,7 +193,7 @@ describe('refuse() - the standard refusal shape', () => {
     });
 
     it('maps to a warning envelope by default', async () => {
-        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api' })
             .addApi('nope', testSchema, async () => refuse('Record not found.'));
 
         const result = await lambder.render(createApiEvent('nope', { value: 'x' }), createMockContext());
@@ -203,7 +204,7 @@ describe('refuse() - the standard refusal shape', () => {
     });
 
     it('carries type, title, flags and statusCode through its options', async () => {
-        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api' })
             .addApi('denied', testSchema, async () => refuse('Admins only.', {
                 type: 'error', title: 'Not Allowed', notAuthorized: true, statusCode: 403,
             }));
@@ -218,7 +219,7 @@ describe('refuse() - the standard refusal shape', () => {
     it('works from nested helpers and skips the global error handler', async () => {
         let globalHandlerCalled = false;
         const assertPositive = (n: number) => { if (n <= 0) refuse('Value must be positive.'); };
-        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api' })
             .setGlobalErrorHandler((err, ctx, res) => {
                 globalHandlerCalled = true;
                 return res.raw({ statusCode: 500, body: 'crash' });
@@ -237,7 +238,7 @@ describe('refuse() - the standard refusal shape', () => {
 describe('LambderApiError - outside API calls', () => {
     it('falls through to the global error handler on routes', async () => {
         let seenByGlobalHandler: Error | null = null;
-        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api' })
             .setGlobalErrorHandler((err, ctx, res) => {
                 seenByGlobalHandler = err;
                 return res.raw({ statusCode: 500, body: 'crash' });
@@ -254,7 +255,7 @@ describe('LambderApiError - outside API calls', () => {
 
 describe('Last-resort 500 shape', () => {
     it('answers API calls with a JSON envelope when no global error handler exists', async () => {
-        const lambder = new Lambder({ publicPath: './public', apiPath: '/api', apiVersion: '1.2.3' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', apiVersion: '1.2.3' })
             .addApi('crash', testSchema, async () => {
                 throw new Error('boom');
             });
@@ -270,7 +271,7 @@ describe('Last-resort 500 shape', () => {
     });
 
     it('keeps the plain-text 500 for routes', async () => {
-        const lambder = new Lambder({ publicPath: './public', apiPath: '/api' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api' })
             .addRoute('/crash', () => { throw new Error('boom'); });
 
         const result = await lambder.render(createRouteEvent('/crash'), createMockContext());

@@ -1,5 +1,5 @@
 import type { S3Client, S3ClientConfig } from "@aws-sdk/client-s3";
-import type { LambderPublicFile, LambderPublicFileSource } from "../core/LambderPublicFiles.js";
+import type { LambderFile, LambderFileSource } from "../core/LambderFiles.js";
 export type LambderS3FileSourceOptions = {
     bucket: string;
     /** Literal key prefix the relative path is appended to, so include the trailing slash: "web/v42/". Default: none. */
@@ -23,7 +23,7 @@ export type LambderS3FileSourceOptions = {
  * An object's Content-Type is used unless it is a generic octet-stream, in
  * which case the extension decides, as for local files.
  */
-export declare class LambderS3FileSource implements LambderPublicFileSource {
+export declare class LambderS3FileSource implements LambderFileSource {
     private readonly bucket;
     private readonly prefix;
     private readonly clientConfig;
@@ -31,5 +31,5 @@ export declare class LambderS3FileSource implements LambderPublicFileSource {
     private sdk;
     constructor({ bucket, prefix, client, clientConfig }: LambderS3FileSourceOptions);
     private loadSdk;
-    read(relativePath: string): Promise<LambderPublicFile | null>;
+    read(relativePath: string): Promise<LambderFile | null>;
 }

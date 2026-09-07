@@ -15,7 +15,8 @@ import { applyCorsHeaders, type LambderCorsConfig } from "./LambderCors.js";
 import LambderSessionManager, { type LambderSessionDataRefreshConfig } from "../session/LambderSessionManager.js";
 import type { LambderCompressionOption } from "../stores/LambderDdbCompression.js";
 import LambderSessionController, { type LambderSessionCookieOptions } from "../session/LambderSessionController.js";
-import { LambderPublicFilesHandler, LambderLocalFileSource, type LambderPublicFilesOptions } from "./LambderPublicFiles.js";
+import { LambderPublicFilesHandler, type LambderPublicFilesOptions } from "./LambderPublicFiles.js";
+import { LambderFiles, type LambderFilesOption } from "./LambderFiles.js";
 import { isLambderApiError, LAMBDER_REFUSAL_CODES, type LambderApiError, type LambderRefusalMessage } from "../shared/LambderApiError.js";
 import { LambderApiPolicyEngine } from "../policies/LambderApiPolicies.js";
 import type {
@@ -159,7 +160,14 @@ export type LambderSessionOptions<TSessionData = any> = {
  * instance type ever needs a name.
  */
 export type LambderCreateOptions<TSessionData = any> = {
-    publicPath?: string;
+    /**
+     * Where the app's files come from, for servePublicFiles, serveIndexHtml,
+     * res.file and res.templateFile: a LambderLocalFileSource over a folder
+     * (the build output bundled with the deployment), a LambderS3FileSource
+     * (S3, R2), or any LambderFileSource; or `{ source, memoryCache }` to
+     * tune or disable the in-memory file cache. Required by those features.
+     */
+    files?: LambderFilesOption;
     apiPath?: string;
     apiVersion?: string;
     /** Automatic gzip for compressible responses. `true` (the default) is `{ minBytes: 860 }`; `false` disables it. */
@@ -210,7 +218,8 @@ export default class Lambder<
 > {
     public apiPath: string;
     public apiVersion: null | string;
-    public publicPath: string;
+    /** The instance's file reader (source + caches), or null without the files option. */
+    public files: LambderFiles | null;
 
     /**
      * Type property for extracting the API contract
@@ -252,7 +261,7 @@ export default class Lambder<
     private sessionCsrfCookieKey = "LMDRSESSIONCSTK";
 
     constructor(options: LambderCreateOptions<TSessionData> = {}){
-        this.publicPath = options.publicPath || "/incorrect-path-not-found";
+        this.files = options.files ? new LambderFiles(options.files) : null;
         this.apiPath = options.apiPath ?? "/api";
         this.apiVersion = options.apiVersion ?? null;
 
@@ -316,17 +325,16 @@ export default class Lambder<
 
     /**
      * Terminal public-file layer. Runs only when no route matched, so it can
-     * never shadow routes registered after it. Serves files from `source`
-     * (default: the publicPath folder; also LambderS3FileSource for S3 and
-     * R2, or any LambderPublicFileSource), traversal-safe, mime-typed,
+     * never shadow routes registered after it. Serves files from the `files`
+     * source configured at creation, traversal-safe, mime-typed,
      * memory-cached, with the immutable-cache heuristic for content-hashed
      * assets; when the source has no such file the request falls through to
      * setRouteFallbackHandler, where the app decides what remains (e.g.
      * render an app shell with res.templateFile).
      */
     servePublicFiles(options: LambderPublicFilesOptions = {}): this {
-        const source = options.source ?? new LambderLocalFileSource({ root: this.publicPath });
-        this.publicFilesHandler = new LambderPublicFilesHandler(source, options);
+        if(!this.files) throw new Error("servePublicFiles requires the files option at creation (e.g. files: new LambderLocalFileSource({ root }))");
+        this.publicFilesHandler = new LambderPublicFilesHandler(this.files, options);
         return this;
     }
 
@@ -336,8 +344,8 @@ export default class Lambder<
      * gone; everything left is an app route (option `skipFilePaths` opts back
      * into 404ing dotted paths). Only configured methods reach it, default
      * GET/HEAD. Gated-out requests fall through to setRouteFallbackHandler.
-     * Without a handler, publicPath/index.html is served via res.templateFile
-     * (markers optional) with no-cache.
+     * Without a handler, index.html from the files source is served via
+     * res.templateFile (markers optional) with no-cache.
      */
     serveIndexHtml(handler?: FallbackHandlerFunction, options: LambderIndexHtmlOptions = {}): this {
         this.indexHtmlConfig = { handler: handler ?? null, options };
@@ -601,7 +609,7 @@ export default class Lambder<
 
     getResponseBuilder(ctx?: LambderRenderContext){
         return new LambderResponseBuilder({
-            publicPath: this.publicPath,
+            files: this.files,
             apiVersion: this.apiVersion,
             ctx,
         });
@@ -609,7 +617,7 @@ export default class Lambder<
 
     private getResolver(ctx: LambderRenderContext){
         return new LambderResolver({
-            publicPath: this.publicPath,
+            files: this.files,
             apiVersion: this.apiVersion,
             ctx,
         });

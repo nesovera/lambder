@@ -4,13 +4,14 @@
 
 import { describe, it, expect } from 'vitest';
 import Lambder from '../src/core/Lambder.js';
+import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
 import { decodeBody, createMockEvent, createMockContext } from './helpers.js';
 describe('Actions (addAction: raw event or context filtering)', () => {
     const sourceIs = (source: string) => (event: unknown) =>
         (event as { source?: string } | null)?.source === source;
 
     it('dispatches non-HTTP events, first match wins', async () => {
-        const lambder = new Lambder({ publicPath: './public' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) })
             .addRoute('/page', (ctx, res) => res.html('http'))
             .addAction(sourceIs('app.reconciliation'), async (event) => ({ reconciled: true, id: (event as any).id }))
             .addAction(() => true, async () => 'catch-all');
@@ -26,7 +27,7 @@ describe('Actions (addAction: raw event or context filtering)', () => {
             !!event && typeof event === 'object' && Array.isArray((event as any).Records)
             && (event as any).Records[0]?.eventSource === 'aws:sqs';
 
-        const lambder = new Lambder({ publicPath: './public' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) })
             .addAction(isSqsEvent, async (event) => event.Records.map((r) => r.body));
 
         const handler = lambder.getHandler();
@@ -36,7 +37,7 @@ describe('Actions (addAction: raw event or context filtering)', () => {
 
     it('non-HTTP invocations get null ctx/res in tools', async () => {
         let seenTools: any = null;
-        const lambder = new Lambder({ publicPath: './public' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) })
             .addAction(() => true, async (event, tools) => { seenTools = tools; return 'ok'; });
 
         await lambder.getHandler()({ source: 'x' }, createMockContext());
@@ -47,7 +48,7 @@ describe('Actions (addAction: raw event or context filtering)', () => {
 
     it('can intercept HTTP requests by filtering on ctx', async () => {
         let handlerRan = false;
-        const lambder = new Lambder({ publicPath: './public' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) })
             .addAction(
                 (event, ctx) => ctx !== null && ctx.host === 'dev.example.com' && ctx.cookie.dev !== 'atlas',
                 async (event, { res }) => res!.status404('Not found'),
@@ -66,7 +67,7 @@ describe('Actions (addAction: raw event or context filtering)', () => {
     });
 
     it('joins the same first-match chain as routes, in registration order', async () => {
-        const lambder = new Lambder({ publicPath: './public' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) })
             .addRoute('/page', (ctx, res) => res.html('route wins'))
             .addAction((event, ctx) => ctx !== null && ctx.path === '/page', async (event, { res }) => res!.html('action'));
 
@@ -75,7 +76,7 @@ describe('Actions (addAction: raw event or context filtering)', () => {
     });
 
     it('errors when an HTTP-matched action does not return a response', async () => {
-        const lambder = new Lambder({ publicPath: './public' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) })
             .setGlobalErrorHandler((err, ctx, res) => res.status(500, err.message))
             .addAction((event, ctx) => ctx !== null && ctx.path === '/oops', async () => ({ not: 'a response' }));
 
@@ -85,7 +86,7 @@ describe('Actions (addAction: raw event or context filtering)', () => {
     });
 
     it('still routes HTTP events normally when no action filter matches', async () => {
-        const lambder = new Lambder({ publicPath: './public' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) })
             .addAction((event, ctx) => ctx === null, async () => 'event only')
             .addRoute('/page', (ctx, res) => res.html('http'));
 
@@ -95,13 +96,13 @@ describe('Actions (addAction: raw event or context filtering)', () => {
     });
 
     it('throws a descriptive error for unmatched non-HTTP events', async () => {
-        const lambder = new Lambder({ publicPath: './public' });
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) });
         await expect(lambder.getHandler()({ source: 'unknown.source' }, createMockContext()))
             .rejects.toThrow(/no action matched.*unknown\.source/);
     });
 
     it('rethrows action errors for Lambda-native retry/DLQ semantics', async () => {
-        const lambder = new Lambder({ publicPath: './public' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) })
             .setGlobalErrorHandler((err, ctx, res) => res.status(500, 'should not be used for events'))
             .addAction(sourceIs('app.fails'), async () => { throw new Error('job failed'); });
 

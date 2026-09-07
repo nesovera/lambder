@@ -7,6 +7,7 @@
 import { describe, it, expect, expectTypeOf } from 'vitest';
 import { z } from 'zod';
 import Lambder from '../src/core/Lambder.js';
+import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
 import LambderCaller from '../src/client/LambderCaller.js';
 import { APIGatewayProxyEvent, Context } from 'aws-lambda';
 
@@ -60,7 +61,7 @@ describe('Plugin System - Basic Usage', () => {
 
         // Use the plugin
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         }).use(userPlugin);
 
@@ -86,7 +87,7 @@ describe('Plugin System - Basic Usage', () => {
         };
 
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         }).use(userPlugin);
 
@@ -149,7 +150,7 @@ describe('Plugin System - Multiple Plugins', () => {
 
         // Chain multiple plugins
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .use(userPlugin)
@@ -200,7 +201,7 @@ describe('Plugin System - Multiple Plugins', () => {
         };
 
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .use(userPlugin)
@@ -238,7 +239,7 @@ describe('Plugin System - Mixed Usage', () => {
         };
 
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             // Direct API
@@ -295,7 +296,7 @@ describe('Plugin System - Routes', () => {
         };
 
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         }).use(healthPlugin);
 
@@ -342,7 +343,7 @@ describe('Plugin System - Complex Composition', () => {
         };
 
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         }).use(extendedPlugin);
 
@@ -371,12 +372,12 @@ describe('Plugin System - Complex Composition', () => {
 
         // Use same plugin in two different instances
         const lambder1 = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         }).use(sharedPlugin);
 
         const lambder2 = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         }).use(sharedPlugin);
 
@@ -418,7 +419,7 @@ describe('Plugin System - Type Safety', () => {
         };
 
         const lambder = new Lambder({
-            publicPath: './public',
+            files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .use(plugin1)
@@ -445,7 +446,7 @@ describe('Plugin System - Non-Generic Plugins', () => {
         const plugin1 = (l: Lambder) => l.addApi('api1', { input: z.void(), output: z.void() }, async (ctx, res) => res.raw({ statusCode: 200, body: '' }));
         const plugin2 = (l: Lambder) => l.addApi('api2', { input: z.void(), output: z.void() }, async (ctx, res) => res.raw({ statusCode: 200, body: '' }));
 
-        const lambder = new Lambder({ publicPath: '', apiPath: '' })
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: '' }), apiPath: '' })
             .addApi('initialApi', { input: z.void(), output: z.void() }, async (ctx, res) => res.raw({ statusCode: 200, body: '' }))
             .use(plugin1)
             .use(plugin2);
