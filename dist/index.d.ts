@@ -18,7 +18,7 @@ export type { LambderRouteMatcher, LambderCorsConfig, LambderCreateOptions, Lamb
 export { LambderPublicFilesHandler } from "./core/LambderPublicFiles.js";
 export type { LambderPublicFilesOptions } from "./core/LambderPublicFiles.js";
 export type { LambderSessionCookieOptions } from "./session/LambderSessionController.js";
-export type { LambderSessionContext, LambderCreatedSession, LambderSessionDataRefreshConfig } from "./session/LambderSessionManager.js";
+export type { LambderSessionContext, LambderCreatedSession, LambderSessionDataRefreshConfig, LambderSessionCompressionConfig } from "./session/LambderSessionManager.js";
 export { LambderSessionDataRefreshError, LambderSessionReadError } from "./session/LambderSessionManager.js";
 export { LambderDdbCache } from "./stores/LambderDdbCache.js";
 export type { LambderDdbCacheOptions, LambderDdbCacheSetOptions, LambderDdbCacheGetOrSetOptions, } from "./stores/LambderDdbCache.js";
