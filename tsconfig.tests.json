@@ -1,0 +1,9 @@
+{
+  // Type checks the test files together with the source they exercise. The
+  // tests carry type-level assertions (@ts-expect-error, expectTypeOf) that
+  // vitest alone never evaluates; `npm test` runs this before vitest so a
+  // typing regression (the use() plugin generics in 4.7.1) fails the suite.
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noEmit": true },
+  "include": ["src/**/*", "tests/**/*"]
+}
