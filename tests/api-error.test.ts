@@ -15,23 +15,11 @@ import { z } from 'zod';
 import Lambder from '../src/core/Lambder.js';
 import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
 import { LambderApiError, isLambderApiError, refuse, LAMBDER_REFUSAL_CODES } from '../src/shared/LambderApiError.js';
-import { decodeBody, createMockContext } from './helpers.js';
+import { decodeBody, createApiEvent as createEnvelopeEvent, createMockContext } from './helpers.js';
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
-const createApiEvent = (apiName: string, payload?: any): APIGatewayProxyEvent => ({
-    body: JSON.stringify({ apiName, payload }),
-    headers: { Host: 'localhost' },
-    multiValueHeaders: {},
-    httpMethod: 'POST',
-    isBase64Encoded: false,
-    path: '/api',
-    pathParameters: null,
-    queryStringParameters: null,
-    multiValueQueryStringParameters: null,
-    stageVariables: null,
-    requestContext: {} as any,
-    resource: '',
-});
+const createApiEvent = (apiName: string, payload?: any): APIGatewayProxyEvent =>
+    createEnvelopeEvent({ apiName, payload });
 
 const createRouteEvent = (path: string): APIGatewayProxyEvent => ({
     ...createApiEvent('unused'),

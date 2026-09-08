@@ -1,4 +1,13 @@
 import cookieParser from "cookie";
+import {
+    COMPRESSED_PAYLOAD_FIELD,
+    COMPRESSED_PAYLOAD_BYTES_FIELD,
+} from "../shared/LambderRequestPayload.js";
+import {
+    restoreBoundedText,
+    LambderCompressionError,
+    LAMBDER_RESTORE_FAILURES,
+} from "../shared/LambderCompressionCodec.js";
 import type { APIGatewayProxyEvent, APIGatewayProxyEventV2, APIGatewayProxyEventHeaders, Context } from "aws-lambda";
 import type { LambderSessionContext } from "../session/LambderSessionManager.js";
 import type { LambderHttpEventFormat } from "./LambderResponse.js";
@@ -169,3 +178,60 @@ export const createContext = (
         }
     };
 }
+
+/** Outcome of restoring a compressed request payload; the message is client-facing. */
+export type LambderRestorePayloadResult = { ok: true } | { ok: false; message: string };
+
+/**
+ * Restores a request payload the caller sent gzipped (`payloadGz` +
+ * `payloadBytes`) onto ctx.post.payload and ctx.apiPayload, so every later
+ * stage (rate-limit key slices, guards, input validation, the handler) reads
+ * an ordinary payload and needs no awareness of the wire format. A request
+ * that sent a plain payload passes through untouched.
+ *
+ * Every failure answers with a message instead of throwing: a malformed body
+ * is a client error, not a crash. The declared byte length both bounds the
+ * decompression and verifies it, so an over-large or tampered body is
+ * refused rather than expanded.
+ */
+export const restoreCompressedApiPayload = async (
+    ctx: LambderRenderContext,
+    maxPayloadBytes: number,
+): Promise<LambderRestorePayloadResult> => {
+    const post = ctx.post as Record<string, unknown>;
+    const compressed = post[COMPRESSED_PAYLOAD_FIELD];
+    if(compressed === undefined) return { ok: true };
+    if(typeof compressed !== "string"){
+        return { ok: false, message: `Request ${COMPRESSED_PAYLOAD_FIELD} must be a base64 string.` };
+    }
+
+    const declaredBytes = post[COMPRESSED_PAYLOAD_BYTES_FIELD];
+    if(typeof declaredBytes !== "number" || !Number.isSafeInteger(declaredBytes) || declaredBytes <= 0){
+        return { ok: false, message: `Request ${COMPRESSED_PAYLOAD_BYTES_FIELD} must be the payload's byte length.` };
+    }
+    if(declaredBytes > maxPayloadBytes){
+        return { ok: false, message: `Request payload of ${declaredBytes} bytes exceeds the ${maxPayloadBytes} byte limit.` };
+    }
+
+    // The bound and the exact-length verification are the codec's, the same
+    // ones a stored record gets; only the wording of the refusal is ours.
+    let json: string;
+    try {
+        json = await restoreBoundedText(Buffer.from(compressed, "base64"), declaredBytes, "gzip");
+    } catch(err) {
+        const reason = err instanceof LambderCompressionError ? err.reason : null;
+        return { ok: false, message: reason === LAMBDER_RESTORE_FAILURES.lengthMismatch
+            ? "Compressed request payload does not match its declared length."
+            : "Compressed request payload could not be decompressed." };
+    }
+
+    let payload: unknown;
+    try { payload = JSON.parse(json); }
+    catch { return { ok: false, message: "Compressed request payload is not valid JSON." }; }
+
+    delete post[COMPRESSED_PAYLOAD_FIELD];
+    delete post[COMPRESSED_PAYLOAD_BYTES_FIELD];
+    post.payload = payload;
+    ctx.apiPayload = payload;
+    return { ok: true };
+};

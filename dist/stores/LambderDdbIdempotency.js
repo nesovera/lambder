@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import { DynamoDBClient, PutItemCommand, GetItemCommand, DeleteItemCommand, } from "@aws-sdk/client-dynamodb";
-import { brotliCompressText, brotliRestoreText, resolveCompressionOption, } from "./LambderDdbCompression.js";
+import { compressText, restoreBoundedText } from "../shared/LambderCompressionCodec.js";
+import { resolveCompressionOption, } from "../shared/LambderCompressionOption.js";
 /** Bodies of 1KB or more are stored Brotli-compressed by default; smaller ones stay plain. */
 const COMPRESSION_DEFAULTS = { minBytes: 1024, quality: 5 };
 /**
@@ -66,7 +67,7 @@ export class LambderDdbIdempotency {
     static async readItemBody(item) {
         const compressed = item.bodyBr?.B;
         if (compressed)
-            return await brotliRestoreText(compressed, Number(item.bodyBytes?.N ?? 0));
+            return await restoreBoundedText(compressed, Number(item.bodyBytes?.N ?? 0), "br");
         return item.body?.S ?? "";
     }
     /**
@@ -157,7 +158,7 @@ export class LambderDdbIdempotency {
         const rawBody = Buffer.from(body, "utf8");
         let bodyAttributes;
         if (this.compression && rawBody.byteLength >= this.compression.minBytes) {
-            const compressed = await brotliCompressText(rawBody, this.compression.quality);
+            const compressed = await compressText(rawBody, "br", this.compression.quality);
             if (compressed.byteLength > MAX_STORED_BODY_BYTES)
                 return "too-large";
             // bodyBytes bounds and verifies decompression on read.

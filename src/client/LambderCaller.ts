@@ -1,4 +1,12 @@
 import Cookies from 'js-cookie';
+import {
+    compressPayloadJson,
+    isRequestCompressionAvailable,
+    DEFAULT_REQUEST_COMPRESSION_SETTINGS,
+    type LambderRequestCompressionOption,
+    type LambderRequestCompressionSettings,
+} from '../shared/LambderRequestPayload.js';
+import { resolveCompressionOption } from '../shared/LambderCompressionOption.js';
 import type { LambderApiResponse } from '../shared/LambderApiContract.js';
 import type { ApiContractShape } from '../shared/LambderApiContract.js';
 import type { z } from "zod";
@@ -126,6 +134,13 @@ export type LambderCallOptions = {
     /** External abort signal, combined with the timeout when both are set. */
     signal?: AbortSignal;
     /**
+     * Overrides the constructor's requestCompression for this call: `false`
+     * sends the payload plainly (a hot path where the CPU matters more than
+     * the bytes), `true` compresses it regardless of the size threshold.
+     * Either way a payload is only sent compressed when that is smaller.
+     */
+    compressRequest?: boolean;
+    /**
      * Values for the API's guardInput-mode guards, keyed by guard name; sent
      * beside the payload and consumed by the guards before validation. The
      * typed contract makes this REQUIRED for APIs that declare such guards,
@@ -171,6 +186,16 @@ type LambderCallerBaseOptions = {
     apiInputValidationErrorHandler?: ValidationErrorHandler,
     /** Must mirror the server's session cookie Domain, otherwise expired cookies cannot be cleared. */
     sessionCookieDomain?: string | ((hostname: string) => string | undefined | null),
+    /**
+     * Gzip the payload of calls whose JSON reaches the threshold, sending it
+     * as `payloadGz` beside its byte length instead of `payload` whenever
+     * that is smaller (a base64 image, say, is not, and goes plain). Off by
+     * default; `true` is `{ minBytes: 4096 }`. Nothing at the call sites
+     * changes, and the server understands both shapes either way, so it can
+     * be turned on or off freely. Chiefly a way to fit a large payload under
+     * Lambda's ~6MB invoke cap, which applies to the compressed bytes.
+     */
+    requestCompression?: LambderRequestCompressionOption,
 };
 
 /** Constructor options: the base options plus guardInputsProvider, mandatory once TProvided names guards. */
@@ -206,6 +231,7 @@ export default class LambderCaller<TContract extends ApiContractShape = any, TPr
     private sessionTokenCookieKey = "LMDRSESSIONTKID";
     private sessionCsrfCookieKey = "LMDRSESSIONCSTK";
     private sessionCookieDomain?: string | ((hostname: string) => string | undefined | null);
+    private requestCompression: LambderRequestCompressionSettings | null;
 
     constructor(options: LambderCallerOptions<TContract, TProvidedGuards>){
         // The conditional provider option is resolved per instantiation;
@@ -220,6 +246,7 @@ export default class LambderCaller<TContract extends ApiContractShape = any, TPr
             fetchStartedHandler, fetchEndedHandler,
             apiInputValidationErrorHandler,
             sessionCookieDomain,
+            requestCompression,
             guardInputsProvider,
         } = options as LambderCallerBaseOptions & { guardInputsProvider?: (apiName: string) => unknown };
         this.apiPath = apiPath ?? "/api";
@@ -227,6 +254,8 @@ export default class LambderCaller<TContract extends ApiContractShape = any, TPr
         this.isCorsEnabled = isCorsEnabled;
         this.timeoutMs = timeoutMs;
         this.sessionCookieDomain = sessionCookieDomain;
+        // `?? false`: unlike the at-rest stores, this one is off unless asked for.
+        this.requestCompression = resolveCompressionOption(requestCompression ?? false, DEFAULT_REQUEST_COMPRESSION_SETTINGS);
 
         this.versionExpiredHandler = versionExpiredHandler;
         this.sessionExpiredHandler = sessionExpiredHandler;
@@ -375,6 +404,18 @@ export default class LambderCaller<TContract extends ApiContractShape = any, TPr
                 ? { ...providedGuardInputs, ...options?.guardInputs }
                 : undefined;
 
+            // Compressed when enabled and the payload's JSON reaches the
+            // threshold; `compressRequest` overrides both ways, and a runtime
+            // without CompressionStream always sends the payload plainly.
+            // Nothing here runs (the extra stringify included) unless
+            // compression is actually a possibility for this call.
+            const compressionMinBytes = options?.compressRequest === true ? 0
+                : options?.compressRequest === false ? null
+                : this.requestCompression?.minBytes ?? null;
+            const compressedPayload = compressionMinBytes !== null && payload !== undefined && isRequestCompressionAvailable()
+                ? await compressPayloadJson(JSON.stringify(payload), compressionMinBytes)
+                : null;
+
             let res: Response;
             try {
                 res = await fetch(this.apiPath, {
@@ -385,7 +426,8 @@ export default class LambderCaller<TContract extends ApiContractShape = any, TPr
                     redirect: 'follow', referrerPolicy: 'origin',
                     headers: { 'Content-Type': 'application/json', ...(headers || {}) },
                     body: JSON.stringify({
-                        apiName, version, token, siteHost, payload,
+                        apiName, version, token, siteHost,
+                        ...(compressedPayload ?? { payload }),
                         ...(guardInputs !== undefined ? { guardInputs } : {}),
                         ...(options?.idempotencyKey !== undefined ? { idempotencyKey: options.idempotencyKey } : {}),
                     }),

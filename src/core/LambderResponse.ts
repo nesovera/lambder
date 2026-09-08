@@ -1,4 +1,6 @@
-import { getZlib, getCrypto } from "../shared/node-polyfills.js";
+import { getCrypto } from "../shared/node-polyfills.js";
+import { compressText } from "../shared/LambderCompressionCodec.js";
+import type { LambderCompressionOption, LambderCompressionSettingsBase, LambderEncoding } from "../shared/LambderCompressionOption.js";
 import type { APIGatewayProxyResult, APIGatewayProxyStructuredResultV2 } from "aws-lambda";
 import type { LambderRenderContext } from "./LambderContext.js";
 
@@ -132,15 +134,40 @@ export const acceptsEncoding = (acceptEncoding: string | undefined | null, encod
     });
 };
 
+/** Response-side settings: the threshold plus what the wire can negotiate. */
+export type LambderResponseCompressionSettings = LambderCompressionSettingsBase & {
+    /** Preference order; the first the client accepts wins. */
+    encodings: LambderEncoding[];
+    /** Brotli quality 0-11, the same field the at-rest stores take. Kept low: this runs per request, and 11 is orders of magnitude slower. */
+    quality: number;
+};
+/** The `compression` option at creation: `true` for the defaults, `false` for off, or overrides. */
+export type LambderResponseCompressionOption = LambderCompressionOption<LambderResponseCompressionSettings>;
+
 export type LambderFinalizeOptions = {
-    compression: false | { minBytes: number };
+    /** Resolved settings, or null when compression is off: the same `Settings | null` contract the stores hold. */
+    compression: LambderResponseCompressionSettings | null;
     etag: boolean;
     /** Guard against Lambda's ~6MB response cap with a clear error. */
     maxResponseBytes: number;
 };
 
+/**
+ * Brotli first: every browser that accepts it produces smaller bodies than
+ * gzip at comparable speed on quality 5, typically 15-25% on markup and
+ * prose and substantially more on the repetitive record lists API responses
+ * tend to be. That is bandwidth saved and, because the ~6MB cap applies to
+ * the encoded bytes, headroom gained. Clients that do not offer `br` fall
+ * through to gzip.
+ */
+export const DEFAULT_RESPONSE_COMPRESSION_SETTINGS: LambderResponseCompressionSettings = {
+    minBytes: 860,
+    encodings: ["br", "gzip"],
+    quality: 5,
+};
+
 export const DEFAULT_FINALIZE_OPTIONS: LambderFinalizeOptions = {
-    compression: { minBytes: 860 },
+    compression: DEFAULT_RESPONSE_COMPRESSION_SETTINGS,
     etag: true,
     maxResponseBytes: 5_500_000,
 };
@@ -215,7 +242,7 @@ export const finalizeResponse = async (
             response.compress === true ||
             (
                 response.compress === "auto" &&
-                options.compression !== false &&
+                options.compression !== null &&
                 bodyBuffer.length >= options.compression.minBytes &&
                 isCompressibleContentType(contentType)
             )
@@ -223,12 +250,15 @@ export const finalizeResponse = async (
         if(eligibleForCompression){
             // Vary even when this client didn't accept an encoding, to keep caches correct.
             response.addHeader("Vary", "Accept-Encoding");
-            if(acceptsEncoding(getRequestHeader(ctx, "accept-encoding"), "gzip")){
-                const zlib = await getZlib();
-                if(zlib){
-                    bodyBuffer = zlib.gzipSync(bodyBuffer);
-                    response.setHeader("Content-Encoding", "gzip");
-                }
+            // compress: true forces compression even with it globally off, so
+            // the settings fall back to the defaults rather than being absent.
+            const settings = options.compression ?? DEFAULT_RESPONSE_COMPRESSION_SETTINGS;
+            const acceptEncoding = getRequestHeader(ctx, "accept-encoding");
+            const encoding = settings.encodings.find((candidate) => acceptsEncoding(acceptEncoding, candidate));
+            if(encoding){
+                // The same codec, quality and TEXT mode a stored record gets.
+                bodyBuffer = await compressText(bodyBuffer, encoding, settings.quality);
+                response.setHeader("Content-Encoding", encoding);
             }
         }
 

@@ -1,10 +1,11 @@
 import crypto from "crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, QueryCommand, DeleteCommand, PutCommand, GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { compressText, restoreBoundedText } from "../shared/LambderCompressionCodec.js";
 import {
-    brotliCompressText, brotliRestoreText, resolveCompressionOption,
+    resolveCompressionOption,
     type LambderCompressionOption, type LambderCompressionSettings,
-} from "../stores/LambderDdbCompression.js";
+} from "../shared/LambderCompressionOption.js";
 
 export type LambderSessionContext<SessionData = any> = {
     [x: string]: any;
@@ -184,7 +185,7 @@ export default class LambderSessionManager{
         const { data, ...item } = session;
         const raw = this.compression && Buffer.from(JSON.stringify(data), "utf8");
         if(this.compression && raw && raw.byteLength >= this.compression.minBytes){
-            item.dataBr = await brotliCompressText(raw, this.compression.quality);
+            item.dataBr = await compressText(raw, "br", this.compression.quality);
             item.dataBytes = raw.byteLength;
         }else{
             item.data = data;
@@ -306,7 +307,7 @@ export default class LambderSessionManager{
         // that fails to decode throws, which the controller treats like any
         // malformed record: no session.
         if(session.dataBr){
-            session.data = JSON.parse(await brotliRestoreText(session.dataBr, session.dataBytes));
+            session.data = JSON.parse(await restoreBoundedText(session.dataBr, session.dataBytes, "br"));
             delete session.dataBr;
             delete session.dataBytes;
         }

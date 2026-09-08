@@ -5,10 +5,11 @@ import {
     GetItemCommand,
     DeleteItemCommand,
 } from "@aws-sdk/client-dynamodb";
+import { compressText, restoreBoundedText } from "../shared/LambderCompressionCodec.js";
 import {
-    brotliCompressText, brotliRestoreText, resolveCompressionOption,
+    resolveCompressionOption,
     type LambderCompressionOption, type LambderCompressionSettings,
-} from "./LambderDdbCompression.js";
+} from "../shared/LambderCompressionOption.js";
 
 /** Bodies of 1KB or more are stored Brotli-compressed by default; smaller ones stay plain. */
 const COMPRESSION_DEFAULTS: LambderCompressionSettings = { minBytes: 1024, quality: 5 };
@@ -102,7 +103,7 @@ export class LambderDdbIdempotency {
     /** A stored item's response body: plain (`body`) or Brotli (`bodyBr` + `bodyBytes`). */
     private static async readItemBody(item: Record<string, any>): Promise<string> {
         const compressed = item.bodyBr?.B;
-        if(compressed) return await brotliRestoreText(compressed, Number(item.bodyBytes?.N ?? 0));
+        if(compressed) return await restoreBoundedText(compressed, Number(item.bodyBytes?.N ?? 0), "br");
         return item.body?.S ?? "";
     }
 
@@ -198,7 +199,7 @@ export class LambderDdbIdempotency {
         const rawBody = Buffer.from(body, "utf8");
         let bodyAttributes: Record<string, { S: string } | { B: Uint8Array } | { N: string }>;
         if(this.compression && rawBody.byteLength >= this.compression.minBytes){
-            const compressed = await brotliCompressText(rawBody, this.compression.quality);
+            const compressed = await compressText(rawBody, "br", this.compression.quality);
             if(compressed.byteLength > MAX_STORED_BODY_BYTES) return "too-large";
             // bodyBytes bounds and verifies decompression on read.
             bodyAttributes = { bodyBr: { B: compressed }, bodyBytes: { N: String(rawBody.byteLength) } };

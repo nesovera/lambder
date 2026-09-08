@@ -58,3 +58,23 @@ export type LambderSessionRenderContext<TApiPayload = any, SessionData = any, TP
     session: LambderSessionContext<SessionData>;
 };
 export declare const createContext: (event: LambderHttpEvent, lambdaContext: Context, apiPath: string) => LambderRenderContext;
+/** Outcome of restoring a compressed request payload; the message is client-facing. */
+export type LambderRestorePayloadResult = {
+    ok: true;
+} | {
+    ok: false;
+    message: string;
+};
+/**
+ * Restores a request payload the caller sent gzipped (`payloadGz` +
+ * `payloadBytes`) onto ctx.post.payload and ctx.apiPayload, so every later
+ * stage (rate-limit key slices, guards, input validation, the handler) reads
+ * an ordinary payload and needs no awareness of the wire format. A request
+ * that sent a plain payload passes through untouched.
+ *
+ * Every failure answers with a message instead of throwing: a malformed body
+ * is a client error, not a crash. The declared byte length both bounds the
+ * decompression and verifies it, so an over-large or tampered body is
+ * refused rather than expanded.
+ */
+export declare const restoreCompressedApiPayload: (ctx: LambderRenderContext, maxPayloadBytes: number) => Promise<LambderRestorePayloadResult>;

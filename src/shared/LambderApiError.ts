@@ -103,6 +103,8 @@ export const LAMBDER_REFUSAL_CODES = {
     invalidIdempotencyKey: "lambder/invalid-idempotency-key",
     /** No API is registered under the requested name. */
     apiNotFound: "lambder/api-not-found",
+    /** The request's compressed payload is malformed or over the size limit (400). */
+    invalidRequestPayload: "lambder/invalid-request-payload",
 } as const;
 export type LambderRefusalCode = (typeof LAMBDER_REFUSAL_CODES)[keyof typeof LAMBDER_REFUSAL_CODES];
 

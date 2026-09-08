@@ -9,10 +9,11 @@ import {
     type WriteRequest,
 } from "@aws-sdk/client-dynamodb";
 import { getCrypto } from "../shared/node-polyfills.js";
+import { compressText, restoreBoundedText } from "../shared/LambderCompressionCodec.js";
 import {
-    brotliCompressText, brotliRestoreText, resolveCompressionOption,
+    resolveCompressionOption,
     type LambderCompressionOption, type LambderCompressionSettings,
-} from "./LambderDdbCompression.js";
+} from "../shared/LambderCompressionOption.js";
 import { LRUCache } from "lru-cache";
 
 const DEFAULT_TTL_SECONDS = 365 * 24 * 60 * 60;
@@ -81,7 +82,7 @@ export interface LambderDdbCacheGetOrSetOptions extends LambderDdbCacheSetOption
 // sit in a frontend bundle's import graph (via the package root) without
 // breaking; using the cache at runtime still requires Node. Brotli helpers
 // are shared with LambderDdbIdempotency and LambderSessionManager via
-// ./LambderDdbCompression.js.
+// ../shared/LambderCompressionCodec.js.
 const requireCrypto = async () => {
     const crypto = await getCrypto();
     if (!crypto) throw new Error("LambderDdbCache requires a Node.js environment.");
@@ -233,7 +234,7 @@ export class LambderDdbCache {
 
         const brotli = this.compression && input.length >= this.compression.minBytes ? this.compression : null;
         const encoding: CacheEncoding = brotli ? "br" : "identity";
-        const stored = brotli ? await brotliCompressText(input, brotli.quality) : input;
+        const stored = brotli ? await compressText(input, "br", brotli.quality) : input;
         if (stored.length > this.maxValueBytes) {
             throw new Error(`Stored cache value exceeds maxValueBytes (${stored.length} > ${this.maxValueBytes})`);
         }
@@ -574,7 +575,7 @@ export class LambderDdbCache {
 
     /** The JSON text of a stored payload. */
     private async decode(stored: Buffer, encoding: CacheEncoding, uncompressedBytes: number): Promise<string> {
-        return encoding === "br" ? await brotliRestoreText(stored, uncompressedBytes) : stored.toString("utf8");
+        return encoding === "br" ? await restoreBoundedText(stored, uncompressedBytes, "br") : stored.toString("utf8");
     }
 
     private remember(

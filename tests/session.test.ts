@@ -1056,6 +1056,51 @@ describe('Session Endpoint Protection', () => {
             expect(body.payload).toEqual({ subject: 'user-123', permission: 'ORG.MANAGE' });
         });
 
+        it('the named opt-out guard under requireSessionApiGuards lets the handler run on the session alone', async () => {
+            const mockSession = {
+                pk: 'hash',
+                sk: hashTok('sortkey'),
+                csrfTokenHash: hashTok('csrf-token'),
+                sessionKey: 'user-123',
+                data: { userId: '123' },
+                createdAt: Math.floor(Date.now() / 1000),
+                expiresAt: Math.floor(Date.now() / 1000) + 3600,
+                lastAccessedAt: Math.floor(Date.now() / 1000),
+                ttlInSeconds: 3600,
+            };
+            ddbMock.on(GetCommand).resolves({ Item: mockSession });
+            ddbMock.on(PutCommand).resolves({});
+
+            const strictLambder = initLambder().create({
+                files: new LambderLocalFileSource({ root: '/public' }),
+                apiPath: '/api',
+                session: {
+                    tableName: 'test-sessions',
+                    tableRegion: 'us-east-1',
+                    sessionSalt: 'test-salt',
+                    partitionKey: 'pk',
+                    sortKey: 'sk',
+                },
+                guards: {
+                    sessionOnly: lambderGuard({ session: true, handler: () => {} }),
+                },
+                requireSessionApiGuards: true,
+            })
+                .addSessionApi('me.session', {
+                    input: z.any(),
+                    output: z.any(),
+                    guards: 'sessionOnly',
+                }, async (ctx, resolver) => {
+                    return resolver.api({ userId: ctx.session.data.userId });
+                });
+
+            const event = createMockEvent('/api', 'POST', 'hash:sortkey', 'me.session');
+            const response = await strictLambder.render(event, createMockContext());
+
+            const body = JSON.parse(decodeBody(response) || '{}');
+            expect(body.payload).toEqual({ userId: '123' });
+        });
+
         it('should throw error when CSRF token is missing', async () => {
             const mockSession = {
                 pk: 'hash',

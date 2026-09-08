@@ -1,4 +1,6 @@
 import Cookies from 'js-cookie';
+import { compressPayloadJson, isRequestCompressionAvailable, DEFAULT_REQUEST_COMPRESSION_SETTINGS, } from '../shared/LambderRequestPayload.js';
+import { resolveCompressionOption } from '../shared/LambderCompressionOption.js';
 /**
  * @typeParam TContract - The API contract, for typed names, payloads and guard inputs.
  * @typeParam TProvidedGuards - Guard names guardInputsProvider covers; those APIs' options argument becomes optional.
@@ -23,15 +25,18 @@ export default class LambderCaller {
     sessionTokenCookieKey = "LMDRSESSIONTKID";
     sessionCsrfCookieKey = "LMDRSESSIONCSTK";
     sessionCookieDomain;
+    requestCompression;
     constructor(options) {
         // The conditional provider option is resolved per instantiation;
         // inside the class it is read through the plain shape.
-        const { apiPath, apiVersion, isCorsEnabled = false, timeoutMs, versionExpiredHandler, sessionExpiredHandler, messageHandler, errorMessageHandler, notAuthorizedHandler, errorHandler, fetchStartedHandler, fetchEndedHandler, apiInputValidationErrorHandler, sessionCookieDomain, guardInputsProvider, } = options;
+        const { apiPath, apiVersion, isCorsEnabled = false, timeoutMs, versionExpiredHandler, sessionExpiredHandler, messageHandler, errorMessageHandler, notAuthorizedHandler, errorHandler, fetchStartedHandler, fetchEndedHandler, apiInputValidationErrorHandler, sessionCookieDomain, requestCompression, guardInputsProvider, } = options;
         this.apiPath = apiPath ?? "/api";
         this.apiVersion = apiVersion;
         this.isCorsEnabled = isCorsEnabled;
         this.timeoutMs = timeoutMs;
         this.sessionCookieDomain = sessionCookieDomain;
+        // `?? false`: unlike the at-rest stores, this one is off unless asked for.
+        this.requestCompression = resolveCompressionOption(requestCompression ?? false, DEFAULT_REQUEST_COMPRESSION_SETTINGS);
         this.versionExpiredHandler = versionExpiredHandler;
         this.sessionExpiredHandler = sessionExpiredHandler;
         this.messageHandler = messageHandler;
@@ -178,6 +183,17 @@ export default class LambderCaller {
             const guardInputs = providedGuardInputs !== undefined || options?.guardInputs !== undefined
                 ? { ...providedGuardInputs, ...options?.guardInputs }
                 : undefined;
+            // Compressed when enabled and the payload's JSON reaches the
+            // threshold; `compressRequest` overrides both ways, and a runtime
+            // without CompressionStream always sends the payload plainly.
+            // Nothing here runs (the extra stringify included) unless
+            // compression is actually a possibility for this call.
+            const compressionMinBytes = options?.compressRequest === true ? 0
+                : options?.compressRequest === false ? null
+                    : this.requestCompression?.minBytes ?? null;
+            const compressedPayload = compressionMinBytes !== null && payload !== undefined && isRequestCompressionAvailable()
+                ? await compressPayloadJson(JSON.stringify(payload), compressionMinBytes)
+                : null;
             let res;
             try {
                 res = await fetch(this.apiPath, {
@@ -188,7 +204,8 @@ export default class LambderCaller {
                     redirect: 'follow', referrerPolicy: 'origin',
                     headers: { 'Content-Type': 'application/json', ...(headers || {}) },
                     body: JSON.stringify({
-                        apiName, version, token, siteHost, payload,
+                        apiName, version, token, siteHost,
+                        ...(compressedPayload ?? { payload }),
                         ...(guardInputs !== undefined ? { guardInputs } : {}),
                         ...(options?.idempotencyKey !== undefined ? { idempotencyKey: options.idempotencyKey } : {}),
                     }),

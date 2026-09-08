@@ -2,6 +2,14 @@
 
 Lambder is a highly opinionated dynamic serverless framework designed to facilitate the management and implementation of routes and APIs within AWS Lambda functions, specifically tailored for TypeScript projects. It provides a streamlined approach to handling HTTP requests, managing sessions, and defining API routes, making serverless application development more intuitive and structured.
 
+**New in 4.7:**
+
+- **Compressed request payloads**: `requestCompression` on `LambderCaller` gzips the payload of any call whose JSON reaches a threshold (`true` is `{ minBytes: 4096 }`), sending it as `payloadGz` beside its byte length instead of `payload` whenever that is actually smaller; the server restores it before rate-limit key slices, guards and input validation, so no call site, handler or schema changes. Chiefly a way to fit a large payload under Lambda's ~6MB invoke cap, which applies to the compressed bytes. The envelope stays `application/json` with its routing fields in plain text, so gateways, CDNs and mocks are unaffected. `maxRequestPayloadBytes` (default 20MB) bounds what a body may expand to.
+- **One compression codec**: `shared/LambderCompressionCodec.ts` is now the only place Lambder compresses or decompresses bytes. Its `restoreBoundedText(bytes, declaredBytes, encoding)` carries the guarantee every compressed value in Lambder depends on, at rest and on the wire: the declared UTF-8 byte length bounds the decompression AND must match the result exactly, so a truncated, tampered or endlessly-expanding input fails instead of decoding to something merely plausible. Compression is split across three modules by what each one needs: the codec (zlib), the option and its resolver (pure, so the browser entry can resolve the caller's option), and the request payload format (the browser's CompressionStream). `stores/LambderDdbCompression.ts` is retired into them.
+- **One compression option, now everywhere**: the HTTP response option and the new request option resolve through the same `resolveCompressionOption` the DynamoDB stores and sessions use, and every site's option is the one generic `LambderCompressionOption<Settings>`. Same vocabulary at every site (`true` for that site's defaults, `false` for off, an object to override, `minBytes` as the threshold, `quality` as the Brotli quality, `encodings` as the negotiation order), same `Settings | null` resolved shape, and the same startup validation: `compression: { quality: 99 }` or `{ encodings: [] }` on a response is now a construction error instead of being silently ignored, and a field set to `undefined` keeps its default.
+- **Brotli responses**: response compression now negotiates `br` before `gzip`, smaller at comparable speed (15-25% on markup and prose, substantially more on the repetitive record lists API responses tend to be), which is bandwidth saved and headroom gained against the ~6MB response cap. `compression: { encodings: ["gzip"] }` opts out, `quality` (default 5) tunes it.
+- **Mandatory authorization on session APIs**: `requireSessionApiGuards: true` at creation makes `guards` a required field of every `addSessionApi`, at the type level (a missing declaration is a compile error at the registration site) and at registration (a plain-JS caller throws). An API the session alone authorizes declares a named no-op session guard, so every opt-out is explicit and one grep lists them all. The class of defect this closes is "the guard existed and the endpoint did not use it", which review discipline does not catch as a surface grows.
+
 **New in 4.6:**
 
 - **Cookies as a first-class concern**: `res.setCookie(name, value, options)` and `res.clearCookie(name, options)` serialize Set-Cookie headers through the `cookie` package (defaults Path=/, SameSite=Lax, Secure; a function-form `domain` resolves against the request hostname, the same option the session takes), replacing hand-built header strings; `serializeCookie`/`serializeClearCookie` are exported for code holding a response. `ctx.cookieList` keeps every value a cookie name arrived with beside the first-wins `ctx.cookie`.
@@ -403,7 +411,7 @@ Semantics:
 
 #### Session data at rest (`compression`)
 
-`session.data` is stored Brotli-compressed by default: the record carries the data's JSON as Brotli bytes in `dataBr` beside its byte length in `dataBytes`, in place of a plain `data` attribute. It is the scheme `LambderDdbCache` and `LambderDdbIdempotency` already use, from one shared implementation, and the byte length both bounds the decompression and verifies it, so a truncated record fails to decode rather than decoding to something else. Session data that caches roles, permissions or product lists typically shrinks 2-3x, which keeps a growing session within one DynamoDB read unit (4KB for the consistent reads sessions use) and one write unit (1KB) for longer.
+`session.data` is stored Brotli-compressed by default: the record carries the data's JSON as Brotli bytes in `dataBr` beside its byte length in `dataBytes`, in place of a plain `data` attribute. It is the scheme `LambderDdbCache` and `LambderDdbIdempotency` already use, from the one shared codec that also restores compressed request payloads, and the byte length both bounds the decompression and verifies it, so a truncated record fails to decode rather than decoding to something else. Session data that caches roles, permissions or product lists typically shrinks 2-3x, which keeps a growing session within one DynamoDB read unit (4KB for the consistent reads sessions use) and one write unit (1KB) for longer.
 
 ```typescript
 session: {
@@ -567,9 +575,18 @@ The `ctx` object provides access to request data:
 | `await res.file(path, options? & { fallback? })` | Serve file from public directory (404 when missing) |
 | `await res.templateFile(path, data?, options?)` | Render an HTML file via LambderTemplatingEngine (cached; throws when missing) |
 | `res.api(payload, config?, options?)` | Standardized API response |
-| `res.apiBinary(payload, config?, options?)` | API response with forced gzip |
+| `res.apiBinary(payload, config?, options?)` | API response with forced compression |
 
-Responses are finalized once at the end of the request: automatic gzip (when the client accepts it, the body is compressible and large enough), automatic ETag + `If-None-Match` 304 handling on GET/HEAD, and a clear error if the body would exceed Lambda's ~6MB cap. Override per response with `compress: true | false` and `etag: false`.
+Responses are finalized once at the end of the request: automatic compression (when the client accepts it, the body is compressible and large enough), automatic ETag + `If-None-Match` 304 handling on GET/HEAD, and a clear error if the body would exceed Lambda's ~6MB cap. Override per response with `compress: true | false` and `etag: false`.
+
+The encoding is negotiated against `Accept-Encoding` in the order `compression.encodings` declares, `["br", "gzip"]` by default. Brotli at quality 5 (`compression.quality`) runs at roughly gzip's speed while producing smaller bodies: 15-25% on markup and prose, and substantially more on the repetitive record lists API responses tend to be. Because the ~6MB cap is checked on the FINAL body, that is headroom as well as bandwidth. A client that offers only gzip gets gzip, and `compression: { encodings: ["gzip"] }` turns Brotli off entirely for a CDN or client that mishandles it. `Vary: Accept-Encoding` rides every compressible response, whether or not this particular client accepted an encoding, so shared caches stay correct.
+
+```typescript
+initLambder().create({
+    compression: { minBytes: 860, encodings: ["br", "gzip"], quality: 5 },  // the defaults
+    // compression: false,  // no automatic compression at all
+});
+```
 
 **API Config Options**: `{ notAuthorized, message, errorMessage, versionExpired, sessionExpired, logList }`
 
@@ -715,6 +732,24 @@ lambder.addSessionApi("secure.order.create", {
 
 Guard results are typed end to end: the handler's `ctx.guardData` carries exactly the declared guards that return a value, a session guard on a public API is a compile error (and a startup assert), an apiInput guard is declarable only where the API's schema carries its fields, and a parameterized guard's param is typechecked in the declaration.
 
+**Requiring an authorization declaration (`requireSessionApiGuards`)**: by default a session API may declare no guards, which reads as "any signed-in user". Once an app has an authorization vocabulary, that silence is where defects hide: the guard exists, a new endpoint forgets it, and nothing notices. With `requireSessionApiGuards: true` at creation, `guards` becomes a required field of every `addSessionApi`: omitting it is a compile error at the registration site ("Property 'guards' is missing"), and a plain-JS registration throws. Public APIs are unaffected. An API that legitimately needs no authorization beyond the session (the signed-in user's own account, a log-out) declares a named no-op session guard, so the opt-out is explicit, greppable, and cannot be used on a public API:
+
+```typescript
+const lambder = initLambder<SessionData>().create({
+    apiPath: "/api",
+    guards: {
+        orgPermission: lambderGuard({ session: true, handler: (ctx, _p, _r, permission: PermissionString) => requireOrRefuse(ctx.session, permission) }),
+        // The one opt-out: the session itself is the whole authorization.
+        sessionOnly: lambderGuard({ session: true, handler: () => {} }),
+    },
+    requireSessionApiGuards: true,
+});
+
+lambder.addSessionApi("secure.order.create", { input, output, guards: { orgPermission: "ORDERS.CREATE" } }, handler);
+lambder.addSessionApi("secure.me.logOut", { input, output, guards: "sessionOnly" }, handler);
+lambder.addSessionApi("secure.report.list", { input, output }, handler);   // compile error: which guard?
+```
+
 For api modules split across files, DERIVE the annotation type from the real instance instead of writing it by hand: create the instance next to the policy declarations and export `typeof` it. The type can never drift from what actually runs, and modules import it without a cycle (the app file imports no modules):
 
 ```typescript
@@ -822,6 +857,38 @@ const user = await lambderCaller.api("getCompanyPage", { companyName: "Acme" });
 // - Required input type
 // - Expected output type
 ```
+
+### Compressed Request Payloads
+
+Large payloads run into Lambda's ~6MB invoke payload cap long before the API Gateway limit, and the cap applies to what the gateway hands the function. `requestCompression` gzips the payload of any call whose JSON reaches the threshold, so that budget holds the compressed bytes instead of the raw ones:
+
+```typescript
+const lambderCaller = new LambderCaller<ApiContractType>({
+    apiPath: "/api",
+    isCorsEnabled: false,
+    requestCompression: true,            // { minBytes: 4096 }
+    // requestCompression: { minBytes: 64_000 },  // only genuinely large calls
+});
+
+// Nothing at the call sites changes; this one goes compressed, that one plain.
+await lambderCaller.api("importStops", { stops: bigArray });
+await lambderCaller.api("getStop", { id: "42" });
+
+// Per call, either way:
+await lambderCaller.api("importStops", huge, { compressRequest: false });
+```
+
+A compressed call sends `payloadGz` (gzip bytes, base64) beside `payloadBytes` (the JSON's UTF-8 byte length) in place of `payload`. It is only sent when it is smaller than the JSON it replaces: a payload that is mostly a base64 image gzips to nearly its own size, and such a call goes plain rather than slightly larger. Everything else in the envelope stays plain text, so `apiName` routing, request logs and MSW mocks are unaffected, and the request stays `application/json`: no `Content-Encoding` negotiation for a gateway, CDN or proxy to get wrong, and no new CORS preflight surface. Base64 inside the JSON rather than a binary body is not a compromise for the size cap, because API Gateway hands a binary request body to Lambda base64-encoded anyway; base64's 4/3 overhead applies to bytes that already shrank several times over. Record-shaped JSON typically gzips 5-10x, so a ~5MB budget of compressed payload carries roughly 25-40MB of it.
+
+The option is off by default and safe to turn on or off at any time: the server understands both shapes regardless, so a deployed client and server never need to agree. gzip rather than Brotli because the browser's `CompressionStream` offers gzip and deflate only; responses, compressed by Node, do prefer Brotli. A runtime without `CompressionStream` sends payloads plainly.
+
+**Server side**: nothing to enable. The payload is restored before rate-limit key slices, guards and input validation run, so handlers, schemas and policies see an ordinary payload and need no awareness of the wire format. `payloadBytes` both bounds the decompression and verifies it (the restored length must match exactly), so a truncated or hostile body is refused rather than expanded, and `maxRequestPayloadBytes` at creation (default 20,000,000) caps what any body may expand to. Size that ceiling to the function's memory: the restored JSON is parsed in full before any session or policy check, and a parsed document occupies several times its text size on the heap. Every malformed case answers a 400 envelope coded `lambder/invalid-request-payload` instead of a 500.
+
+```typescript
+initLambder().create({ apiPath: "/api", maxRequestPayloadBytes: 20_000_000 });
+```
+
+Compression moves the ceiling rather than removing it. Past roughly 25-40MB of JSON the answer is a presigned S3 upload plus a job reference, or chunking, not a better codec.
 
 ### Failure Semantics (apiOutcome, timeouts, per-call overrides)
 

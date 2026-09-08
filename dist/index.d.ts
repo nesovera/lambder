@@ -9,7 +9,7 @@ export { default as LambderResponseBuilder } from "./core/LambderResponseBuilder
 export { default as LambderResolver } from "./core/LambderResolver.js";
 export { default as LambderSessionManager } from "./session/LambderSessionManager.js";
 export { default as LambderSessionController } from "./session/LambderSessionController.js";
-export { LambderResponse, finalizeResponse, acceptsEncoding, type HttpStatusCode, type LambderHttpResponse, type LambderHttpEventFormat, type LambderHeadersInput, type LambderFinalizeOptions, } from "./core/LambderResponse.js";
+export { LambderResponse, finalizeResponse, acceptsEncoding, type HttpStatusCode, type LambderHttpResponse, type LambderHttpEventFormat, type LambderHeadersInput, type LambderFinalizeOptions, type LambderResponseCompressionSettings, type LambderResponseCompressionOption, } from "./core/LambderResponse.js";
 export { html, xml, raw, jsonScript, escapeHtml, renderHtmlValue, LambderSafeHtml, type LambderHtmlValue } from "./shared/LambderHtml.js";
 export { LambderTemplatingEngine } from "./core/LambderTemplatingEngine.js";
 export type { LambderTemplateData, LambderTemplatingEngineOptions } from "./core/LambderTemplatingEngine.js";
@@ -23,7 +23,10 @@ export { LambderS3FileSource } from "./stores/LambderS3FileSource.js";
 export type { LambderS3FileSourceOptions } from "./stores/LambderS3FileSource.js";
 export type { LambderSessionCookieOptions } from "./session/LambderSessionController.js";
 export type { LambderSessionContext, LambderCreatedSession, LambderSessionDataRefreshConfig } from "./session/LambderSessionManager.js";
-export type { LambderCompressionOption, LambderCompressionConfig } from "./stores/LambderDdbCompression.js";
+export { resolveCompressionOption, LAMBDER_ENCODINGS } from "./shared/LambderCompressionOption.js";
+export type { LambderCompressionOption, LambderCompressionSettings, LambderCompressionSettingsBase, LambderEncoding, } from "./shared/LambderCompressionOption.js";
+export { compressText, restoreBoundedText, LambderCompressionError, LAMBDER_RESTORE_FAILURES, } from "./shared/LambderCompressionCodec.js";
+export type { LambderRestoreFailure } from "./shared/LambderCompressionCodec.js";
 export { LambderSessionDataRefreshError, LambderSessionReadError } from "./session/LambderSessionManager.js";
 export { LambderDdbCache } from "./stores/LambderDdbCache.js";
 export type { LambderDdbCacheOptions, LambderDdbCacheSetOptions, LambderDdbCacheGetOrSetOptions, } from "./stores/LambderDdbCache.js";
@@ -41,5 +44,7 @@ export type { LambderLanguageMeta, LambderI18nConfig, LambderI18nInstance, Lambd
 export { type ApiContractShape, type LambderApiResponse, type LambderApiResponseConfig, } from "./shared/LambderApiContract.js";
 export type { LambderRenderContext, LambderSessionRenderContext, LambderHttpEvent } from "./core/LambderContext.js";
 export { createContext, isV2HttpEvent } from "./core/LambderContext.js";
+export { COMPRESSED_PAYLOAD_FIELD, COMPRESSED_PAYLOAD_BYTES_FIELD, DEFAULT_REQUEST_COMPRESSION_SETTINGS, DEFAULT_MAX_REQUEST_PAYLOAD_BYTES, } from "./shared/LambderRequestPayload.js";
+export type { LambderCompressedPayload, LambderRequestCompressionOption, LambderRequestCompressionSettings, } from "./shared/LambderRequestPayload.js";
 export { serializeCookie, serializeClearCookie, resolveCookieDomain } from "./core/LambderCookie.js";
 export type { LambderCookieOptions, LambderClearCookieOptions, LambderCookieDomain } from "./core/LambderCookie.js";
