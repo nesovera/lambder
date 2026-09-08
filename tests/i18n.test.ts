@@ -240,10 +240,12 @@ describe("LambderI18n: config validation", () => {
     it("extensions copy the dictionary (no aliasing of the caller's object)", () => {
         const i18n = makeI18n();
         const source = { en: { k: "V" } };
-        const child = i18n.extendPartial(source as any);
+        const child = i18n.extendPartial(source);
         child.registerDictionary("en", { other: "O" });
         expect(source.en).toEqual({ k: "V" });
-        expect(child.forLanguage("en")("other" as never)).toBe("O");
+        // "other" arrived at runtime, so it is outside the typed contract.
+        const translate = child.forLanguage("en") as (key: string) => string;
+        expect(translate("other")).toBe("O");
     });
 
     it("exposes registry helpers", () => {

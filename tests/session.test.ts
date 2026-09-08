@@ -86,6 +86,7 @@ describe('Session Type Safety', () => {
             get: {},
             post: {},
             cookie: {},
+            cookieList: {},
             session: {
                 csrfTokenHash: 'csrf-token-hash',
                 sessionKey: 'user-123',
@@ -102,6 +103,7 @@ describe('Session Type Safety', () => {
             },
             apiName: '',
             apiPayload: {},
+            guardData: {},
             headers: {},
             rawBody: '',
             ip: '',
@@ -547,6 +549,7 @@ describe('LambderSessionController', () => {
             session: null,
             apiName: 'test.api',
             apiPayload: {},
+            guardData: {},
             headers: {},
             rawBody: '',
             ip: '',

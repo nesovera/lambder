@@ -6,7 +6,10 @@
 
 import { describe, it, expect, expectTypeOf } from 'vitest';
 import { z } from 'zod';
-import Lambder from '../src/core/Lambder.js';
+import Lambder, { initLambder } from '../src/core/Lambder.js';
+import { lambderGuard } from '../src/policies/LambderApiGuards.js';
+import type { LambderDdbIdempotency } from '../src/stores/LambderDdbIdempotency.js';
+import type { LambderDdbRateLimiter } from '../src/stores/LambderDdbRateLimiter.js';
 import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
 import LambderCaller from '../src/client/LambderCaller.js';
 import { APIGatewayProxyEvent, Context } from 'aws-lambda';
@@ -457,5 +460,55 @@ describe('Plugin System - Non-Generic Plugins', () => {
         expectTypeOf<Contract>().toHaveProperty('initialApi');
         expectTypeOf<Contract>().toHaveProperty('api1');
         expectTypeOf<Contract>().toHaveProperty('api2');
+    });
+});
+
+// ============================================================================
+// Test 8: Policy generics survive .use()
+// ============================================================================
+
+describe('Plugin System - Policy generics survive use()', () => {
+    // Every policy generic at a non-default value: rate-limit policies,
+    // guards, idempotency and requireSessionApiGuards. 4.7.1's use() listed
+    // one generic too few, so an instance created with
+    // requireSessionApiGuards: true was not assignable to a plugin typed
+    // with its own derived type. This block is checked by `npm run
+    // typecheck`; vitest alone would not see a regression here.
+    const guards = {
+        orgPermission: lambderGuard({ session: true, handler: (_ctx, _payload, _res, permission: string) => ({ permission }) }),
+        sessionOnly: lambderGuard({ session: true, handler: () => {} }),
+    };
+    // The stores are never reached: nothing here is rendered, only registered.
+    const makeApp = () => initLambder<{ userId: string }>().create({
+        files: new LambderLocalFileSource({ root: '' }),
+        apiPath: '/api',
+        rateLimits: { limiter: {} as LambderDdbRateLimiter, policies: { perIp: { perMin: 5, per: 'ip', budget: 'perApi' } } },
+        guards,
+        idempotency: { store: {} as LambderDdbIdempotency },
+        requireSessionApiGuards: true,
+    });
+    type App = ReturnType<typeof makeApp>;
+
+    it('a plugin typed with the derived app type chains, and the result keeps every policy typing', () => {
+        const plugin = (l: App) => l.addSessionApi('secure.me', {
+            input: z.object({}), output: z.object({ ok: z.boolean() }), guards: 'sessionOnly',
+        }, async (_ctx, res) => res.api({ ok: true }));
+        const app = makeApp().use(plugin);
+        expectTypeOf<typeof app.ApiContract>().toHaveProperty('secure.me');
+
+        // requireSessionApiGuards survives use(): guards stay required.
+        // @ts-expect-error guards is required on this instance
+        const missing = () => app.addSessionApi('secure.forgot', { input: z.object({}), output: z.object({}) }, async (_ctx, res) => res.api({}));
+        expect(missing).toThrow(/declares no guards/);
+
+        // The guard map survives: names are still checked against it.
+        // @ts-expect-error unknown guard name
+        const unknown = () => app.addSessionApi('secure.unknown', { input: z.object({}), output: z.object({}), guards: 'nope' }, async (_ctx, res) => res.api({}));
+        expect(unknown).toThrow(/unknown guard "nope"/);
+
+        // The rate-limit policies and the idempotency flag survive too.
+        expect(() => app.addApi('public.once', {
+            input: z.object({}), output: z.object({}), rateLimit: 'perIp', idempotency: true,
+        }, async (_ctx, res) => res.api({}))).not.toThrow();
     });
 });
