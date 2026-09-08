@@ -514,10 +514,14 @@ export default class Lambder<
     // module may annotate its parameter as the bare Lambder<SessionData> or
     // as the app's narrowed alias, and both must chain. Registration-time
     // assertions still verify every referenced policy/guard name at runtime.
+    // Every policy generic must be listed here: one short of the class's
+    // parameter list and the missing one silently falls back to its default,
+    // which makes an instance carrying the non-default value unassignable to
+    // its own plugins (requireSessionApiGuards did exactly that in 4.7.1).
     public use<_TNewContract extends Record<string, any>>(
         plugin: (
-            lambder: Lambder<TSessionData, _TContract, any, any, any>
-        ) => Lambder<TSessionData, _TNewContract, any, any, any>
+            lambder: Lambder<TSessionData, _TContract, any, any, any, any>
+        ) => Lambder<TSessionData, _TNewContract, any, any, any, any>
     ): Lambder<TSessionData, _TNewContract extends _TContract ? _TNewContract : (_TContract & _TNewContract), _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired> {
         return plugin(this as any) as any;
     }
