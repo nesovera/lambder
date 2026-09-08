@@ -7,13 +7,15 @@ import {
     LambderResponse,
     finalizeResponse,
     DEFAULT_FINALIZE_OPTIONS,
+    DEFAULT_RESPONSE_COMPRESSION_SETTINGS,
     type LambderFinalizeOptions,
     type LambderHttpResponse,
+    type LambderResponseCompressionOption,
 } from "./LambderResponse.js";
 import { compileRouteMatcher, type CompiledMatcher, type RouteCondition, type ConditionFunction, type LambderRouteMatcher, type PathParamsOf } from "./LambderRouting.js";
 import { applyCorsHeaders, type LambderCorsConfig } from "./LambderCors.js";
 import LambderSessionManager, { type LambderSessionDataRefreshConfig } from "../session/LambderSessionManager.js";
-import type { LambderCompressionOption } from "../stores/LambderDdbCompression.js";
+import { resolveCompressionOption, type LambderCompressionOption } from "../shared/LambderCompressionOption.js";
 import LambderSessionController, { type LambderSessionCookieOptions } from "../session/LambderSessionController.js";
 import { LambderPublicFilesHandler, type LambderPublicFilesOptions } from "./LambderPublicFiles.js";
 import { LambderFiles, type LambderFilesOption } from "./LambderFiles.js";
@@ -35,7 +37,8 @@ import type {
 } from "../policies/LambderApiRateLimits.js";
 import type { LambderApiIdempotencyConfig } from "../policies/LambderApiIdempotency.js";
 import type { MergeContract } from "../shared/LambderApiContract.js";
-import { createContext, isV2HttpEvent, type LambderHttpEvent, type LambderRenderContext, type LambderSessionRenderContext } from "./LambderContext.js";
+import { createContext, isV2HttpEvent, restoreCompressedApiPayload, type LambderHttpEvent, type LambderRenderContext, type LambderSessionRenderContext } from "./LambderContext.js";
+import { DEFAULT_MAX_REQUEST_PAYLOAD_BYTES } from "../shared/LambderRequestPayload.js";
 
 export type { PathParamsOf, RouteCondition, ConditionFunction, LambderRouteMatcher } from "./LambderRouting.js";
 export type { LambderCorsConfig } from "./LambderCors.js";
@@ -55,7 +58,7 @@ type ActionObject = { match: CompiledMatcher, actionFn: ActionFunction };
 // Hooks
 // ---------------------------------------------------------------------------
 type HookEventType = "created" | "beforeRender" | "afterRender" | "fallback";
-type HookCreatedFunction = (lambderInstance: Lambder<any, any, any, any, any>) => void | Promise<void>;
+type HookCreatedFunction = (lambderInstance: Lambder<any, any, any, any, any, any>) => void | Promise<void>;
 /** Return the (possibly replaced) ctx to continue, a LambderResponse to short-circuit, or an Error to fail. */
 type HookBeforeRenderFunction = (ctx: LambderRenderContext, resolver: LambderResolver) => MaybePromise<LambderRenderContext | LambderResponse | Error>;
 type HookAfterRenderFunction = (ctx: LambderRenderContext, resolver: LambderResolver, response: LambderResponse) => MaybePromise<LambderResponse | Error>;
@@ -170,12 +173,26 @@ export type LambderCreateOptions<TSessionData = any> = {
     files?: LambderFilesOption;
     apiPath?: string;
     apiVersion?: string;
-    /** Automatic gzip for compressible responses. `true` (the default) is `{ minBytes: 860 }`; `false` disables it. */
-    compression?: boolean | { minBytes?: number };
+    /**
+     * Automatic compression for compressible responses. `true` (the default)
+     * is `{ minBytes: 860, encodings: ["br", "gzip"], quality: 5 }`; `false`
+     * disables it. `encodings` is a preference order, so `["gzip"]` opts out
+     * of Brotli for a client or CDN that mishandles it, and `quality` is the
+     * Brotli quality, the same field the at-rest stores take.
+     */
+    compression?: LambderResponseCompressionOption;
     /** Automatic ETag + If-None-Match 304 on GET/HEAD 200 responses. Default: true. */
     etag?: boolean;
     /** Guard threshold for Lambda's ~6MB response cap. Default: 5,500,000. */
     maxResponseBytes?: number;
+    /**
+     * Ceiling on what a gzipped request payload may restore to (Lambda's
+     * ~6MB invoke cap already bounds the compressed bytes). Default:
+     * 20,000,000. Requests over it are refused rather than decompressed.
+     * The restored JSON is parsed in full before any policy or session
+     * check, so size it to the function's memory.
+     */
+    maxRequestPayloadBytes?: number;
     /** CORS: true allows any origin; or pass a LambderCorsConfig. Default: off. */
     cors?: boolean | LambderCorsConfig;
     /** DynamoDB-backed sessions; required for addSessionApi/addSessionRoute. */
@@ -184,9 +201,35 @@ export type LambderCreateOptions<TSessionData = any> = {
     rateLimits?: LambderApiRateLimitsConfig<Record<string, LambderApiRateLimitPolicyConfig>>;
     /** Named guards APIs reference (typed) via the `guards` option; build each with lambderGuard(). */
     guards?: Record<string, LambderApiGuard<any, any, any>>;
+    /**
+     * Make an authorization declaration part of registering a session API:
+     * every addSessionApi must declare `guards`, at the type level (a
+     * missing `guards` is a compile error) and at registration (a plain-JS
+     * caller throws). An API that legitimately needs none, because the
+     * session itself is the whole authorization (the signed-in user's own
+     * account), declares a named no-op session guard, so every opt-out is
+     * explicit and one grep lists them all. Needs a guards map to pick
+     * from. Default: false.
+     */
+    requireSessionApiGuards?: boolean;
     /** Declarative idempotency: your store plus replay defaults; APIs opt in via `idempotency: true | { ttlSeconds }`. */
     idempotency?: LambderApiIdempotencyConfig;
 };
+
+/**
+ * The `guards` field of a session API's options: optional by default,
+ * required once create() received requireSessionApiGuards, so that an
+ * authorization declaration cannot be forgotten at the type level.
+ */
+type LambderSessionGuardsField<TRequired extends boolean, TGuardsOpt> = TRequired extends true
+    ? {
+        /** Named guards, run in declared order before input validation: a name, a list of names, or a { name: param } map for parameterized guards. Required on this instance (requireSessionApiGuards): an API the session alone authorizes declares the named no-op session guard. Their input requirements merge into this API's contract input; their return values land typed on ctx.guardData. */
+        guards: TGuardsOpt;
+    }
+    : {
+        /** Named guards, run in declared order before input validation: a name, a list of names, or a { name: param } map for parameterized guards. Their input requirements merge into this API's contract input; their return values land typed on ctx.guardData. */
+        guards?: TGuardsOpt;
+    };
 
 /**
  * Main Lambder class for building type-safe serverless APIs. Create
@@ -199,6 +242,7 @@ export type LambderCreateOptions<TSessionData = any> = {
  * @typeParam _TRateLimitPolicies - @internal Inferred from create()'s rateLimits.policies (do not pass manually)
  * @typeParam _TGuards - @internal Guard metadata map inferred from create()'s guards (do not pass manually)
  * @typeParam _TIdempotencyEnabled - @internal True when create() received idempotency (do not pass manually)
+ * @typeParam _TSessionGuardsRequired - @internal True when create() received requireSessionApiGuards (do not pass manually)
  *
  * @example
  * ```typescript
@@ -215,6 +259,7 @@ export default class Lambder<
     _TRateLimitPolicies extends Record<string, LambderApiRateLimitPolicyConfig> = {},
     _TGuards extends Record<string, any> = {},
     _TIdempotencyEnabled extends boolean = false,
+    _TSessionGuardsRequired extends boolean = false,
 > {
     public apiPath: string;
     public apiVersion: null | string;
@@ -254,6 +299,8 @@ export default class Lambder<
     private eventActionList: EventActionObject[] = [];
     private corsConfig: LambderCorsConfig | null = null;
     private finalizeOptions: LambderFinalizeOptions;
+    private maxRequestPayloadBytes: number;
+    private requireSessionApiGuards: boolean;
 
     private lambderSessionManager?: LambderSessionManager;
     private sessionCookieOptions: LambderSessionCookieOptions = {};
@@ -266,13 +313,16 @@ export default class Lambder<
         this.apiVersion = options.apiVersion ?? null;
 
         this.finalizeOptions = {
-            compression: options.compression === false
-                ? false
-                : { minBytes: (typeof options.compression === "object" ? options.compression.minBytes : undefined)
-                    ?? (DEFAULT_FINALIZE_OPTIONS.compression as { minBytes: number }).minBytes },
+            // Resolved (and validated) by the same function the at-rest
+            // stores use; on unless explicitly disabled.
+            compression: resolveCompressionOption(options.compression, DEFAULT_RESPONSE_COMPRESSION_SETTINGS),
             etag: options.etag ?? DEFAULT_FINALIZE_OPTIONS.etag,
             maxResponseBytes: options.maxResponseBytes ?? DEFAULT_FINALIZE_OPTIONS.maxResponseBytes,
         };
+        this.maxRequestPayloadBytes = options.maxRequestPayloadBytes ?? DEFAULT_MAX_REQUEST_PAYLOAD_BYTES;
+        if(!Number.isSafeInteger(this.maxRequestPayloadBytes) || this.maxRequestPayloadBytes <= 0){
+            throw new Error("maxRequestPayloadBytes must be a positive integer");
+        }
 
         if(options.cors !== undefined && options.cors !== false){
             this.corsConfig = options.cors === true ? {} : options.cors;
@@ -299,6 +349,11 @@ export default class Lambder<
         if(options.rateLimits) this.getOrCreatePolicyEngine().setRateLimits(options.rateLimits);
         if(options.guards) this.getOrCreatePolicyEngine().addGuards(options.guards);
         if(options.idempotency) this.getOrCreatePolicyEngine().setIdempotency(options.idempotency);
+
+        this.requireSessionApiGuards = options.requireSessionApiGuards ?? false;
+        if(this.requireSessionApiGuards && !options.guards){
+            throw new Error("Lambder: requireSessionApiGuards needs a guards map at creation for session APIs to declare from.");
+        }
     }
 
     setRouteFallbackHandler(routeFallbackHandler: FallbackHandlerFunction): this {
@@ -408,6 +463,12 @@ export default class Lambder<
             throw new Error(`Lambder: duplicate API name "${name}". Dispatch is first-match, so the second registration would be silently dead code.`);
         }
         this.registeredApiNames.add(name);
+        if(mode === "session" && this.requireSessionApiGuards && options.guards === undefined){
+            throw new Error(
+                `Lambder: session API "${name}" declares no guards, and requireSessionApiGuards is on. ` +
+                `Declare the guard that authorizes it, or the named no-op guard that marks the session itself as the whole authorization.`
+            );
+        }
         const usesPolicies = options.rateLimit !== undefined || options.guards !== undefined || options.idempotency !== undefined;
         if(!usesPolicies) return;
         if(!this.apiPolicyEngine){
@@ -457,7 +518,7 @@ export default class Lambder<
         plugin: (
             lambder: Lambder<TSessionData, _TContract, any, any, any>
         ) => Lambder<TSessionData, _TNewContract, any, any, any>
-    ): Lambder<TSessionData, _TNewContract extends _TContract ? _TNewContract : (_TContract & _TNewContract), _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled> {
+    ): Lambder<TSessionData, _TNewContract extends _TContract ? _TNewContract : (_TContract & _TNewContract), _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired> {
         return plugin(this as any) as any;
     }
 
@@ -485,7 +546,7 @@ export default class Lambder<
     ): Lambder<TSessionData, MergeContract<_TContract, TName,
         z.infer<TInput>,
         z.infer<TOutput>,
-        LambderGuardInputsOf<_TGuards, TGuardsOpt>>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled> {
+        LambderGuardInputsOf<_TGuards, TGuardsOpt>>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired> {
         this.assertApiRegistration(name, "public", schema);
         this.actionList.push({
             match: (ctx) => ctx.apiName === name ? {} : false,
@@ -523,11 +584,9 @@ export default class Lambder<
         schema: { input: TInput, output: TOutput } & {
             /** Named rate limits, checked in declared order before guards and validation: a name, a list of names, or a { name: true | override } map (windows overridable on perApi budgets, errorMessage on any). The first exceeded one refuses (429 envelope + Retry-After); attempts count on every counter checked before it. */
             rateLimit?: TRateOpt;
-            /** Named guards, run in declared order before input validation: a name, a list of names, or a { name: param } map for parameterized guards. Their input requirements merge into this API's contract input; their return values land typed on ctx.guardData. */
-            guards?: TGuardsOpt;
             /** Replay-protect this API per client idempotencyKey. Requires the idempotency option at creation. */
             idempotency?: _TIdempotencyEnabled extends true ? (boolean | { ttlSeconds?: number }) : never;
-        },
+        } & LambderSessionGuardsField<_TSessionGuardsRequired, TGuardsOpt>,
         handler: (
             ctx: LambderSessionRenderContext<z.infer<TInput>, TSessionData, Record<string, string>, LambderGuardDataOf<_TGuards, TGuardsOpt>>,
             resolver: LambderResolver<z.infer<TOutput>>
@@ -535,7 +594,7 @@ export default class Lambder<
     ): Lambder<TSessionData, MergeContract<_TContract, TName,
         z.infer<TInput>,
         z.infer<TOutput>,
-        LambderGuardInputsOf<_TGuards, TGuardsOpt>>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled> {
+        LambderGuardInputsOf<_TGuards, TGuardsOpt>>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired> {
         this.assertApiRegistration(name, "session", schema);
         this.actionList.push({
             match: (ctx) => ctx.apiName === name ? {} : false,
@@ -760,6 +819,21 @@ export default class Lambder<
             return resolver.versionExpired();
         }
 
+        // A gzipped payload is restored before anything reads it: rate-limit
+        // key slices, guards and input validation all see a plain payload.
+        if(ctx._otherInternal.isApiCall){
+            const restored = await restoreCompressedApiPayload(ctx, this.maxRequestPayloadBytes);
+            if(!restored.ok){
+                return resolver.api(null, {
+                    errorMessage: {
+                        type: "error",
+                        code: LAMBDER_REFUSAL_CODES.invalidRequestPayload,
+                        content: restored.message,
+                    } satisfies LambderRefusalMessage,
+                }, { statusCode: 400 });
+            }
+        }
+
         let matched: { action: ActionObject, params: Record<string, string> } | null = null;
         for(const action of this.actionList){
             const params = action.match(ctx);
@@ -903,7 +977,8 @@ export const initLambder = <TSessionData = any>() => ({
         {},
         TOptions["rateLimits"] extends { policies: infer TPolicies extends Record<string, LambderApiRateLimitPolicyConfig> } ? TPolicies : {},
         TOptions["guards"] extends Record<string, LambderApiGuard<any, any, any>> ? LambderGuardMetaMap<TOptions["guards"]> : {},
-        TOptions["idempotency"] extends LambderApiIdempotencyConfig ? true : false
+        TOptions["idempotency"] extends LambderApiIdempotencyConfig ? true : false,
+        TOptions["requireSessionApiGuards"] extends true ? true : false
     > {
         return new Lambder(options) as never;
     },

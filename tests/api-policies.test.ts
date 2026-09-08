@@ -22,7 +22,7 @@ import { LambderDdbRateLimiter } from '../src/stores/LambderDdbRateLimiter.js';
 import { LambderDdbIdempotency } from '../src/stores/LambderDdbIdempotency.js';
 import { lambderGuard } from '../src/policies/LambderApiGuards.js';
 import { lambderRateLimitKey } from '../src/policies/LambderApiRateLimits.js';
-import { createMockContext } from './helpers.js';
+import { createApiEvent as createEnvelopeEvent, createMockContext } from './helpers.js';
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
 type Item = Record<string, AttributeValue>;
@@ -86,20 +86,8 @@ class MemoryDdb extends DynamoDBClient {
     }
 }
 
-const createApiEvent = (apiName: string, payload?: any, extra: Record<string, any> = {}): APIGatewayProxyEvent => ({
-    body: JSON.stringify({ apiName, payload, ...extra }),
-    headers: { Host: 'localhost', 'X-Forwarded-For': '203.0.113.7' },
-    multiValueHeaders: {},
-    httpMethod: 'POST',
-    isBase64Encoded: false,
-    path: '/api',
-    pathParameters: null,
-    queryStringParameters: null,
-    multiValueQueryStringParameters: null,
-    stageVariables: null,
-    requestContext: {} as any,
-    resource: '',
-});
+const createApiEvent = (apiName: string, payload?: any, extra: Record<string, any> = {}): APIGatewayProxyEvent =>
+    createEnvelopeEvent({ apiName, payload, ...extra });
 
 const testSchema = {
     input: z.object({ value: z.string() }),
@@ -338,6 +326,57 @@ describe('API policies - rate limiting', () => {
         expect((await call()).statusCode).toBe(429);
         const ipWideCount = [...client.items.entries()].find(([k]) => k.includes('|ipWide|'))?.[1].count?.N;
         expect(ipWideCount).toBe('2');
+    });
+});
+
+describe('API policies - requireSessionApiGuards', () => {
+    /** An app's authorization vocabulary, plus the named opt-out. */
+    const guards = {
+        orgPermission: lambderGuard({
+            session: true,
+            handler: (_ctx, _payload, _res, permission: string) => ({ permission }),
+        }),
+        // The named opt-out: the session itself is the whole authorization.
+        sessionOnly: lambderGuard({ session: true, handler: () => {} }),
+    };
+    const strict = () => initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', guards, requireSessionApiGuards: true });
+
+    it('refuses a session API that declares no guards, at registration', () => {
+        expect(() => strict().addSessionApi('secure.forgot', { ...testSchema } as any, async (ctx, res) => res.api(null)))
+            .toThrow(/"secure.forgot" declares no guards/);
+    });
+
+    it('accepts a session API that declares a guard, or the named opt-out', () => {
+        expect(() => strict()
+            .addSessionApi('secure.admin', { ...testSchema, guards: { orgPermission: 'ORG.MANAGE' } }, async (ctx, res) => res.api(null))
+            .addSessionApi('secure.me', { ...testSchema, guards: 'sessionOnly' }, async (ctx, res) => res.api(null)))
+            .not.toThrow();
+    });
+
+    it('leaves public APIs alone: authorization there is not a session concern', () => {
+        expect(() => strict().addApi('public.ping', { ...testSchema }, async (ctx, res) => res.api(null))).not.toThrow();
+    });
+
+    it('needs a guards map to declare from', () => {
+        expect(() => initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', requireSessionApiGuards: true }))
+            .toThrow(/needs a guards map/);
+    });
+
+    it('is off by default: a session API without guards still registers', () => {
+        const relaxed = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', guards });
+        expect(() => relaxed.addSessionApi('secure.free', { ...testSchema }, async (ctx, res) => res.api(null))).not.toThrow();
+    });
+
+    it('makes a missing guards declaration a compile error', () => {
+        const lambder = strict();
+        // @ts-expect-error guards is required on this instance
+        const missing = () => lambder.addSessionApi('secure.typed', { ...testSchema }, async (ctx, res) => res.api(null));
+        expect(missing).toThrow(/declares no guards/);
+        // The declaration keeps its typing: the guard's output lands on ctx.guardData.
+        lambder.addSessionApi('secure.typedOk', { ...testSchema, guards: { orgPermission: 'ORG.READ' } }, async (ctx, res) => {
+            const permission: string = ctx.guardData.orgPermission.permission;
+            return res.api({ result: permission });
+        });
     });
 });
 

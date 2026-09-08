@@ -1,5 +1,5 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { type LambderCompressionOption } from "./LambderDdbCompression.js";
+import { type LambderCompressionOption } from "../shared/LambderCompressionOption.js";
 export interface LambderDdbCacheOptions {
     tableName: string;
     region?: string;

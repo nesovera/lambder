@@ -11,6 +11,10 @@ export type { LambderApiOutcome, LambderApiFailureReason, LambderCallOptions, La
 export { LambderApiError, isLambderApiError, refuse, LAMBDER_REFUSAL_CODES } from "./shared/LambderApiError.js";
 export type { LambderApiErrorOptions, LambderRefusalMessage, LambderRefusalCode, LambderRefuseOptions } from "./shared/LambderApiError.js";
 export type { ApiContractShape, LambderApiResponse, LambderApiResponseConfig } from "./shared/LambderApiContract.js";
+export { compressPayloadJson, decompressPayloadJson, isRequestCompressionAvailable, COMPRESSED_PAYLOAD_FIELD, COMPRESSED_PAYLOAD_BYTES_FIELD, DEFAULT_REQUEST_COMPRESSION_SETTINGS, } from "./shared/LambderRequestPayload.js";
+export type { LambderCompressedPayload, LambderRequestCompressionOption, LambderRequestCompressionSettings, } from "./shared/LambderRequestPayload.js";
+export { resolveCompressionOption } from "./shared/LambderCompressionOption.js";
+export type { LambderCompressionOption, LambderCompressionSettingsBase } from "./shared/LambderCompressionOption.js";
 export { html, xml, raw, jsonScript, escapeHtml, renderHtmlValue, LambderSafeHtml, type LambderHtmlValue } from "./shared/LambderHtml.js";
 export { createLambderI18n } from "./shared/LambderI18n.js";
 export type { LambderLanguageMeta, LambderI18nConfig, LambderI18nInstance, LambderI18nTranslator, LambderI18nExtractParams, LambderI18nCodes, LambderI18nKeys, LambderI18nTranslatorFor, } from "./shared/LambderI18n.js";

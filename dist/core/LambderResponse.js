@@ -1,4 +1,5 @@
-import { getZlib, getCrypto } from "../shared/node-polyfills.js";
+import { getCrypto } from "../shared/node-polyfills.js";
+import { compressText } from "../shared/LambderCompressionCodec.js";
 export const normalizeHeaders = (headers) => Object.fromEntries(Object.entries(headers ?? {}).map(([k, v]) => [k, Array.isArray(v) ? [...v] : [v]]));
 /**
  * Intermediate response object returned by all response builder methods and by
@@ -83,8 +84,21 @@ export const acceptsEncoding = (acceptEncoding, encoding) => {
         return !q || Number(q.slice(2)) > 0;
     });
 };
+/**
+ * Brotli first: every browser that accepts it produces smaller bodies than
+ * gzip at comparable speed on quality 5, typically 15-25% on markup and
+ * prose and substantially more on the repetitive record lists API responses
+ * tend to be. That is bandwidth saved and, because the ~6MB cap applies to
+ * the encoded bytes, headroom gained. Clients that do not offer `br` fall
+ * through to gzip.
+ */
+export const DEFAULT_RESPONSE_COMPRESSION_SETTINGS = {
+    minBytes: 860,
+    encodings: ["br", "gzip"],
+    quality: 5,
+};
 export const DEFAULT_FINALIZE_OPTIONS = {
-    compression: { minBytes: 860 },
+    compression: DEFAULT_RESPONSE_COMPRESSION_SETTINGS,
     etag: true,
     maxResponseBytes: 5_500_000,
 };
@@ -141,18 +155,21 @@ export const finalizeResponse = async (ctx, response, options, format = "v1") =>
         const alreadyEncoded = !!response.getHeader("Content-Encoding");
         const eligibleForCompression = !alreadyEncoded && (response.compress === true ||
             (response.compress === "auto" &&
-                options.compression !== false &&
+                options.compression !== null &&
                 bodyBuffer.length >= options.compression.minBytes &&
                 isCompressibleContentType(contentType)));
         if (eligibleForCompression) {
             // Vary even when this client didn't accept an encoding, to keep caches correct.
             response.addHeader("Vary", "Accept-Encoding");
-            if (acceptsEncoding(getRequestHeader(ctx, "accept-encoding"), "gzip")) {
-                const zlib = await getZlib();
-                if (zlib) {
-                    bodyBuffer = zlib.gzipSync(bodyBuffer);
-                    response.setHeader("Content-Encoding", "gzip");
-                }
+            // compress: true forces compression even with it globally off, so
+            // the settings fall back to the defaults rather than being absent.
+            const settings = options.compression ?? DEFAULT_RESPONSE_COMPRESSION_SETTINGS;
+            const acceptEncoding = getRequestHeader(ctx, "accept-encoding");
+            const encoding = settings.encodings.find((candidate) => acceptsEncoding(acceptEncoding, candidate));
+            if (encoding) {
+                // The same codec, quality and TEXT mode a stored record gets.
+                bodyBuffer = await compressText(bodyBuffer, encoding, settings.quality);
+                response.setHeader("Content-Encoding", encoding);
             }
         }
         if (Buffer.isBuffer(response.body) || response.getHeader("Content-Encoding")) {

@@ -1,27 +1,96 @@
 /**
- * Response finalize pipeline: automatic gzip negotiation and ETag / If-None-Match conditional requests.
+ * Response finalize pipeline: automatic Brotli/gzip negotiation and ETag /
+ * If-None-Match conditional requests.
  */
 
 import { describe, it, expect } from 'vitest';
 import Lambder from '../src/core/Lambder.js';
 import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
-import { decodeBody, gunzipBody, createMockEvent, createMockContext } from './helpers.js';
-describe('Compression (gzip)', () => {
+import { decodeBody, gunzipBody, brotliBody, createMockEvent, createMockContext } from './helpers.js';
+describe('Compression (Brotli / gzip)', () => {
     const bigHtml = '<p>' + 'lambder '.repeat(500) + '</p>';
 
-    it('gzips large compressible responses when the client accepts gzip', async () => {
-        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) })
+    const serveBig = (options?: ConstructorParameters<typeof Lambder>[0]) =>
+        new Lambder({ files: new LambderLocalFileSource({ root: './public' }), ...options })
             .addRoute('/big', (ctx, res) => res.html(bigHtml));
 
-        const result = await lambder.render(
+    it('prefers Brotli when the client accepts it', async () => {
+        const result = await serveBig().render(
             createMockEvent('/big', { headers: { Host: 'localhost', 'Accept-Encoding': 'gzip, deflate, br' } }),
             createMockContext(),
         );
 
-        expect(result.multiValueHeaders?.['Content-Encoding']).toEqual(['gzip']);
+        expect(result.multiValueHeaders?.['Content-Encoding']).toEqual(['br']);
         expect(result.multiValueHeaders?.['Vary']).toContain('Accept-Encoding');
         expect(result.isBase64Encoded).toBe(true);
+        expect(brotliBody(result)).toBe(bigHtml);
+    });
+
+    it('falls back to gzip for a client that does not accept Brotli', async () => {
+        const result = await serveBig().render(
+            createMockEvent('/big', { headers: { Host: 'localhost', 'Accept-Encoding': 'gzip, deflate' } }),
+            createMockContext(),
+        );
+
+        expect(result.multiValueHeaders?.['Content-Encoding']).toEqual(['gzip']);
         expect(gunzipBody(result)).toBe(bigHtml);
+    });
+
+    it('respects an encodings preference that excludes Brotli', async () => {
+        const result = await serveBig({ compression: { encodings: ['gzip'] } }).render(
+            createMockEvent('/big', { headers: { Host: 'localhost', 'Accept-Encoding': 'br, gzip' } }),
+            createMockContext(),
+        );
+
+        expect(result.multiValueHeaders?.['Content-Encoding']).toEqual(['gzip']);
+        expect(gunzipBody(result)).toBe(bigHtml);
+    });
+
+    it('skips an encoding the client refused with q=0', async () => {
+        const result = await serveBig().render(
+            createMockEvent('/big', { headers: { Host: 'localhost', 'Accept-Encoding': 'br;q=0, gzip' } }),
+            createMockContext(),
+        );
+
+        expect(result.multiValueHeaders?.['Content-Encoding']).toEqual(['gzip']);
+    });
+
+    it('Brotli beats gzip on the same body', async () => {
+        const [brotli, gzip] = await Promise.all([
+            serveBig().render(createMockEvent('/big', { headers: { Host: 'localhost', 'Accept-Encoding': 'br' } }), createMockContext()),
+            serveBig().render(createMockEvent('/big', { headers: { Host: 'localhost', 'Accept-Encoding': 'gzip' } }), createMockContext()),
+        ]);
+
+        expect(brotli.body!.length).toBeLessThan(gzip.body!.length);
+    });
+
+    it('rejects a nonsense compression option at construction', () => {
+        // The same validation the at-rest stores get, from the same resolver.
+        expect(() => serveBig({ compression: { minBytes: -50 } })).toThrow(/non-negative integer/);
+        expect(() => serveBig({ compression: { quality: 99 } })).toThrow(/0 to 11/);
+        // An empty preference list would add Vary and never compress, silently.
+        expect(() => serveBig({ compression: { encodings: [] } })).toThrow(/non-empty list/);
+    });
+
+    it('keeps the defaults for a field set to undefined', async () => {
+        // A quality of undefined must not reach Brotli on the first large response.
+        const result = await serveBig({ compression: { minBytes: undefined, quality: undefined } }).render(
+            createMockEvent('/big', { headers: { Host: 'localhost', 'Accept-Encoding': 'br' } }),
+            createMockContext(),
+        );
+
+        expect(result.multiValueHeaders?.['Content-Encoding']).toEqual(['br']);
+        expect(brotliBody(result)).toBe(bigHtml);
+    });
+
+    it('honours a custom quality', async () => {
+        const result = await serveBig({ compression: { quality: 11 } }).render(
+            createMockEvent('/big', { headers: { Host: 'localhost', 'Accept-Encoding': 'br' } }),
+            createMockContext(),
+        );
+
+        expect(result.multiValueHeaders?.['Content-Encoding']).toEqual(['br']);
+        expect(brotliBody(result)).toBe(bigHtml);
     });
 
     it('does not gzip when the client does not accept gzip', async () => {

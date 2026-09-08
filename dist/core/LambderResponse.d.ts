@@ -1,3 +1,4 @@
+import type { LambderCompressionOption, LambderCompressionSettingsBase, LambderEncoding } from "../shared/LambderCompressionOption.js";
 import type { LambderRenderContext } from "./LambderContext.js";
 export type HttpStatusCode = 100 | 101 | 200 | 201 | 202 | 203 | 204 | 206 | 300 | 301 | 302 | 303 | 304 | 307 | 308 | 400 | 401 | 402 | 403 | 404 | 405 | 406 | 408 | 409 | 410 | 412 | 413 | 415 | 416 | 418 | 422 | 428 | 429 | 431 | 451 | 500 | 501 | 502 | 503 | 504;
 export type LambderHeadersInput = Record<string, string | string[]>;
@@ -53,14 +54,31 @@ export declare class LambderResponse {
 }
 export declare const isCompressibleContentType: (contentType: string | undefined) => boolean;
 export declare const acceptsEncoding: (acceptEncoding: string | undefined | null, encoding: string) => boolean;
+/** Response-side settings: the threshold plus what the wire can negotiate. */
+export type LambderResponseCompressionSettings = LambderCompressionSettingsBase & {
+    /** Preference order; the first the client accepts wins. */
+    encodings: LambderEncoding[];
+    /** Brotli quality 0-11, the same field the at-rest stores take. Kept low: this runs per request, and 11 is orders of magnitude slower. */
+    quality: number;
+};
+/** The `compression` option at creation: `true` for the defaults, `false` for off, or overrides. */
+export type LambderResponseCompressionOption = LambderCompressionOption<LambderResponseCompressionSettings>;
 export type LambderFinalizeOptions = {
-    compression: false | {
-        minBytes: number;
-    };
+    /** Resolved settings, or null when compression is off: the same `Settings | null` contract the stores hold. */
+    compression: LambderResponseCompressionSettings | null;
     etag: boolean;
     /** Guard against Lambda's ~6MB response cap with a clear error. */
     maxResponseBytes: number;
 };
+/**
+ * Brotli first: every browser that accepts it produces smaller bodies than
+ * gzip at comparable speed on quality 5, typically 15-25% on markup and
+ * prose and substantially more on the repetitive record lists API responses
+ * tend to be. That is bandwidth saved and, because the ~6MB cap applies to
+ * the encoded bytes, headroom gained. Clients that do not offer `br` fall
+ * through to gzip.
+ */
+export declare const DEFAULT_RESPONSE_COMPRESSION_SETTINGS: LambderResponseCompressionSettings;
 export declare const DEFAULT_FINALIZE_OPTIONS: LambderFinalizeOptions;
 /**
  * Convert an intermediate LambderResponse into the final Lambda response:

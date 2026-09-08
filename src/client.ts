@@ -27,6 +27,25 @@ export type { LambderApiErrorOptions, LambderRefusalMessage, LambderRefusalCode,
 // The API contract and wire envelope both sides speak.
 export type { ApiContractShape, LambderApiResponse, LambderApiResponseConfig } from "./shared/LambderApiContract.js";
 
+// Request payload compression (browser-safe: gzip via CompressionStream, no Node built-ins).
+export {
+    compressPayloadJson,
+    decompressPayloadJson,
+    isRequestCompressionAvailable,
+    COMPRESSED_PAYLOAD_FIELD,
+    COMPRESSED_PAYLOAD_BYTES_FIELD,
+    DEFAULT_REQUEST_COMPRESSION_SETTINGS,
+} from "./shared/LambderRequestPayload.js";
+export type {
+    LambderCompressedPayload,
+    LambderRequestCompressionOption,
+    LambderRequestCompressionSettings,
+} from "./shared/LambderRequestPayload.js";
+
+// The compression option vocabulary every Lambder surface shares (pure: no zlib).
+export { resolveCompressionOption } from "./shared/LambderCompressionOption.js";
+export type { LambderCompressionOption, LambderCompressionSettingsBase } from "./shared/LambderCompressionOption.js";
+
 // Type-safe templating (tagged templates with auto-escaping)
 export { html, xml, raw, jsonScript, escapeHtml, renderHtmlValue, LambderSafeHtml, type LambderHtmlValue } from "./shared/LambderHtml.js";
 

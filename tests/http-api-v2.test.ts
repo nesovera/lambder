@@ -7,33 +7,9 @@
 import { describe, it, expect } from 'vitest';
 import Lambder, { initLambder } from '../src/core/Lambder.js';
 import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
-import { decodeBody, gunzipBody, createMockContext } from './helpers.js';
+import { decodeBody, gunzipBody, brotliBody, createMockContext, createMockEventV2 } from './helpers.js';
 import type { APIGatewayProxyEventV2 } from 'aws-lambda';
 
-const createMockEventV2 = (
-    reqPath: string,
-    overrides: Partial<APIGatewayProxyEventV2> = {},
-): APIGatewayProxyEventV2 => ({
-    version: '2.0',
-    routeKey: '$default',
-    rawPath: reqPath,
-    rawQueryString: '',
-    headers: { host: 'localhost' },
-    requestContext: {
-        accountId: '1',
-        apiId: 'api',
-        domainName: 'localhost',
-        domainPrefix: '',
-        http: { method: 'GET', path: reqPath, protocol: 'HTTP/1.1', sourceIp: '9.9.9.9', userAgent: 'test' },
-        requestId: 'r',
-        routeKey: '$default',
-        stage: '$default',
-        time: '',
-        timeEpoch: 0,
-    },
-    isBase64Encoded: false,
-    ...overrides,
-});
 
 describe('HTTP API v2 events', () => {
     it('is detected as an HTTP event and routes normally', async () => {
@@ -164,7 +140,7 @@ describe('HTTP API v2 events', () => {
         expect(second.body).toBe('');
     });
 
-    it('gzips large compressible v2 responses when accepted', async () => {
+    it('compresses large compressible v2 responses when accepted', async () => {
         const bigHtml = `<p>${'lambder '.repeat(500)}</p>`;
         const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) })
             .addRoute('/big', (ctx, res) => res.html(bigHtml));
@@ -173,9 +149,9 @@ describe('HTTP API v2 events', () => {
             createMockEventV2('/big', { headers: { 'host': 'localhost', 'accept-encoding': 'gzip, br' } }),
             createMockContext(),
         );
-        expect((result.headers as Record<string, string>)['Content-Encoding']).toBe('gzip');
+        expect((result.headers as Record<string, string>)['Content-Encoding']).toBe('br');
         expect(result.isBase64Encoded).toBe(true);
-        expect(gunzipBody(result as any)).toBe(bigHtml);
+        expect(brotliBody(result as any)).toBe(bigHtml);
     });
 
     it('answers CORS preflight on v2 OPTIONS requests', async () => {

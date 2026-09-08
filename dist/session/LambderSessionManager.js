@@ -1,7 +1,8 @@
 import crypto from "crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, QueryCommand, DeleteCommand, PutCommand, GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { brotliCompressText, brotliRestoreText, resolveCompressionOption, } from "../stores/LambderDdbCompression.js";
+import { compressText, restoreBoundedText } from "../shared/LambderCompressionCodec.js";
+import { resolveCompressionOption, } from "../shared/LambderCompressionOption.js";
 /**
  * Session compression defaults: every record compressed (see
  * LambderCompressionOption for the option's shape and toggle semantics).
@@ -95,7 +96,7 @@ export default class LambderSessionManager {
         const { data, ...item } = session;
         const raw = this.compression && Buffer.from(JSON.stringify(data), "utf8");
         if (this.compression && raw && raw.byteLength >= this.compression.minBytes) {
-            item.dataBr = await brotliCompressText(raw, this.compression.quality);
+            item.dataBr = await compressText(raw, "br", this.compression.quality);
             item.dataBytes = raw.byteLength;
         }
         else {
@@ -201,7 +202,7 @@ export default class LambderSessionManager {
         // that fails to decode throws, which the controller treats like any
         // malformed record: no session.
         if (session.dataBr) {
-            session.data = JSON.parse(await brotliRestoreText(session.dataBr, session.dataBytes));
+            session.data = JSON.parse(await restoreBoundedText(session.dataBr, session.dataBytes, "br"));
             delete session.dataBr;
             delete session.dataBytes;
         }
