@@ -1,6 +1,6 @@
 {
   "name": "lambder",
-  "version": "4.6.1",
+  "version": "4.6.2",
   "description": "",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -51,26 +51,40 @@
     "url": "https://github.com/nesovera/lambder.git"
   },
   "dependencies": {
-    "@aws-sdk/client-dynamodb": "^3.574.0",
-    "@aws-sdk/lib-dynamodb": "^3.574.0",
     "cookie": "^1.0.2",
     "js-cookie": "^3.0.5",
     "lru-cache": "^11.5.2",
     "mime-types": "^2.1.35",
-    "path-to-regexp": "^6.2.1",
-    "zod": "^4.1.12"
+    "path-to-regexp": "^6.2.1"
   },
   "peerDependencies": {
+    "@aws-sdk/client-dynamodb": "^3.574.0",
     "@aws-sdk/client-s3": "^3.574.0",
-    "msw": "^2.0.0"
+    "@aws-sdk/lib-dynamodb": "^3.574.0",
+    "msw": "^2.0.0",
+    "zod": "^4.1.12"
   },
   "peerDependenciesMeta": {
+    "@aws-sdk/client-dynamodb": {
+      "optional": true
+    },
+    "@aws-sdk/client-s3": {
+      "optional": true
+    },
+    "@aws-sdk/lib-dynamodb": {
+      "optional": true
+    },
     "msw": {
+      "optional": true
+    },
+    "zod": {
       "optional": true
     }
   },
   "devDependencies": {
+    "@aws-sdk/client-dynamodb": "^3.913.0",
     "@aws-sdk/client-s3": "^3.1127.0",
+    "@aws-sdk/lib-dynamodb": "^3.913.0",
     "@types/aws-lambda": "^8.10.136",
     "@types/cookie": "^0.6.0",
     "@types/js-cookie": "^3.0.6",
@@ -82,6 +96,7 @@
     "aws-sdk-client-mock": "^4.1.0",
     "eslint": "^8.57.0",
     "typescript": "^5.9.3",
-    "vitest": "^3.2.4"
+    "vitest": "^3.2.4",
+    "zod": "^4.1.12"
   }
 }

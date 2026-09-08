@@ -74,6 +74,24 @@ npm install lambder zod
 yarn add lambder zod
 ```
 
+`zod` and the AWS SDK clients are optional peer dependencies, so installing
+lambder never drags them into your tree. Add whatever the code you actually
+import needs:
+
+| What you import | What to install alongside |
+|---|---|
+| `lambder/client` (browser, shared isomorphic code) | `zod` |
+| `lambder` on AWS Lambda (`nodejs18.x` and later) | `zod`. The runtime already provides the AWS SDK v3, so mark the SDK packages as dev dependencies and keep them out of the deployment package |
+| `lambder` anywhere else (a long-running server, a container, local tests) | `zod`, `@aws-sdk/client-dynamodb`, `@aws-sdk/lib-dynamodb` |
+| `LambderS3FileSource` | `@aws-sdk/client-s3`, loaded on first read |
+| `lambder/testing` | `msw` |
+
+The SDK and its `@smithy` tree are roughly 21MB installed, which is why they are
+peers rather than dependencies: a frontend importing only `lambder/client` has
+no use for any of it, and a Lambda deployment package should not ship a second
+copy of what the runtime already loads. The runtime pins its own SDK version,
+so if you need a specific one, install it and bundle it yourself.
+
 ## Package Entry Points
 
 The package ships three entry points; pick by where the code runs:
