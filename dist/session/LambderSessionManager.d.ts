@@ -1,4 +1,4 @@
-import { type LambderCompressionOption } from "../stores/LambderDdbCompression.js";
+import { type LambderCompressionOption } from "../shared/LambderCompressionOption.js";
 export type LambderSessionContext<SessionData = any> = {
     [x: string]: any;
     /**

@@ -1,3 +1,4 @@
+import { COMPRESSED_PAYLOAD_FIELD, COMPRESSED_PAYLOAD_BYTES_FIELD, decompressPayloadJson } from '../shared/LambderRequestPayload.js';
 export default class LambderMSW {
     apiPath;
     apiVersion;
@@ -41,6 +42,20 @@ export default class LambderMSW {
             }
             if (body.apiName !== apiName) {
                 return;
+            }
+            // A caller with requestCompression on sends the payload gzipped;
+            // mock handlers still receive the payload itself, and the wire
+            // fields are consumed the way the server consumes them.
+            if (typeof body[COMPRESSED_PAYLOAD_FIELD] === 'string') {
+                try {
+                    body.payload = await decompressPayloadJson(body[COMPRESSED_PAYLOAD_FIELD]);
+                }
+                catch {
+                    console.warn("LambderMSW: Failed to decompress the request payload");
+                    return;
+                }
+                delete body[COMPRESSED_PAYLOAD_FIELD];
+                delete body[COMPRESSED_PAYLOAD_BYTES_FIELD];
             }
             try {
                 // Add artificial delay if specified

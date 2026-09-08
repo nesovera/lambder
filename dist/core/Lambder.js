@@ -1,15 +1,17 @@
 import LambderResolver from "./LambderResolver.js";
 import LambderResponseBuilder from "./LambderResponseBuilder.js";
-import { LambderResponse, finalizeResponse, DEFAULT_FINALIZE_OPTIONS, } from "./LambderResponse.js";
+import { LambderResponse, finalizeResponse, DEFAULT_FINALIZE_OPTIONS, DEFAULT_RESPONSE_COMPRESSION_SETTINGS, } from "./LambderResponse.js";
 import { compileRouteMatcher } from "./LambderRouting.js";
 import { applyCorsHeaders } from "./LambderCors.js";
 import LambderSessionManager from "../session/LambderSessionManager.js";
+import { resolveCompressionOption } from "../shared/LambderCompressionOption.js";
 import LambderSessionController from "../session/LambderSessionController.js";
 import { LambderPublicFilesHandler } from "./LambderPublicFiles.js";
 import { LambderFiles } from "./LambderFiles.js";
 import { isLambderApiError, LAMBDER_REFUSAL_CODES } from "../shared/LambderApiError.js";
 import { LambderApiPolicyEngine } from "../policies/LambderApiPolicies.js";
-import { createContext, isV2HttpEvent } from "./LambderContext.js";
+import { createContext, isV2HttpEvent, restoreCompressedApiPayload } from "./LambderContext.js";
+import { DEFAULT_MAX_REQUEST_PAYLOAD_BYTES } from "../shared/LambderRequestPayload.js";
 /**
  * Main Lambder class for building type-safe serverless APIs. Create
  * instances with initLambder<SessionData>().create({...}) (see below): the
@@ -21,6 +23,7 @@ import { createContext, isV2HttpEvent } from "./LambderContext.js";
  * @typeParam _TRateLimitPolicies - @internal Inferred from create()'s rateLimits.policies (do not pass manually)
  * @typeParam _TGuards - @internal Guard metadata map inferred from create()'s guards (do not pass manually)
  * @typeParam _TIdempotencyEnabled - @internal True when create() received idempotency (do not pass manually)
+ * @typeParam _TSessionGuardsRequired - @internal True when create() received requireSessionApiGuards (do not pass manually)
  *
  * @example
  * ```typescript
@@ -63,6 +66,8 @@ export default class Lambder {
     eventActionList = [];
     corsConfig = null;
     finalizeOptions;
+    maxRequestPayloadBytes;
+    requireSessionApiGuards;
     lambderSessionManager;
     sessionCookieOptions = {};
     sessionTokenCookieKey = "LMDRSESSIONTKID";
@@ -72,13 +77,16 @@ export default class Lambder {
         this.apiPath = options.apiPath ?? "/api";
         this.apiVersion = options.apiVersion ?? null;
         this.finalizeOptions = {
-            compression: options.compression === false
-                ? false
-                : { minBytes: (typeof options.compression === "object" ? options.compression.minBytes : undefined)
-                        ?? DEFAULT_FINALIZE_OPTIONS.compression.minBytes },
+            // Resolved (and validated) by the same function the at-rest
+            // stores use; on unless explicitly disabled.
+            compression: resolveCompressionOption(options.compression, DEFAULT_RESPONSE_COMPRESSION_SETTINGS),
             etag: options.etag ?? DEFAULT_FINALIZE_OPTIONS.etag,
             maxResponseBytes: options.maxResponseBytes ?? DEFAULT_FINALIZE_OPTIONS.maxResponseBytes,
         };
+        this.maxRequestPayloadBytes = options.maxRequestPayloadBytes ?? DEFAULT_MAX_REQUEST_PAYLOAD_BYTES;
+        if (!Number.isSafeInteger(this.maxRequestPayloadBytes) || this.maxRequestPayloadBytes <= 0) {
+            throw new Error("maxRequestPayloadBytes must be a positive integer");
+        }
         if (options.cors !== undefined && options.cors !== false) {
             this.corsConfig = options.cors === true ? {} : options.cors;
         }
@@ -107,6 +115,10 @@ export default class Lambder {
             this.getOrCreatePolicyEngine().addGuards(options.guards);
         if (options.idempotency)
             this.getOrCreatePolicyEngine().setIdempotency(options.idempotency);
+        this.requireSessionApiGuards = options.requireSessionApiGuards ?? false;
+        if (this.requireSessionApiGuards && !options.guards) {
+            throw new Error("Lambder: requireSessionApiGuards needs a guards map at creation for session APIs to declare from.");
+        }
     }
     setRouteFallbackHandler(routeFallbackHandler) {
         this.routeFallbackHandler = routeFallbackHandler;
@@ -203,6 +215,10 @@ export default class Lambder {
             throw new Error(`Lambder: duplicate API name "${name}". Dispatch is first-match, so the second registration would be silently dead code.`);
         }
         this.registeredApiNames.add(name);
+        if (mode === "session" && this.requireSessionApiGuards && options.guards === undefined) {
+            throw new Error(`Lambder: session API "${name}" declares no guards, and requireSessionApiGuards is on. ` +
+                `Declare the guard that authorizes it, or the named no-op guard that marks the session itself as the whole authorization.`);
+        }
         const usesPolicies = options.rateLimit !== undefined || options.guards !== undefined || options.idempotency !== undefined;
         if (!usesPolicies)
             return;
@@ -453,6 +469,20 @@ export default class Lambder {
         // Version check if provided by both the client and the server
         if (this.apiVersion && ctx._otherInternal.requestVersion && ctx._otherInternal.requestVersion !== this.apiVersion) {
             return resolver.versionExpired();
+        }
+        // A gzipped payload is restored before anything reads it: rate-limit
+        // key slices, guards and input validation all see a plain payload.
+        if (ctx._otherInternal.isApiCall) {
+            const restored = await restoreCompressedApiPayload(ctx, this.maxRequestPayloadBytes);
+            if (!restored.ok) {
+                return resolver.api(null, {
+                    errorMessage: {
+                        type: "error",
+                        code: LAMBDER_REFUSAL_CODES.invalidRequestPayload,
+                        content: restored.message,
+                    },
+                }, { statusCode: 400 });
+            }
         }
         let matched = null;
         for (const action of this.actionList) {

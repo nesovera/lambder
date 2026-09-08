@@ -18,6 +18,11 @@ export { LambderTemplatingEngine } from "./core/LambderTemplatingEngine.js";
 export { LambderPublicFilesHandler } from "./core/LambderPublicFiles.js";
 export { LambderFiles, LambderLocalFileSource } from "./core/LambderFiles.js";
 export { LambderS3FileSource } from "./stores/LambderS3FileSource.js";
+// Compression: the option every site shares, and the one codec behind them all.
+export { resolveCompressionOption, LAMBDER_ENCODINGS } from "./shared/LambderCompressionOption.js";
+// Brotli/gzip plus the bounded, length-verified restore every compressed
+// value in Lambder (records at rest, request payloads) goes through.
+export { compressText, restoreBoundedText, LambderCompressionError, LAMBDER_RESTORE_FAILURES, } from "./shared/LambderCompressionCodec.js";
 export { LambderSessionDataRefreshError, LambderSessionReadError } from "./session/LambderSessionManager.js";
 // DynamoDB-backed compressed cache (standalone, server-only)
 export { LambderDdbCache } from "./stores/LambderDdbCache.js";
@@ -32,5 +37,7 @@ export { lambderRateLimitKey } from "./policies/LambderApiRateLimits.js";
 // Typed translations (standalone, isomorphic)
 export { createLambderI18n } from "./shared/LambderI18n.js";
 export { createContext, isV2HttpEvent } from "./core/LambderContext.js";
+// Request payload compression: the wire format LambderCaller and the server share.
+export { COMPRESSED_PAYLOAD_FIELD, COMPRESSED_PAYLOAD_BYTES_FIELD, DEFAULT_REQUEST_COMPRESSION_SETTINGS, DEFAULT_MAX_REQUEST_PAYLOAD_BYTES, } from "./shared/LambderRequestPayload.js";
 // Cookies (res.setCookie / res.clearCookie build on these; exported for code holding a LambderResponse)
 export { serializeCookie, serializeClearCookie, resolveCookieDomain } from "./core/LambderCookie.js";
