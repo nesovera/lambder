@@ -23,6 +23,11 @@ const DEFAULT_MAX_VALUE_BYTES = 32 * 1024 * 1024;
 const DEFAULT_MEMORY_BYTES = 16 * 1024 * 1024;
 const META_SORT_KEY = "meta";
 const LOCK_SORT_KEY = "lock";
+const CHUNK_SORT_KEY_PREFIX = "chunk#";
+/** Item-key prefix that separates entries addressed with a sort key from plain-key entries sharing the partition. */
+const SORT_KEY_MARKER = "sk#";
+/** Budget for one encoded sort key, leaving room for the marker and the longest item suffix inside DynamoDB's 1024-byte range key limit. */
+const MAX_SORT_KEY_BYTES = 900;
 const BATCH_WRITE_LIMIT = 25;
 const MAX_BATCH_RETRIES = 8;
 /** Every value compressed by default; see the `compression` option. */
@@ -69,6 +74,36 @@ export interface LambderDdbCacheOptions {
     client?: DynamoDBClient;
 }
 
+/**
+ * Where a value lives. A plain string addresses one entry, as it always has.
+ * `{ pk, sk }` puts the entry in a partition it can share with others, so a
+ * group can be listed or dropped in one call: `{ pk: "division:ist-34", sk:
+ * "1700:1800" }` keeps every cached window of one division together.
+ * Only the `pk` part is hashed into the DynamoDB partition key; the sort key
+ * is stored readable, which is what makes prefix queries possible.
+ */
+export type LambderCacheKey = string | { pk: string, sk: string };
+
+/** One entry's address, normalized: `sortKey` is null for a plain string key. */
+interface CacheAddress {
+    partition: string;
+    sortKey: string | null;
+    /** Unambiguous key for the in-memory layer and the in-flight map. */
+    memoryKey: string;
+}
+
+/**
+ * `#` separates the store's own item-key segments, so a caller's `#` is
+ * escaped rather than refused: `~` becomes `~0` and `#` becomes `~1`. An
+ * encoded sort key therefore never contains a bare `#`, which keeps
+ * `<encoded>#` an unambiguous boundary for prefix queries. Escaping is
+ * per-character, so a prefix of the raw key stays a prefix of the encoded
+ * one; only the sort ORDER of keys that contain `#` or `~` shifts, since
+ * both encode into the `~` range.
+ */
+const encodeSortKey = (value: string): string => value.replace(/~/g, "~0").replace(/#/g, "~1");
+const decodeSortKey = (value: string): string => value.replace(/~([01])/g, (_match, code) => code === "0" ? "~" : "#");
+
 export interface LambderDdbCacheSetOptions {
     ttlSeconds?: number;
 }
@@ -76,6 +111,13 @@ export interface LambderDdbCacheSetOptions {
 export interface LambderDdbCacheGetOrSetOptions extends LambderDdbCacheSetOptions {
     leaseSeconds?: number;
     waitForFillMs?: number;
+}
+
+export interface LambderDdbCacheListOptions {
+    /** Only sort keys starting with this raw (unescaped) prefix. */
+    prefix?: string;
+    /** Cap on RESULTS, not on items read: the partition (or prefix range) is read either way. */
+    limit?: number;
 }
 
 // Node builtins are loaded lazily through node-polyfills so this module can
@@ -125,6 +167,13 @@ const sleep = (milliseconds: number): Promise<void> =>
  * `expiresAt`. Items are prefixed `CACHE#<namespace>#` by default, so the
  * table can be shared with LambderDdbRateLimiter (`RL#`) and
  * LambderDdbIdempotency (`IDEM#`) without key collisions.
+ *
+ * A key may also be a `{ pk, sk }` pair, which groups entries under one
+ * partition so `deletePartition` and `listSortKeys` can work on the group
+ * without knowing its members. Plain-string keys keep the exact item layout
+ * they have always had (`meta`, `lock`, `chunk#...`), and grouped entries
+ * live beside them under `sk#<encoded sort key>#...`, so both forms can
+ * share a partition and a live table needs no migration.
  */
 export class LambderDdbCache {
     readonly tableName: string;
@@ -173,9 +222,12 @@ export class LambderDdbCache {
         this.client = options.client ?? new DynamoDBClient({ region: options.region ?? "us-east-1" });
     }
 
-    async get<T>(key: string): Promise<T | undefined> {
-        const normalizedKey = this.normalizeKey(key);
-        const cached = this.memory?.get(normalizedKey);
+    async get<T>(key: LambderCacheKey): Promise<T | undefined> {
+        return await this.getByAddress<T>(this.normalizeKey(key));
+    }
+
+    private async getByAddress<T>(address: CacheAddress): Promise<T | undefined> {
+        const cached = this.memory?.get(address.memoryKey);
         const nowSeconds = this.nowSeconds();
         if (cached && cached.expiresAt > nowSeconds) {
             try {
@@ -184,14 +236,14 @@ export class LambderDdbCache {
                 // Fall through to DynamoDB; the in-memory copy is disposable.
             }
         }
-        if (cached) this.memory?.delete(normalizedKey);
+        if (cached) this.memory?.delete(address.memoryKey);
 
-        const pk = await this.partitionKey(normalizedKey);
-        const manifest = await this.readManifest(pk);
+        const pk = await this.partitionKey(address.partition);
+        const manifest = await this.readManifest(pk, address);
         if (!manifest || manifest.expiresAt <= nowSeconds) return undefined;
 
         try {
-            const stored = manifest.inlineData ?? await this.readChunks(pk, manifest);
+            const stored = manifest.inlineData ?? await this.readChunks(pk, address, manifest);
             if (stored.length !== manifest.storedBytes) {
                 throw new Error("stored byte length does not match manifest");
             }
@@ -201,28 +253,31 @@ export class LambderDdbCache {
 
             const json = await this.decode(stored, manifest.encoding, manifest.uncompressedBytes);
             const parsed = JSON.parse(json) as T;
-            this.remember(normalizedKey, stored, manifest.encoding, manifest.uncompressedBytes, manifest.expiresAt);
+            this.remember(address.memoryKey, stored, manifest.encoding, manifest.uncompressedBytes, manifest.expiresAt);
             return parsed;
         } catch (error) {
-            await this.invalidateManifest(pk, manifest.version);
+            await this.invalidateManifest(pk, address, manifest.version);
             console.warn(`Ignoring corrupt DynamoDB cache entry in ${this.namespace}`, error);
             return undefined;
         }
     }
 
-    async has(key: string): Promise<boolean> {
-        const normalizedKey = this.normalizeKey(key);
-        const cached = this.memory?.get(normalizedKey);
+    async has(key: LambderCacheKey): Promise<boolean> {
+        const address = this.normalizeKey(key);
+        const cached = this.memory?.get(address.memoryKey);
         const nowSeconds = this.nowSeconds();
         if (cached?.expiresAt && cached.expiresAt > nowSeconds) return true;
-        if (cached) this.memory?.delete(normalizedKey);
+        if (cached) this.memory?.delete(address.memoryKey);
 
-        const manifest = await this.readManifest(await this.partitionKey(normalizedKey));
+        const manifest = await this.readManifest(await this.partitionKey(address.partition), address);
         return !!manifest && manifest.expiresAt > nowSeconds;
     }
 
-    async set<T>(key: string, value: T, options: LambderDdbCacheSetOptions = {}): Promise<void> {
-        const normalizedKey = this.normalizeKey(key);
+    async set<T>(key: LambderCacheKey, value: T, options: LambderDdbCacheSetOptions = {}): Promise<void> {
+        return await this.setByAddress(this.normalizeKey(key), value, options);
+    }
+
+    private async setByAddress<T>(address: CacheAddress, value: T, options: LambderDdbCacheSetOptions): Promise<void> {
         const ttlSeconds = positiveInteger(options.ttlSeconds ?? this.defaultTtlSeconds, "ttlSeconds");
         const json = JSON.stringify(value);
         if (json === undefined) throw new Error("Cache value must be JSON-serializable");
@@ -239,7 +294,7 @@ export class LambderDdbCache {
             throw new Error(`Stored cache value exceeds maxValueBytes (${stored.length} > ${this.maxValueBytes})`);
         }
 
-        const pk = await this.partitionKey(normalizedKey);
+        const pk = await this.partitionKey(address.partition);
         const version = `${Date.now().toString(36)}-${await randomUUID()}`;
         const expiresAt = this.nowSeconds() + ttlSeconds;
         const chunks: Buffer[] = [];
@@ -254,7 +309,7 @@ export class LambderDdbCache {
             PutRequest: {
                 Item: {
                     pk: { S: pk },
-                    sk: { S: this.chunkSortKey(version, index) },
+                    sk: { S: this.chunkSortKey(address, version, index) },
                     data: { B: chunk },
                     expiresAt: { N: String(expiresAt) },
                 },
@@ -267,7 +322,7 @@ export class LambderDdbCache {
                 TableName: this.tableName,
                 Item: {
                     pk: { S: pk },
-                    sk: { S: META_SORT_KEY },
+                    sk: { S: this.itemSortKey(address, META_SORT_KEY) },
                     version: { S: version },
                     chunkCount: { N: String(chunks.length) },
                     storedBytes: { N: String(stored.length) },
@@ -280,50 +335,79 @@ export class LambderDdbCache {
                 },
             }),
         );
-        this.remember(normalizedKey, stored, encoding, input.length, expiresAt);
+        this.remember(address.memoryKey, stored, encoding, input.length, expiresAt);
     }
 
-    async delete(key: string): Promise<boolean> {
-        const normalizedKey = this.normalizeKey(key);
-        const pk = await this.partitionKey(normalizedKey);
-        this.memory?.delete(normalizedKey);
+    async delete(key: LambderCacheKey): Promise<boolean> {
+        const address = this.normalizeKey(key);
+        const pk = await this.partitionKey(address.partition);
+        this.memory?.delete(address.memoryKey);
 
-        const keys: Array<Record<string, AttributeValue>> = [];
-        let cursor: Record<string, AttributeValue> | undefined;
-        do {
-            const response = await this.client.send(
-                new QueryCommand({
-                    TableName: this.tableName,
-                    KeyConditionExpression: "#pk = :pk",
-                    ExpressionAttributeNames: { "#pk": "pk", "#sk": "sk" },
-                    ExpressionAttributeValues: { ":pk": { S: pk } },
-                    ProjectionExpression: "#pk, #sk",
-                    ExclusiveStartKey: cursor,
-                }),
-            );
-            for (const item of response.Items ?? []) {
-                if (item.pk && item.sk) keys.push({ pk: item.pk, sk: item.sk });
-            }
-            cursor = response.LastEvaluatedKey;
-        } while (cursor);
+        // A grouped entry owns one contiguous item range; a plain-string one
+        // owns the bare item keys, so it must leave any grouped entries
+        // sharing its partition alone.
+        const prefix = this.entryItemPrefix(address);
+        const items = await this.queryItems(pk, { prefix, projection: "#pk, #sk" });
+        const owned = prefix ? items : items.filter((item) => !item.sk?.S?.startsWith(SORT_KEY_MARKER));
 
-        await this.batchWrite(keys.map((Key) => ({ DeleteRequest: { Key } })));
-        return keys.length > 0;
+        await this.deleteItems(owned);
+        return owned.length > 0;
+    }
+
+    /**
+     * Drop every entry stored under one `pk`, without knowing which sort keys
+     * exist: the invalidation a group of related entries is worth grouping
+     * for. Returns the number of entries removed. In-memory copies held by
+     * OTHER Lambda containers still serve until their own TTL, as they do
+     * after a single-entry delete.
+     */
+    async deletePartition(partition: string): Promise<number> {
+        const normalized = this.normalizePartition(partition);
+        const pk = await this.partitionKey(normalized);
+        this.forgetPartition(normalized);
+
+        const items = await this.queryItems(pk, { projection: "#pk, #sk" });
+        await this.deleteItems(items);
+        return items.filter((item) => this.isManifestSortKey(item.sk?.S)).length;
+    }
+
+    /**
+     * The live (unexpired) sort keys stored under one `pk`, in table order.
+     * Plain-string entries have no sort key, so they never appear here.
+     * Reading a partition whose values are chunked also reads those chunk
+     * items, so grouping very large values makes listing more expensive.
+     */
+    async listSortKeys(partition: string, options: LambderDdbCacheListOptions = {}): Promise<string[]> {
+        const pk = await this.partitionKey(this.normalizePartition(partition));
+        const prefix = `${SORT_KEY_MARKER}${encodeSortKey(options.prefix ?? "")}`;
+        const limit = options.limit === undefined ? undefined : positiveInteger(options.limit, "limit");
+        const nowSeconds = this.nowSeconds();
+
+        const items = await this.queryItems(pk, { prefix, projection: "#sk, #expiresAt", extraNames: { "#expiresAt": "expiresAt" } });
+        const sortKeys: string[] = [];
+        for (const item of items) {
+            const sk = item.sk?.S;
+            if (!sk || !this.isManifestSortKey(sk)) continue;
+            if (Number(item.expiresAt?.N) <= nowSeconds) continue;
+            sortKeys.push(decodeSortKey(sk.slice(SORT_KEY_MARKER.length, -(META_SORT_KEY.length + 1))));
+            if (limit !== undefined && sortKeys.length >= limit) break;
+        }
+        return sortKeys;
     }
 
     async getOrSet<T>(
-        key: string,
+        key: LambderCacheKey,
         factory: () => Promise<T>,
         options: LambderDdbCacheGetOrSetOptions = {},
     ): Promise<T> {
-        const normalizedKey = this.normalizeKey(key);
-        const current = this.inFlight.get(normalizedKey) as Promise<T> | undefined;
+        const address = this.normalizeKey(key);
+        const current = this.inFlight.get(address.memoryKey) as Promise<T> | undefined;
         if (current) return current;
 
-        const fill = this.getOrSetFailOpen(normalizedKey, factory, options).finally(() => {
-            this.inFlight.delete(normalizedKey);
+        const fill = this.getOrSetFailOpen(address, factory, options).finally(() => {
+            this.inFlight.delete(address.memoryKey);
         });
-        this.inFlight.set(normalizedKey, fill);
+        this.inFlight.set(address.memoryKey, fill);
         return fill;
     }
 
@@ -333,7 +417,7 @@ export class LambderDdbCache {
      * loader is never repeated after it has completed successfully.
      */
     private async getOrSetFailOpen<T>(
-        key: string,
+        address: CacheAddress,
         factory: () => Promise<T>,
         options: LambderDdbCacheGetOrSetOptions,
     ): Promise<T> {
@@ -348,34 +432,34 @@ export class LambderDdbCache {
         };
 
         try {
-            const existing = await this.get<T>(key);
+            const existing = await this.getByAddress<T>(address);
             if (existing !== undefined) return existing;
-            return await this.fill(key, trackedFactory, options);
+            return await this.fill(address, trackedFactory, options);
         } catch (error) {
             if (factoryStarted && !factoryCompleted) throw error;
-            console.error(`DynamoDB cache failed open in ${this.namespace} for ${key}`, error);
+            console.error(`DynamoDB cache failed open in ${this.namespace} for ${address.memoryKey}`, error);
             if (factoryCompleted) return factoryValue as T;
             return trackedFactory();
         }
     }
 
     private async fill<T>(
-        key: string,
+        address: CacheAddress,
         factory: () => Promise<T>,
         options: LambderDdbCacheGetOrSetOptions,
     ): Promise<T> {
         const leaseSeconds = positiveInteger(options.leaseSeconds ?? 15, "leaseSeconds");
         const waitForFillMs = positiveInteger(options.waitForFillMs ?? 5_000, "waitForFillMs");
-        const pk = await this.partitionKey(key);
+        const pk = await this.partitionKey(address.partition);
         const owner = await randomUUID();
 
-        if (await this.acquireLease(pk, owner, leaseSeconds)) {
+        if (await this.acquireLease(pk, address, owner, leaseSeconds)) {
             try {
                 const value = await factory();
-                await this.set(key, value, { ttlSeconds: options.ttlSeconds });
+                await this.setByAddress(address, value, { ttlSeconds: options.ttlSeconds });
                 return value;
             } finally {
-                await this.releaseLease(pk, owner);
+                await this.releaseLease(pk, address, owner);
             }
         }
 
@@ -383,15 +467,15 @@ export class LambderDdbCache {
         let delay = 50;
         while (Date.now() < deadline) {
             await sleep(delay + Math.floor(Math.random() * 25));
-            const value = await this.get<T>(key);
+            const value = await this.getByAddress<T>(address);
             if (value !== undefined) return value;
-            if (await this.acquireLease(pk, owner, leaseSeconds)) {
+            if (await this.acquireLease(pk, address, owner, leaseSeconds)) {
                 try {
                     const loaded = await factory();
-                    await this.set(key, loaded, { ttlSeconds: options.ttlSeconds });
+                    await this.setByAddress(address, loaded, { ttlSeconds: options.ttlSeconds });
                     return loaded;
                 } finally {
-                    await this.releaseLease(pk, owner);
+                    await this.releaseLease(pk, address, owner);
                 }
             }
             delay = Math.min(delay * 2, 500);
@@ -400,7 +484,7 @@ export class LambderDdbCache {
         throw new Error(`Timed out waiting for DynamoDB cache fill in ${this.namespace}`);
     }
 
-    private async acquireLease(pk: string, owner: string, leaseSeconds: number): Promise<boolean> {
+    private async acquireLease(pk: string, address: CacheAddress, owner: string, leaseSeconds: number): Promise<boolean> {
         const now = this.nowSeconds();
         try {
             await this.client.send(
@@ -408,7 +492,7 @@ export class LambderDdbCache {
                     TableName: this.tableName,
                     Item: {
                         pk: { S: pk },
-                        sk: { S: LOCK_SORT_KEY },
+                        sk: { S: this.itemSortKey(address, LOCK_SORT_KEY) },
                         owner: { S: owner },
                         expiresAt: { N: String(now + leaseSeconds) },
                     },
@@ -424,12 +508,12 @@ export class LambderDdbCache {
         }
     }
 
-    private async releaseLease(pk: string, owner: string): Promise<void> {
+    private async releaseLease(pk: string, address: CacheAddress, owner: string): Promise<void> {
         try {
             await this.client.send(
                 new DeleteItemCommand({
                     TableName: this.tableName,
-                    Key: { pk: { S: pk }, sk: { S: LOCK_SORT_KEY } },
+                    Key: { pk: { S: pk }, sk: { S: this.itemSortKey(address, LOCK_SORT_KEY) } },
                     ConditionExpression: "#owner = :owner",
                     ExpressionAttributeNames: { "#owner": "owner" },
                     ExpressionAttributeValues: { ":owner": { S: owner } },
@@ -442,11 +526,11 @@ export class LambderDdbCache {
         }
     }
 
-    private async readManifest(pk: string): Promise<CacheManifest | undefined> {
+    private async readManifest(pk: string, address: CacheAddress): Promise<CacheManifest | undefined> {
         const response = await this.client.send(
             new GetItemCommand({
                 TableName: this.tableName,
-                Key: { pk: { S: pk }, sk: { S: META_SORT_KEY } },
+                Key: { pk: { S: pk }, sk: { S: this.itemSortKey(address, META_SORT_KEY) } },
                 ConsistentRead: false,
             }),
         );
@@ -500,48 +584,70 @@ export class LambderDdbCache {
         };
     }
 
-    private async readChunks(pk: string, manifest: CacheManifest): Promise<Buffer> {
-        const prefix = `chunk#${manifest.version}#`;
-        const chunks: Array<{ sk: string; data: Buffer }> = [];
-        let cursor: Record<string, AttributeValue> | undefined;
-        do {
-            const response = await this.client.send(
-                new QueryCommand({
-                    TableName: this.tableName,
-                    KeyConditionExpression: "#pk = :pk AND begins_with(#sk, :prefix)",
-                    ExpressionAttributeValues: { ":pk": { S: pk }, ":prefix": { S: prefix } },
-                    ProjectionExpression: "#sk, #data",
-                    ExpressionAttributeNames: { "#pk": "pk", "#sk": "sk", "#data": "data" },
-                    ExclusiveStartKey: cursor,
-                    ConsistentRead: false,
-                }),
-            );
-            for (const item of response.Items ?? []) {
-                if (item.sk?.S && item.data?.B) {
-                    chunks.push({ sk: item.sk.S, data: Buffer.from(item.data.B) });
-                }
-            }
-            cursor = response.LastEvaluatedKey;
-        } while (cursor);
+    private async readChunks(pk: string, address: CacheAddress, manifest: CacheManifest): Promise<Buffer> {
+        const prefix = this.itemSortKey(address, `${CHUNK_SORT_KEY_PREFIX}${manifest.version}#`);
+        const items = await this.queryItems(pk, {
+            prefix,
+            projection: "#sk, #data",
+            extraNames: { "#data": "data" },
+        });
+        const chunks = items
+            .filter((item) => item.sk?.S && item.data?.B)
+            .map((item) => ({ sk: item.sk!.S!, data: Buffer.from(item.data!.B!) }));
 
         chunks.sort((left, right) => left.sk.localeCompare(right.sk));
         if (chunks.length !== manifest.chunkCount) {
             throw new Error(`DynamoDB cache entry is missing chunks (${chunks.length}/${manifest.chunkCount})`);
         }
         for (let index = 0; index < chunks.length; index += 1) {
-            if (chunks[index]?.sk !== this.chunkSortKey(manifest.version, index)) {
+            if (chunks[index]?.sk !== this.chunkSortKey(address, manifest.version, index)) {
                 throw new Error(`DynamoDB cache entry has an invalid chunk index at ${index}`);
             }
         }
         return Buffer.concat(chunks.map((chunk) => chunk.data), manifest.storedBytes);
     }
 
-    private async invalidateManifest(pk: string, version: string): Promise<void> {
+    /** Every item matching a partition (optionally a sort-key prefix), following pagination. */
+    private async queryItems(
+        pk: string,
+        options: { prefix?: string | null, projection: string, extraNames?: Record<string, string> },
+    ): Promise<Array<Record<string, AttributeValue>>> {
+        const items: Array<Record<string, AttributeValue>> = [];
+        let cursor: Record<string, AttributeValue> | undefined;
+        do {
+            const response = await this.client.send(
+                new QueryCommand({
+                    TableName: this.tableName,
+                    KeyConditionExpression: options.prefix
+                        ? "#pk = :pk AND begins_with(#sk, :prefix)"
+                        : "#pk = :pk",
+                    ExpressionAttributeNames: { "#pk": "pk", "#sk": "sk", ...options.extraNames },
+                    ExpressionAttributeValues: {
+                        ":pk": { S: pk },
+                        ...(options.prefix ? { ":prefix": { S: options.prefix } } : {}),
+                    },
+                    ProjectionExpression: options.projection,
+                    ExclusiveStartKey: cursor,
+                    ConsistentRead: false,
+                }),
+            );
+            items.push(...(response.Items ?? []));
+            cursor = response.LastEvaluatedKey;
+        } while (cursor);
+        return items;
+    }
+
+    private async deleteItems(items: Array<Record<string, AttributeValue>>): Promise<void> {
+        const keys = items.flatMap((item) => item.pk && item.sk ? [{ pk: item.pk, sk: item.sk }] : []);
+        await this.batchWrite(keys.map((Key) => ({ DeleteRequest: { Key } })));
+    }
+
+    private async invalidateManifest(pk: string, address: CacheAddress, version: string): Promise<void> {
         try {
             await this.client.send(
                 new DeleteItemCommand({
                     TableName: this.tableName,
-                    Key: { pk: { S: pk }, sk: { S: META_SORT_KEY } },
+                    Key: { pk: { S: pk }, sk: { S: this.itemSortKey(address, META_SORT_KEY) } },
                     ConditionExpression: "#version = :version",
                     ExpressionAttributeNames: { "#version": "version" },
                     ExpressionAttributeValues: { ":version": { S: version } },
@@ -591,7 +697,24 @@ export class LambderDdbCache {
         this.memory.set(key, { stored, encoding, uncompressedBytes, expiresAt }, { ttl });
     }
 
-    private normalizeKey(key: string): string {
+    private normalizeKey(key: LambderCacheKey): CacheAddress {
+        if (typeof key === "string") {
+            const partition = this.normalizePartition(key);
+            return { partition, sortKey: null, memoryKey: this.memoryKeyOf(partition, null) };
+        }
+        if (!key || typeof key !== "object") throw new Error("Cache key is required");
+
+        const partition = this.normalizePartition(key.pk);
+        const sortKey = key.sk;
+        if (typeof sortKey !== "string" || !sortKey.trim()) throw new Error("Cache sort key is required");
+        const encodedBytes = Buffer.byteLength(encodeSortKey(sortKey), "utf8");
+        if (encodedBytes > MAX_SORT_KEY_BYTES) {
+            throw new Error(`Cache sort key must be at most ${MAX_SORT_KEY_BYTES} UTF-8 bytes once escaped (${encodedBytes})`);
+        }
+        return { partition, sortKey, memoryKey: this.memoryKeyOf(partition, sortKey) };
+    }
+
+    private normalizePartition(key: string): string {
         if (typeof key !== "string" || !key.trim()) throw new Error("Cache key is required");
         if (Buffer.byteLength(key, "utf8") > 8 * 1024) {
             throw new Error("Cache key must be at most 8192 UTF-8 bytes");
@@ -599,12 +722,45 @@ export class LambderDdbCache {
         return key;
     }
 
+    /** Length-prefixed so a partition ending in the separator cannot collide with a sort key. */
+    private memoryKeyOf(partition: string, sortKey: string | null): string {
+        return `${partition.length}:${partition}#${sortKey ?? ""}`;
+    }
+
     private async partitionKey(key: string): Promise<string> {
         return `${this.keyPrefix}#${this.namespace}#${await sha256(key)}`;
     }
 
-    private chunkSortKey(version: string, index: number): string {
-        return `chunk#${version}#${String(index).padStart(6, "0")}`;
+    /**
+     * One of an entry's item keys. A plain-string entry keeps the bare
+     * suffix it has always used; a grouped one nests under its escaped sort
+     * key, whose trailing `#` is an unambiguous boundary because an escaped
+     * sort key never contains a bare `#`.
+     */
+    private itemSortKey(address: CacheAddress, suffix: string): string {
+        return address.sortKey === null ? suffix : `${SORT_KEY_MARKER}${encodeSortKey(address.sortKey)}#${suffix}`;
+    }
+
+    /** The prefix covering every item of a grouped entry; null for a plain-string entry, which owns the bare item keys instead. */
+    private entryItemPrefix(address: CacheAddress): string | null {
+        return address.sortKey === null ? null : `${SORT_KEY_MARKER}${encodeSortKey(address.sortKey)}#`;
+    }
+
+    private isManifestSortKey(sk: string | undefined): boolean {
+        return sk === META_SORT_KEY || (!!sk && sk.startsWith(SORT_KEY_MARKER) && sk.endsWith(`#${META_SORT_KEY}`));
+    }
+
+    private chunkSortKey(address: CacheAddress, version: string, index: number): string {
+        return this.itemSortKey(address, `${CHUNK_SORT_KEY_PREFIX}${version}#${String(index).padStart(6, "0")}`);
+    }
+
+    /** Drop every in-memory copy belonging to one partition. */
+    private forgetPartition(partition: string): void {
+        if (!this.memory) return;
+        const prefix = this.memoryKeyOf(partition, "");
+        for (const key of [...this.memory.keys()]) {
+            if (key.startsWith(prefix)) this.memory.delete(key);
+        }
     }
 
     private nowSeconds(): number {

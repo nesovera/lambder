@@ -610,3 +610,227 @@ describe("LambderDdbCache", () => {
         );
     });
 });
+
+describe("LambderDdbCache - grouped keys", () => {
+    /** The sort keys of every stored item, for asserting the on-table layout. */
+    const sortKeysOf = (client: MemoryDynamoClient): string[] =>
+        [...client.items.values()].map((item) => item.sk?.S ?? "").sort();
+
+    it("keeps entries of one partition together and reads each one back", async () => {
+        const client = new MemoryDynamoClient();
+        const cache = createCache(client);
+
+        await cache.set({ pk: "division:ist-34", sk: "1700:1800" }, { heroes: 3 });
+        await cache.set({ pk: "division:ist-34", sk: "1700:1900" }, { heroes: 7 });
+        await cache.set({ pk: "division:ist-35", sk: "1700:1800" }, { heroes: 1 });
+
+        // The two windows of ist-34 share a partition; ist-35 has its own.
+        const partitions = new Set([...client.items.values()].map((item) => item.pk?.S));
+        expect(partitions.size).toBe(2);
+        expect(sortKeysOf(client)).toEqual(["sk#1700:1800#meta", "sk#1700:1800#meta", "sk#1700:1900#meta"]);
+
+        const reader = createCache(client);
+        await expect(reader.get({ pk: "division:ist-34", sk: "1700:1800" })).resolves.toEqual({ heroes: 3 });
+        await expect(reader.get({ pk: "division:ist-34", sk: "1700:1900" })).resolves.toEqual({ heroes: 7 });
+        await expect(reader.get({ pk: "division:ist-35", sk: "1700:1800" })).resolves.toEqual({ heroes: 1 });
+        await expect(reader.has({ pk: "division:ist-34", sk: "1700:2000" })).resolves.toBe(false);
+    });
+
+    it("reads a grouped entry in one request, as an ungrouped one does", async () => {
+        const client = new MemoryDynamoClient();
+        await createCache(client).set({ pk: "division:ist-34", sk: "1700:1800" }, { heroes: 3 });
+
+        client.resetCommands();
+        await createCache(client).get({ pk: "division:ist-34", sk: "1700:1800" });
+        expect(client.commandCount("GetItemCommand")).toBe(1);
+        expect(client.commandCount("QueryCommand")).toBe(0);
+    });
+
+    it("stores a plain-string key exactly as before, beside grouped entries in the same partition", async () => {
+        const client = new MemoryDynamoClient();
+        const cache = createCache(client);
+
+        await cache.set("division:ist-34", { summary: true });
+        await cache.set({ pk: "division:ist-34", sk: "1700:1800" }, { heroes: 3 });
+
+        // The legacy layout is untouched, so a live table needs no migration.
+        expect(sortKeysOf(client)).toEqual(["meta", "sk#1700:1800#meta"]);
+
+        // Deleting the plain entry leaves the grouped one alone, and vice versa.
+        await expect(cache.delete("division:ist-34")).resolves.toBe(true);
+        expect(sortKeysOf(client)).toEqual(["sk#1700:1800#meta"]);
+        await expect(createCache(client).get({ pk: "division:ist-34", sk: "1700:1800" })).resolves.toEqual({ heroes: 3 });
+
+        await cache.set("division:ist-34", { summary: true });
+        await expect(cache.delete({ pk: "division:ist-34", sk: "1700:1800" })).resolves.toBe(true);
+        expect(sortKeysOf(client)).toEqual(["meta"]);
+    });
+
+    it("chunks a grouped value under its own sort key and reassembles it", async () => {
+        const client = new MemoryDynamoClient();
+        const key = { pk: "division:ist-34", sk: "1700:1900" };
+        const value = largePayload();
+
+        await createCache(client, 256).set(key, value);
+
+        const chunks = [...client.items.values()].filter((item) => item.sk?.S?.includes("#chunk#"));
+        expect(chunks.length).toBeGreaterThan(1);
+        for (const chunk of chunks) expect(chunk.sk?.S?.startsWith("sk#1700:1900#chunk#")).toBe(true);
+
+        await expect(createCache(client, 256).get(key)).resolves.toEqual(value);
+    });
+
+    it("escapes # and ~ in a sort key instead of refusing them", async () => {
+        const client = new MemoryDynamoClient();
+        const cache = createCache(client);
+
+        await cache.set({ pk: "reports", sk: "a#b" }, { which: "hash" });
+        await cache.set({ pk: "reports", sk: "a~b" }, { which: "tilde" });
+        await cache.set({ pk: "reports", sk: "a~1b" }, { which: "escape-lookalike" });
+
+        // ~ escapes as ~0 and # as ~1, so the three stay distinct on the table.
+        expect(sortKeysOf(client)).toEqual(["sk#a~01b#meta", "sk#a~0b#meta", "sk#a~1b#meta"]);
+
+        const reader = createCache(client);
+        await expect(reader.get({ pk: "reports", sk: "a#b" })).resolves.toEqual({ which: "hash" });
+        await expect(reader.get({ pk: "reports", sk: "a~b" })).resolves.toEqual({ which: "tilde" });
+        await expect(reader.get({ pk: "reports", sk: "a~1b" })).resolves.toEqual({ which: "escape-lookalike" });
+        // Escaped keys come back exactly as written, but they range in ENCODED
+        // order: a#b sorts last here because its escape starts with ~1.
+        await expect(reader.listSortKeys("reports")).resolves.toEqual(["a~1b", "a~b", "a#b"]);
+    });
+
+    it("a sort key ending in the delimiter cannot reach another entry's items", async () => {
+        const client = new MemoryDynamoClient();
+        const cache = createCache(client);
+
+        await cache.set({ pk: "reports", sk: "a#" }, { which: "trailing" });
+        await cache.set({ pk: "reports", sk: "a##" }, { which: "double" });
+
+        await expect(cache.delete({ pk: "reports", sk: "a#" })).resolves.toBe(true);
+        await expect(createCache(client).get({ pk: "reports", sk: "a##" })).resolves.toEqual({ which: "double" });
+    });
+
+    it("deletes a whole partition without knowing its sort keys", async () => {
+        const client = new MemoryDynamoClient();
+        const cache = createCache(client, 256);
+
+        await cache.set({ pk: "division:ist-34", sk: "1700:1800" }, { heroes: 3 });
+        await cache.set({ pk: "division:ist-34", sk: "1700:1900" }, largePayload());  // chunked
+        await cache.set("division:ist-34", { summary: true });
+        await cache.set({ pk: "division:ist-35", sk: "1700:1800" }, { heroes: 1 });
+
+        await expect(cache.deletePartition("division:ist-34")).resolves.toBe(3);
+
+        await expect(cache.get({ pk: "division:ist-34", sk: "1700:1800" })).resolves.toBeUndefined();
+        await expect(cache.get({ pk: "division:ist-34", sk: "1700:1900" })).resolves.toBeUndefined();
+        await expect(cache.get("division:ist-34")).resolves.toBeUndefined();
+        // Chunks went with it, and the neighbouring partition is untouched.
+        expect([...client.items.values()].every((item) => item.sk?.S === "sk#1700:1800#meta")).toBe(true);
+        await expect(cache.get({ pk: "division:ist-35", sk: "1700:1800" })).resolves.toEqual({ heroes: 1 });
+    });
+
+    it("deletePartition drops the in-memory copies of that partition only", async () => {
+        const client = new MemoryDynamoClient();
+        const cache = createCache(client);
+        await cache.set({ pk: "division:ist-34", sk: "1700:1800" }, { heroes: 3 });
+        await cache.set({ pk: "division:ist-35", sk: "1700:1800" }, { heroes: 1 });
+
+        await cache.deletePartition("division:ist-34");
+
+        client.resetCommands();
+        // Gone, not served from memory...
+        await expect(cache.get({ pk: "division:ist-34", sk: "1700:1800" })).resolves.toBeUndefined();
+        expect(client.commandCount("GetItemCommand")).toBe(1);
+        // ...while the other partition still answers without touching DynamoDB.
+        client.resetCommands();
+        await expect(cache.get({ pk: "division:ist-35", sk: "1700:1800" })).resolves.toEqual({ heroes: 1 });
+        expect(client.commands).toHaveLength(0);
+    });
+
+    it("lists live sort keys, filtered by raw prefix and limit", async () => {
+        const client = new MemoryDynamoClient();
+        const cache = createCache(client);
+
+        await cache.set({ pk: "division:ist-34", sk: "1700:1800" }, { heroes: 1 });
+        await cache.set({ pk: "division:ist-34", sk: "1700:1900" }, { heroes: 2 });
+        await cache.set({ pk: "division:ist-34", sk: "1800:1900" }, { heroes: 3 }, { ttlSeconds: 60 });
+        await cache.set("division:ist-34", { summary: true });
+
+        // A plain-string entry has no sort key, so it never appears.
+        await expect(cache.listSortKeys("division:ist-34")).resolves.toEqual(["1700:1800", "1700:1900", "1800:1900"]);
+        await expect(cache.listSortKeys("division:ist-34", { prefix: "1700:" })).resolves.toEqual(["1700:1800", "1700:1900"]);
+        await expect(cache.listSortKeys("division:ist-34", { limit: 2 })).resolves.toEqual(["1700:1800", "1700:1900"]);
+        await expect(cache.listSortKeys("division:ist-35")).resolves.toEqual([]);
+
+        // Expired entries drop out even before DynamoDB's TTL sweep removes them.
+        vi.setSystemTime(Date.now() + 120_000);
+        await expect(cache.listSortKeys("division:ist-34")).resolves.toEqual(["1700:1800", "1700:1900"]);
+    });
+
+    it("single-flights and leases per entry, not per partition", async () => {
+        const client = new MemoryDynamoClient();
+        const cache = createCache(client);
+        const calls: string[] = [];
+        const loader = (name: string) => async () => {
+            calls.push(name);
+            return { name };
+        };
+
+        const [first, second, third] = await Promise.all([
+            cache.getOrSet({ pk: "division:ist-34", sk: "1700:1800" }, loader("a")),
+            cache.getOrSet({ pk: "division:ist-34", sk: "1700:1800" }, loader("a-again")),
+            cache.getOrSet({ pk: "division:ist-34", sk: "1700:1900" }, loader("b")),
+        ]);
+
+        // Same entry deduplicates; a sibling entry in the same partition is not blocked by it.
+        expect(calls).toEqual(["a", "b"]);
+        expect(first).toEqual({ name: "a" });
+        expect(second).toEqual({ name: "a" });
+        expect(third).toEqual({ name: "b" });
+
+        const locks = [...client.items.values()].filter((item) => item.sk?.S?.endsWith("#lock"));
+        expect(locks).toHaveLength(0);  // both leases released
+    });
+
+    it("keeps adversarial sort keys distinct, addressable and independently deletable", async () => {
+        const client = new MemoryDynamoClient();
+        const cache = createCache(client);
+        // Every string up to length 3 over the characters the escape scheme
+        // has to survive: the delimiter, the escape character, and the digits
+        // its escape sequences use.
+        const keys: string[] = [];
+        const build = (prefix: string, depth: number) => {
+            if (prefix) keys.push(prefix);
+            if (depth === 0) return;
+            for (const char of ["a", "#", "~", "0", "1"]) build(prefix + char, depth - 1);
+        };
+        build("", 3);
+
+        for (const [index, sk] of keys.entries()) await cache.set({ pk: "adversarial", sk }, { index });
+
+        // Distinct on the table, and each one reads back its own value.
+        expect(new Set([...client.items.values()].map((item) => item.sk?.S)).size).toBe(keys.length);
+        const reader = createCache(client);
+        for (const [index, sk] of keys.entries()) {
+            await expect(reader.get({ pk: "adversarial", sk })).resolves.toEqual({ index });
+        }
+        await expect(cache.listSortKeys("adversarial")).resolves.toHaveLength(keys.length);
+
+        // Deleting one entry never reaches a neighbour, however the two escape.
+        for (const [index, sk] of keys.entries()) {
+            await expect(cache.delete({ pk: "adversarial", sk })).resolves.toBe(true);
+            await expect(cache.listSortKeys("adversarial")).resolves.toHaveLength(keys.length - index - 1);
+        }
+    });
+
+    it("rejects an empty or oversized sort key", async () => {
+        const client = new MemoryDynamoClient();
+        const cache = createCache(client);
+        await expect(cache.get({ pk: "reports", sk: "  " })).rejects.toThrow("Cache sort key is required");
+        await expect(cache.get({ pk: "  ", sk: "daily" })).rejects.toThrow("Cache key is required");
+        await expect(cache.get({ pk: "reports", sk: "s".repeat(901) })).rejects.toThrow("900");
+        // Escaping counts toward the limit: 500 hashes are 1000 bytes encoded.
+        await expect(cache.get({ pk: "reports", sk: "#".repeat(500) })).rejects.toThrow("900");
+    });
+});

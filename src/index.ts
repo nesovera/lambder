@@ -85,9 +85,11 @@ export { LambderSessionDataRefreshError, LambderSessionReadError } from "./sessi
 // DynamoDB-backed compressed cache (standalone, server-only)
 export { LambderDdbCache } from "./stores/LambderDdbCache.js";
 export type {
+    LambderCacheKey,
     LambderDdbCacheOptions,
     LambderDdbCacheSetOptions,
     LambderDdbCacheGetOrSetOptions,
+    LambderDdbCacheListOptions,
 } from "./stores/LambderDdbCache.js";
 
 // DynamoDB-backed fixed-window rate limiter (standalone, server-only)
