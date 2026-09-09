@@ -29,7 +29,7 @@ export { compressText, restoreBoundedText, LambderCompressionError, LAMBDER_REST
 export type { LambderRestoreFailure } from "./shared/LambderCompressionCodec.js";
 export { LambderSessionDataRefreshError, LambderSessionReadError } from "./session/LambderSessionManager.js";
 export { LambderDdbCache } from "./stores/LambderDdbCache.js";
-export type { LambderDdbCacheOptions, LambderDdbCacheSetOptions, LambderDdbCacheGetOrSetOptions, } from "./stores/LambderDdbCache.js";
+export type { LambderCacheKey, LambderDdbCacheOptions, LambderDdbCacheSetOptions, LambderDdbCacheGetOrSetOptions, LambderDdbCacheListOptions, } from "./stores/LambderDdbCache.js";
 export { LambderDdbRateLimiter } from "./stores/LambderDdbRateLimiter.js";
 export type { LambderDdbRateLimiterOptions, LambderRateLimitWindow, LambderRateLimitPolicy, LambderRateLimitExceeded, LambderRateLimitResult, } from "./stores/LambderDdbRateLimiter.js";
 export { LambderDdbIdempotency } from "./stores/LambderDdbIdempotency.js";

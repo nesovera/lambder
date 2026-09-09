@@ -550,7 +550,8 @@ export default class Lambder<
     ): Lambder<TSessionData, MergeContract<_TContract, TName,
         z.infer<TInput>,
         z.infer<TOutput>,
-        LambderGuardInputsOf<_TGuards, TGuardsOpt>>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired> {
+        LambderGuardInputsOf<_TGuards, TGuardsOpt>,
+        TGuardsOpt>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired> {
         this.assertApiRegistration(name, "public", schema);
         this.actionList.push({
             match: (ctx) => ctx.apiName === name ? {} : false,
@@ -598,7 +599,8 @@ export default class Lambder<
     ): Lambder<TSessionData, MergeContract<_TContract, TName,
         z.infer<TInput>,
         z.infer<TOutput>,
-        LambderGuardInputsOf<_TGuards, TGuardsOpt>>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired> {
+        LambderGuardInputsOf<_TGuards, TGuardsOpt>,
+        TGuardsOpt>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired> {
         this.assertApiRegistration(name, "session", schema);
         this.actionList.push({
             match: (ctx) => ctx.apiName === name ? {} : false,

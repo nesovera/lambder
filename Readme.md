@@ -2,6 +2,11 @@
 
 Lambder is a highly opinionated dynamic serverless framework designed to facilitate the management and implementation of routes and APIs within AWS Lambda functions, specifically tailored for TypeScript projects. It provides a streamlined approach to handling HTTP requests, managing sessions, and defining API routes, making serverless application development more intuitive and structured.
 
+**New in 4.8:**
+
+- **Grouped cache keys**: `LambderDdbCache` keys may be a `{ pk, sk }` pair instead of a string, which stores related entries in one partition: `{ pk: "division:ist-34", sk: "1700:1800" }` keeps every cached window of one division together. `deletePartition(pk)` then drops the whole group without knowing which sort keys exist, and `listSortKeys(pk, { prefix, limit })` reads back what is currently cached under it. The group invalidation a cache of derived, per-entity values needs, in place of remembering every key ever written or waiting out the TTL. Reads stay one request, and the memory layer, single-flight and fill lease stay per entry. Only the `pk` part is hashed, so the sort key is queryable; a caller's `#` is escaped rather than refused (`~`→`~0`, `#`→`~1`). Plain string keys keep their exact item layout, so a live table needs no migration and both forms can share a partition.
+- **`guards` on the API contract**: each contract entry now carries the `guards` option exactly as declared (`ApiContractType["getUser"]["guards"]` is the literal `{ readonly orgPermission: "USERS.MANAGE" }`), so a client-side map of what an API needs can be pinned to the server's own declaration with `satisfies` instead of a test that reads the server source.
+
 **New in 4.7:**
 
 - **Compressed request payloads**: `requestCompression` on `LambderCaller` gzips the payload of any call whose JSON reaches a threshold (`true` is `{ minBytes: 4096 }`), sending it as `payloadGz` beside its byte length instead of `payload` whenever that is actually smaller; the server restores it before rate-limit key slices, guards and input validation, so no call site, handler or schema changes. Chiefly a way to fit a large payload under Lambda's ~6MB invoke cap, which applies to the compressed bytes. The envelope stays `application/json` with its routing fields in plain text, so gateways, CDNs and mocks are unaffected. `maxRequestPayloadBytes` (default 20MB) bounds what a body may expand to.
@@ -174,6 +179,19 @@ export type ApiContractType = typeof lambder.ApiContract;
 // Export the handler
 export const handler = lambder.getHandler();
 ```
+
+Each contract entry carries the API's `input` and `output`, its `guardInputs` when a guardInput-mode guard applies, and its `guards` option exactly as declared (`ApiContractType["getUser"]["guards"]` is the literal `{ readonly orgPermission: "USERS.MANAGE" }`). A client that keeps its own map of what an API needs, to decide whether to render a screen before calling, pins that map to the declarations with `satisfies` instead of a test that reads the server source:
+
+```typescript
+type PermissionNeededBy<K extends keyof ApiContractType> =
+    ApiContractType[K] extends { guards: { orgPermission: infer N } } ? N : never;
+
+const NEEDS = {
+    getUser: "USERS.MANAGE",
+} as const satisfies { [K in keyof ApiContractType]?: PermissionNeededBy<K> };
+```
+
+Renaming the permission on the server, or moving the API to a different one, then fails the client's map to compile. Make the mapped type non-optional (over the guarded API names) when the map must also stay complete as guarded APIs are added.
 
 ### Adding Routes
 
@@ -783,7 +801,7 @@ Also enforced at registration: **duplicate API names throw** (dispatch is first-
 
 ### DynamoDB Cache (LambderDdbCache)
 
-Standalone, persistent JSON cache backed by a DynamoDB table (`pk`/`sk` keys + `expiresAt` TTL attribute, same shape as the session table). Items are prefixed `CACHE#<namespace>#`, and the rate limiter (`RL#`) and idempotency store (`IDEM#`) prefix theirs too, so all three non-session systems can share one table without collisions; keep sessions in their own table for IAM scoping. Brotli-compressed values (the shared `compression` option), in-memory LRU layer, single-flight deduplication, a DynamoDB lease so only one Lambda fills a missing key, and fail-open semantics. Server-only. **Full guide with table setup: [docs/DDB_CACHE.md](./docs/DDB_CACHE.md).**
+Standalone, persistent JSON cache backed by a DynamoDB table (`pk`/`sk` keys + `expiresAt` TTL attribute, same shape as the session table). Items are prefixed `CACHE#<namespace>#`, and the rate limiter (`RL#`) and idempotency store (`IDEM#`) prefix theirs too, so all three non-session systems can share one table without collisions; keep sessions in their own table for IAM scoping. Brotli-compressed values (the shared `compression` option), in-memory LRU layer, single-flight deduplication, a DynamoDB lease so only one Lambda fills a missing key, fail-open semantics, and optional grouped keys for group invalidation. Server-only. **Full guide with table setup: [docs/DDB_CACHE.md](./docs/DDB_CACHE.md).**
 
 ```typescript
 import { LambderDdbCache } from "lambder";
@@ -799,6 +817,13 @@ const city = await cache.getOrSet(`city:${slug}`, async () => fetchCityFromDb(sl
     ttlSeconds: 7 * 24 * 3600,
 });
 // Also: cache.get(key), cache.set(key, value, { ttlSeconds }), cache.has(key), cache.delete(key)
+
+// A key can also be a { pk, sk } pair, which groups related entries under one
+// partition so the whole group can be invalidated without listing its members:
+const window = { pk: `division:${divisionId}`, sk: `${from}:${to}` };
+await cache.getOrSet(window, () => loadDivision(divisionId, from, to));
+await cache.deletePartition(`division:${divisionId}`);   // every cached window of it
+await cache.listSortKeys(`division:${divisionId}`);      // ["1700:1800", "1700:1900"]
 ```
 
 ### Typed Translations (createLambderI18n)
