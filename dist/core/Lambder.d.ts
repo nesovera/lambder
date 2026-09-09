@@ -288,7 +288,7 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
         idempotency?: _TIdempotencyEnabled extends true ? (boolean | {
             ttlSeconds?: number;
         }) : never;
-    }, handler: (ctx: LambderRenderContext<z.infer<TInput>, Record<string, string>, LambderGuardDataOf<_TGuards, TGuardsOpt>>, resolver: LambderResolver<z.infer<TOutput>>) => MaybePromise<LambderResponse>): Lambder<TSessionData, MergeContract<_TContract, TName, z.infer<TInput>, z.infer<TOutput>, LambderGuardInputsOf<_TGuards, TGuardsOpt>>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired>;
+    }, handler: (ctx: LambderRenderContext<z.infer<TInput>, Record<string, string>, LambderGuardDataOf<_TGuards, TGuardsOpt>>, resolver: LambderResolver<z.infer<TOutput>>) => MaybePromise<LambderResponse>): Lambder<TSessionData, MergeContract<_TContract, TName, z.infer<TInput>, z.infer<TOutput>, LambderGuardInputsOf<_TGuards, TGuardsOpt>, TGuardsOpt>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired>;
     addSessionApi<TName extends string, TInput extends z.ZodTypeAny, TOutput extends z.ZodTypeAny, const TRateOpt extends LambderRateLimitOption<_TRateLimitPolicies, z.infer<TInput>, true> = never, const TGuardsOpt extends LambderGuardsOption<_TGuards, z.infer<TInput>, true> = never>(name: TName, schema: {
         input: TInput;
         output: TOutput;
@@ -299,7 +299,7 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
         idempotency?: _TIdempotencyEnabled extends true ? (boolean | {
             ttlSeconds?: number;
         }) : never;
-    } & LambderSessionGuardsField<_TSessionGuardsRequired, TGuardsOpt>, handler: (ctx: LambderSessionRenderContext<z.infer<TInput>, TSessionData, Record<string, string>, LambderGuardDataOf<_TGuards, TGuardsOpt>>, resolver: LambderResolver<z.infer<TOutput>>) => MaybePromise<LambderResponse>): Lambder<TSessionData, MergeContract<_TContract, TName, z.infer<TInput>, z.infer<TOutput>, LambderGuardInputsOf<_TGuards, TGuardsOpt>>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired>;
+    } & LambderSessionGuardsField<_TSessionGuardsRequired, TGuardsOpt>, handler: (ctx: LambderSessionRenderContext<z.infer<TInput>, TSessionData, Record<string, string>, LambderGuardDataOf<_TGuards, TGuardsOpt>>, resolver: LambderResolver<z.infer<TOutput>>) => MaybePromise<LambderResponse>): Lambder<TSessionData, MergeContract<_TContract, TName, z.infer<TInput>, z.infer<TOutput>, LambderGuardInputsOf<_TGuards, TGuardsOpt>, TGuardsOpt>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired>;
     /**
      * Fetch the session or short-circuit the request: API calls get the
      * protocol's { sessionExpired: true } response (handled by LambderCaller),
