@@ -58,7 +58,7 @@ type ActionObject = { match: CompiledMatcher, actionFn: ActionFunction };
 // Hooks
 // ---------------------------------------------------------------------------
 type HookEventType = "created" | "beforeRender" | "afterRender" | "fallback";
-type HookCreatedFunction = (lambderInstance: Lambder<any, any, any, any, any, any>) => void | Promise<void>;
+type HookCreatedFunction = (lambderInstance: Lambder<any, any, any, any, any, any, any>) => void | Promise<void>;
 /** Return the (possibly replaced) ctx to continue, a LambderResponse to short-circuit, or an Error to fail. */
 type HookBeforeRenderFunction = (ctx: LambderRenderContext, resolver: LambderResolver) => MaybePromise<LambderRenderContext | LambderResponse | Error>;
 type HookAfterRenderFunction = (ctx: LambderRenderContext, resolver: LambderResolver, response: LambderResponse) => MaybePromise<LambderResponse | Error>;
@@ -212,22 +212,41 @@ export type LambderCreateOptions<TSessionData = any> = {
      * from. Default: false.
      */
     requireSessionApiGuards?: boolean;
+    /**
+     * The same for public APIs: every addApi must declare `guards`, at the
+     * type level and at registration.
+     *
+     * Public APIs are open by default and that is the right default, so this
+     * is off unless an app decides otherwise. What it buys an app that turns
+     * it on is that a public endpoint's openness becomes a written decision
+     * rather than an omission: the ones anybody may call declare a named no-op
+     * guard carrying the reason, and the ones that authorize their caller some
+     * other way (a signature, a device secret, a one-shot token) name where
+     * that happens. One grep over the guard names then lists every public
+     * door and why it is open, which is the review question a growing public
+     * surface makes expensive to answer any other way. Needs a guards map to
+     * pick from. Default: false.
+     */
+    requirePublicApiGuards?: boolean;
     /** Declarative idempotency: your store plus replay defaults; APIs opt in via `idempotency: true | { ttlSeconds }`. */
     idempotency?: LambderApiIdempotencyConfig;
 };
 
 /**
- * The `guards` field of a session API's options: optional by default,
- * required once create() received requireSessionApiGuards, so that an
- * authorization declaration cannot be forgotten at the type level.
+ * The `guards` field of an API's options: optional by default, required once
+ * create() received the require*ApiGuards flag for that kind of API, so that
+ * an authorization declaration cannot be forgotten at the type level.
+ *
+ * One type for both kinds: the requirement is the same shape either way, and
+ * only which flag switches it on differs.
  */
-type LambderSessionGuardsField<TRequired extends boolean, TGuardsOpt> = TRequired extends true
+type LambderRequirableGuardsField<TRequired extends boolean, TGuardsOpt> = TRequired extends true
     ? {
-        /** Named guards, run in declared order before input validation: a name, a list of names, or a { name: param } map for parameterized guards. Required on this instance (requireSessionApiGuards): an API the session alone authorizes declares the named no-op session guard. Their input requirements merge into this API's contract input; their return values land typed on ctx.guardData. */
+        /** Named guards, run in declared order before input validation: a name, a non-empty list of names, or a non-empty { name: param } map for parameterized guards. Required on this instance: an API that needs no authorization declares a named no-op guard, so every opt-out is explicit and one grep lists them all. Their input requirements merge into this API's contract input; their return values land typed on ctx.guardData. */
         guards: TGuardsOpt;
     }
     : {
-        /** Named guards, run in declared order before input validation: a name, a list of names, or a { name: param } map for parameterized guards. Their input requirements merge into this API's contract input; their return values land typed on ctx.guardData. */
+        /** Named guards, run in declared order before input validation: a name, a non-empty list of names, or a non-empty { name: param } map for parameterized guards. Their input requirements merge into this API's contract input; their return values land typed on ctx.guardData. */
         guards?: TGuardsOpt;
     };
 
@@ -243,6 +262,7 @@ type LambderSessionGuardsField<TRequired extends boolean, TGuardsOpt> = TRequire
  * @typeParam _TGuards - @internal Guard metadata map inferred from create()'s guards (do not pass manually)
  * @typeParam _TIdempotencyEnabled - @internal True when create() received idempotency (do not pass manually)
  * @typeParam _TSessionGuardsRequired - @internal True when create() received requireSessionApiGuards (do not pass manually)
+ * @typeParam _TPublicGuardsRequired - @internal True when create() received requirePublicApiGuards (do not pass manually)
  *
  * @example
  * ```typescript
@@ -260,6 +280,7 @@ export default class Lambder<
     _TGuards extends Record<string, any> = {},
     _TIdempotencyEnabled extends boolean = false,
     _TSessionGuardsRequired extends boolean = false,
+    _TPublicGuardsRequired extends boolean = false,
 > {
     public apiPath: string;
     public apiVersion: null | string;
@@ -301,6 +322,7 @@ export default class Lambder<
     private finalizeOptions: LambderFinalizeOptions;
     private maxRequestPayloadBytes: number;
     private requireSessionApiGuards: boolean;
+    private requirePublicApiGuards: boolean;
 
     private lambderSessionManager?: LambderSessionManager;
     private sessionCookieOptions: LambderSessionCookieOptions = {};
@@ -351,8 +373,10 @@ export default class Lambder<
         if(options.idempotency) this.getOrCreatePolicyEngine().setIdempotency(options.idempotency);
 
         this.requireSessionApiGuards = options.requireSessionApiGuards ?? false;
-        if(this.requireSessionApiGuards && !options.guards){
-            throw new Error("Lambder: requireSessionApiGuards needs a guards map at creation for session APIs to declare from.");
+        this.requirePublicApiGuards = options.requirePublicApiGuards ?? false;
+        const requireFlag = this.requireSessionApiGuards ? "requireSessionApiGuards" : "requirePublicApiGuards";
+        if((this.requireSessionApiGuards || this.requirePublicApiGuards) && !options.guards){
+            throw new Error(`Lambder: ${requireFlag} needs a guards map at creation for APIs to declare from.`);
         }
     }
 
@@ -463,10 +487,14 @@ export default class Lambder<
             throw new Error(`Lambder: duplicate API name "${name}". Dispatch is first-match, so the second registration would be silently dead code.`);
         }
         this.registeredApiNames.add(name);
-        if(mode === "session" && this.requireSessionApiGuards && options.guards === undefined){
+        const guardsRequired = mode === "session" ? this.requireSessionApiGuards : this.requirePublicApiGuards;
+        if(guardsRequired && options.guards === undefined){
+            const optOut = mode === "session"
+                ? "the named no-op guard that marks the session itself as the whole authorization"
+                : "the named no-op guard that records why anyone may call it";
             throw new Error(
-                `Lambder: session API "${name}" declares no guards, and requireSessionApiGuards is on. ` +
-                `Declare the guard that authorizes it, or the named no-op guard that marks the session itself as the whole authorization.`
+                `Lambder: ${mode} API "${name}" declares no guards, and require${mode === "session" ? "Session" : "Public"}ApiGuards is on. ` +
+                `Declare the guard that authorizes it, or ${optOut}.`
             );
         }
         const usesPolicies = options.rateLimit !== undefined || options.guards !== undefined || options.idempotency !== undefined;
@@ -520,9 +548,9 @@ export default class Lambder<
     // its own plugins (requireSessionApiGuards did exactly that in 4.7.1).
     public use<_TNewContract extends Record<string, any>>(
         plugin: (
-            lambder: Lambder<TSessionData, _TContract, any, any, any, any>
-        ) => Lambder<TSessionData, _TNewContract, any, any, any, any>
-    ): Lambder<TSessionData, _TNewContract extends _TContract ? _TNewContract : (_TContract & _TNewContract), _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired> {
+            lambder: Lambder<TSessionData, _TContract, any, any, any, any, any>
+        ) => Lambder<TSessionData, _TNewContract, any, any, any, any, any>
+    ): Lambder<TSessionData, _TNewContract extends _TContract ? _TNewContract : (_TContract & _TNewContract), _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired, _TPublicGuardsRequired> {
         return plugin(this as any) as any;
     }
 
@@ -538,11 +566,9 @@ export default class Lambder<
         schema: { input: TInput, output: TOutput } & {
             /** Named rate limits, checked in declared order before guards and validation: a name, a list of names, or a { name: true | override } map (windows overridable on perApi budgets, errorMessage on any). The first exceeded one refuses (429 envelope + Retry-After); attempts count on every counter checked before it. */
             rateLimit?: TRateOpt;
-            /** Named guards, run in declared order before input validation: a name, a list of names, or a { name: param } map for parameterized guards. Their input requirements merge into this API's contract input; their return values land typed on ctx.guardData. */
-            guards?: TGuardsOpt;
             /** Replay-protect this API per client idempotencyKey. Requires the idempotency option at creation. */
             idempotency?: _TIdempotencyEnabled extends true ? (boolean | { ttlSeconds?: number }) : never;
-        },
+        } & LambderRequirableGuardsField<_TPublicGuardsRequired, TGuardsOpt>,
         handler: (
             ctx: LambderRenderContext<z.infer<TInput>, Record<string, string>, LambderGuardDataOf<_TGuards, TGuardsOpt>>,
             resolver: LambderResolver<z.infer<TOutput>>
@@ -551,7 +577,7 @@ export default class Lambder<
         z.infer<TInput>,
         z.infer<TOutput>,
         LambderGuardInputsOf<_TGuards, TGuardsOpt>,
-        TGuardsOpt>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired> {
+        TGuardsOpt>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired, _TPublicGuardsRequired> {
         this.assertApiRegistration(name, "public", schema);
         this.actionList.push({
             match: (ctx) => ctx.apiName === name ? {} : false,
@@ -591,7 +617,7 @@ export default class Lambder<
             rateLimit?: TRateOpt;
             /** Replay-protect this API per client idempotencyKey. Requires the idempotency option at creation. */
             idempotency?: _TIdempotencyEnabled extends true ? (boolean | { ttlSeconds?: number }) : never;
-        } & LambderSessionGuardsField<_TSessionGuardsRequired, TGuardsOpt>,
+        } & LambderRequirableGuardsField<_TSessionGuardsRequired, TGuardsOpt>,
         handler: (
             ctx: LambderSessionRenderContext<z.infer<TInput>, TSessionData, Record<string, string>, LambderGuardDataOf<_TGuards, TGuardsOpt>>,
             resolver: LambderResolver<z.infer<TOutput>>
@@ -600,7 +626,7 @@ export default class Lambder<
         z.infer<TInput>,
         z.infer<TOutput>,
         LambderGuardInputsOf<_TGuards, TGuardsOpt>,
-        TGuardsOpt>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired> {
+        TGuardsOpt>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired, _TPublicGuardsRequired> {
         this.assertApiRegistration(name, "session", schema);
         this.actionList.push({
             match: (ctx) => ctx.apiName === name ? {} : false,
@@ -984,7 +1010,8 @@ export const initLambder = <TSessionData = any>() => ({
         TOptions["rateLimits"] extends { policies: infer TPolicies extends Record<string, LambderApiRateLimitPolicyConfig> } ? TPolicies : {},
         TOptions["guards"] extends Record<string, LambderApiGuard<any, any, any>> ? LambderGuardMetaMap<TOptions["guards"]> : {},
         TOptions["idempotency"] extends LambderApiIdempotencyConfig ? true : false,
-        TOptions["requireSessionApiGuards"] extends true ? true : false
+        TOptions["requireSessionApiGuards"] extends true ? true : false,
+        TOptions["requirePublicApiGuards"] extends true ? true : false
     > {
         return new Lambder(options) as never;
     },

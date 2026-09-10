@@ -380,6 +380,140 @@ describe('API policies - requireSessionApiGuards', () => {
     });
 });
 
+describe('API policies - requirePublicApiGuards', () => {
+    /** A public surface's vocabulary: a real control, plus the two named opt-outs. */
+    const guards = {
+        deviceToken: lambderGuard({
+            apiInput: z.object({ value: z.string() }),
+            handler: (_ctx, { value }) => ({ deviceId: value }),
+        }),
+        // Anyone may call, and the param records why.
+        open: lambderGuard({ handler: (_ctx, _payload, _res, _reason: string) => {} }),
+        // The endpoint establishes identity; the handler proves what it needs.
+        credentialFlow: lambderGuard({ handler: () => {} }),
+    };
+    const strict = () => initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', guards, requirePublicApiGuards: true });
+
+    it('refuses a public API that declares no guards, at registration', () => {
+        expect(() => strict().addApi('public.forgot', { ...testSchema } as any, async (ctx, res) => res.api(null)))
+            .toThrow(/public API "public\.forgot" declares no guards/);
+    });
+
+    it('accepts a public API that declares a guard, or either named opt-out', () => {
+        expect(() => strict()
+            .addApi('public.device', { ...testSchema, guards: 'deviceToken' }, async (ctx, res) => res.api(null))
+            .addApi('public.translations', { ...testSchema, guards: { open: 'Static strings already in the bundle.' } }, async (ctx, res) => res.api(null))
+            .addApi('public.login', { ...testSchema, guards: 'credentialFlow' }, async (ctx, res) => res.api(null)))
+            .not.toThrow();
+    });
+
+    it('leaves session APIs alone: the two requirements are independent', () => {
+        // requireSessionApiGuards is off on this instance, so a session API
+        // without guards still registers.
+        expect(() => strict().addSessionApi('secure.free', { ...testSchema }, async (ctx, res) => res.api(null))).not.toThrow();
+    });
+
+    it('is off by default: a public API without guards still registers', () => {
+        const relaxed = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', guards });
+        expect(() => relaxed.addApi('public.free', { ...testSchema }, async (ctx, res) => res.api(null))).not.toThrow();
+    });
+
+    it('needs a guards map to declare from', () => {
+        expect(() => initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', requirePublicApiGuards: true }))
+            .toThrow(/needs a guards map/);
+    });
+
+    it('makes a missing guards declaration a compile error', () => {
+        const lambder = strict();
+        // @ts-expect-error guards is required on this instance
+        const missing = () => lambder.addApi('public.typed', { ...testSchema }, async (ctx, res) => res.api(null));
+        expect(missing).toThrow(/declares no guards/);
+        // The declaration keeps its typing: the guard's output lands on ctx.guardData.
+        lambder.addApi('public.typedOk', { ...testSchema, guards: 'deviceToken' }, async (ctx, res) => {
+            const deviceId: string = ctx.guardData.deviceToken.deviceId;
+            return res.api({ result: deviceId });
+        });
+    });
+
+    it('holds both requirements at once when both flags are on', () => {
+        const both = initLambder().create({
+            files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api',
+            guards: { ...guards, sessionOnly: lambderGuard({ session: true, handler: () => {} }) },
+            requireSessionApiGuards: true, requirePublicApiGuards: true,
+        });
+        expect(() => both.addApi('public.a', { ...testSchema } as any, async (ctx, res) => res.api(null)))
+            .toThrow(/public API "public\.a" declares no guards/);
+        expect(() => both.addSessionApi('secure.a', { ...testSchema } as any, async (ctx, res) => res.api(null)))
+            .toThrow(/session API "secure\.a" declares no guards/);
+    });
+});
+
+describe('API policies - an empty guards option declares nothing', () => {
+    // The one shape that turns a mandatory authorization declaration back into
+    // an optional one: the option is present, so the required-field check
+    // passes, and it normalizes to zero entries, so no guard runs.
+    const guards = {
+        orgPermission: lambderGuard({ session: true, handler: (_ctx, _p, _r, permission: string) => ({ permission }) }),
+        sessionOnly: lambderGuard({ session: true, handler: () => {} }),
+        open: lambderGuard({ handler: (_ctx, _payload, _res, _reason: string) => {} }),
+    };
+    const strict = () => initLambder().create({
+        files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', guards,
+        requireSessionApiGuards: true, requirePublicApiGuards: true,
+    });
+
+    it('refuses an empty guards map at registration', () => {
+        expect(() => strict().addSessionApi('secure.empty', { ...testSchema, guards: {} } as any, async (ctx, res) => res.api(null)))
+            .toThrow(/declares an empty guards option/);
+    });
+
+    it('refuses an empty guards list at registration', () => {
+        expect(() => strict().addApi('public.empty', { ...testSchema, guards: [] } as any, async (ctx, res) => res.api(null)))
+            .toThrow(/declares an empty guards option/);
+    });
+
+    it('refuses an empty option even where guards are not required', () => {
+        // Not just a hole in the require* flags: an empty declaration reads as
+        // an authorization decision and is not one, whoever writes it.
+        const relaxed = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', guards });
+        expect(() => relaxed.addApi('public.emptyToo', { ...testSchema, guards: {} } as any, async (ctx, res) => res.api(null)))
+            .toThrow(/declares an empty guards option/);
+    });
+
+    it('rejects the empty forms at the type level', () => {
+        const lambder = strict();
+        // @ts-expect-error an empty guards map declares no guard
+        expect(() => lambder.addSessionApi('secure.t1', { ...testSchema, guards: {} }, async (ctx, res) => res.api(null))).toThrow();
+        // @ts-expect-error an empty guards list declares no guard
+        expect(() => lambder.addSessionApi('secure.t2', { ...testSchema, guards: [] }, async (ctx, res) => res.api(null))).toThrow();
+    });
+
+    it('rejects a named guard with an undefined param at the type level', () => {
+        // Requiring the chosen key (rather than leaving every key optional)
+        // is what rejects this: an optional property accepts undefined, and
+        // the guard would then run with an undefined param and fail inside its
+        // own handler, at request time, as a 500 rather than a refusal.
+        //
+        // Registration itself does NOT throw here: the option normalizes to
+        // one entry naming a real guard, and a guard whose param is legitimately
+        // optional would be indistinguishable. The type is the whole check.
+        const lambder = strict();
+        // @ts-expect-error a named guard with an undefined param is not a declaration
+        expect(() => lambder.addSessionApi('secure.t3', { ...testSchema, guards: { orgPermission: undefined } }, async (ctx, res) => res.api(null)))
+            .not.toThrow();
+    });
+
+    it('still accepts every non-empty form', () => {
+        expect(() => strict()
+            .addSessionApi('secure.one', { ...testSchema, guards: 'sessionOnly' }, async (ctx, res) => res.api(null))
+            .addSessionApi('secure.list', { ...testSchema, guards: ['sessionOnly'] }, async (ctx, res) => res.api(null))
+            .addSessionApi('secure.map', { ...testSchema, guards: { orgPermission: 'ORG.READ' } }, async (ctx, res) => res.api(null))
+            .addSessionApi('secure.both', { ...testSchema, guards: { sessionOnly: true, orgPermission: 'ORG.READ' } }, async (ctx, res) => res.api(null))
+            .addApi('public.open', { ...testSchema, guards: { open: 'Nothing here is anybody\'s.' } }, async (ctx, res) => res.api(null)))
+            .not.toThrow();
+    });
+});
+
 describe('API policies - guards', () => {
     it('a refusing guard blocks before validation and before the handler', async () => {
         let handlerRan = false;

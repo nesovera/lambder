@@ -2,6 +2,11 @@
 
 Lambder is a highly opinionated dynamic serverless framework designed to facilitate the management and implementation of routes and APIs within AWS Lambda functions, specifically tailored for TypeScript projects. It provides a streamlined approach to handling HTTP requests, managing sessions, and defining API routes, making serverless application development more intuitive and structured.
 
+**New in 4.9:**
+
+- **Mandatory authorization on public APIs**: `requirePublicApiGuards: true` at creation makes `guards` a required field of every `addApi`, the same way `requireSessionApiGuards` does for session APIs, at the type level and at registration. Public APIs are open by default and that stays the default; what turning it on buys is that a public endpoint's openness becomes a written decision rather than an omission. The ones anybody may call declare a named no-op guard carrying the reason (`guards: { open: "Static strings already in the bundle." }`), the ones that authorize their caller some other way (a signature, a device secret, a one-shot token) name where that happens, and one grep over the guard names then lists every public door and why it is open. The two flags are independent, so an app can require either or both.
+- **An empty guards option is refused**: `guards: {}` and `guards: []` were inhabited by the option type and passed the require\*ApiGuards field check while normalizing to zero entries, so a declaration that authorized nothing satisfied a requirement that exists to make authorization explicit. Both are now compile errors (every form of the option is non-empty by construction) and a registration error for a plain-JS caller, whichever flag is on or off. Requiring the chosen key also rejects `guards: { theGuard: undefined }`, which an optional property accepted and which reached the guard's handler with an undefined param.
+
 **New in 4.8:**
 
 - **Grouped cache keys**: `LambderDdbCache` keys may be a `{ pk, sk }` pair instead of a string, which stores related entries in one partition: `{ pk: "division:ist-34", sk: "1700:1800" }` keeps every cached window of one division together. `deletePartition(pk)` then drops the whole group without knowing which sort keys exist, and `listSortKeys(pk, { prefix, limit })` reads back what is currently cached under it. The group invalidation a cache of derived, per-entity values needs, in place of remembering every key ever written or waiting out the TTL. Reads stay one request, and the memory layer, single-flight and fill lease stay per entry. Only the `pk` part is hashed, so the sort key is queryable; a caller's `#` is escaped rather than refused (`~`→`~0`, `#`→`~1`). Plain string keys keep their exact item layout, so a live table needs no migration and both forms can share a partition.
@@ -729,7 +734,7 @@ lambder.addApi("public.resetPassword", {
     input: z.object({ email: z.string().email() }),
     output: z.object({ ok: z.boolean() }),
     rateLimit: ["authPerIp", "codePerEmail"],   // stacked: checked in order, first exceeded refuses (429 envelope + Retry-After)
-    guards: "captcha",                          // one name, a list of names, or a { name: param } map
+    guards: "captcha",                          // one name, a non-empty list of names, or a non-empty { name: param } map
 }, handler);
 
 lambder.addSessionApi("secure.order.create", {
@@ -766,6 +771,28 @@ const lambder = initLambder<SessionData>().create({
 lambder.addSessionApi("secure.order.create", { input, output, guards: { orgPermission: "ORDERS.CREATE" } }, handler);
 lambder.addSessionApi("secure.me.logOut", { input, output, guards: "sessionOnly" }, handler);
 lambder.addSessionApi("secure.report.list", { input, output }, handler);   // compile error: which guard?
+lambder.addSessionApi("secure.report.list", { input, output, guards: {} }, handler);   // compile error: {} declares no guard
+```
+
+**The same for public APIs (`requirePublicApiGuards`)**: public APIs are open by default, and that remains the default. An app whose public surface has grown past a handful of endpoints can turn `requirePublicApiGuards: true` on to make each one's openness a written decision instead of an omission. Not every public endpoint has a control that can be hoisted into a guard (an endpoint that checks a password *is* the check), so the vocabulary an app declares here is usually a real guard for what is a genuine precondition, plus named no-op guards for the rest. The two flags are independent; either or both may be on.
+
+```typescript
+const lambder = initLambder<SessionData>().create({
+    apiPath: "/api",
+    guards: {
+        deviceToken: lambderGuard({ apiInput: z.object({ deviceToken: z.string().min(20) }), handler: (_c, { deviceToken }) => requireDevice(deviceToken) }),
+        // Anyone may call, and the param records why: `grep "open:"` lists every public door.
+        open: lambderGuard({ handler: (_c, _p, _r, _reason: string) => {} }),
+        // This endpoint establishes identity; the proof is the handler's own work.
+        credentialFlow: lambderGuard({ handler: () => {} }),
+    },
+    requirePublicApiGuards: true,
+});
+
+lambder.addApi("public.device.report", { input, output, guards: "deviceToken" }, handler);
+lambder.addApi("public.translations", { input, output, guards: { open: "Static strings already in the bundle." } }, handler);
+lambder.addApi("public.login", { input, output, guards: "credentialFlow" }, handler);
+lambder.addApi("public.search", { input, output }, handler);   // compile error: open to anyone, or authorized how?
 ```
 
 For api modules split across files, DERIVE the annotation type from the real instance instead of writing it by hand: create the instance next to the policy declarations and export `typeof` it. The type can never drift from what actually runs, and modules import it without a cycle (the app file imports no modules):
