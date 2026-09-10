@@ -1,4 +1,4 @@
-# LambderMSW - Mock Service Worker Integration
+# Testing with LambderMSW
 
 LambderMSW provides seamless integration with [MSW (Mock Service Worker)](https://mswjs.io/) for testing your Lambder APIs. It allows you to mock API endpoints with full type safety when using TypeScript API contracts.
 
@@ -410,5 +410,6 @@ LambderMSW logs matching information to console for debugging. To see these logs
 ## See Also
 
 - [MSW Documentation](https://mswjs.io/)
-- [Type-Safe Quick Start](./TYPE_SAFE_QUICK_START.md)
-- [Lambder Main Documentation](../Readme.md)
+- [Getting started](./getting-started.md)
+- [Frontend client](./client.md)
+- [Documentation index](./README.md)
