@@ -24,6 +24,7 @@ import { DEFAULT_MAX_REQUEST_PAYLOAD_BYTES } from "../shared/LambderRequestPaylo
  * @typeParam _TGuards - @internal Guard metadata map inferred from create()'s guards (do not pass manually)
  * @typeParam _TIdempotencyEnabled - @internal True when create() received idempotency (do not pass manually)
  * @typeParam _TSessionGuardsRequired - @internal True when create() received requireSessionApiGuards (do not pass manually)
+ * @typeParam _TPublicGuardsRequired - @internal True when create() received requirePublicApiGuards (do not pass manually)
  *
  * @example
  * ```typescript
@@ -68,6 +69,7 @@ export default class Lambder {
     finalizeOptions;
     maxRequestPayloadBytes;
     requireSessionApiGuards;
+    requirePublicApiGuards;
     lambderSessionManager;
     sessionCookieOptions = {};
     sessionTokenCookieKey = "LMDRSESSIONTKID";
@@ -116,8 +118,10 @@ export default class Lambder {
         if (options.idempotency)
             this.getOrCreatePolicyEngine().setIdempotency(options.idempotency);
         this.requireSessionApiGuards = options.requireSessionApiGuards ?? false;
-        if (this.requireSessionApiGuards && !options.guards) {
-            throw new Error("Lambder: requireSessionApiGuards needs a guards map at creation for session APIs to declare from.");
+        this.requirePublicApiGuards = options.requirePublicApiGuards ?? false;
+        const requireFlag = this.requireSessionApiGuards ? "requireSessionApiGuards" : "requirePublicApiGuards";
+        if ((this.requireSessionApiGuards || this.requirePublicApiGuards) && !options.guards) {
+            throw new Error(`Lambder: ${requireFlag} needs a guards map at creation for APIs to declare from.`);
         }
     }
     setRouteFallbackHandler(routeFallbackHandler) {
@@ -215,9 +219,13 @@ export default class Lambder {
             throw new Error(`Lambder: duplicate API name "${name}". Dispatch is first-match, so the second registration would be silently dead code.`);
         }
         this.registeredApiNames.add(name);
-        if (mode === "session" && this.requireSessionApiGuards && options.guards === undefined) {
-            throw new Error(`Lambder: session API "${name}" declares no guards, and requireSessionApiGuards is on. ` +
-                `Declare the guard that authorizes it, or the named no-op guard that marks the session itself as the whole authorization.`);
+        const guardsRequired = mode === "session" ? this.requireSessionApiGuards : this.requirePublicApiGuards;
+        if (guardsRequired && options.guards === undefined) {
+            const optOut = mode === "session"
+                ? "the named no-op guard that marks the session itself as the whole authorization"
+                : "the named no-op guard that records why anyone may call it";
+            throw new Error(`Lambder: ${mode} API "${name}" declares no guards, and require${mode === "session" ? "Session" : "Public"}ApiGuards is on. ` +
+                `Declare the guard that authorizes it, or ${optOut}.`);
         }
         const usesPolicies = options.rateLimit !== undefined || options.guards !== undefined || options.idempotency !== undefined;
         if (!usesPolicies)

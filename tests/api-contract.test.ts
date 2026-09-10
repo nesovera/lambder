@@ -107,6 +107,25 @@ describe('ApiContract - the guards option on the contract', () => {
         expectTypeOf<Contract['users.list']['guards']>().toEqualTypeOf<{ readonly orgPermission: 'USERS.VIEW' }>();
     });
 
+    it('a declaration names only the guards it declared: guardData and guardInputs do not widen to the whole map', () => {
+        // The map form is a union over "this name required, the rest optional",
+        // so a declaration could in principle be inferred as the CONSTRAINT
+        // (every declarable name) rather than the literal. If it ever were,
+        // ctx.guardData would claim guards that never ran and the contract
+        // would demand guardInputs the call does not need, both silently.
+        createApp().addApi('narrow', { ...testSchema, guards: { orgPermission: 'USERS.VIEW' } }, async (ctx, res) => {
+            expectTypeOf<typeof ctx.guardData>().toEqualTypeOf<{ orgPermission: { permission: Permission } }>();
+            // captcha is declarable here and was not declared: it must not appear.
+            expectTypeOf<typeof ctx.guardData>().not.toHaveProperty('captcha');
+            return res.api({ result: ctx.guardData.orgPermission.permission });
+        });
+
+        const app = createApp()
+            .addApi('narrowContract', { ...testSchema, guards: { orgPermission: 'USERS.VIEW' } }, async (_ctx, res) => res.api({ result: 'ok' }));
+        // No declared guardInput guard, so the contract asks the client for nothing.
+        expectTypeOf<(typeof app.ApiContract)['narrowContract']>().not.toHaveProperty('guardInputs');
+    });
+
     it('guards survive plugin composition through .use()', () => {
         const usersPlugin = <T>(lambder: Lambder<T, {}, any, LambderGuardMetaMap<typeof guards>, any, any>) =>
             lambder.addApi('users.remove', { ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } },
