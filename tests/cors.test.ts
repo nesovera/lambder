@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import Lambder, { initLambder } from '../src/core/Lambder.js';
+import { initLambder } from '../src/core/Lambder.js';
 import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
 import { createMockEvent, createMockContext } from './helpers.js';
 describe('CORS', () => {

@@ -7,8 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import Lambder, { initLambder } from '../src/core/Lambder.js';
 import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
-import { decodeBody, gunzipBody, brotliBody, createMockContext, createMockEventV2 } from './helpers.js';
-import type { APIGatewayProxyEventV2 } from 'aws-lambda';
+import { decodeBody, brotliBody, createMockContext, createMockEventV2 } from './helpers.js';
 
 
 describe('HTTP API v2 events', () => {

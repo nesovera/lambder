@@ -278,4 +278,4 @@ describe('Error Handling', () => {
 });
 
 console.log('✅ LambderMSW example tests configured!');
-console.log('📖 See docs/LAMBDER_MSW.md for more information');
+console.log('📖 See docs/testing.md for more information');

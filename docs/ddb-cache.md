@@ -1,4 +1,4 @@
-# LambderDdbCache — DynamoDB-Backed Compressed Cache
+# LambderDdbCache
 
 Standalone, persistent JSON cache backed by a DynamoDB table. Server-only (uses the AWS SDK + zlib); importing the `lambder` package root in a frontend bundle stays safe because Node modules are loaded lazily.
 
@@ -29,7 +29,7 @@ A key can also be a `{ pk, sk }` pair, which keeps related entries in one partit
 - An **in-memory LRU layer** serves repeat reads within warm Lambda invocations.
 - **Single-flight + DynamoDB lease**: concurrent `getOrSet` calls for the same key are deduplicated in-process, and a short-lived lock item ensures only one Lambda instance fills a missing key while others poll for the result.
 - **Fail-open**: cache infrastructure errors (read/lease/write) fall back to calling the loader directly; loader errors propagate to the caller.
-- `namespace` isolates key spaces — use a version-suffixed namespace (e.g. `` `v${webVersion}` ``) to invalidate everything on deploy.
+- `namespace` isolates key spaces; use a version-suffixed namespace (e.g. `` `v${webVersion}` ``) to invalidate everything on deploy.
 
 ## Grouped keys
 
@@ -82,7 +82,7 @@ A plain string key keeps the exact layout it has always had (bare `meta`, `lock`
 
 ## Table setup
 
-Same shape as the Lambder session table — they can even share a table (namespaces prevent collisions), though a dedicated table is cleaner:
+Same shape as every other Lambder DynamoDB store. It can share a table with the rate limiter and the idempotency store (key prefixes prevent collisions); see [DynamoDB tables](./dynamodb-tables.md).
 
 ```hcl
 resource "aws_dynamodb_table" "myapp-cache" {
@@ -106,7 +106,7 @@ Required IAM actions on the table: `dynamodb:GetItem`, `PutItem`, `DeleteItem`, 
 ## Options
 
 | Option | Default | Description |
-|---|---|---|
+| --- | --- | --- |
 | `tableName` | required | DynamoDB table (pk/sk string keys, `expiresAt` TTL attribute) |
 | `region` | `"us-east-1"` | AWS region |
 | `namespace` | `"default"` | Key-space isolation prefix |
@@ -117,7 +117,7 @@ Required IAM actions on the table: `dynamodb:GetItem`, `PutItem`, `DeleteItem`, 
 ## Methods
 
 | Method | Description |
-|---|---|
+| --- | --- |
 | `get(key)` | The stored value, or `undefined` when missing or expired |
 | `set(key, value, { ttlSeconds })` | Store a JSON-serializable value |
 | `has(key)` | Whether a live entry exists |

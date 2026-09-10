@@ -13,7 +13,7 @@
  * - Response modification in hooks
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { decodeBody } from './helpers.js';
 import { z } from 'zod';
 import Lambder from '../src/core/Lambder.js';
