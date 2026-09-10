@@ -164,18 +164,42 @@ export type LambderParamlessGuardNames<TGuards, TPayload, TIncludeSession extend
         param: undefined;
     } ? K & string : never;
 }[LambderAllowedGuardNames<TGuards, TPayload, TIncludeSession> & keyof TGuards];
-/**
- * The per-API `guards` option: one paramless guard name, an ordered list of
- * paramless names, or an object map that can carry each guard's param
- * (`true` enables a paramless guard). Map entries run in insertion order.
- */
-export type LambderGuardsOption<TGuards, TPayload, TIncludeSession extends boolean> = LambderParamlessGuardNames<TGuards, TPayload, TIncludeSession> | readonly LambderParamlessGuardNames<TGuards, TPayload, TIncludeSession>[] | {
+/** The map form's full shape: every declarable guard name, each carrying its own param type. */
+type LambderGuardsMap<TGuards, TPayload, TIncludeSession extends boolean> = {
     readonly [K in LambderAllowedGuardNames<TGuards, TPayload, TIncludeSession> & keyof TGuards]?: TGuards[K] extends {
         param: undefined;
     } ? true : TGuards[K] extends {
         param: infer P;
     } ? P : true;
 };
+/**
+ * The map form with AT LEAST ONE entry: the union, over every declarable
+ * name, of "this one required and the rest optional".
+ *
+ * An all-optional map is inhabited by `{}`, which would let `guards: {}`
+ * satisfy requireSessionApiGuards / requirePublicApiGuards at the type level
+ * while declaring no guard at all: the option is present, so the required-field
+ * check passes, and it normalizes to zero entries, so nothing runs. Requiring
+ * the chosen key also rejects `{ theGuard: undefined }`, which an optional
+ * property accepts and which would otherwise reach the guard's handler with an
+ * undefined param.
+ */
+type LambderNonEmptyGuardsMap<TGuards, TPayload, TIncludeSession extends boolean, TMap = LambderGuardsMap<TGuards, TPayload, TIncludeSession>> = {
+    [K in keyof TMap]-?: Required<Pick<TMap, K>> & Omit<TMap, K>;
+}[keyof TMap];
+/**
+ * The per-API `guards` option: one paramless guard name, a non-empty ordered
+ * list of paramless names, or a non-empty object map that can carry each
+ * guard's param (`true` enables a paramless guard). Map entries run in
+ * insertion order.
+ *
+ * Every form is non-empty by construction, so declaring the option is always
+ * declaring a guard. See LambderNonEmptyGuardsMap.
+ */
+export type LambderGuardsOption<TGuards, TPayload, TIncludeSession extends boolean> = LambderParamlessGuardNames<TGuards, TPayload, TIncludeSession> | readonly [
+    LambderParamlessGuardNames<TGuards, TPayload, TIncludeSession>,
+    ...LambderParamlessGuardNames<TGuards, TPayload, TIncludeSession>[]
+] | LambderNonEmptyGuardsMap<TGuards, TPayload, TIncludeSession>;
 /**
  * The typed ctx.guardData an API's handler sees: declared guards that return
  * a value, keyed by name. Check-only (void) guards never appear.

@@ -48,7 +48,18 @@ export class LambderApiGuardsEngine {
     }
     /** Startup validation of one API registration's guards option. */
     assertRegistration(apiName, mode, guardsOption) {
-        for (const { name } of toGuardEntries(guardsOption)) {
+        const entries = toGuardEntries(guardsOption);
+        // The runtime half of LambderNonEmptyGuardsMap. `guards: {}` and
+        // `guards: []` are present-but-empty: they satisfy the require*ApiGuards
+        // field check while running nothing, which is the one shape that turns a
+        // mandatory authorization declaration back into an optional one. The type
+        // rejects both; a plain-JS caller, a cast, or a spread that happened to
+        // produce an empty object lands here instead.
+        if (guardsOption !== undefined && entries.length === 0) {
+            throw new Error(`Lambder: API "${apiName}" declares an empty guards option, which authorizes nothing. ` +
+                `Name the guard that authorizes it, or omit the option entirely.`);
+        }
+        for (const { name } of entries) {
             const guardDef = this.guards[name];
             if (!guardDef) {
                 throw new Error(`Lambder: API "${apiName}" references unknown guard "${name}". Declare it in the guards option at creation.`);
