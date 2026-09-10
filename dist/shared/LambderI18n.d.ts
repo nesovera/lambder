@@ -4,7 +4,7 @@
  * Zero dependencies, no Node/DOM requirements (browser detection is feature-gated),
  * safe to import in both lambda backends and frontend bundles.
  *
- * See docs/I18N.md for the full guide.
+ * See docs/i18n.md for the full guide.
  */
 export interface LambderLanguageMeta {
     /** Native language name (shown in language switchers). */

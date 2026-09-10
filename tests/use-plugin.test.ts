@@ -102,7 +102,7 @@ describe('Plugin System - Basic Usage', () => {
         });
 
         // Type check - if this compiles, types are correct
-        type GetUserInput = Parameters<typeof caller.api<'getUser'>>[1];
+        type _GetUserInput = Parameters<typeof caller.api<'getUser'>>[1];
         
         expect(caller).toBeDefined();
     });
@@ -218,8 +218,8 @@ describe('Plugin System - Multiple Plugins', () => {
         });
 
         // Type check - both APIs should be available
-        type GetUserInput = Parameters<typeof caller.api<'getUser'>>[1];
-        type GetProductInput = Parameters<typeof caller.api<'getProduct'>>[1];
+        type _GetUserInput = Parameters<typeof caller.api<'getUser'>>[1];
+        type _GetProductInput = Parameters<typeof caller.api<'getProduct'>>[1];
         
         expect(caller).toBeDefined();
     });

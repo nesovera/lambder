@@ -1,10 +1,40 @@
 {
   "name": "lambder",
-  "version": "4.9.1",
-  "description": "",
+  "version": "5.0.0",
+  "description": "Opinionated serverless web framework for TypeScript on AWS Lambda: type-safe APIs from Zod schemas, DynamoDB sessions, and declarative rate limits, authorization guards and idempotency.",
+  "keywords": [
+    "lambda",
+    "aws-lambda",
+    "serverless",
+    "framework",
+    "typescript",
+    "api",
+    "zod",
+    "type-safe",
+    "rest",
+    "api-gateway",
+    "dynamodb",
+    "session",
+    "rate-limit",
+    "idempotency",
+    "guards",
+    "msw",
+    "i18n",
+    "templating"
+  ],
+  "homepage": "https://github.com/nesovera/lambder#readme",
+  "bugs": {
+    "url": "https://github.com/nesovera/lambder/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nesovera/lambder.git"
+  },
+  "license": "MIT",
+  "author": "NesoVera",
+  "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "type": "module",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -38,18 +68,15 @@
   "files": [
     "dist"
   ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "typecheck": "tsc -p tsconfig.tests.json",
     "test": "npm run typecheck && vitest run",
     "test:watch": "vitest",
     "build": "tsc",
     "lint": "eslint . --ext .ts,.tsx --fix"
-  },
-  "author": "",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/nesovera/lambder.git"
   },
   "dependencies": {
     "cookie": "^1.0.2",
