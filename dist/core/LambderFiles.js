@@ -28,6 +28,12 @@ export class LambderLocalFileSource {
     }
 }
 /**
+ * A file a remote store returned: the store's Content-Type unless it is a
+ * generic octet-stream, in which case the extension decides, as for local
+ * files.
+ */
+export const remoteStoreFile = (body, contentType) => contentType && !contentType.endsWith("octet-stream") ? { body, mimeType: contentType } : { body };
+/**
  * The path a source is asked for: leading slash stripped, traversal
  * rejected; null for a path that names no file (empty, or a directory).
  */

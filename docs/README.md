@@ -26,7 +26,7 @@ order the first time.
 | Page | Covers |
 | --- | --- |
 | [Frontend client](./client.md) | `LambderCaller`: typed calls, `apiOutcome`, timeouts, guard inputs, idempotency keys, request compression |
-| [Frontend hosting](./frontend-hosting.md) | File sources (local, S3, R2), `servePublicFiles`, `serveIndexHtml`, `res.templateFile` |
+| [Frontend hosting](./frontend-hosting.md) | File sources (local, S3, R2, HTTP), `servePublicFiles`, `serveIndexHtml`, `res.templateFile` |
 | [Templating](./templating.md) | `html`/`xml` tagged templates and the comment-only `LambderTemplatingEngine` |
 | [Translations](./i18n.md) | `createLambderI18n`: typed keys, component extension, language detection, runtime dictionaries |
 | [Testing](./testing.md) | `LambderMSW`: typed MSW mocking of your API contract |

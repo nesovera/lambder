@@ -53,8 +53,9 @@ const company = await caller.api("getCompany", { slug: "acme" });
   cookies, and a guard against Lambda's response size cap.
 - **Hooks and actions.** Lifecycle hooks, plus `addAction()` for the non-HTTP
   invocations (EventBridge, SQS, custom events) the same function receives.
-- **Frontend hosting.** Serve a build from a folder, S3 or R2, with an app
-  shell rendered through a build-pipeline-safe template engine.
+- **Frontend hosting.** Serve a build from a folder, S3, R2 or any HTTP
+  origin, with an app shell rendered through a build-pipeline-safe template
+  engine.
 - **Runs anywhere Lambda does.** API Gateway REST APIs (payload v1), HTTP APIs
   (payload v2) and Lambda Function URLs; the payload format is detected per
   event.

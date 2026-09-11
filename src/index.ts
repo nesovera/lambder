@@ -59,6 +59,8 @@ export { LambderFiles, LambderLocalFileSource } from "./core/LambderFiles.js";
 export type { LambderFileSource, LambderFile, LambderFilesOption, LambderFileMemoryCacheOption, LambderReadFile } from "./core/LambderFiles.js";
 export { LambderS3FileSource } from "./stores/LambderS3FileSource.js";
 export type { LambderS3FileSourceOptions } from "./stores/LambderS3FileSource.js";
+export { LambderHttpFileSource } from "./stores/LambderHttpFileSource.js";
+export type { LambderHttpFileSourceOptions } from "./stores/LambderHttpFileSource.js";
 
 // Session types
 export type { LambderSessionCookieOptions } from "./session/LambderSessionController.js";

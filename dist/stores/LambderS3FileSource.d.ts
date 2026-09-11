@@ -1,5 +1,5 @@
 import type { S3Client, S3ClientConfig } from "@aws-sdk/client-s3";
-import type { LambderFile, LambderFileSource } from "../core/LambderFiles.js";
+import { type LambderFile, type LambderFileSource } from "../core/LambderFiles.js";
 export type LambderS3FileSourceOptions = {
     bucket: string;
     /** Literal key prefix the relative path is appended to, so include the trailing slash: "web/v42/". Default: none. */

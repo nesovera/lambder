@@ -18,6 +18,7 @@ export { LambderTemplatingEngine } from "./core/LambderTemplatingEngine.js";
 export { LambderPublicFilesHandler } from "./core/LambderPublicFiles.js";
 export { LambderFiles, LambderLocalFileSource } from "./core/LambderFiles.js";
 export { LambderS3FileSource } from "./stores/LambderS3FileSource.js";
+export { LambderHttpFileSource } from "./stores/LambderHttpFileSource.js";
 // Compression: the option every site shares, and the one codec behind them all.
 export { resolveCompressionOption, LAMBDER_ENCODINGS } from "./shared/LambderCompressionOption.js";
 // Brotli/gzip plus the bounded, length-verified restore every compressed

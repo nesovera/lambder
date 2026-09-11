@@ -82,6 +82,7 @@ disable the in-memory file cache beside it:
 ```typescript
 files: new LambderLocalFileSource({ root: path.resolve("./public") }),
 files: new LambderS3FileSource({ bucket: "myapp-web", clientConfig: { region: "eu-central-1" } }),
+files: new LambderHttpFileSource({ baseUrl: "https://assets.example.com/v42/" }),
 files: { read: async (relativePath) => myStore.get(relativePath) },
 files: { source: new LambderLocalFileSource({ root }), memoryCache: { maxBytes: 64_000_000, maxFileBytes: 4_000_000 } },
 files: { source: new LambderLocalFileSource({ root }), memoryCache: false },
