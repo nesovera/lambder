@@ -44,6 +44,9 @@ initLambder().create({
     }),
 });
 
+// Any origin serving files by path: a CDN, an R2 custom domain, a public bucket. Reads with fetch, no SDK.
+initLambder().create({ files: new LambderHttpFileSource({ baseUrl: "https://assets.example.com/v42/" }) });
+
 // Anything else: implement read().
 initLambder().create({ files: { read: async (relativePath) => myStore.get(relativePath) } });
 
@@ -61,6 +64,29 @@ is a generic octet-stream, in which case the extension decides.
 
 Lambda's ~6MB response cap still applies to anything proxied this way: redirect
 large downloads to the bucket or CDN URL instead of serving them.
+
+### HTTP notes
+
+`LambderHttpFileSource` requests `baseUrl` plus the relative path with the
+runtime's `fetch`: no SDK, and no credentials for a public origin. When the
+bucket is public and sits behind a CDN (an R2 custom domain, say), this is
+usually the better fit than the S3 source: reads come out of the edge cache
+instead of the bucket, and the Lambda holds no bucket keys. A version in the
+base URL (`.../v42/`) suits it well, since files under one version never change
+and the memory cache never has to drop them.
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `baseUrl` | required | The folder URL relative paths resolve under. A missing trailing slash is added |
+| `headers` | none | Sent with every read, e.g. an Authorization header for a private origin or a User-Agent a firewall allows |
+| `timeoutMs` | `10000` | How long one read may take before it fails |
+
+Each path segment is percent-encoded, so `a b.png` is requested as `a%20b.png`
+and names the same object it would as an S3 key. A 404 or 410 reads as null and
+the request falls through; any other failed status, a network error or a
+timeout propagates as an error. Redirects are followed. The response's
+Content-Type is used unless it is a generic octet-stream, and the ~6MB response
+cap applies here too.
 
 ## servePublicFiles
 

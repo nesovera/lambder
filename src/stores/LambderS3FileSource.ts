@@ -1,5 +1,5 @@
 import type { S3Client, S3ClientConfig } from "@aws-sdk/client-s3";
-import type { LambderFile, LambderFileSource } from "../core/LambderFiles.js";
+import { remoteStoreFile, type LambderFile, type LambderFileSource } from "../core/LambderFiles.js";
 
 export type LambderS3FileSourceOptions = {
     bucket: string;
@@ -63,8 +63,6 @@ export class LambderS3FileSource implements LambderFileSource {
         }
         if(!output.Body) return null;
 
-        const body = Buffer.from(await output.Body.transformToByteArray());
-        const contentType = output.ContentType;
-        return contentType && !contentType.endsWith("octet-stream") ? { body, mimeType: contentType } : { body };
+        return remoteStoreFile(Buffer.from(await output.Body.transformToByteArray()), output.ContentType);
     }
 }

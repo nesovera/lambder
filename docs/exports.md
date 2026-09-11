@@ -3,7 +3,7 @@
 Every name the three entry points export, grouped by what it is for. Anything
 not listed here is internal and may change without a major version.
 
-- `lambder` is the server surface: 48 values and 101 types.
+- `lambder` is the server surface: 49 values and 102 types.
 - `lambder/client` is the browser-safe subset: 20 values and 28 types, all of
   them also exported from `lambder`.
 - `lambder/testing` carries the MSW adapter.
@@ -126,13 +126,14 @@ See [DynamoDB cache](./ddb-cache.md), [Rate limiter](./ddb-rate-limiter.md),
 | --- | --- | --- |
 | `LambderLocalFileSource` | | Read files from a folder |
 | `LambderS3FileSource` | | Read files from S3, R2 or any S3-compatible store |
+| `LambderHttpFileSource` | | Read files over HTTP(S) from a CDN, a public bucket's domain or any origin serving them by path |
 | `LambderFiles` | | The instance's reader over a source: path rule, memory cache, template cache |
 | `LambderPublicFilesHandler` | | The handler `servePublicFiles()` registers |
 
 Types: `LambderFileSource`, `LambderFile`, `LambderReadFile`,
 `LambderFilesOption`, `LambderFileMemoryCacheOption`,
-`LambderS3FileSourceOptions`, `LambderPublicFilesOptions`,
-`LambderIndexHtmlOptions`.
+`LambderS3FileSourceOptions`, `LambderHttpFileSourceOptions`,
+`LambderPublicFilesOptions`, `LambderIndexHtmlOptions`.
 
 See [Frontend hosting](./frontend-hosting.md).
 

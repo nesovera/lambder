@@ -1,3 +1,4 @@
+import { remoteStoreFile } from "../core/LambderFiles.js";
 /**
  * Files from an S3 bucket, or any S3-compatible store such as Cloudflare
  * R2 (pass its endpoint in clientConfig). Needs @aws-sdk/client-s3, an
@@ -46,8 +47,6 @@ export class LambderS3FileSource {
         }
         if (!output.Body)
             return null;
-        const body = Buffer.from(await output.Body.transformToByteArray());
-        const contentType = output.ContentType;
-        return contentType && !contentType.endsWith("octet-stream") ? { body, mimeType: contentType } : { body };
+        return remoteStoreFile(Buffer.from(await output.Body.transformToByteArray()), output.ContentType);
     }
 }

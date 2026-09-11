@@ -57,7 +57,7 @@ change that only passes at runtime is not finished.
 | `src/core/` | The request pipeline: context, routing, responses, files, templating |
 | `src/policies/` | Declarative rate limits, guards and idempotency |
 | `src/session/` | Session manager and controller |
-| `src/stores/` | DynamoDB primitives: cache, rate limiter, idempotency, S3 file source |
+| `src/stores/` | DynamoDB primitives: cache, rate limiter, idempotency; S3 and HTTP file sources |
 | `src/client/` | `LambderCaller` and the MSW adapter |
 | `src/shared/` | Isomorphic modules both entry points re-export |
 
