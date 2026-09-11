@@ -10,9 +10,10 @@ export type LambderFile = { body: Buffer; mimeType?: string };
  * servePublicFiles, serveIndexHtml, res.file and res.templateFile alike,
  * through the instance's one reader (LambderFiles). Implement `read` over
  * any backing store: LambderLocalFileSource (a folder), LambderS3FileSource
- * (S3, or R2 and other S3-compatible stores), or your own. The reader does
- * the rest for every source: traversal check, memory cache, mime fallback
- * from the extension.
+ * (S3, or R2 and other S3-compatible stores), LambderHttpFileSource (any
+ * origin serving files by path), or your own. The reader does the rest for
+ * every source: traversal check, memory cache, mime fallback from the
+ * extension.
  */
 export interface LambderFileSource {
     /**
@@ -60,6 +61,14 @@ export class LambderLocalFileSource implements LambderFileSource {
         return { body: await fs.promises.readFile(absolute) };
     }
 }
+
+/**
+ * A file a remote store returned: the store's Content-Type unless it is a
+ * generic octet-stream, in which case the extension decides, as for local
+ * files.
+ */
+export const remoteStoreFile = (body: Buffer, contentType: string | null | undefined): LambderFile =>
+    contentType && !contentType.endsWith("octet-stream") ? { body, mimeType: contentType } : { body };
 
 /**
  * The path a source is asked for: leading slash stripped, traversal

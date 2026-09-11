@@ -9,6 +9,25 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [5.1.1] - 2026-09-11
+
+### Added
+
+- **`LambderHttpFileSource`**, a file source that reads over HTTP(S) from any
+  origin serving files by path: a CDN, a public bucket's own domain (a
+  Cloudflare R2 custom domain, an S3 website endpoint) or another server.
+  `files: new LambderHttpFileSource({ baseUrl: "https://assets.example.com/v42/" })`
+  serves public files, index.html and templates from there through the same
+  reader, memory cache and template cache as every other source. It reads with
+  the runtime's `fetch`, so it needs no SDK and, for a public origin, no
+  credentials, and its reads come out of the origin's edge cache rather than
+  the bucket. A 404 or 410 reads as null and the request falls through; any
+  other failed status, a network error or a timeout (`timeoutMs`, default 10
+  seconds) is an error. Path segments are percent-encoded, so a relative path
+  names the same object it would as an S3 key, and `headers` go with every
+  read for an origin that wants an Authorization header or a known
+  User-Agent.
+
 ## [5.0.0] - 2026-09-10
 
 The v4 line is closed and its accumulated surface is released as v5. **There
