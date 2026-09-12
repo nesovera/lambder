@@ -14,7 +14,7 @@ import { type LambderInputValidationRefusal } from "./LambderApiGuards.js";
  * stays the single owner of the field. Build with lambderRateLimitKey() so
  * the handler's payload type follows `apiInput`.
  */
-export type LambderRateLimitKeyFn<TInput extends z.ZodTypeAny = z.ZodTypeAny> = {
+export type LambderRateLimitKeyFn<TInput extends z.ZodType = z.ZodType> = {
     apiInput: TInput;
     handler: (ctx: LambderRenderContext, payload: z.output<TInput>) => string | Promise<string>;
 } | {
@@ -26,7 +26,7 @@ export type LambderRateLimitKeyFn<TInput extends z.ZodTypeAny = z.ZodTypeAny> = 
  * inside one literal. Returns the exact union member so type extraction can
  * see the schema.
  */
-export declare function lambderRateLimitKey<TInput extends z.ZodTypeAny>(key: {
+export declare function lambderRateLimitKey<TInput extends z.ZodType>(key: {
     apiInput: TInput;
     handler: (ctx: LambderRenderContext, payload: z.output<TInput>) => string | Promise<string>;
 }): {
@@ -78,7 +78,7 @@ export type LambderAllowedPolicyNames<TPolicies, TPayload, TIncludeSession exten
         per: "session";
     } ? (TIncludeSession extends true ? K : never) : TPolicies[K] extends {
         per: {
-            apiInput: infer S extends z.ZodTypeAny;
+            apiInput: infer S extends z.ZodType;
         };
     } ? (TPayload extends z.output<S> ? K : never) : K;
 }[keyof TPolicies] & string;
