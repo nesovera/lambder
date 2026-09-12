@@ -37,7 +37,7 @@ import type { LambderResponse } from "../core/LambderResponse.js";
  * and the handler refuses by throwing (typically refuse()/LambderApiError).
  * Build with lambderGuard() so the handler's payload/ctx/param types line up.
  */
-export type LambderApiGuard<TInput extends z.ZodTypeAny = z.ZodTypeAny, TParam = any, TOutput = any> =
+export type LambderApiGuard<TInput extends z.ZodType = z.ZodType, TParam = any, TOutput = any> =
     | { apiInput: TInput; guardInput?: undefined; session?: boolean; handler: (ctx: any, payload: z.output<TInput>, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput> }
     | { guardInput: TInput; apiInput?: undefined; session?: boolean; handler: (ctx: any, payload: z.output<TInput>, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput> }
     | { apiInput?: undefined; guardInput?: undefined; session?: boolean; handler: (ctx: any, payload: undefined, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput> };
@@ -52,10 +52,10 @@ type GuardSessionCtx = LambderSessionRenderContext<any, any>;
  * inferred from the handler's 4th argument annotation; the output from its
  * return type.
  */
-export function lambderGuard<TInput extends z.ZodTypeAny, TParam = undefined, TOutput = void>(guard: { apiInput: TInput; session: true; handler: (ctx: GuardSessionCtx, payload: z.output<TInput>, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput> }): { apiInput: TInput; guardInput?: undefined; session: true; handler: (ctx: GuardSessionCtx, payload: z.output<TInput>, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput> };
-export function lambderGuard<TInput extends z.ZodTypeAny, TParam = undefined, TOutput = void>(guard: { apiInput: TInput; handler: (ctx: GuardCtx, payload: z.output<TInput>, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput> }): { apiInput: TInput; guardInput?: undefined; session?: undefined; handler: (ctx: GuardCtx, payload: z.output<TInput>, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput> };
-export function lambderGuard<TInput extends z.ZodTypeAny, TParam = undefined, TOutput = void>(guard: { guardInput: TInput; session: true; handler: (ctx: GuardSessionCtx, payload: z.output<TInput>, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput> }): { guardInput: TInput; apiInput?: undefined; session: true; handler: (ctx: GuardSessionCtx, payload: z.output<TInput>, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput> };
-export function lambderGuard<TInput extends z.ZodTypeAny, TParam = undefined, TOutput = void>(guard: { guardInput: TInput; handler: (ctx: GuardCtx, payload: z.output<TInput>, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput> }): { guardInput: TInput; apiInput?: undefined; session?: undefined; handler: (ctx: GuardCtx, payload: z.output<TInput>, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput> };
+export function lambderGuard<TInput extends z.ZodType, TParam = undefined, TOutput = void>(guard: { apiInput: TInput; session: true; handler: (ctx: GuardSessionCtx, payload: z.output<TInput>, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput> }): { apiInput: TInput; guardInput?: undefined; session: true; handler: (ctx: GuardSessionCtx, payload: z.output<TInput>, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput> };
+export function lambderGuard<TInput extends z.ZodType, TParam = undefined, TOutput = void>(guard: { apiInput: TInput; handler: (ctx: GuardCtx, payload: z.output<TInput>, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput> }): { apiInput: TInput; guardInput?: undefined; session?: undefined; handler: (ctx: GuardCtx, payload: z.output<TInput>, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput> };
+export function lambderGuard<TInput extends z.ZodType, TParam = undefined, TOutput = void>(guard: { guardInput: TInput; session: true; handler: (ctx: GuardSessionCtx, payload: z.output<TInput>, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput> }): { guardInput: TInput; apiInput?: undefined; session: true; handler: (ctx: GuardSessionCtx, payload: z.output<TInput>, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput> };
+export function lambderGuard<TInput extends z.ZodType, TParam = undefined, TOutput = void>(guard: { guardInput: TInput; handler: (ctx: GuardCtx, payload: z.output<TInput>, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput> }): { guardInput: TInput; apiInput?: undefined; session?: undefined; handler: (ctx: GuardCtx, payload: z.output<TInput>, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput> };
 export function lambderGuard<TParam = undefined, TOutput = void>(guard: { session: true; handler: (ctx: GuardSessionCtx, payload: undefined, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput> }): { apiInput?: undefined; guardInput?: undefined; session: true; handler: (ctx: GuardSessionCtx, payload: undefined, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput> };
 export function lambderGuard<TParam = undefined, TOutput = void>(guard: { handler: (ctx: GuardCtx, payload: undefined, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput> }): { apiInput?: undefined; guardInput?: undefined; session?: undefined; handler: (ctx: GuardCtx, payload: undefined, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput> };
 export function lambderGuard(guard: LambderApiGuard<any, any, any>): LambderApiGuard<any, any, any> { return guard; }
@@ -70,8 +70,8 @@ type LambderGuardOutputOf<G> = G extends { handler: (...args: any[]) => infer R 
 
 /** Per-guard metadata carried on the Lambder instance: input mode, session requirement, param type, output type. */
 export type LambderGuardMeta<G> =
-    (G extends { apiInput: infer S extends z.ZodTypeAny } ? { apiInput: z.output<S> }
-    : G extends { guardInput: infer S extends z.ZodTypeAny } ? { guardInput: z.output<S> }
+    (G extends { apiInput: infer S extends z.ZodType } ? { apiInput: z.output<S> }
+    : G extends { guardInput: infer S extends z.ZodType } ? { guardInput: z.output<S> }
     : {})
     & (G extends { session: true } ? { session: true } : {})
     & { param: LambderGuardParamOf<G>; output: LambderGuardOutputOf<G> };
@@ -187,7 +187,7 @@ export type LambderInputValidationRefusal = (ctx: LambderRenderContext, resolver
  * engine's apiInput-keyed policies.
  */
 export const parsePreflightSlice = async (
-    input: z.ZodTypeAny,
+    input: z.ZodType,
     value: unknown,
     ctx: LambderRenderContext,
     resolver: LambderResolver,

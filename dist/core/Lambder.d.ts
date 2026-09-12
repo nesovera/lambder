@@ -297,7 +297,7 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
     addSessionRoute<TPath extends Path>(condition: TPath, actionFn: (ctx: LambderSessionRenderContext<any, TSessionData, PathParamsOf<TPath>>, resolver: LambderResolver) => MaybePromise<LambderResponse>): this;
     addSessionRoute(condition: RegExp | ConditionFunction | LambderRouteMatcher, actionFn: SessionActionFunction<TSessionData>): this;
     use<_TNewContract extends Record<string, any>>(plugin: (lambder: Lambder<TSessionData, _TContract, any, any, any, any, any>) => Lambder<TSessionData, _TNewContract, any, any, any, any, any>): Lambder<TSessionData, _TNewContract extends _TContract ? _TNewContract : (_TContract & _TNewContract), _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired, _TPublicGuardsRequired>;
-    addApi<TName extends string, TInput extends z.ZodTypeAny, TOutput extends z.ZodTypeAny, const TRateOpt extends LambderRateLimitOption<_TRateLimitPolicies, z.infer<TInput>, false> = never, const TGuardsOpt extends LambderGuardsOption<_TGuards, z.infer<TInput>, false> = never>(name: TName, schema: {
+    addApi<TName extends string, TInput extends z.ZodType, TOutput extends z.ZodType, const TRateOpt extends LambderRateLimitOption<_TRateLimitPolicies, z.infer<TInput>, false> = never, const TGuardsOpt extends LambderGuardsOption<_TGuards, z.infer<TInput>, false> = never>(name: TName, schema: {
         input: TInput;
         output: TOutput;
     } & {
@@ -308,7 +308,7 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
             ttlSeconds?: number;
         }) : never;
     } & LambderRequirableGuardsField<_TPublicGuardsRequired, TGuardsOpt>, handler: (ctx: LambderRenderContext<z.infer<TInput>, Record<string, string>, LambderGuardDataOf<_TGuards, TGuardsOpt>>, resolver: LambderResolver<z.infer<TOutput>>) => MaybePromise<LambderResponse>): Lambder<TSessionData, MergeContract<_TContract, TName, z.infer<TInput>, z.infer<TOutput>, LambderGuardInputsOf<_TGuards, TGuardsOpt>, TGuardsOpt>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired, _TPublicGuardsRequired>;
-    addSessionApi<TName extends string, TInput extends z.ZodTypeAny, TOutput extends z.ZodTypeAny, const TRateOpt extends LambderRateLimitOption<_TRateLimitPolicies, z.infer<TInput>, true> = never, const TGuardsOpt extends LambderGuardsOption<_TGuards, z.infer<TInput>, true> = never>(name: TName, schema: {
+    addSessionApi<TName extends string, TInput extends z.ZodType, TOutput extends z.ZodType, const TRateOpt extends LambderRateLimitOption<_TRateLimitPolicies, z.infer<TInput>, true> = never, const TGuardsOpt extends LambderGuardsOption<_TGuards, z.infer<TInput>, true> = never>(name: TName, schema: {
         input: TInput;
         output: TOutput;
     } & {

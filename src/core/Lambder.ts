@@ -557,8 +557,8 @@ export default class Lambder<
     // Typed API with Zod
     public addApi<
         TName extends string,
-        TInput extends z.ZodTypeAny,
-        TOutput extends z.ZodTypeAny,
+        TInput extends z.ZodType,
+        TOutput extends z.ZodType,
         const TRateOpt extends LambderRateLimitOption<_TRateLimitPolicies, z.infer<TInput>, false> = never,
         const TGuardsOpt extends LambderGuardsOption<_TGuards, z.infer<TInput>, false> = never,
     >(
@@ -606,8 +606,8 @@ export default class Lambder<
     // Typed Session API with Zod
     public addSessionApi<
         TName extends string,
-        TInput extends z.ZodTypeAny,
-        TOutput extends z.ZodTypeAny,
+        TInput extends z.ZodType,
+        TOutput extends z.ZodType,
         const TRateOpt extends LambderRateLimitOption<_TRateLimitPolicies, z.infer<TInput>, true> = never,
         const TGuardsOpt extends LambderGuardsOption<_TGuards, z.infer<TInput>, true> = never,
     >(

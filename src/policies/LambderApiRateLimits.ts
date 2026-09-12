@@ -20,7 +20,7 @@ const DEFAULT_RATE_LIMIT_REFUSAL = { type: "warning", code: LAMBDER_REFUSAL_CODE
  * stays the single owner of the field. Build with lambderRateLimitKey() so
  * the handler's payload type follows `apiInput`.
  */
-export type LambderRateLimitKeyFn<TInput extends z.ZodTypeAny = z.ZodTypeAny> =
+export type LambderRateLimitKeyFn<TInput extends z.ZodType = z.ZodType> =
     | { apiInput: TInput; handler: (ctx: LambderRenderContext, payload: z.output<TInput>) => string | Promise<string> }
     | { apiInput?: undefined; handler: (ctx: LambderRenderContext, payload: undefined) => string | Promise<string> };
 
@@ -29,7 +29,7 @@ export type LambderRateLimitKeyFn<TInput extends z.ZodTypeAny = z.ZodTypeAny> =
  * inside one literal. Returns the exact union member so type extraction can
  * see the schema.
  */
-export function lambderRateLimitKey<TInput extends z.ZodTypeAny>(key: { apiInput: TInput; handler: (ctx: LambderRenderContext, payload: z.output<TInput>) => string | Promise<string> }): { apiInput: TInput; handler: (ctx: LambderRenderContext, payload: z.output<TInput>) => string | Promise<string> };
+export function lambderRateLimitKey<TInput extends z.ZodType>(key: { apiInput: TInput; handler: (ctx: LambderRenderContext, payload: z.output<TInput>) => string | Promise<string> }): { apiInput: TInput; handler: (ctx: LambderRenderContext, payload: z.output<TInput>) => string | Promise<string> };
 export function lambderRateLimitKey(key: { handler: (ctx: LambderRenderContext, payload: undefined) => string | Promise<string> }): { apiInput?: undefined; handler: (ctx: LambderRenderContext, payload: undefined) => string | Promise<string> };
 export function lambderRateLimitKey(key: LambderRateLimitKeyFn<any>): LambderRateLimitKeyFn<any> { return key; }
 
@@ -75,7 +75,7 @@ export type LambderAllowedPolicyNames<TPolicies, TPayload, TIncludeSession exten
     [K in keyof TPolicies]:
         TPolicies[K] extends { per: "session" }
             ? (TIncludeSession extends true ? K : never)
-            : TPolicies[K] extends { per: { apiInput: infer S extends z.ZodTypeAny } }
+            : TPolicies[K] extends { per: { apiInput: infer S extends z.ZodType } }
                 ? (TPayload extends z.output<S> ? K : never)
                 : K
 }[keyof TPolicies] & string;
