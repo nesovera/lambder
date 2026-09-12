@@ -9,6 +9,16 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [5.1.3] - 2026-09-12
+
+### Changed
+
+- Bumped the `zod` dependency and peer range from `^4.1.12` to `^4.6.2`, matching
+  the version already resolved everywhere else in a typical install.
+- Replaced the deprecated `z.ZodTypeAny` with `z.ZodType` across `Lambder.ts`,
+  `LambderApiGuards.ts` and `LambderApiRateLimits.ts`. Purely a type-level
+  change; runtime behavior is unchanged.
+
 ## [5.1.1] - 2026-09-11
 
 ### Added

@@ -36,7 +36,7 @@ import type { LambderResponse } from "../core/LambderResponse.js";
  * and the handler refuses by throwing (typically refuse()/LambderApiError).
  * Build with lambderGuard() so the handler's payload/ctx/param types line up.
  */
-export type LambderApiGuard<TInput extends z.ZodTypeAny = z.ZodTypeAny, TParam = any, TOutput = any> = {
+export type LambderApiGuard<TInput extends z.ZodType = z.ZodType, TParam = any, TOutput = any> = {
     apiInput: TInput;
     guardInput?: undefined;
     session?: boolean;
@@ -61,7 +61,7 @@ type GuardSessionCtx = LambderSessionRenderContext<any, any>;
  * inferred from the handler's 4th argument annotation; the output from its
  * return type.
  */
-export declare function lambderGuard<TInput extends z.ZodTypeAny, TParam = undefined, TOutput = void>(guard: {
+export declare function lambderGuard<TInput extends z.ZodType, TParam = undefined, TOutput = void>(guard: {
     apiInput: TInput;
     session: true;
     handler: (ctx: GuardSessionCtx, payload: z.output<TInput>, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput>;
@@ -71,7 +71,7 @@ export declare function lambderGuard<TInput extends z.ZodTypeAny, TParam = undef
     session: true;
     handler: (ctx: GuardSessionCtx, payload: z.output<TInput>, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput>;
 };
-export declare function lambderGuard<TInput extends z.ZodTypeAny, TParam = undefined, TOutput = void>(guard: {
+export declare function lambderGuard<TInput extends z.ZodType, TParam = undefined, TOutput = void>(guard: {
     apiInput: TInput;
     handler: (ctx: GuardCtx, payload: z.output<TInput>, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput>;
 }): {
@@ -80,7 +80,7 @@ export declare function lambderGuard<TInput extends z.ZodTypeAny, TParam = undef
     session?: undefined;
     handler: (ctx: GuardCtx, payload: z.output<TInput>, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput>;
 };
-export declare function lambderGuard<TInput extends z.ZodTypeAny, TParam = undefined, TOutput = void>(guard: {
+export declare function lambderGuard<TInput extends z.ZodType, TParam = undefined, TOutput = void>(guard: {
     guardInput: TInput;
     session: true;
     handler: (ctx: GuardSessionCtx, payload: z.output<TInput>, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput>;
@@ -90,7 +90,7 @@ export declare function lambderGuard<TInput extends z.ZodTypeAny, TParam = undef
     session: true;
     handler: (ctx: GuardSessionCtx, payload: z.output<TInput>, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput>;
 };
-export declare function lambderGuard<TInput extends z.ZodTypeAny, TParam = undefined, TOutput = void>(guard: {
+export declare function lambderGuard<TInput extends z.ZodType, TParam = undefined, TOutput = void>(guard: {
     guardInput: TInput;
     handler: (ctx: GuardCtx, payload: z.output<TInput>, res: LambderResolver, param: TParam) => TOutput | Promise<TOutput>;
 }): {
@@ -126,11 +126,11 @@ type LambderGuardOutputOf<G> = G extends {
 } ? Awaited<R> : never;
 /** Per-guard metadata carried on the Lambder instance: input mode, session requirement, param type, output type. */
 export type LambderGuardMeta<G> = (G extends {
-    apiInput: infer S extends z.ZodTypeAny;
+    apiInput: infer S extends z.ZodType;
 } ? {
     apiInput: z.output<S>;
 } : G extends {
-    guardInput: infer S extends z.ZodTypeAny;
+    guardInput: infer S extends z.ZodType;
 } ? {
     guardInput: z.output<S>;
 } : {}) & (G extends {
@@ -237,7 +237,7 @@ export type LambderInputValidationRefusal = (ctx: LambderRenderContext, resolver
  * same one regular input validation answers. Shared with the rate-limit
  * engine's apiInput-keyed policies.
  */
-export declare const parsePreflightSlice: (input: z.ZodTypeAny, value: unknown, ctx: LambderRenderContext, resolver: LambderResolver, onInvalid: LambderInputValidationRefusal) => Promise<unknown>;
+export declare const parsePreflightSlice: (input: z.ZodType, value: unknown, ctx: LambderRenderContext, resolver: LambderResolver, onInvalid: LambderInputValidationRefusal) => Promise<unknown>;
 /**
  * Runtime side of the guards subsystem: holds the defined guards, asserts
  * API registrations against them at startup, and executes an API's declared
