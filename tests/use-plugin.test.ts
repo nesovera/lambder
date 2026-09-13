@@ -89,12 +89,12 @@ describe('Plugin System - Basic Usage', () => {
                 });
         };
 
-        const lambder = new Lambder({
+        const _lambder = new Lambder({
             files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         }).use(userPlugin);
 
-        type AppContract = typeof lambder.ApiContract;
+        type AppContract = typeof _lambder.ApiContract;
 
         const caller = new LambderCaller<AppContract>({
             apiPath: '/api',
@@ -203,14 +203,14 @@ describe('Plugin System - Multiple Plugins', () => {
                 });
         };
 
-        const lambder = new Lambder({
+        const _lambder = new Lambder({
             files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .use(userPlugin)
             .use(productPlugin);
 
-        type AppContract = typeof lambder.ApiContract;
+        type AppContract = typeof _lambder.ApiContract;
 
         const caller = new LambderCaller<AppContract>({
             apiPath: '/api',
@@ -421,14 +421,14 @@ describe('Plugin System - Type Safety', () => {
                 });
         };
 
-        const lambder = new Lambder({
+        const _lambder = new Lambder({
             files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api'
         })
             .use(plugin1)
             .use(plugin2);
 
-        type Contract = typeof lambder.ApiContract;
+        type Contract = typeof _lambder.ApiContract;
 
         // Type assertions - both api1 and api2 should be in the contract
         // We test this at runtime by creating a caller
@@ -449,12 +449,12 @@ describe('Plugin System - Non-Generic Plugins', () => {
         const plugin1 = (l: Lambder) => l.addApi('api1', { input: z.void(), output: z.void() }, async (ctx, res) => res.raw({ statusCode: 200, body: '' }));
         const plugin2 = (l: Lambder) => l.addApi('api2', { input: z.void(), output: z.void() }, async (ctx, res) => res.raw({ statusCode: 200, body: '' }));
 
-        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: '' }), apiPath: '' })
+        const _lambder = new Lambder({ files: new LambderLocalFileSource({ root: '' }), apiPath: '' })
             .addApi('initialApi', { input: z.void(), output: z.void() }, async (ctx, res) => res.raw({ statusCode: 200, body: '' }))
             .use(plugin1)
             .use(plugin2);
 
-        type Contract = typeof lambder.ApiContract;
+        type Contract = typeof _lambder.ApiContract;
         
         // Check if both api1 and api2 exist in Contract
         expectTypeOf<Contract>().toHaveProperty('initialApi');

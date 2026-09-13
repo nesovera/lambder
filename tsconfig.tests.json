@@ -4,6 +4,8 @@
   // vitest alone never evaluates; `npm test` runs this before vitest so a
   // typing regression (the use() plugin generics in 4.7.1) fails the suite.
   "extends": "./tsconfig.json",
-  "compilerOptions": { "noEmit": true },
+  // tests/ sits outside the build's rootDir. Nothing is emitted here, so the
+  // root only has to be wide enough to cover both trees.
+  "compilerOptions": { "noEmit": true, "rootDir": "." },
   "include": ["src/**/*", "tests/**/*"]
 }
