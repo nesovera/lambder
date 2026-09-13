@@ -67,10 +67,10 @@ describe('ApiContract - the guards option on the contract', () => {
     });
 
     it('an API that declares no guards has no guards entry at all', () => {
-        const app = createApp()
+        const _app = createApp()
             .addApi('open', testSchema, async (_ctx, res) => res.api({ result: 'ok' }));
 
-        type Contract = typeof app.ApiContract;
+        type Contract = typeof _app.ApiContract;
 
         expectTypeOf<Contract['open']>().not.toHaveProperty('guards');
         expectTypeOf<Contract['open']>().not.toHaveProperty('guardInputs');
@@ -79,11 +79,11 @@ describe('ApiContract - the guards option on the contract', () => {
     });
 
     it('a guardInput-mode guard lands on both guardInputs and guards', () => {
-        const app = createApp()
+        const _app = createApp()
             .addApi('contact', { ...testSchema, guards: { captcha: true, orgPermission: 'BILLING.MANAGE' } },
                 async (_ctx, res) => res.api({ result: 'ok' }));
 
-        type Entry = (typeof app.ApiContract)['contact'];
+        type Entry = (typeof _app.ApiContract)['contact'];
 
         // What the client must send stays the guard's own input shape...
         expectTypeOf<Entry['guardInputs']>().toEqualTypeOf<{ captcha: { token: string } }>();
@@ -92,7 +92,7 @@ describe('ApiContract - the guards option on the contract', () => {
     });
 
     it('session APIs carry their guards too, including on a requireSessionApiGuards instance', () => {
-        const app = initLambder<{ userId: string }>().create({
+        const _app = initLambder<{ userId: string }>().create({
             files: new LambderLocalFileSource({ root: './public' }),
             apiPath: '/api',
             guards,
@@ -101,7 +101,7 @@ describe('ApiContract - the guards option on the contract', () => {
             .addSessionApi('me', { ...testSchema, guards: 'sessionOnly' }, async (_ctx, res) => res.api({ result: 'ok' }))
             .addSessionApi('users.list', { ...testSchema, guards: { orgPermission: 'USERS.VIEW' } }, async (_ctx, res) => res.api({ result: 'ok' }));
 
-        type Contract = typeof app.ApiContract;
+        type Contract = typeof _app.ApiContract;
 
         expectTypeOf<Contract['me']['guards']>().toEqualTypeOf<'sessionOnly'>();
         expectTypeOf<Contract['users.list']['guards']>().toEqualTypeOf<{ readonly orgPermission: 'USERS.VIEW' }>();
@@ -120,10 +120,10 @@ describe('ApiContract - the guards option on the contract', () => {
             return res.api({ result: ctx.guardData.orgPermission.permission });
         });
 
-        const app = createApp()
+        const _app = createApp()
             .addApi('narrowContract', { ...testSchema, guards: { orgPermission: 'USERS.VIEW' } }, async (_ctx, res) => res.api({ result: 'ok' }));
         // No declared guardInput guard, so the contract asks the client for nothing.
-        expectTypeOf<(typeof app.ApiContract)['narrowContract']>().not.toHaveProperty('guardInputs');
+        expectTypeOf<(typeof _app.ApiContract)['narrowContract']>().not.toHaveProperty('guardInputs');
     });
 
     it('guards survive plugin composition through .use()', () => {
@@ -131,21 +131,21 @@ describe('ApiContract - the guards option on the contract', () => {
             lambder.addApi('users.remove', { ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } },
                 async (_ctx, res) => res.api({ result: 'ok' }));
 
-        const app = createApp().use(usersPlugin);
-        type Contract = typeof app.ApiContract;
+        const _app = createApp().use(usersPlugin);
+        type Contract = typeof _app.ApiContract;
 
         expectTypeOf<Contract['users.remove']['guards']>().toEqualTypeOf<{ readonly orgPermission: 'USERS.MANAGE' }>();
     });
 });
 
 describe('ApiContract - pinning a client-side needs map to the declarations', () => {
-    const app = createApp()
+    const _app = createApp()
         .addApi('users.list', { ...testSchema, guards: { orgPermission: 'USERS.VIEW' } }, async (_ctx, res) => res.api({ result: 'ok' }))
         .addApi('users.remove', { ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } }, async (_ctx, res) => res.api({ result: 'ok' }))
         .addApi('billing.pay', { ...testSchema, guards: { orgPermission: 'BILLING.MANAGE', captcha: true } }, async (_ctx, res) => res.api({ result: 'ok' }))
         .addApi('ping', testSchema, async (_ctx, res) => res.api({ result: 'ok' }));
 
-    type Contract = typeof app.ApiContract;
+    type Contract = typeof _app.ApiContract;
     /** What the server itself says the API needs; never for an API that declares no such guard. */
     type PermissionNeededBy<K extends keyof Contract> =
         Contract[K] extends { guards: { orgPermission: infer N } } ? N : never;
@@ -217,12 +217,12 @@ describe('ApiContract - pinning a client-side needs map to the declarations', ()
 });
 
 describe('ApiContract - the added guards entry changes nothing for consumers', () => {
-    const app = createApp()
+    const _app = createApp()
         .addApi('open', testSchema, async (_ctx, res) => res.api({ result: 'ok' }))
         .addApi('guarded', { ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } }, async (_ctx, res) => res.api({ result: 'ok' }))
         .addApi('captchaed', { ...testSchema, guards: 'captcha' }, async (_ctx, res) => res.api({ result: 'ok' }));
 
-    type Contract = typeof app.ApiContract;
+    type Contract = typeof _app.ApiContract;
 
     let fetchMock: ReturnType<typeof vi.fn>;
     beforeEach(() => {

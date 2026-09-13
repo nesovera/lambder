@@ -1,4 +1,9 @@
 {
+    // Use this package's own TypeScript (6.0.3) for the language service
+    // instead of the one bundled with VS Code, so the editor reports exactly
+    // what `npm run build` and `npm run typecheck` do.
+    "typescript.tsdk": "node_modules/typescript/lib",
+    "typescript.enablePromptUseWorkspaceTsdk": true,
     "editor.codeActionsOnSave": {
       "source.fixAll.eslint": "explicit"
     },
