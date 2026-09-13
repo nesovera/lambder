@@ -1,15 +1,7 @@
-import {
-    BatchWriteItemCommand,
-    DeleteItemCommand,
-    DynamoDBClient,
-    GetItemCommand,
-    PutItemCommand,
-    QueryCommand,
-    type AttributeValue,
-    type WriteRequest,
-} from "@aws-sdk/client-dynamodb";
+import type { AttributeValue, DynamoDBClient, WriteRequest } from "@aws-sdk/client-dynamodb";
+import { loadDynamoClientSdk, type LambderDynamoClientSdk } from "./LambderDdbSdk.js";
 import { getCrypto } from "../shared/node-polyfills.js";
-import { compressText, restoreBoundedText } from "../shared/LambderCompressionCodec.js";
+import { compressText, restoreText } from "../shared/LambderCompressionCodec.js";
 import {
     resolveCompressionOption,
     type LambderCompressionOption, type LambderCompressionSettings,
@@ -180,7 +172,10 @@ export class LambderDdbCache {
     readonly keyPrefix: string;
     readonly namespace: string;
 
-    private readonly client: DynamoDBClient;
+    /** The client given at creation, or one created from `region` on first use; the SDK arrives with it. */
+    private readonly providedClient: DynamoDBClient | undefined;
+    private readonly region: string;
+    private readyPromise: Promise<{ client: DynamoDBClient; sdk: LambderDynamoClientSdk }> | undefined;
     private readonly defaultTtlSeconds: number;
     private readonly chunkBytes: number;
     private readonly compression: LambderCompressionSettings | null;
@@ -219,7 +214,16 @@ export class LambderDdbCache {
                 maxSize: positiveInteger(memoryMaxBytes, "memoryMaxBytes"),
                 sizeCalculation: (entry) => entry.stored.length,
             });
-        this.client = options.client ?? new DynamoDBClient({ region: options.region ?? "us-east-1" });
+        this.providedClient = options.client;
+        this.region = options.region ?? "us-east-1";
+    }
+
+    /** The SDK and the client, loaded and created the first time the table is touched (see LambderDdbSdk). */
+    private ready(): Promise<{ client: DynamoDBClient; sdk: LambderDynamoClientSdk }> {
+        this.readyPromise ??= loadDynamoClientSdk("LambderDdbCache")
+            .then((sdk) => ({ sdk, client: this.providedClient ?? new sdk.DynamoDBClient({ region: this.region }) }))
+            .catch((error: unknown) => { this.readyPromise = undefined; throw error; });
+        return this.readyPromise;
     }
 
     async get<T>(key: LambderCacheKey): Promise<T | undefined> {
@@ -317,8 +321,9 @@ export class LambderDdbCache {
         }));
         await this.batchWrite(writes);
 
-        await this.client.send(
-            new PutItemCommand({
+        const { client, sdk } = await this.ready();
+        await client.send(
+            new sdk.PutItemCommand({
                 TableName: this.tableName,
                 Item: {
                     pk: { S: pk },
@@ -487,8 +492,9 @@ export class LambderDdbCache {
     private async acquireLease(pk: string, address: CacheAddress, owner: string, leaseSeconds: number): Promise<boolean> {
         const now = this.nowSeconds();
         try {
-            await this.client.send(
-                new PutItemCommand({
+            const { client, sdk } = await this.ready();
+            await client.send(
+                new sdk.PutItemCommand({
                     TableName: this.tableName,
                     Item: {
                         pk: { S: pk },
@@ -510,8 +516,9 @@ export class LambderDdbCache {
 
     private async releaseLease(pk: string, address: CacheAddress, owner: string): Promise<void> {
         try {
-            await this.client.send(
-                new DeleteItemCommand({
+            const { client, sdk } = await this.ready();
+            await client.send(
+                new sdk.DeleteItemCommand({
                     TableName: this.tableName,
                     Key: { pk: { S: pk }, sk: { S: this.itemSortKey(address, LOCK_SORT_KEY) } },
                     ConditionExpression: "#owner = :owner",
@@ -527,8 +534,9 @@ export class LambderDdbCache {
     }
 
     private async readManifest(pk: string, address: CacheAddress): Promise<CacheManifest | undefined> {
-        const response = await this.client.send(
-            new GetItemCommand({
+        const { client, sdk } = await this.ready();
+        const response = await client.send(
+            new sdk.GetItemCommand({
                 TableName: this.tableName,
                 Key: { pk: { S: pk }, sk: { S: this.itemSortKey(address, META_SORT_KEY) } },
                 ConsistentRead: false,
@@ -615,8 +623,9 @@ export class LambderDdbCache {
         const items: Array<Record<string, AttributeValue>> = [];
         let cursor: Record<string, AttributeValue> | undefined;
         do {
-            const response = await this.client.send(
-                new QueryCommand({
+            const { client, sdk } = await this.ready();
+            const response = await client.send(
+                new sdk.QueryCommand({
                     TableName: this.tableName,
                     KeyConditionExpression: options.prefix
                         ? "#pk = :pk AND begins_with(#sk, :prefix)"
@@ -644,8 +653,9 @@ export class LambderDdbCache {
 
     private async invalidateManifest(pk: string, address: CacheAddress, version: string): Promise<void> {
         try {
-            await this.client.send(
-                new DeleteItemCommand({
+            const { client, sdk } = await this.ready();
+            await client.send(
+                new sdk.DeleteItemCommand({
                     TableName: this.tableName,
                     Key: { pk: { S: pk }, sk: { S: this.itemSortKey(address, META_SORT_KEY) } },
                     ConditionExpression: "#version = :version",
@@ -667,8 +677,9 @@ export class LambderDdbCache {
                 if (attempt >= MAX_BATCH_RETRIES) {
                     throw new Error(`DynamoDB cache batch write remained throttled after ${MAX_BATCH_RETRIES} attempts`);
                 }
-                const response = await this.client.send(
-                    new BatchWriteItemCommand({ RequestItems: { [this.tableName]: pending } }),
+                const { client, sdk } = await this.ready();
+                const response = await client.send(
+                    new sdk.BatchWriteItemCommand({ RequestItems: { [this.tableName]: pending } }),
                 );
                 pending = response.UnprocessedItems?.[this.tableName] ?? [];
                 if (pending.length > 0) {
@@ -681,7 +692,7 @@ export class LambderDdbCache {
 
     /** The JSON text of a stored payload. */
     private async decode(stored: Buffer, encoding: CacheEncoding, uncompressedBytes: number): Promise<string> {
-        return encoding === "br" ? await restoreBoundedText(stored, uncompressedBytes, "br") : stored.toString("utf8");
+        return encoding === "br" ? await restoreText(stored, "br", { declaredBytes: uncompressedBytes }) : stored.toString("utf8");
     }
 
     private remember(

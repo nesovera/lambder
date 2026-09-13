@@ -113,6 +113,13 @@ fails), the last-resort 500 is a JSON envelope
 (`{ payload: null, errorMessage: "Internal server error." }`); routes get a
 plain-text 500.
 
+The handler's fourth argument is the `logList` the request had accumulated, and
+`describeCrash(err, ctx)` packs the error itself (name, message, stack, cause
+chain, request id) into the envelope's `crash` field for a caller entitled to
+see it. Browsers should not be; another lambda invoking this one is the case it
+exists for. See
+[Calling a Lambder app from another lambda](./invoke.md#errors-and-logs).
+
 ## Hooks
 
 Hooks run at fixed points in the request lifecycle. Each takes an optional

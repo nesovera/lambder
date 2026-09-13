@@ -1,10 +1,11 @@
 import cookieParser from "cookie";
 import {
-    COMPRESSED_PAYLOAD_FIELD,
+    COMPRESSED_PAYLOAD_GZ_FIELD,
+    COMPRESSED_PAYLOAD_BR_FIELD,
     COMPRESSED_PAYLOAD_BYTES_FIELD,
 } from "../shared/LambderRequestPayload.js";
 import {
-    restoreBoundedText,
+    restoreText,
     LambderCompressionError,
     LAMBDER_RESTORE_FAILURES,
 } from "../shared/LambderCompressionCodec.js";
@@ -183,11 +184,12 @@ export const createContext = (
 export type LambderRestorePayloadResult = { ok: true } | { ok: false; message: string };
 
 /**
- * Restores a request payload the caller sent gzipped (`payloadGz` +
- * `payloadBytes`) onto ctx.post.payload and ctx.apiPayload, so every later
- * stage (rate-limit key slices, guards, input validation, the handler) reads
- * an ordinary payload and needs no awareness of the wire format. A request
- * that sent a plain payload passes through untouched.
+ * Restores a request payload the caller sent compressed (`payloadGz` or
+ * `payloadBr`, beside `payloadBytes`) onto ctx.post.payload and
+ * ctx.apiPayload, so every later stage (rate-limit key slices, guards, input
+ * validation, the handler) reads an ordinary payload and needs no awareness
+ * of the wire format. The field names the encoding; a request carrying both
+ * is refused. A request that sent a plain payload passes through untouched.
  *
  * Every failure answers with a message instead of throwing: a malformed body
  * is a client error, not a crash. The declared byte length both bounds the
@@ -199,10 +201,17 @@ export const restoreCompressedApiPayload = async (
     maxPayloadBytes: number,
 ): Promise<LambderRestorePayloadResult> => {
     const post = ctx.post as Record<string, unknown>;
-    const compressed = post[COMPRESSED_PAYLOAD_FIELD];
-    if(compressed === undefined) return { ok: true };
+    const hasGzip = post[COMPRESSED_PAYLOAD_GZ_FIELD] !== undefined;
+    const hasBrotli = post[COMPRESSED_PAYLOAD_BR_FIELD] !== undefined;
+    if(!hasGzip && !hasBrotli) return { ok: true };
+    if(hasGzip && hasBrotli){
+        return { ok: false, message: `Request carries both ${COMPRESSED_PAYLOAD_GZ_FIELD} and ${COMPRESSED_PAYLOAD_BR_FIELD}; send one.` };
+    }
+    const field = hasGzip ? COMPRESSED_PAYLOAD_GZ_FIELD : COMPRESSED_PAYLOAD_BR_FIELD;
+    const encoding = hasGzip ? "gzip" : "br";
+    const compressed = post[field];
     if(typeof compressed !== "string"){
-        return { ok: false, message: `Request ${COMPRESSED_PAYLOAD_FIELD} must be a base64 string.` };
+        return { ok: false, message: `Request ${field} must be a base64 string.` };
     }
 
     const declaredBytes = post[COMPRESSED_PAYLOAD_BYTES_FIELD];
@@ -217,7 +226,7 @@ export const restoreCompressedApiPayload = async (
     // ones a stored record gets; only the wording of the refusal is ours.
     let json: string;
     try {
-        json = await restoreBoundedText(Buffer.from(compressed, "base64"), declaredBytes, "gzip");
+        json = await restoreText(Buffer.from(compressed, "base64"), encoding, { declaredBytes });
     } catch(err) {
         const reason = err instanceof LambderCompressionError ? err.reason : null;
         return { ok: false, message: reason === LAMBDER_RESTORE_FAILURES.lengthMismatch
@@ -229,7 +238,7 @@ export const restoreCompressedApiPayload = async (
     try { payload = JSON.parse(json); }
     catch { return { ok: false, message: "Compressed request payload is not valid JSON." }; }
 
-    delete post[COMPRESSED_PAYLOAD_FIELD];
+    delete post[field];
     delete post[COMPRESSED_PAYLOAD_BYTES_FIELD];
     post.payload = payload;
     ctx.apiPayload = payload;

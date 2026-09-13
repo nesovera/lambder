@@ -5,6 +5,10 @@ compressed. Import it from the `lambder/client` entry: everything reachable
 from there is browser-safe by construction (no AWS SDK, no Node built-ins, no
 server pipeline), so your bundle can never pick up server code.
 
+Its server-side counterpart is
+[`LambderInvokeCaller`](./invoke.md), which calls a Lambder app running in
+another lambda over the same envelope.
+
 ## Setup
 
 ```typescript
@@ -180,7 +184,10 @@ A compressed call sends `payloadGz` (gzip bytes, base64) beside `payloadBytes`
 (the JSON's UTF-8 byte length) in place of `payload`. It is only sent when it
 is smaller than the JSON it replaces: a payload that is mostly a base64 image
 gzips to nearly its own size, and such a call goes plain rather than slightly
-larger.
+larger. The server also accepts `payloadBr`, the same pair compressed with
+Brotli, which is what a Node caller
+([`LambderInvokeCaller`](./invoke.md#compression)) sends; nothing changes for
+browsers, which keep sending `payloadGz`.
 
 Everything else in the envelope stays plain text, so `apiName` routing, request
 logs and MSW mocks are unaffected, and the request stays `application/json`: no

@@ -4,10 +4,11 @@
  * When a LambderCaller call's payload clears the configured size, the caller
  * sends the payload's JSON as `payloadGz` (gzip bytes, base64) beside
  * `payloadBytes` (its UTF-8 byte length) in place of `payload`, and the
- * server restores it before anything reads the payload. Everything else in
- * the envelope (apiName, version, token, siteHost, guardInputs,
- * idempotencyKey) stays plain text, so routing, logging and request mocking
- * are unaffected.
+ * server restores it before anything reads the payload. A Node caller
+ * (LambderInvokeCaller) sends `payloadBr` instead, Brotli under the same
+ * rules; the server accepts either. Everything else in the envelope
+ * (apiName, version, token, siteHost, guardInputs, idempotencyKey) stays
+ * plain text, so routing, logging and request mocking are unaffected.
  *
  * Base64 inside the JSON envelope, rather than a binary body with
  * Content-Encoding: API Gateway hands a binary request body to Lambda
@@ -28,13 +29,24 @@
 import type { LambderCompressionOption } from "./LambderCompressionOption.js";
 
 /** Envelope field carrying the base64 gzip of the payload's JSON. */
-export const COMPRESSED_PAYLOAD_FIELD = "payloadGz";
+export const COMPRESSED_PAYLOAD_GZ_FIELD = "payloadGz";
+/**
+ * Envelope field carrying the base64 Brotli of the payload's JSON: the same
+ * pair as payloadGz for a caller that can produce Brotli (a Node caller,
+ * LambderInvokeCaller). A request carries one of the two, never both.
+ */
+export const COMPRESSED_PAYLOAD_BR_FIELD = "payloadBr";
 /** Envelope field carrying the UTF-8 byte length of that JSON before compression. */
 export const COMPRESSED_PAYLOAD_BYTES_FIELD = "payloadBytes";
 
-/** The pair a compressed call sends in place of `payload`. */
-export type LambderCompressedPayload = {
-    [COMPRESSED_PAYLOAD_FIELD]: string;
+/** The pair a gzip-compressing call sends in place of `payload`. */
+export type LambderCompressedGzipPayload = {
+    [COMPRESSED_PAYLOAD_GZ_FIELD]: string;
+    [COMPRESSED_PAYLOAD_BYTES_FIELD]: number;
+};
+/** The pair a Brotli-compressing call sends in place of `payload`. */
+export type LambderCompressedBrotliPayload = {
+    [COMPRESSED_PAYLOAD_BR_FIELD]: string;
     [COMPRESSED_PAYLOAD_BYTES_FIELD]: number;
 };
 
@@ -55,14 +67,17 @@ export type LambderRequestCompressionOption = LambderCompressionOption<LambderRe
 export const DEFAULT_REQUEST_COMPRESSION_SETTINGS: LambderRequestCompressionSettings = { minBytes: 4096 };
 
 /**
- * Default ceiling for a restored payload. Lambda's ~6MB invoke cap already
- * bounds the compressed bytes; this bounds what they may expand to, so a
- * highly compressible body cannot exhaust the function's memory.
+ * Default ceiling for a restored payload, a request's on the server
+ * (maxRequestPayloadBytes) or an answer's on the invoke caller
+ * (maxResponsePayloadBytes). Lambda's ~6MB invoke cap already bounds the
+ * compressed bytes; this bounds what they may expand to, so a highly
+ * compressible body cannot exhaust the function's memory.
  */
-export const DEFAULT_MAX_REQUEST_PAYLOAD_BYTES = 20_000_000;
+export const DEFAULT_MAX_RESTORED_PAYLOAD_BYTES = 20_000_000;
 
-/** Chunked so a large payload cannot overflow the argument list of String.fromCharCode. */
+/** Buffer where there is one (Node); otherwise chunked so a large payload cannot overflow the argument list of String.fromCharCode. */
 const bytesToBase64 = (bytes: Uint8Array): string => {
+    if(typeof Buffer !== "undefined") return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64");
     const chunkSize = 0x8000;
     let binary = "";
     for(let i = 0; i < bytes.length; i += chunkSize){
@@ -71,37 +86,49 @@ const bytesToBase64 = (bytes: Uint8Array): string => {
     return btoa(binary);
 };
 
+/**
+ * The two rules every compressed payload follows, whichever algorithm made
+ * the bytes: nothing below the threshold is compressed, and the compressed
+ * form is only ever sent when its base64 is smaller than the JSON it
+ * replaces. The threshold is measured on real UTF-8 bytes, not string
+ * length, so a payload of multi-byte text is judged by what actually goes on
+ * the wire. `compress` is the algorithm: the browser's CompressionStream for
+ * gzip, zlib for Brotli (LambderInvokeCaller); both go through here so the
+ * rules cannot drift between them.
+ */
+export const compressPayloadWith = async <TField extends string>(
+    json: string,
+    minBytes: number,
+    field: TField,
+    compress: (bytes: Uint8Array<ArrayBuffer>) => Promise<Uint8Array>,
+): Promise<({ [K in TField]: string } & { [COMPRESSED_PAYLOAD_BYTES_FIELD]: number }) | null> => {
+    const encoded = new TextEncoder().encode(json);
+    if(encoded.length < minBytes) return null;
+    const base64 = bytesToBase64(await compress(encoded));
+    if(base64.length >= encoded.length) return null;
+    return { [field]: base64, [COMPRESSED_PAYLOAD_BYTES_FIELD]: encoded.length } as { [K in TField]: string } & { [COMPRESSED_PAYLOAD_BYTES_FIELD]: number };
+};
+
 /** True when this runtime can compress request payloads (browsers, and Node 18+). */
 export const isRequestCompressionAvailable = (): boolean =>
     typeof CompressionStream !== "undefined" && typeof btoa !== "undefined";
 
 /**
  * Gzip one payload's JSON for sending, or null when the plain JSON should go
- * instead: below the threshold, or when compressing did not make it smaller.
- * The threshold is measured on real UTF-8 bytes, not string length, so a
- * payload of multi-byte text is judged by what actually goes on the wire.
- *
- * The second null matters for the payloads most likely to be large: a
- * base64 image gzips to nearly its own size, and base64 then inflates the
- * result past the original. Sending that would cost CPU on both ends for a
- * request that got bigger, so the compressed form is only ever sent when it
- * is smaller than the JSON it replaces.
+ * instead (see compressPayloadWith for the two rules). The second null
+ * matters for the payloads most likely to be large: a base64 image gzips to
+ * nearly its own size, and base64 then inflates the result past the
+ * original. Sending that would cost CPU on both ends for a request that got
+ * bigger, so the compressed form is only ever sent when it is smaller.
  */
-export const compressPayloadJson = async (
+export const compressPayloadGzip = (
     json: string,
     minBytes: number,
-): Promise<LambderCompressedPayload | null> => {
-    const encoded = new TextEncoder().encode(json);
-    if(encoded.length < minBytes) return null;
-    const stream = new Blob([encoded]).stream().pipeThrough(new CompressionStream("gzip"));
-    const compressed = new Uint8Array(await new Response(stream).arrayBuffer());
-    const base64 = bytesToBase64(compressed);
-    if(base64.length >= encoded.length) return null;
-    return {
-        [COMPRESSED_PAYLOAD_FIELD]: base64,
-        [COMPRESSED_PAYLOAD_BYTES_FIELD]: encoded.length,
-    };
-};
+): Promise<LambderCompressedGzipPayload | null> =>
+    compressPayloadWith(json, minBytes, COMPRESSED_PAYLOAD_GZ_FIELD, async (bytes) => {
+        const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream("gzip"));
+        return new Uint8Array(await new Response(stream).arrayBuffer());
+    });
 
 /**
  * Restores a payload the caller compressed, for request mocking
@@ -109,7 +136,7 @@ export const compressPayloadJson = async (
  * would. The server does NOT use this: it decompresses through zlib, whose
  * bounded output is what makes an untrusted body safe to expand.
  */
-export const decompressPayloadJson = async (payloadGz: string): Promise<unknown> => {
+export const decompressPayloadGzip = async (payloadGz: string): Promise<unknown> => {
     const binary = atob(payloadGz);
     const bytes = new Uint8Array(binary.length);
     for(let i = 0; i < binary.length; i += 1){ bytes[i] = binary.charCodeAt(i); }
