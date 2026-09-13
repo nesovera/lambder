@@ -1,6 +1,6 @@
 {
   "name": "lambder",
-  "version": "6.0.1",
+  "version": "6.0.2",
   "description": "Opinionated serverless web framework for TypeScript on AWS Lambda: type-safe APIs from Zod schemas, DynamoDB sessions, and declarative rate limits, authorization guards and idempotency.",
   "keywords": [
     "lambda",
@@ -122,14 +122,14 @@
     "@types/cookie": "^0.6.0",
     "@types/js-cookie": "^3.0.6",
     "@types/mime-types": "^2.1.4",
-    "@types/node": "^20.19.22",
+    "@types/node": "^24.9.0",
     "@types/path-to-regexp": "^1.7.0",
-    "@typescript-eslint/eslint-plugin": "^7.2.0",
-    "@typescript-eslint/parser": "^7.2.0",
+    "@typescript-eslint/eslint-plugin": "^8.70.0",
+    "@typescript-eslint/parser": "^8.70.0",
     "aws-sdk-client-mock": "^4.1.0",
     "eslint": "^8.57.0",
-    "typescript": "^5.9.3",
-    "vitest": "^3.2.4",
+    "typescript": "^6.0.3",
+    "vitest": "^5.0.0",
     "zod": "^4.6.2"
   }
 }

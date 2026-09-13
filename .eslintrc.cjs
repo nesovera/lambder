@@ -20,11 +20,10 @@ module.exports = {
     rules: {
         // Deliberate in the type-level machinery.
         "@typescript-eslint/no-explicit-any": "off",
-        "@typescript-eslint/ban-types": ["error", {
-            extendDefaults: true,
-            // The generic accumulator default (`_TContract extends Record<string, any> = {}`).
-            types: { "{}": false },
-        }],
+        // The generic accumulator default (`_TContract extends Record<string, any> = {}`).
+        // `ban-types` was split up in typescript-eslint 8; this is the part of
+        // it that this codebase needs relaxed.
+        "@typescript-eslint/no-empty-object-type": ["error", { allowObjectTypes: "always" }],
         // Handlers declare the arguments their signature has; unused ones are
         // normal. Variables and imports are still checked.
         // A leading underscore is this codebase's marker for a declaration
@@ -36,7 +35,6 @@ module.exports = {
         }],
         // Style the codebase already settled on.
         "no-extra-semi": "off",
-        "@typescript-eslint/no-extra-semi": "off",
         // `catch {}` as a deliberate swallow (best-effort body parsing).
         "no-empty": ["error", { allowEmptyCatch: true }],
     },

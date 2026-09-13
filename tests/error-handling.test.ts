@@ -277,7 +277,8 @@ describe('Error Handling - Different Error Types', () => {
             })
             .addRoute('/test', (ctx, res) => {
                 const obj: any = null;
-                obj.property.access; // Will throw TypeError
+                // Reading through null is the TypeError the global handler must catch.
+                const _boom = obj.property.access;
                 return res.html('Never reached');
             });
 
