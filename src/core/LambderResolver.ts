@@ -1,4 +1,5 @@
 import LambderResponseBuilder, {
+    type LambderApiAnswer,
     type LambderApiResponseConfig,
     type LambderResponseOptions,
 } from "./LambderResponseBuilder.js";
@@ -18,16 +19,8 @@ export interface DieResolverMethods<TOutput> {
     redirect: SyncDie<LambderResponseBuilder["redirect"]>;
     versionExpired: SyncDie<LambderResponseBuilder["versionExpired"]>;
     fileBase64: SyncDie<LambderResponseBuilder["fileBase64"]>;
-    api: (
-        payload: TOutput | null,
-        config?: LambderApiResponseConfig,
-        options?: LambderResponseOptions,
-    ) => never;
-    apiBinary: (
-        payload: TOutput | null,
-        config?: LambderApiResponseConfig,
-        options?: LambderResponseOptions,
-    ) => never;
+    api: LambderApiAnswer<TOutput, never>;
+    apiBinary: LambderApiAnswer<TOutput, never>;
     file: AsyncDie<LambderResponseBuilder["file"]>;
     templateFile: AsyncDie<LambderResponseBuilder["templateFile"]>;
 }
@@ -57,27 +50,29 @@ export default class LambderResolver<TOutput = any> extends LambderResponseBuild
             redirect: (...a) => { throw this.redirect(...a); },
             versionExpired: (...a) => { throw this.versionExpired(...a); },
             fileBase64: (...a) => { throw this.fileBase64(...a); },
-            api: (...a) => { throw this.api(...a); },
-            apiBinary: (...a) => { throw this.apiBinary(...a); },
+            // Overloaded on the payload (see LambderApiAnswer); the implementation takes both shapes.
+            api: ((payload: TOutput | null, config?: LambderApiResponseConfig, options?: LambderResponseOptions) => {
+                throw this.api(payload as TOutput, config, options);
+            }) as LambderApiAnswer<TOutput, never>,
+            apiBinary: ((payload: TOutput | null, config?: LambderApiResponseConfig, options?: LambderResponseOptions) => {
+                throw this.apiBinary(payload as TOutput, config, options);
+            }) as LambderApiAnswer<TOutput, never>,
             file: async (...a) => { throw await this.file(...a); },
             templateFile: async (...a) => { throw await this.templateFile(...a); },
         };
     }
 
-    // Override api method with proper output typing
-    api(
-        payload: TOutput | null,
-        config?: LambderApiResponseConfig,
-        options?: LambderResponseOptions,
-    ): LambderResponse {
-        return super.api(payload, config, options);
+    // Restated with the resolver's output type: the answer is the declared
+    // output, or null beside a reason (see LambderApiAnswer).
+    api(payload: TOutput, config?: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
+    api(payload: null, config: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
+    api(payload: TOutput | null, config?: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse {
+        return super.api(payload as TOutput, config, options);
     }
 
-    apiBinary(
-        payload: TOutput | null,
-        config?: LambderApiResponseConfig,
-        options?: LambderResponseOptions,
-    ): LambderResponse {
-        return super.apiBinary(payload, config, options);
+    apiBinary(payload: TOutput, config?: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
+    apiBinary(payload: null, config: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
+    apiBinary(payload: TOutput | null, config?: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse {
+        return super.apiBinary(payload as TOutput, config, options);
     }
 }

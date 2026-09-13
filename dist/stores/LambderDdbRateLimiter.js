@@ -1,4 +1,4 @@
-import { DynamoDBClient, UpdateItemCommand, } from "@aws-sdk/client-dynamodb";
+import { loadDynamoClientSdk } from "./LambderDdbSdk.js";
 /**
  * The fixed windows a policy may cap, smallest first (the evaluation order),
  * with their length. The policy type derives from this table, so the two can
@@ -32,7 +32,10 @@ export const RATE_LIMIT_WINDOWS = [
 export class LambderDdbRateLimiter {
     tableName;
     keyPrefix;
-    client;
+    /** The client given at creation, or one created from `region` on first use; the SDK arrives with it. */
+    providedClient;
+    region;
+    readyPromise;
     ttlWindowMultiplier;
     failOpen;
     constructor(options) {
@@ -45,7 +48,15 @@ export class LambderDdbRateLimiter {
             throw new Error("ttlWindowMultiplier must be a number greater than or equal to 1");
         }
         this.failOpen = options.failOpen ?? false;
-        this.client = options.client ?? new DynamoDBClient(options.region ? { region: options.region } : {});
+        this.providedClient = options.client;
+        this.region = options.region;
+    }
+    /** The SDK and the client, loaded and created the first time the table is touched (see LambderDdbSdk). */
+    ready() {
+        this.readyPromise ??= loadDynamoClientSdk("LambderDdbRateLimiter")
+            .then((sdk) => ({ sdk, client: this.providedClient ?? new sdk.DynamoDBClient(this.region ? { region: this.region } : {}) }))
+            .catch((error) => { this.readyPromise = undefined; throw error; });
+        return this.readyPromise;
     }
     /**
      * Increment every configured window for `trackerKey` (IP, session, user id, ...)
@@ -84,7 +95,8 @@ export class LambderDdbRateLimiter {
             },
         };
         try {
-            await this.client.send(new UpdateItemCommand(input));
+            const { client, sdk } = await this.ready();
+            await client.send(new sdk.UpdateItemCommand(input));
             return false;
         }
         catch (error) {

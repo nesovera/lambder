@@ -12,6 +12,7 @@ export { default as LambderCaller } from "./client/LambderCaller.js";
 export type {
     LambderApiOutcome,
     LambderApiFailureReason,
+    LambderValidationError,
     LambderCallOptions,
     LambderCallerOptions,
     LambderGuardInputsProvider,
@@ -27,17 +28,23 @@ export type { LambderApiErrorOptions, LambderRefusalMessage, LambderRefusalCode,
 // The API contract and wire envelope both sides speak.
 export type { ApiContractShape, LambderApiResponse, LambderApiResponseConfig } from "./shared/LambderApiContract.js";
 
+// A crash described for a caller allowed to see it (the envelope's `crash` field; pure, no Node built-ins).
+export { describeCrash, errorFromCrashDetail } from "./shared/LambderCrashDetail.js";
+export type { LambderCrashDetail, LambderCrashCause } from "./shared/LambderCrashDetail.js";
+
 // Request payload compression (browser-safe: gzip via CompressionStream, no Node built-ins).
 export {
-    compressPayloadJson,
-    decompressPayloadJson,
+    compressPayloadGzip,
+    decompressPayloadGzip,
     isRequestCompressionAvailable,
-    COMPRESSED_PAYLOAD_FIELD,
+    COMPRESSED_PAYLOAD_GZ_FIELD,
+    COMPRESSED_PAYLOAD_BR_FIELD,
     COMPRESSED_PAYLOAD_BYTES_FIELD,
     DEFAULT_REQUEST_COMPRESSION_SETTINGS,
 } from "./shared/LambderRequestPayload.js";
 export type {
-    LambderCompressedPayload,
+    LambderCompressedGzipPayload,
+    LambderCompressedBrotliPayload,
     LambderRequestCompressionOption,
     LambderRequestCompressionSettings,
 } from "./shared/LambderRequestPayload.js";

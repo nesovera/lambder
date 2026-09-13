@@ -66,11 +66,12 @@ export type LambderRestorePayloadResult = {
     message: string;
 };
 /**
- * Restores a request payload the caller sent gzipped (`payloadGz` +
- * `payloadBytes`) onto ctx.post.payload and ctx.apiPayload, so every later
- * stage (rate-limit key slices, guards, input validation, the handler) reads
- * an ordinary payload and needs no awareness of the wire format. A request
- * that sent a plain payload passes through untouched.
+ * Restores a request payload the caller sent compressed (`payloadGz` or
+ * `payloadBr`, beside `payloadBytes`) onto ctx.post.payload and
+ * ctx.apiPayload, so every later stage (rate-limit key slices, guards, input
+ * validation, the handler) reads an ordinary payload and needs no awareness
+ * of the wire format. The field names the encoding; a request carrying both
+ * is refused. A request that sent a plain payload passes through untouched.
  *
  * Every failure answers with a message instead of throwing: a malformed body
  * is a client error, not a crash. The declared byte length both bounds the

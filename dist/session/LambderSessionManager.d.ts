@@ -78,7 +78,9 @@ export default class LambderSessionManager {
     private sessionSalt;
     private partitionKey;
     private sortKey;
-    private ddbDocumentClient;
+    private tableRegion;
+    /** The document client and the SDK it came from, created the first time the table is touched. */
+    private readyPromise;
     private enableSlidingExpiration;
     private slidingWriteIntervalSeconds;
     private dataRefresh;
@@ -94,6 +96,8 @@ export default class LambderSessionManager {
         dataRefresh?: LambderSessionDataRefreshConfig;
         compression?: LambderCompressionOption;
     });
+    /** The SDK and the client, loaded and created the first time the table is touched (see LambderDdbSdk). */
+    private ready;
     private sessionUserKeyHasher;
     /**
      * At-rest hash for the bearer secrets (session sort-key secret, CSRF

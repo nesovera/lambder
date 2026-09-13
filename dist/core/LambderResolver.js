@@ -22,13 +22,17 @@ export default class LambderResolver extends LambderResponseBuilder {
             redirect: (...a) => { throw this.redirect(...a); },
             versionExpired: (...a) => { throw this.versionExpired(...a); },
             fileBase64: (...a) => { throw this.fileBase64(...a); },
-            api: (...a) => { throw this.api(...a); },
-            apiBinary: (...a) => { throw this.apiBinary(...a); },
+            // Overloaded on the payload (see LambderApiAnswer); the implementation takes both shapes.
+            api: ((payload, config, options) => {
+                throw this.api(payload, config, options);
+            }),
+            apiBinary: ((payload, config, options) => {
+                throw this.apiBinary(payload, config, options);
+            }),
             file: async (...a) => { throw await this.file(...a); },
             templateFile: async (...a) => { throw await this.templateFile(...a); },
         };
     }
-    // Override api method with proper output typing
     api(payload, config, options) {
         return super.api(payload, config, options);
     }

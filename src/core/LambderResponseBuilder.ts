@@ -21,6 +21,19 @@ export type LambderResponseOptions = {
     etag?: boolean | "auto";
 };
 
+/**
+ * The two shapes of an API answer: the output the contract declares, or
+ * `null` beside a config that says why (a refusal flag, an `errorMessage`, a
+ * `message`). A bare `res.api(null)` compiles only when the output type
+ * itself allows null, so a success payload is always the declared output,
+ * which is what lets a typed caller (LambderInvokeCaller.api) promise it.
+ * Untyped resolvers (`TOutput = any`) accept anything, as before.
+ */
+export type LambderApiAnswer<TOutput, TResult> = {
+    (payload: TOutput, config?: LambderApiResponseConfig, options?: LambderResponseOptions): TResult;
+    (payload: null, config: LambderApiResponseConfig, options?: LambderResponseOptions): TResult;
+};
+
 export type LambderRawResponseInit = {
     statusCode: HttpStatusCode;
     headers?: LambderHeadersInput;
@@ -199,11 +212,13 @@ export default class LambderResponseBuilder<TResponse = any> {
         return this.buildResponse(200, "text/html; charset=utf-8", template.render(data), options);
     };
 
+    api(payload: TResponse, config?: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
+    api(payload: null, config: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
     api(
         payload: TResponse | null,
         {
             versionExpired, sessionExpired, notAuthorized,
-            message, errorMessage, logList,
+            message, errorMessage, logList, crash,
         }: LambderApiResponseConfig = {},
         options?: LambderResponseOptions,
     ): LambderResponse {
@@ -216,17 +231,20 @@ export default class LambderResponseBuilder<TResponse = any> {
             ...(notAuthorized ? { notAuthorized } : {}),
             ...(message ? { message } : {}),
             ...(errorMessage ? { errorMessage } : {}),
+            ...(crash ? { crash } : {}),
             ...(finalLogList?.length ? { logList: finalLogList } : {}),
         }, options);
     };
 
-    /** Same as api() but forces gzip compression of the response body. */
+    /** Same as api() but forces compression of the response body. */
+    apiBinary(payload: TResponse, config?: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
+    apiBinary(payload: null, config: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
     apiBinary(
         payload: TResponse | null,
         config: LambderApiResponseConfig = {},
         options?: LambderResponseOptions,
     ): LambderResponse {
-        return this.api(payload, config, { ...options, compress: true });
+        return this.api(payload as TResponse, config, { ...options, compress: true });
     };
 
 };

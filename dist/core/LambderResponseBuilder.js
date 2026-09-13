@@ -157,7 +157,7 @@ export default class LambderResponseBuilder {
         return this.buildResponse(200, "text/html; charset=utf-8", template.render(data), options);
     }
     ;
-    api(payload, { versionExpired, sessionExpired, notAuthorized, message, errorMessage, logList, } = {}, options) {
+    api(payload, { versionExpired, sessionExpired, notAuthorized, message, errorMessage, logList, crash, } = {}, options) {
         const finalLogList = logList || this.ctx?._otherInternal?.logToApiResponseAccumulator;
         return this.json({
             apiVersion: this.apiVersion,
@@ -167,11 +167,11 @@ export default class LambderResponseBuilder {
             ...(notAuthorized ? { notAuthorized } : {}),
             ...(message ? { message } : {}),
             ...(errorMessage ? { errorMessage } : {}),
+            ...(crash ? { crash } : {}),
             ...(finalLogList?.length ? { logList: finalLogList } : {}),
         }, options);
     }
     ;
-    /** Same as api() but forces gzip compression of the response body. */
     apiBinary(payload, config = {}, options) {
         return this.api(payload, config, { ...options, compress: true });
     }

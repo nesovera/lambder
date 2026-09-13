@@ -1,7 +1,7 @@
 import crypto from "crypto";
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, QueryCommand, DeleteCommand, PutCommand, GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { compressText, restoreBoundedText } from "../shared/LambderCompressionCodec.js";
+import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { loadDynamoClientSdk, loadDynamoDocumentSdk, type LambderDynamoDocumentSdk } from "../stores/LambderDdbSdk.js";
+import { compressText, restoreText } from "../shared/LambderCompressionCodec.js";
 import {
     resolveCompressionOption,
     type LambderCompressionOption, type LambderCompressionSettings,
@@ -108,7 +108,9 @@ export default class LambderSessionManager{
     private sessionSalt: string;
     private partitionKey: string;
     private sortKey: string;
-    private ddbDocumentClient: DynamoDBDocumentClient;
+    private tableRegion: string;
+    /** The document client and the SDK it came from, created the first time the table is touched. */
+    private readyPromise: Promise<{ client: DynamoDBDocumentClient; sdk: LambderDynamoDocumentSdk }> | undefined;
     private enableSlidingExpiration: boolean;
     private slidingWriteIntervalSeconds: number | null;
     private dataRefresh: LambderSessionDataRefreshConfig | null;
@@ -141,9 +143,15 @@ export default class LambderSessionManager{
         this.slidingWriteIntervalSeconds = slidingWriteIntervalSeconds ?? null;
         this.dataRefresh = dataRefresh ?? null;
         this.compression = resolveCompressionOption(compression, SESSION_COMPRESSION_DEFAULTS);
+        this.tableRegion = tableRegion;
+    }
 
-        const ddbClient = new DynamoDBClient({ region: tableRegion });
-        this.ddbDocumentClient = DynamoDBDocumentClient.from(ddbClient);
+    /** The SDK and the client, loaded and created the first time the table is touched (see LambderDdbSdk). */
+    private ready(): Promise<{ client: DynamoDBDocumentClient; sdk: LambderDynamoDocumentSdk }> {
+        this.readyPromise ??= Promise.all([loadDynamoClientSdk("LambderSessionManager"), loadDynamoDocumentSdk("LambderSessionManager")])
+            .then(([clientSdk, sdk]) => ({ sdk, client: sdk.DynamoDBDocumentClient.from(new clientSdk.DynamoDBClient({ region: this.tableRegion })) }))
+            .catch((error: unknown) => { this.readyPromise = undefined; throw error; });
+        return this.readyPromise;
     }
 
     private sessionUserKeyHasher(password:string){
@@ -170,8 +178,9 @@ export default class LambderSessionManager{
     }
 
     private async ddbGetItem<T=any>(key:Record<string,string|number>){
-        const response = await this.ddbDocumentClient.send(
-            new GetCommand({ TableName: this.tableName, Key: key, ConsistentRead: true })
+        const { client, sdk } = await this.ready();
+        const response = await client.send(
+            new sdk.GetCommand({ TableName: this.tableName, Key: key, ConsistentRead: true })
         );
         if(response.Item) return response.Item as T;
         return null;
@@ -190,14 +199,16 @@ export default class LambderSessionManager{
         }else{
             item.data = data;
         }
-        return await this.ddbDocumentClient.send(
-            new PutCommand({ TableName: this.tableName, Item: item, })
+        const { client, sdk } = await this.ready();
+        return await client.send(
+            new sdk.PutCommand({ TableName: this.tableName, Item: item, })
         );
     };
 
     private async ddbDeleteItem(key:Record<string,string|number>){
-        return await this.ddbDocumentClient.send(
-            new DeleteCommand({ TableName: this.tableName, Key: key, })
+        const { client, sdk } = await this.ready();
+        return await client.send(
+            new sdk.DeleteCommand({ TableName: this.tableName, Key: key, })
         );
     };
 
@@ -212,7 +223,8 @@ export default class LambderSessionManager{
         }
         const queryResults: any[] = [];
         do{
-            const {Items, LastEvaluatedKey} =  await this.ddbDocumentClient.send(new QueryCommand(params));
+            const { client, sdk } = await this.ready();
+            const {Items, LastEvaluatedKey} =  await client.send(new sdk.QueryCommand(params));
             if(Items) queryResults.push(...Items);
             params.ExclusiveStartKey  = LastEvaluatedKey;
             if(typeof LastEvaluatedKey == "undefined") return queryResults;
@@ -223,7 +235,8 @@ export default class LambderSessionManager{
     private async ddbDeleteAllByPartitionKey(partitionValue: string){
         const queryResults = await this.ddbQueryAllByPartitionKey(partitionValue);
         for(const item of queryResults){
-            await this.ddbDocumentClient.send(new DeleteCommand({
+            const { client, sdk } = await this.ready();
+            await client.send(new sdk.DeleteCommand({
                 TableName: this.tableName,
                 Key: { [this.partitionKey]: partitionValue, [this.sortKey]: item[this.sortKey] }
             }));
@@ -307,7 +320,7 @@ export default class LambderSessionManager{
         // that fails to decode throws, which the controller treats like any
         // malformed record: no session.
         if(session.dataBr){
-            session.data = JSON.parse(await restoreBoundedText(session.dataBr, session.dataBytes, "br"));
+            session.data = JSON.parse(await restoreText(session.dataBr, "br", { declaredBytes: session.dataBytes }));
             delete session.dataBr;
             delete session.dataBytes;
         }
@@ -451,7 +464,8 @@ export default class LambderSessionManager{
         const now = Math.floor(Date.now()/1000);
         for(const item of await this.ddbQueryAllByPartitionKey(partitionValue)){
             try{
-                await this.ddbDocumentClient.send(new UpdateCommand({
+                const { client, sdk } = await this.ready();
+                await client.send(new sdk.UpdateCommand({
                     TableName: this.tableName,
                     Key: { [this.partitionKey]: partitionValue, [this.sortKey]: item[this.sortKey] },
                     UpdateExpression: "SET #dataExpiresAt = :now",

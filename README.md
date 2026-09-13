@@ -53,6 +53,9 @@ const company = await caller.api("getCompany", { slug: "acme" });
   cookies, and a guard against Lambda's response size cap.
 - **Hooks and actions.** Lifecycle hooks, plus `addAction()` for the non-HTTP
   invocations (EventBridge, SQS, custom events) the same function receives.
+- **Lambda to lambda calls.** `LambderInvokeCaller` invokes a Lambder app in
+  another function directly, with no API Gateway in between, typed from the
+  callee's own contract and carrying its refusals, crash detail and logs back.
 - **Frontend hosting.** Serve a build from a folder, S3, R2 or any HTTP
   origin, with an app shell rendered through a build-pipeline-safe template
   engine.
@@ -74,8 +77,9 @@ import needs:
 | --- | --- |
 | `lambder/client` (browser, shared isomorphic code) | `zod` |
 | `lambder` on AWS Lambda (`nodejs18.x` and later) | `zod`. The runtime already provides the AWS SDK v3, so mark the SDK packages as dev dependencies and keep them out of the deployment package |
-| `lambder` anywhere else (a long-running server, a container, local tests) | `zod`, `@aws-sdk/client-dynamodb`, `@aws-sdk/lib-dynamodb` |
+| `lambder` anywhere else (a long-running server, a container, local tests) | `zod`, plus `@aws-sdk/client-dynamodb` and `@aws-sdk/lib-dynamodb` when sessions or the DynamoDB stores are used; both are loaded on the first table access, so an app that uses neither needs neither |
 | `LambderS3FileSource` | `@aws-sdk/client-s3`, loaded on first read |
+| `LambderInvokeCaller` | `@aws-sdk/client-lambda`, loaded on the first call |
 | `lambder/testing` | `msw` |
 
 The SDK and its `@smithy` tree are roughly 21MB installed, which is why they are
@@ -101,8 +105,8 @@ tree-shaking.
 
 Source layout mirrors this: `src/core/` (request pipeline), `src/policies/`
 (declarative rate limits, guards, idempotency), `src/session/`, `src/stores/`
-(DynamoDB primitives), `src/client/`, and `src/shared/` (isomorphic modules
-both entries re-export).
+(DynamoDB primitives), `src/client/`, `src/invoke/` (the lambda-to-lambda
+caller), and `src/shared/` (isomorphic modules both entries re-export).
 
 ## Documentation
 
@@ -119,6 +123,7 @@ guide that matches what you are building. The full index lives in
 | [Responses](./docs/responses.md) | The render context, resolver methods, cookies, compression, ETag and the size cap |
 | [Sessions](./docs/sessions.md) | DynamoDB sessions, cookie scope, secrets at rest, `dataRefresh`, the controller API |
 | [API policies](./docs/api-policies.md) | Declarative rate limits, guards and idempotency, and mandatory authorization declarations |
+| [Calling another lambda](./docs/invoke.md) | `LambderInvokeCaller`: invoking a Lambder app in another function, its contract, failures and compression |
 | [Frontend client](./docs/client.md) | `LambderCaller`: typed calls, failure outcomes, timeouts, guard inputs, request compression |
 | [Frontend hosting](./docs/frontend-hosting.md) | File sources, `servePublicFiles`, `serveIndexHtml`, `res.templateFile` |
 | [Templating](./docs/templating.md) | `html`/`xml` tagged templates and `LambderTemplatingEngine` |

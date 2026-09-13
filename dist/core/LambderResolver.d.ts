@@ -1,4 +1,4 @@
-import LambderResponseBuilder, { type LambderApiResponseConfig, type LambderResponseOptions } from "./LambderResponseBuilder.js";
+import LambderResponseBuilder, { type LambderApiAnswer, type LambderApiResponseConfig, type LambderResponseOptions } from "./LambderResponseBuilder.js";
 import type { LambderResponse } from "./LambderResponse.js";
 type SyncDie<T extends (...args: any[]) => LambderResponse> = (...args: Parameters<T>) => never;
 type AsyncDie<T extends (...args: any[]) => Promise<LambderResponse>> = (...args: Parameters<T>) => Promise<never>;
@@ -13,8 +13,8 @@ export interface DieResolverMethods<TOutput> {
     redirect: SyncDie<LambderResponseBuilder["redirect"]>;
     versionExpired: SyncDie<LambderResponseBuilder["versionExpired"]>;
     fileBase64: SyncDie<LambderResponseBuilder["fileBase64"]>;
-    api: (payload: TOutput | null, config?: LambderApiResponseConfig, options?: LambderResponseOptions) => never;
-    apiBinary: (payload: TOutput | null, config?: LambderApiResponseConfig, options?: LambderResponseOptions) => never;
+    api: LambderApiAnswer<TOutput, never>;
+    apiBinary: LambderApiAnswer<TOutput, never>;
     file: AsyncDie<LambderResponseBuilder["file"]>;
     templateFile: AsyncDie<LambderResponseBuilder["templateFile"]>;
 }
@@ -29,7 +29,9 @@ export interface DieResolverMethods<TOutput> {
 export default class LambderResolver<TOutput = any> extends LambderResponseBuilder<TOutput> {
     die: DieResolverMethods<TOutput>;
     constructor(...args: ConstructorParameters<typeof LambderResponseBuilder>);
-    api(payload: TOutput | null, config?: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
-    apiBinary(payload: TOutput | null, config?: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
+    api(payload: TOutput, config?: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
+    api(payload: null, config: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
+    apiBinary(payload: TOutput, config?: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
+    apiBinary(payload: null, config: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
 }
 export {};

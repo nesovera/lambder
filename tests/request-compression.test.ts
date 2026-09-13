@@ -16,8 +16,8 @@ import { z } from 'zod';
 import Lambder, { initLambder } from '../src/core/Lambder.js';
 import LambderCaller from '../src/client/LambderCaller.js';
 import {
-    compressPayloadJson,
-    decompressPayloadJson,
+    compressPayloadGzip,
+    decompressPayloadGzip,
     DEFAULT_REQUEST_COMPRESSION_SETTINGS,
 } from '../src/shared/LambderRequestPayload.js';
 import { resolveCompressionOption } from '../src/shared/LambderCompressionOption.js';
@@ -25,13 +25,14 @@ import { LAMBDER_REFUSAL_CODES } from '../src/shared/LambderApiError.js';
 import { lambderGuard } from '../src/policies/LambderApiGuards.js';
 import { lambderRateLimitKey } from '../src/policies/LambderApiRateLimits.js';
 import { createApiEvent, createMockContext, createMockEventV2, decodeBody } from './helpers.js';
+import { compressPayloadBrotli } from '../src/invoke/LambderInvokeCaller.js';
 
 /** A payload big and repetitive enough that gzip is a large win. */
 const bigPayload = (size = 400) => ({ notes: Array.from({ length: size }, (_, i) => `stop-${i} on the main line`) });
 
 /** Builds the envelope exactly as a compressing caller would; the payload must be one that shrinks. */
 const compressedApiEvent = async (apiName: string, payload: unknown, extra: Record<string, unknown> = {}) => {
-    const compressed = await compressPayloadJson(JSON.stringify(payload), 0);
+    const compressed = await compressPayloadGzip(JSON.stringify(payload), 0);
     if(!compressed) throw new Error('test payload did not compress; use a larger or more repetitive one');
     return createApiEvent({ apiName, ...compressed, ...extra });
 };
@@ -73,7 +74,7 @@ describe('Request compression - the caller side', () => {
         expect(typeof bodies[0].payloadGz).toBe('string');
         expect(bodies[0].payloadBytes).toBe(new TextEncoder().encode(JSON.stringify(payload)).length);
         // Round-trips to the original payload.
-        await expect(decompressPayloadJson(bodies[0].payloadGz)).resolves.toEqual(payload);
+        await expect(decompressPayloadGzip(bodies[0].payloadGz)).resolves.toEqual(payload);
         // And is meaningfully smaller, base64 overhead included.
         expect(bodies[0].payloadGz.length).toBeLessThan(bodies[0].payloadBytes / 3);
     });
@@ -171,7 +172,7 @@ describe('Request compression - the caller side', () => {
         expect(json.length).toBeLessThan(200);
         expect(new TextEncoder().encode(json).length).toBeGreaterThan(200);
 
-        expect(await compressPayloadJson(json, 200)).not.toBeNull();
+        expect(await compressPayloadGzip(json, 200)).not.toBeNull();
     });
 
     it('resolves through the shared compression resolver, defaulting to off', () => {
@@ -264,7 +265,7 @@ describe('Request compression - the server side', () => {
     });
 
     it('refuses a missing or invalid payloadBytes', async () => {
-        const compressed = await compressPayloadJson(JSON.stringify(bigPayload()), 0);
+        const compressed = await compressPayloadGzip(JSON.stringify(bigPayload()), 0);
         for(const bytes of [undefined, 0, -5, 1.5, '100']){
             const result = await echoApi().render(
                 createApiEvent({ apiName: 'echo', payloadGz: compressed!.payloadGz, payloadBytes: bytes }),
@@ -306,7 +307,7 @@ describe('Request compression - the server side', () => {
     });
 
     it('refuses a truncated body', async () => {
-        const compressed = await compressPayloadJson(JSON.stringify(bigPayload()), 0);
+        const compressed = await compressPayloadGzip(JSON.stringify(bigPayload()), 0);
         const truncated = Buffer.from(compressed!.payloadGz, 'base64').subarray(0, 40).toString('base64');
         const result = await echoApi().render(
             createApiEvent({ apiName: 'echo', payloadGz: truncated, payloadBytes: compressed!.payloadBytes }),
@@ -343,7 +344,7 @@ describe('Request compression - the server side', () => {
     });
 
     it('lets a compressed payload win over a plain one sent alongside it', async () => {
-        const compressed = await compressPayloadJson(JSON.stringify(bigPayload(5)), 0);
+        const compressed = await compressPayloadGzip(JSON.stringify(bigPayload(5)), 0);
         const result = await echoApi().render(
             createApiEvent({ apiName: 'echo', payload: { notes: ['plain', 'plain'] }, ...compressed }),
             createMockContext(),
@@ -399,7 +400,7 @@ describe('Request compression - the deployment shape (HTTP API v2 + CORS)', () =
     });
 
     it('restores a compressed payload from a v2 event', async () => {
-        const compressed = await compressPayloadJson(JSON.stringify(bigPayload(7)), 0);
+        const compressed = await compressPayloadGzip(JSON.stringify(bigPayload(7)), 0);
 
         const result = await corsApi().render(v2ApiEvent({ apiName: 'echo', ...compressed }), createMockContext());
 
@@ -483,5 +484,50 @@ describe('Request compression - round trip through the real pipeline', () => {
 
         expect(keys).toEqual(['api|ingest|perTenant|custom:acme']);
         expect(JSON.parse(decodeBody(result)).payload).toEqual({ ok: true });
+    });
+});
+
+describe('Request compression - Brotli from a Node caller (payloadBr)', () => {
+    /** The pair LambderInvokeCaller sends; the same field rules as payloadGz. */
+    const brotliApiEvent = async (apiName: string, payload: unknown, extra: Record<string, unknown> = {}) => {
+        const compressed = await compressPayloadBrotli(JSON.stringify(payload), 0, 5);
+        if(!compressed) throw new Error('test payload did not compress; use a larger or more repetitive one');
+        return createApiEvent({ apiName, ...compressed, ...extra });
+    };
+
+    it('restores a payloadBr payload before validation and the handler', async () => {
+        const payload = bigPayload();
+        const result = await echoApi().render(await brotliApiEvent('echo', payload), createMockContext());
+
+        expect(result.statusCode).toBe(200);
+        expect(JSON.parse(decodeBody(result)).payload).toEqual({ count: 400 });
+    });
+
+    it('refuses a request that carries both payloadGz and payloadBr', async () => {
+        const payload = bigPayload();
+        const gzip = await compressPayloadGzip(JSON.stringify(payload), 0);
+        const result = await echoApi().render(await brotliApiEvent('echo', payload, { ...gzip }), createMockContext());
+
+        expect(result.statusCode).toBe(400);
+        const body = JSON.parse(decodeBody(result));
+        expect(body.errorMessage.code).toBe(LAMBDER_REFUSAL_CODES.invalidRequestPayload);
+        expect(body.errorMessage.content).toContain('both');
+    });
+
+    it('a payloadBr that is not Brotli, or lies about its length, is refused like a bad payloadGz', async () => {
+        const payload = bigPayload();
+        const gzipBytes = await compressPayloadGzip(JSON.stringify(payload), 0);
+        // gzip bytes under the Brotli field: not this algorithm.
+        const wrongAlgorithm = await echoApi().render(createApiEvent({
+            apiName: 'echo', payloadBr: gzipBytes!.payloadGz, payloadBytes: gzipBytes!.payloadBytes,
+        }), createMockContext());
+        expect(wrongAlgorithm.statusCode).toBe(400);
+
+        const compressed = await compressPayloadBrotli(JSON.stringify(payload), 0, 5);
+        const wrongLength = await echoApi().render(createApiEvent({
+            apiName: 'echo', payloadBr: compressed!.payloadBr, payloadBytes: compressed!.payloadBytes + 1,
+        }), createMockContext());
+        expect(wrongLength.statusCode).toBe(400);
+        expect(JSON.parse(decodeBody(wrongLength)).errorMessage.content).toContain('declared length');
     });
 });

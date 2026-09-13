@@ -174,6 +174,7 @@ the reserved `lambder/` prefix, so app codes never collide:
 | `duplicateInFlight` | `lambder/duplicate-in-flight` | The original of an idempotent request is still running (409) |
 | `invalidIdempotencyKey` | `lambder/invalid-idempotency-key` | The `idempotencyKey` is malformed (400) |
 | `apiNotFound` | `lambder/api-not-found` | No API is registered under the requested name |
+| `invalidRequestPayload` | `lambder/invalid-request-payload` | A compressed request payload (`payloadGz` or `payloadBr`) is malformed, carries both fields, or exceeds `maxRequestPayloadBytes` (400) |
 
 A rate-limit policy's own `errorMessage` inherits `lambder/rate-limited` unless
 it sets a code, so an `errorMessageHandler` can treat every rate limit alike and

@@ -1,6 +1,6 @@
 import crypto from "crypto";
-import { DynamoDBClient, PutItemCommand, GetItemCommand, DeleteItemCommand, } from "@aws-sdk/client-dynamodb";
-import { compressText, restoreBoundedText } from "../shared/LambderCompressionCodec.js";
+import { loadDynamoClientSdk } from "./LambderDdbSdk.js";
+import { compressText, restoreText } from "../shared/LambderCompressionCodec.js";
 import { resolveCompressionOption, } from "../shared/LambderCompressionOption.js";
 /** Bodies of 1KB or more are stored Brotli-compressed by default; smaller ones stay plain. */
 const COMPRESSION_DEFAULTS = { minBytes: 1024, quality: 5 };
@@ -38,14 +38,25 @@ export class LambderDdbIdempotency {
     tableName;
     keyPrefix;
     compression;
-    client;
+    /** The client given at creation, or one created from `region` on first use; the SDK arrives with it. */
+    providedClient;
+    region;
+    readyPromise;
     constructor(options) {
         if (!options.tableName.trim())
             throw new Error("tableName is required");
         this.tableName = options.tableName;
         this.keyPrefix = options.keyPrefix ?? "IDEM";
         this.compression = resolveCompressionOption(options.compression, COMPRESSION_DEFAULTS);
-        this.client = options.client ?? new DynamoDBClient(options.region ? { region: options.region } : {});
+        this.providedClient = options.client;
+        this.region = options.region;
+    }
+    /** The SDK and the client, loaded and created the first time the table is touched (see LambderDdbSdk). */
+    ready() {
+        this.readyPromise ??= loadDynamoClientSdk("LambderDdbIdempotency")
+            .then((sdk) => ({ sdk, client: this.providedClient ?? new sdk.DynamoDBClient(this.region ? { region: this.region } : {}) }))
+            .catch((error) => { this.readyPromise = undefined; throw error; });
+        return this.readyPromise;
     }
     itemKey(scopeKey) {
         return { pk: { S: `${this.keyPrefix}#${scopeKey}` }, sk: { S: "idem" } };
@@ -67,7 +78,7 @@ export class LambderDdbIdempotency {
     static async readItemBody(item) {
         const compressed = item.bodyBr?.B;
         if (compressed)
-            return await restoreBoundedText(compressed, Number(item.bodyBytes?.N ?? 0), "br");
+            return await restoreText(compressed, "br", { declaredBytes: Number(item.bodyBytes?.N ?? 0) });
         return item.body?.S ?? "";
     }
     /**
@@ -77,7 +88,8 @@ export class LambderDdbIdempotency {
      * proceeds to begin(), whose read is authoritative.
      */
     async peek(scopeKey) {
-        const existing = await this.client.send(new GetItemCommand({
+        const { client, sdk } = await this.ready();
+        const existing = await client.send(new sdk.GetItemCommand({
             TableName: this.tableName,
             Key: this.itemKey(scopeKey),
         }));
@@ -103,7 +115,8 @@ export class LambderDdbIdempotency {
         const nowSeconds = Math.floor(Date.now() / 1000);
         const ownerToken = crypto.randomBytes(16).toString("hex");
         try {
-            await this.client.send(new PutItemCommand({
+            const { client, sdk } = await this.ready();
+            await client.send(new sdk.PutItemCommand({
                 TableName: this.tableName,
                 Item: {
                     ...this.itemKey(scopeKey),
@@ -120,7 +133,8 @@ export class LambderDdbIdempotency {
             if (error.name !== "ConditionalCheckFailedException")
                 throw error;
         }
-        const existing = await this.client.send(new GetItemCommand({
+        const { client, sdk } = await this.ready();
+        const existing = await client.send(new sdk.GetItemCommand({
             TableName: this.tableName,
             Key: this.itemKey(scopeKey),
             ConsistentRead: true,
@@ -168,7 +182,8 @@ export class LambderDdbIdempotency {
             bodyAttributes = { body: { S: body } };
         }
         try {
-            await this.client.send(new PutItemCommand({
+            const { client, sdk } = await this.ready();
+            await client.send(new sdk.PutItemCommand({
                 TableName: this.tableName,
                 Item: {
                     ...this.itemKey(scopeKey),
@@ -197,7 +212,8 @@ export class LambderDdbIdempotency {
      */
     async abandon(scopeKey, ownerToken) {
         try {
-            await this.client.send(new DeleteItemCommand({
+            const { client, sdk } = await this.ready();
+            await client.send(new sdk.DeleteItemCommand({
                 TableName: this.tableName,
                 Key: this.itemKey(scopeKey),
                 ConditionExpression: "ownerToken = :owner",

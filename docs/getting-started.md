@@ -13,7 +13,9 @@ npm install lambder zod
 On Lambda (`nodejs18.x` and later) the AWS SDK v3 is already provided by the
 runtime, so add `@aws-sdk/client-dynamodb` and `@aws-sdk/lib-dynamodb` as dev
 dependencies and keep them out of the deployment package. Anywhere else (a
-container, a long-running server, local tests) install them for real. The
+container, a long-running server, local tests) install them for real. Both are
+loaded on the first session or store access, so an app that keeps no sessions
+and uses no store needs neither. The
 [README's install section](../README.md#installation) has the full table.
 
 ## 1. Create the instance

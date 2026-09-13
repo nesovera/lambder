@@ -1,4 +1,4 @@
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import type { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 /**
  * The fixed windows a policy may cap, smallest first (the evaluation order),
  * with their length. The policy type derives from this table, so the two can
@@ -68,10 +68,15 @@ export interface LambderDdbRateLimiterOptions {
 export declare class LambderDdbRateLimiter {
     readonly tableName: string;
     readonly keyPrefix: string;
-    private readonly client;
+    /** The client given at creation, or one created from `region` on first use; the SDK arrives with it. */
+    private readonly providedClient;
+    private readonly region;
+    private readyPromise;
     private readonly ttlWindowMultiplier;
     private readonly failOpen;
     constructor(options: LambderDdbRateLimiterOptions);
+    /** The SDK and the client, loaded and created the first time the table is touched (see LambderDdbSdk). */
+    private ready;
     /**
      * Increment every configured window for `trackerKey` (IP, session, user id, ...)
      * and report whether any of them is over its limit, with the window's

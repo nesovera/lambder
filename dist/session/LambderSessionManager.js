@@ -1,7 +1,6 @@
 import crypto from "crypto";
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, QueryCommand, DeleteCommand, PutCommand, GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { compressText, restoreBoundedText } from "../shared/LambderCompressionCodec.js";
+import { loadDynamoClientSdk, loadDynamoDocumentSdk } from "../stores/LambderDdbSdk.js";
+import { compressText, restoreText } from "../shared/LambderCompressionCodec.js";
 import { resolveCompressionOption, } from "../shared/LambderCompressionOption.js";
 /**
  * Session compression defaults: every record compressed (see
@@ -42,7 +41,9 @@ export default class LambderSessionManager {
     sessionSalt;
     partitionKey;
     sortKey;
-    ddbDocumentClient;
+    tableRegion;
+    /** The document client and the SDK it came from, created the first time the table is touched. */
+    readyPromise;
     enableSlidingExpiration;
     slidingWriteIntervalSeconds;
     dataRefresh;
@@ -56,8 +57,14 @@ export default class LambderSessionManager {
         this.slidingWriteIntervalSeconds = slidingWriteIntervalSeconds ?? null;
         this.dataRefresh = dataRefresh ?? null;
         this.compression = resolveCompressionOption(compression, SESSION_COMPRESSION_DEFAULTS);
-        const ddbClient = new DynamoDBClient({ region: tableRegion });
-        this.ddbDocumentClient = DynamoDBDocumentClient.from(ddbClient);
+        this.tableRegion = tableRegion;
+    }
+    /** The SDK and the client, loaded and created the first time the table is touched (see LambderDdbSdk). */
+    ready() {
+        this.readyPromise ??= Promise.all([loadDynamoClientSdk("LambderSessionManager"), loadDynamoDocumentSdk("LambderSessionManager")])
+            .then(([clientSdk, sdk]) => ({ sdk, client: sdk.DynamoDBDocumentClient.from(new clientSdk.DynamoDBClient({ region: this.tableRegion })) }))
+            .catch((error) => { this.readyPromise = undefined; throw error; });
+        return this.readyPromise;
     }
     sessionUserKeyHasher(password) {
         return crypto.createHash("sha256")
@@ -81,7 +88,8 @@ export default class LambderSessionManager {
         return crypto.timingSafeEqual(new Uint8Array(bufferA), new Uint8Array(bufferB));
     }
     async ddbGetItem(key) {
-        const response = await this.ddbDocumentClient.send(new GetCommand({ TableName: this.tableName, Key: key, ConsistentRead: true }));
+        const { client, sdk } = await this.ready();
+        const response = await client.send(new sdk.GetCommand({ TableName: this.tableName, Key: key, ConsistentRead: true }));
         if (response.Item)
             return response.Item;
         return null;
@@ -102,11 +110,13 @@ export default class LambderSessionManager {
         else {
             item.data = data;
         }
-        return await this.ddbDocumentClient.send(new PutCommand({ TableName: this.tableName, Item: item, }));
+        const { client, sdk } = await this.ready();
+        return await client.send(new sdk.PutCommand({ TableName: this.tableName, Item: item, }));
     }
     ;
     async ddbDeleteItem(key) {
-        return await this.ddbDocumentClient.send(new DeleteCommand({ TableName: this.tableName, Key: key, }));
+        const { client, sdk } = await this.ready();
+        return await client.send(new sdk.DeleteCommand({ TableName: this.tableName, Key: key, }));
     }
     ;
     /** Sort keys of every session under a partition (the callers only need the keys). */
@@ -120,7 +130,8 @@ export default class LambderSessionManager {
         };
         const queryResults = [];
         do {
-            const { Items, LastEvaluatedKey } = await this.ddbDocumentClient.send(new QueryCommand(params));
+            const { client, sdk } = await this.ready();
+            const { Items, LastEvaluatedKey } = await client.send(new sdk.QueryCommand(params));
             if (Items)
                 queryResults.push(...Items);
             params.ExclusiveStartKey = LastEvaluatedKey;
@@ -133,7 +144,8 @@ export default class LambderSessionManager {
     async ddbDeleteAllByPartitionKey(partitionValue) {
         const queryResults = await this.ddbQueryAllByPartitionKey(partitionValue);
         for (const item of queryResults) {
-            await this.ddbDocumentClient.send(new DeleteCommand({
+            const { client, sdk } = await this.ready();
+            await client.send(new sdk.DeleteCommand({
                 TableName: this.tableName,
                 Key: { [this.partitionKey]: partitionValue, [this.sortKey]: item[this.sortKey] }
             }));
@@ -202,7 +214,7 @@ export default class LambderSessionManager {
         // that fails to decode throws, which the controller treats like any
         // malformed record: no session.
         if (session.dataBr) {
-            session.data = JSON.parse(await restoreBoundedText(session.dataBr, session.dataBytes, "br"));
+            session.data = JSON.parse(await restoreText(session.dataBr, "br", { declaredBytes: session.dataBytes }));
             delete session.dataBr;
             delete session.dataBytes;
         }
@@ -360,7 +372,8 @@ export default class LambderSessionManager {
         const now = Math.floor(Date.now() / 1000);
         for (const item of await this.ddbQueryAllByPartitionKey(partitionValue)) {
             try {
-                await this.ddbDocumentClient.send(new UpdateCommand({
+                const { client, sdk } = await this.ready();
+                await client.send(new sdk.UpdateCommand({
                     TableName: this.tableName,
                     Key: { [this.partitionKey]: partitionValue, [this.sortKey]: item[this.sortKey] },
                     UpdateExpression: "SET #dataExpiresAt = :now",

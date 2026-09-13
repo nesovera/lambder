@@ -3,9 +3,11 @@
 Every name the three entry points export, grouped by what it is for. Anything
 not listed here is internal and may change without a major version.
 
-- `lambder` is the server surface: 49 values and 102 types.
-- `lambder/client` is the browser-safe subset: 20 values and 28 types, all of
-  them also exported from `lambder`.
+- `lambder` is the server surface: 61 values and 121 types.
+- `lambder/client` is the browser-safe subset: 23 values and 32 types. All but
+  the three browser-only compression helpers (`compressPayloadGzip`,
+  `decompressPayloadGzip`, `isRequestCompressionAvailable`) are also exported
+  from `lambder`.
 - `lambder/testing` carries the MSW adapter.
 
 The **Client** column marks what `lambder/client` also exports.
@@ -61,10 +63,12 @@ See [Responses](./responses.md).
 | `LambderApiError` | yes | The refusal class `refuse()` is sugar over |
 | `isLambderApiError` | yes | Brand-based detection, safe across duplicate copies of the package |
 | `LAMBDER_REFUSAL_CODES` | yes | The codes the framework stamps on its own refusals |
+| `describeCrash` | yes | Describe a thrown error for the envelope's `crash` field: name, message, stack, cause chain, where it happened |
+| `errorFromCrashDetail` | yes | Rebuild an Error (with its cause chain) from a crash detail |
 
 Types: `ApiContractShape`, `LambderApiResponse`, `LambderApiResponseConfig`,
 `LambderApiErrorOptions`, `LambderRefusalMessage`, `LambderRefusalCode`,
-`LambderRefuseOptions`.
+`LambderRefuseOptions`, `LambderCrashDetail`, `LambderCrashCause`.
 
 See [APIs and refusals](./apis.md).
 
@@ -162,21 +166,24 @@ See [Templating](./templating.md).
 | `resolveCompressionOption` | yes | Resolve any site's `compression` option to settings or null |
 | `LAMBDER_ENCODINGS` | | The encodings responses can negotiate |
 | `compressText` | | Brotli or gzip a buffer |
-| `restoreBoundedText` | | Decompress with the declared byte length bounding AND verifying the result |
+| `restoreBytes` | | Decompress under a bound: `{ declaredBytes }` bounds and verifies the result, `{ maxBytes }` is a ceiling alone for bytes that carry no declared length (a compressed HTTP answer). Returns the buffer, so bytes that are not text survive |
+| `restoreText` | | `restoreBytes` plus the UTF-8 decode: what every text caller uses |
 | `LambderCompressionError` | | Thrown when a restore fails |
 | `LAMBDER_RESTORE_FAILURES` | | The reasons a restore can fail |
-| `compressPayloadJson` | yes | Gzip a request payload (browser `CompressionStream`) |
-| `decompressPayloadJson` | yes | Restore one |
+| `compressPayloadGzip` | yes | Gzip a request payload (browser `CompressionStream`) |
+| `compressPayloadBrotli` | | Brotli a request payload, the Node caller's counterpart (zlib) |
+| `decompressPayloadGzip` | yes | Restore one |
 | `isRequestCompressionAvailable` | yes | Whether the runtime can compress requests |
-| `COMPRESSED_PAYLOAD_FIELD` | yes | The envelope field name (`payloadGz`) |
+| `COMPRESSED_PAYLOAD_GZ_FIELD` | yes | The envelope field name (`payloadGz`) |
+| `COMPRESSED_PAYLOAD_BR_FIELD` | yes | The Brotli envelope field name (`payloadBr`) |
 | `COMPRESSED_PAYLOAD_BYTES_FIELD` | yes | The envelope field name (`payloadBytes`) |
 | `DEFAULT_REQUEST_COMPRESSION_SETTINGS` | yes | `{ minBytes: 4096 }` |
-| `DEFAULT_MAX_REQUEST_PAYLOAD_BYTES` | | `20_000_000` |
+| `DEFAULT_MAX_RESTORED_PAYLOAD_BYTES` | | `20_000_000` |
 
 Types: `LambderCompressionOption`, `LambderCompressionSettings`,
-`LambderCompressionSettingsBase`, `LambderEncoding`, `LambderRestoreFailure`,
-`LambderCompressedPayload`, `LambderRequestCompressionOption`,
-`LambderRequestCompressionSettings`.
+`LambderCompressionSettingsBase`, `LambderEncoding`, `LambderRestoreFailure`, `LambderRestoreBound`,
+`LambderCompressedGzipPayload`, `LambderCompressedBrotliPayload`,
+`LambderRequestCompressionOption`, `LambderRequestCompressionSettings`.
 
 See [Responses](./responses.md#compression) and
 [Frontend client](./client.md#compressed-request-payloads).
@@ -187,11 +194,32 @@ See [Responses](./responses.md#compression) and
 | --- | --- | --- |
 | `LambderCaller` | yes | The typed API caller |
 
-Types: `LambderCallerOptions`, `LambderCallOptions`, `LambderApiOutcome`,
+Types: `LambderCallerOptions`, `LambderCallOptions`, `LambderApiOutcome`, `LambderValidationError`,
 `LambderApiFailureReason`, `LambderGuardInputsProvider`,
 `LambderProvidedGuardInputs`, `LambderIdempotencyKeyScope`.
 
 See [Frontend client](./client.md).
+
+## Invoking another Lambder app
+
+| Export | Client | Description |
+| --- | --- | --- |
+| `LambderInvokeCaller` | | Calls a Lambder app running in another lambda directly, typed from the callee's contract |
+| `LambderInvokeError` | | What `api()` throws: the reason, the outcome, the callee's crash, and its error rebuilt as `cause` |
+| `isLambderInvokeError` | | Brand-based detection, safe across duplicate copies of the package |
+| `LAMBDER_INVOKE_HEADER` | | The marker header name (`x-lambder-invoke`) |
+| `LAMBDER_INVOKED_BY_HEADER` | | The header naming the calling function (`x-lambder-invoked-by`) |
+| `LAMBDER_INVOKE_PROTOCOL` | | The marker's value (`"1"`) |
+| `LAMBDER_INVOKE_MAX_EVENT_BYTES` | | `5_500_000`, the guard applied to the event before it is sent |
+| `DEFAULT_INVOKE_REQUEST_COMPRESSION_SETTINGS` | | `{ minBytes: 4096, quality: 5 }` |
+
+Types: `LambderInvokeCallerOptions`, `LambderInvokeCallOptions`,
+`LambderInvokeOutcome`, `LambderInvokeFailure`, `LambderInvokeFailureReason`,
+`LambderInvokeFunctionError`, `LambderInvokeFailureHandler`, `LambderInvokeLogListHandler`, `LambderInvokeSession`, `LambderInvokeTransport`,
+`LambderInvokeTransportResult`, `LambderInvokeHttpResult`,
+`LambderInvokeRequestInit`, `LambderInvokeEventInit`.
+
+See [Calling a Lambder app from another lambda](./invoke.md).
 
 ## Translations
 

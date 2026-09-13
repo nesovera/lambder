@@ -19,6 +19,7 @@ export type ApiContractShape = Record<string, {
      */
     guards?: any;
 }>;
+import type { LambderCrashDetail } from "./LambderCrashDetail.js";
 /** Envelope flags/channels the server may set beside (or instead of) the payload. */
 export type LambderApiResponseConfig = {
     versionExpired?: boolean;
@@ -27,6 +28,14 @@ export type LambderApiResponseConfig = {
     message?: any;
     errorMessage?: any;
     logList?: any[];
+    /**
+     * A crash described in full (name, message, stack, cause chain, where it
+     * happened), for a caller that is allowed to see it: a global error
+     * handler answering a trusted invoker sets it with describeCrash().
+     * LambderInvokeCaller reads it back as the cause of the error it throws;
+     * the browser caller ignores it.
+     */
+    crash?: LambderCrashDetail;
 };
 /** The API wire envelope both sides speak: res.api() emits it, LambderCaller parses it. */
 export type LambderApiResponse<T> = LambderApiResponseConfig & {
