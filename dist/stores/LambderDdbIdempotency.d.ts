@@ -1,4 +1,4 @@
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import type { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { type LambderCompressionOption } from "../shared/LambderCompressionOption.js";
 export interface LambderDdbIdempotencyOptions {
     tableName: string;
@@ -56,8 +56,13 @@ export declare class LambderDdbIdempotency {
     readonly tableName: string;
     readonly keyPrefix: string;
     private readonly compression;
-    private readonly client;
+    /** The client given at creation, or one created from `region` on first use; the SDK arrives with it. */
+    private readonly providedClient;
+    private readonly region;
+    private readyPromise;
     constructor(options: LambderDdbIdempotencyOptions);
+    /** The SDK and the client, loaded and created the first time the table is touched (see LambderDdbSdk). */
+    private ready;
     private itemKey;
     /** Parse a stored item's response headers. */
     private static readItemHeaders;

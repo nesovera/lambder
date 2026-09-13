@@ -430,3 +430,20 @@ describe('LambderCaller - guardInputsProvider', () => {
         await plain.api('org.list', { page: 1 }, { guardInputs: { orgPermission: { orgSlug: 'acme' } } });
     });
 });
+
+describe('LambderCaller - a 5xx keeps the envelope the server sent', () => {
+    it('errorMessage, crash and logList from a global error handler\'s 500 body land on the outcome', async () => {
+        const crash = { name: 'Error', message: 'boom', stack: 'Error: boom\n    at handler', requestId: 'req-9', functionName: 'fn' };
+        stubFetch(async () => mockResponse(null, {
+            status: 500, statusText: 'Internal Server Error',
+            rawText: JSON.stringify({ apiVersion: '1', payload: null, errorMessage: 'Internal server error.', crash, logList: [{ before: 'the throw' }] }),
+        }));
+        const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false });
+
+        const outcome = await caller.apiOutcome('crash', {});
+        expect(outcome).toMatchObject({ ok: false, reason: 'server', status: 500, errorMessage: 'Internal server error.' });
+        if(outcome.ok) throw new Error('unreachable');
+        expect(outcome.response?.crash).toEqual(crash);
+        expect(outcome.response?.logList).toEqual([{ before: 'the throw' }]);
+    });
+});

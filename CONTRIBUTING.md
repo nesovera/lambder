@@ -59,6 +59,7 @@ change that only passes at runtime is not finished.
 | `src/session/` | Session manager and controller |
 | `src/stores/` | DynamoDB primitives: cache, rate limiter, idempotency; S3 and HTTP file sources |
 | `src/client/` | `LambderCaller` and the MSW adapter |
+| `src/invoke/` | `LambderInvokeCaller`: calling a Lambder app in another lambda |
 | `src/shared/` | Isomorphic modules both entry points re-export |
 
 The three entry points (`src/index.ts`, `src/client.ts`, `src/testing.ts`)

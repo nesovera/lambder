@@ -1,57 +1,9 @@
 import { type LambderRequestCompressionOption } from '../shared/LambderRequestPayload.js';
-import type { LambderApiResponse } from '../shared/LambderApiContract.js';
 import type { ApiContractShape } from '../shared/LambderApiContract.js';
-import type { z } from "zod";
-type IsAny<T> = 0 extends (1 & T) ? true : false;
-type GuardInputsOf<TEntry> = TEntry extends {
-    guardInputs: infer G;
-} ? G : never;
-/** Input type of guard G on one contract entry; never when that API does not declare it. */
-type GuardInputOf<TEntry, G extends string> = GuardInputsOf<TEntry> extends infer I ? (G extends keyof I ? I[G] : never) : never;
-/**
- * What guardInputsProvider returns: for every provided guard name, the value
- * the contract's APIs expect for it (a union across APIs when they differ).
- * Naming a guard no API declares in guardInput mode resolves to never, so a
- * typo fails the provider's return type instead of going missing at runtime.
- */
-export type LambderProvidedGuardInputs<TContract, TProvided extends string> = IsAny<TContract> extends true ? Record<TProvided, unknown> : {
-    [G in TProvided]: {
-        [K in keyof TContract]: GuardInputOf<TContract[K], G>;
-    }[keyof TContract];
-};
-/**
- * Supplies guardInputs for every call from one place (the organization the
- * UI is on, a device token), keyed by guard name; per-call guardInputs
- * merge on top. Name the guards it covers in the caller's second type
- * parameter, `new LambderCaller<Contract, "orgPermission">`, and calls to
- * APIs whose guardInput guards are all covered no longer require the
- * options argument. May be async; a throw fails the call as an unknown
- * error before anything is sent.
- */
-export type LambderGuardInputsProvider<TContract, TProvided extends string> = (apiName: keyof TContract & string) => LambderProvidedGuardInputs<TContract, TProvided> | Promise<LambderProvidedGuardInputs<TContract, TProvided>>;
-/** Optional until the caller names provided guards: naming them without a provider would send nothing. */
-type GuardInputsProviderOption<TContract, TProvided extends string> = [
-    TProvided
-] extends [never] ? {
-    guardInputsProvider?: LambderGuardInputsProvider<TContract, TProvided>;
-} : {
-    guardInputsProvider: LambderGuardInputsProvider<TContract, TProvided>;
-};
-/** An API's guardInput guards the provider does not cover: those the call must still pass. */
-type RemainingGuardInputs<TEntry, TProvided extends string> = Omit<GuardInputsOf<TEntry>, TProvided>;
-/**
- * The options argument: optional normally, REQUIRED (with guardInputs) when
- * the API's contract declares guardInput-mode guards the provider does not
- * cover, so forgetting to send a guard's value is a compile error at the
- * call site. Provided guards may still be overridden per call.
- */
-type CallOptionsArg<TContract, TApiName, TProvided extends string> = IsAny<TContract> extends true ? [options?: LambderCallOptions] : TApiName extends keyof TContract ? [GuardInputsOf<TContract[TApiName]>] extends [never] ? [options?: LambderCallOptions] : [keyof RemainingGuardInputs<TContract[TApiName], TProvided>] extends [never] ? [options?: LambderCallOptions & {
-    guardInputs?: Partial<GuardInputsOf<TContract[TApiName]>>;
-}] : [
-    options: LambderCallOptions & {
-        guardInputs: RemainingGuardInputs<TContract[TApiName], TProvided> & Partial<GuardInputsOf<TContract[TApiName]>>;
-    }
-] : [options?: LambderCallOptions];
+import { type LambderApiOutcome, type LambderValidationError } from '../shared/LambderApiOutcome.js';
+import { type LambderCallOptionsArg, type LambderGuardInputsProviderOption } from '../shared/LambderCallOptions.js';
+export type { LambderApiOutcome, LambderApiFailureReason, LambderValidationError } from '../shared/LambderApiOutcome.js';
+export type { LambderProvidedGuardInputs, LambderGuardInputsProvider } from '../shared/LambderCallOptions.js';
 type VoidFunction = () => void | Promise<void>;
 type FetchTracker = {
     apiName: string;
@@ -73,7 +25,7 @@ type FetchEndEventHandler = (params: {
     activeFetchList: FetchTracker[];
 }) => void | Promise<void>;
 type ErrorHandler = (err: Error) => void | Promise<void>;
-type ValidationErrorHandler = (zodError: z.ZodError) => (void | false) | Promise<(void | false)>;
+type ValidationErrorHandler = (zodError: LambderValidationError) => (void | false) | Promise<(void | false)>;
 type MessageHandler = (message: any) => void | Promise<void>;
 /** One logical operation's rotating idempotency key: see LambderCaller.createIdempotencyKeyScope(). */
 export type LambderIdempotencyKeyScope = {
@@ -81,32 +33,6 @@ export type LambderIdempotencyKeyScope = {
     readonly current: string;
     /** Call after a confirmed success: the next operation is a new intent. Returns the new key. */
     rotate(): string;
-};
-export type LambderApiFailureReason = 'network' | 'timeout' | 'server' | 'validation' | 'versionExpired' | 'sessionExpired' | 'notAuthorized' | 'errorMessage' | 'unknown';
-/**
- * Discriminated result of an API call: `ok: true` carries the payload, every
- * failure carries a machine-readable reason, so "the server returned null"
- * and "the request failed" are never conflated.
- */
-export type LambderApiOutcome<T> = {
-    ok: true;
-    payload: T | null | undefined;
-    response: LambderApiResponse<T>;
-} | {
-    ok: false;
-    reason: LambderApiFailureReason;
-    /** HTTP status, when a response was received. */
-    status?: number;
-    /** Envelope errorMessage, when the server provided one. */
-    errorMessage?: any;
-    /** Seconds to wait before retrying, from the response's Retry-After header (rate-limit refusals send it). */
-    retryAfterSeconds?: number;
-    /** Underlying Error for network/timeout/server/unknown failures. */
-    error?: Error;
-    /** Zod issue detail for 'validation'. */
-    zodError?: z.ZodError;
-    /** The parsed envelope, when one was received (protocol-level failures). */
-    response?: LambderApiResponse<T>;
 };
 /** Per-call options: request extras plus overrides for every constructor handler. */
 export type LambderCallOptions = {
@@ -179,7 +105,7 @@ type LambderCallerBaseOptions = {
     requestCompression?: LambderRequestCompressionOption;
 };
 /** Constructor options: the base options plus guardInputsProvider, mandatory once TProvided names guards. */
-export type LambderCallerOptions<TContract, TProvided extends string = never> = LambderCallerBaseOptions & GuardInputsProviderOption<TContract, TProvided>;
+export type LambderCallerOptions<TContract, TProvided extends string = never> = LambderCallerBaseOptions & LambderGuardInputsProviderOption<TContract, TProvided>;
 /**
  * @typeParam TContract - The API contract, for typed names, payloads and guard inputs.
  * @typeParam TProvidedGuards - Guard names guardInputsProvider covers; those APIs' options argument becomes optional.
@@ -238,8 +164,7 @@ export default class LambderCaller<TContract extends ApiContractShape = any, TPr
      * Full-fidelity call: resolves to a discriminated LambderApiOutcome
      * instead of collapsing every failure to null. Never throws.
      */
-    apiOutcome<TApiName extends keyof TContract & string = string, TOutput = TApiName extends keyof TContract ? TContract[TApiName]['output'] : any>(apiName: TApiName, payload?: TApiName extends keyof TContract ? TContract[TApiName]['input'] : any, ...rest: CallOptionsArg<TContract, TApiName, TProvidedGuards>): Promise<LambderApiOutcome<TOutput>>;
+    apiOutcome<TApiName extends keyof TContract & string = string, TOutput = TApiName extends keyof TContract ? TContract[TApiName]['output'] : any>(apiName: TApiName, payload?: TApiName extends keyof TContract ? TContract[TApiName]['input'] : any, ...rest: LambderCallOptionsArg<TContract, TApiName, TProvidedGuards, LambderCallOptions>): Promise<LambderApiOutcome<TOutput>>;
     /** Payload on success, null/undefined otherwise (indistinguishable from a null payload; prefer apiOutcome() when that matters). */
-    api<TApiName extends keyof TContract & string = string, TOutput = TApiName extends keyof TContract ? TContract[TApiName]['output'] : any>(apiName: TApiName, payload?: TApiName extends keyof TContract ? TContract[TApiName]['input'] : any, ...rest: CallOptionsArg<TContract, TApiName, TProvidedGuards>): Promise<TOutput | null | undefined>;
+    api<TApiName extends keyof TContract & string = string, TOutput = TApiName extends keyof TContract ? TContract[TApiName]['output'] : any>(apiName: TApiName, payload?: TApiName extends keyof TContract ? TContract[TApiName]['input'] : any, ...rest: LambderCallOptionsArg<TContract, TApiName, TProvidedGuards, LambderCallOptions>): Promise<TOutput | null | undefined>;
 }
-export {};

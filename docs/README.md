@@ -20,6 +20,7 @@ order the first time.
 | [Responses](./responses.md) | The render context, resolver methods, `die`, cookies, compression, ETag, and Lambda's size caps |
 | [Sessions](./sessions.md) | DynamoDB sessions, cookie scope and migrations, secrets at rest, `dataRefresh`, the session controller |
 | [API policies](./api-policies.md) | Declarative rate limits, guards and idempotency, and making an authorization declaration mandatory |
+| [Calling another lambda](./invoke.md) | `LambderInvokeCaller`: invoking a Lambder app in another function directly, with its contract, crash detail and logs |
 
 ## Building a frontend
 

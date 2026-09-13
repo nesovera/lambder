@@ -2,6 +2,10 @@ import Lambder from './core/Lambder.js';
 export default Lambder;
 export { initLambder } from './core/Lambder.js';
 export { default as LambderCaller } from "./client/LambderCaller.js";
+// Calling a Lambder app from another lambda (server-only: the Lambda SDK, zlib)
+export { default as LambderInvokeCaller, LambderInvokeError, isLambderInvokeError, compressPayloadBrotli, LAMBDER_INVOKE_HEADER, LAMBDER_INVOKED_BY_HEADER, LAMBDER_INVOKE_PROTOCOL, LAMBDER_INVOKE_MAX_EVENT_BYTES, DEFAULT_INVOKE_REQUEST_COMPRESSION_SETTINGS, } from "./invoke/LambderInvokeCaller.js";
+// A crash described for a caller allowed to see it (the envelope's `crash` field)
+export { describeCrash, errorFromCrashDetail } from "./shared/LambderCrashDetail.js";
 // Typed API refusals (isomorphic: shared code may throw them from anywhere)
 export { LambderApiError, isLambderApiError, refuse, LAMBDER_REFUSAL_CODES } from "./shared/LambderApiError.js";
 export { default as LambderResponseBuilder } from "./core/LambderResponseBuilder.js";
@@ -23,7 +27,7 @@ export { LambderHttpFileSource } from "./stores/LambderHttpFileSource.js";
 export { resolveCompressionOption, LAMBDER_ENCODINGS } from "./shared/LambderCompressionOption.js";
 // Brotli/gzip plus the bounded, length-verified restore every compressed
 // value in Lambder (records at rest, request payloads) goes through.
-export { compressText, restoreBoundedText, LambderCompressionError, LAMBDER_RESTORE_FAILURES, } from "./shared/LambderCompressionCodec.js";
+export { compressText, restoreBytes, restoreText, LambderCompressionError, LAMBDER_RESTORE_FAILURES, } from "./shared/LambderCompressionCodec.js";
 export { LambderSessionDataRefreshError, LambderSessionReadError } from "./session/LambderSessionManager.js";
 // DynamoDB-backed compressed cache (standalone, server-only)
 export { LambderDdbCache } from "./stores/LambderDdbCache.js";
@@ -39,6 +43,6 @@ export { lambderRateLimitKey } from "./policies/LambderApiRateLimits.js";
 export { createLambderI18n } from "./shared/LambderI18n.js";
 export { createContext, isV2HttpEvent } from "./core/LambderContext.js";
 // Request payload compression: the wire format LambderCaller and the server share.
-export { COMPRESSED_PAYLOAD_FIELD, COMPRESSED_PAYLOAD_BYTES_FIELD, DEFAULT_REQUEST_COMPRESSION_SETTINGS, DEFAULT_MAX_REQUEST_PAYLOAD_BYTES, } from "./shared/LambderRequestPayload.js";
+export { COMPRESSED_PAYLOAD_GZ_FIELD, COMPRESSED_PAYLOAD_BR_FIELD, COMPRESSED_PAYLOAD_BYTES_FIELD, DEFAULT_REQUEST_COMPRESSION_SETTINGS, DEFAULT_MAX_RESTORED_PAYLOAD_BYTES, } from "./shared/LambderRequestPayload.js";
 // Cookies (res.setCookie / res.clearCookie build on these; exported for code holding a LambderResponse)
 export { serializeCookie, serializeClearCookie, resolveCookieDomain } from "./core/LambderCookie.js";

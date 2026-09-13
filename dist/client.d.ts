@@ -7,12 +7,14 @@
  * the root entry (`"lambder"`) is the server surface.
  */
 export { default as LambderCaller } from "./client/LambderCaller.js";
-export type { LambderApiOutcome, LambderApiFailureReason, LambderCallOptions, LambderCallerOptions, LambderGuardInputsProvider, LambderProvidedGuardInputs, LambderIdempotencyKeyScope, } from "./client/LambderCaller.js";
+export type { LambderApiOutcome, LambderApiFailureReason, LambderValidationError, LambderCallOptions, LambderCallerOptions, LambderGuardInputsProvider, LambderProvidedGuardInputs, LambderIdempotencyKeyScope, } from "./client/LambderCaller.js";
 export { LambderApiError, isLambderApiError, refuse, LAMBDER_REFUSAL_CODES } from "./shared/LambderApiError.js";
 export type { LambderApiErrorOptions, LambderRefusalMessage, LambderRefusalCode, LambderRefuseOptions } from "./shared/LambderApiError.js";
 export type { ApiContractShape, LambderApiResponse, LambderApiResponseConfig } from "./shared/LambderApiContract.js";
-export { compressPayloadJson, decompressPayloadJson, isRequestCompressionAvailable, COMPRESSED_PAYLOAD_FIELD, COMPRESSED_PAYLOAD_BYTES_FIELD, DEFAULT_REQUEST_COMPRESSION_SETTINGS, } from "./shared/LambderRequestPayload.js";
-export type { LambderCompressedPayload, LambderRequestCompressionOption, LambderRequestCompressionSettings, } from "./shared/LambderRequestPayload.js";
+export { describeCrash, errorFromCrashDetail } from "./shared/LambderCrashDetail.js";
+export type { LambderCrashDetail, LambderCrashCause } from "./shared/LambderCrashDetail.js";
+export { compressPayloadGzip, decompressPayloadGzip, isRequestCompressionAvailable, COMPRESSED_PAYLOAD_GZ_FIELD, COMPRESSED_PAYLOAD_BR_FIELD, COMPRESSED_PAYLOAD_BYTES_FIELD, DEFAULT_REQUEST_COMPRESSION_SETTINGS, } from "./shared/LambderRequestPayload.js";
+export type { LambderCompressedGzipPayload, LambderCompressedBrotliPayload, LambderRequestCompressionOption, LambderRequestCompressionSettings, } from "./shared/LambderRequestPayload.js";
 export { resolveCompressionOption } from "./shared/LambderCompressionOption.js";
 export type { LambderCompressionOption, LambderCompressionSettingsBase } from "./shared/LambderCompressionOption.js";
 export { html, xml, raw, jsonScript, escapeHtml, renderHtmlValue, LambderSafeHtml, type LambderHtmlValue } from "./shared/LambderHtml.js";

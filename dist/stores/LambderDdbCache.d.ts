@@ -1,4 +1,4 @@
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import type { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { type LambderCompressionOption } from "../shared/LambderCompressionOption.js";
 export interface LambderDdbCacheOptions {
     tableName: string;
@@ -72,7 +72,10 @@ export declare class LambderDdbCache {
     readonly tableName: string;
     readonly keyPrefix: string;
     readonly namespace: string;
-    private readonly client;
+    /** The client given at creation, or one created from `region` on first use; the SDK arrives with it. */
+    private readonly providedClient;
+    private readonly region;
+    private readyPromise;
     private readonly defaultTtlSeconds;
     private readonly chunkBytes;
     private readonly compression;
@@ -80,6 +83,8 @@ export declare class LambderDdbCache {
     private readonly memory;
     private readonly inFlight;
     constructor(options: LambderDdbCacheOptions);
+    /** The SDK and the client, loaded and created the first time the table is touched (see LambderDdbSdk). */
+    private ready;
     get<T>(key: LambderCacheKey): Promise<T | undefined>;
     private getByAddress;
     has(key: LambderCacheKey): Promise<boolean>;

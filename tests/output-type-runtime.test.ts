@@ -383,3 +383,49 @@ describe('Edge Cases', () => {
         });
     });
 });
+
+// ============================================================================
+// A null answer needs a reason
+// ============================================================================
+
+describe('Output Type Enforcement - a null answer needs a reason', () => {
+    it('res.api(null) compiles only for an output that allows null; beside a reason it always does; the answers run as written', async () => {
+        const lambder = new Lambder({
+            files: new LambderLocalFileSource({ root: './public' }),
+            apiPath: '/api',
+        })
+        .addApi('strict', {
+            input: z.object({ mode: z.enum(['ok', 'refuse', 'message']) }),
+            output: z.object({ id: z.string() }),
+        }, async (ctx, res) => {
+            // @ts-expect-error a bare null is not an answer of this output
+            if(ctx.apiPayload.mode === 'never') return res.api(null);
+            // @ts-expect-error nor through die
+            if(ctx.apiPayload.mode === 'never') res.die.api(null);
+            if(ctx.apiPayload.mode === 'refuse') return res.api(null, { errorMessage: 'Not now.' });
+            if(ctx.apiPayload.mode === 'message') return res.api(null, { message: 'Nothing to report.' });
+            return res.api({ id: '1' });
+        })
+        .addApi('maybe', {
+            input: z.object({}),
+            output: z.object({ id: z.string() }).nullable(),
+        }, async (_ctx, res) => res.api(null));
+
+        const context = createMockContext();
+        const strictOk = JSON.parse((await lambder.render(createMockEvent('strict', { mode: 'ok' }), context)).body || '{}');
+        expect(strictOk.payload).toEqual({ id: '1' });
+        const refused = JSON.parse((await lambder.render(createMockEvent('strict', { mode: 'refuse' }), context)).body || '{}');
+        expect(refused).toMatchObject({ payload: null, errorMessage: 'Not now.' });
+        const messaged = JSON.parse((await lambder.render(createMockEvent('strict', { mode: 'message' }), context)).body || '{}');
+        expect(messaged).toMatchObject({ payload: null, message: 'Nothing to report.' });
+        const maybe = JSON.parse((await lambder.render(createMockEvent('maybe', {}), context)).body || '{}');
+        expect(maybe.payload).toBe(null);
+    });
+
+    it('an untyped resolver (any output) accepts a bare null, as before', async () => {
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api' })
+            .addRoute('/api-shaped', (_ctx, res) => res.api(null));
+        const response = await lambder.render({ ...createMockEvent('unused', {}), path: '/api-shaped', httpMethod: 'GET', body: null }, createMockContext());
+        expect(JSON.parse(response.body || '{}').payload).toBe(null);
+    });
+});

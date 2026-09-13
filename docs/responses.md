@@ -48,8 +48,22 @@ All accept an options object: `{ statusCode?, headers?, cacheControl?, compress?
 | `res.api(payload, config?, options?)` | Standardized API response |
 | `res.apiBinary(payload, config?, options?)` | API response with forced compression |
 
+`res.api` is overloaded on its payload: the output the API declared, or
+`null` beside a config that says why (a refusal flag, an `errorMessage`, a
+`message`). A bare `res.api(null)` compiles only when the output schema
+itself allows null, so a success payload is always the declared output,
+which is what lets a typed caller promise it. Untyped resolvers (routes,
+hooks, `getResponseBuilder`) accept anything.
+
 **API config options** (the second argument of `res.api`):
-`{ notAuthorized, message, errorMessage, versionExpired, sessionExpired, logList }`.
+`{ notAuthorized, message, errorMessage, versionExpired, sessionExpired, logList, crash }`.
+
+`crash` carries a failure described in full (name, message, stack, cause chain,
+and the request id it happened under) for a caller that is allowed to see it,
+built with `describeCrash(err, ctx)` in a global error handler. Browsers get a
+generic `errorMessage` and `LambderCaller` ignores the field; a server-side
+caller reads it back as the cause of the error it throws. See
+[Calling a Lambder app from another lambda](./invoke.md#errors-and-logs).
 
 ## Headers and cookies
 

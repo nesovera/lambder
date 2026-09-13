@@ -38,7 +38,7 @@ import type {
 import type { LambderApiIdempotencyConfig } from "../policies/LambderApiIdempotency.js";
 import type { MergeContract } from "../shared/LambderApiContract.js";
 import { createContext, isV2HttpEvent, restoreCompressedApiPayload, type LambderHttpEvent, type LambderRenderContext, type LambderSessionRenderContext } from "./LambderContext.js";
-import { DEFAULT_MAX_REQUEST_PAYLOAD_BYTES } from "../shared/LambderRequestPayload.js";
+import { DEFAULT_MAX_RESTORED_PAYLOAD_BYTES } from "../shared/LambderRequestPayload.js";
 
 export type { PathParamsOf, RouteCondition, ConditionFunction, LambderRouteMatcher } from "./LambderRouting.js";
 export type { LambderCorsConfig } from "./LambderCors.js";
@@ -341,7 +341,7 @@ export default class Lambder<
             etag: options.etag ?? DEFAULT_FINALIZE_OPTIONS.etag,
             maxResponseBytes: options.maxResponseBytes ?? DEFAULT_FINALIZE_OPTIONS.maxResponseBytes,
         };
-        this.maxRequestPayloadBytes = options.maxRequestPayloadBytes ?? DEFAULT_MAX_REQUEST_PAYLOAD_BYTES;
+        this.maxRequestPayloadBytes = options.maxRequestPayloadBytes ?? DEFAULT_MAX_RESTORED_PAYLOAD_BYTES;
         if(!Number.isSafeInteger(this.maxRequestPayloadBytes) || this.maxRequestPayloadBytes <= 0){
             throw new Error("maxRequestPayloadBytes must be a positive integer");
         }
@@ -474,7 +474,14 @@ export default class Lambder<
      */
     private async inputValidationRefusal(ctx: LambderRenderContext, resolver: LambderResolver, zodError: z.ZodError): Promise<LambderResponse> {
         if(this.apiInputValidationErrorHandler) return await this.apiInputValidationErrorHandler(ctx, resolver, zodError);
-        return resolver.json({ error: "Input validation failed", zodError }, { statusCode: 422 });
+        // Spelled out rather than serialized as-is: zod 4 keeps `issues` as a
+        // non-enumerable property, so JSON.stringify(zodError) would carry the
+        // issues only inside the message string, and a client's validation
+        // handler would receive a ZodError with nothing to branch on.
+        return resolver.json({
+            error: "Input validation failed",
+            zodError: { name: zodError.name, message: zodError.message, issues: zodError.issues },
+        }, { statusCode: 422 });
     }
 
     /** Registration-time checks shared by addApi/addSessionApi. */

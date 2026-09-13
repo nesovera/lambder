@@ -102,7 +102,7 @@ const makeStore = (client: MemoryDdb) =>
 describe('API policies - registration assertions', () => {
     it('throws on duplicate API names', () => {
         const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api' })
-            .addApi('dup', testSchema, async (ctx, res) => res.api(null));
+            .addApi('dup', testSchema, async (ctx, res) => res.api({ result: 'ok' }));
         expect(() => lambder.addApi('dup', testSchema as any, async (ctx, res) => res.api(null)))
             .toThrow(/duplicate API name "dup"/);
     });
@@ -348,13 +348,13 @@ describe('API policies - requireSessionApiGuards', () => {
 
     it('accepts a session API that declares a guard, or the named opt-out', () => {
         expect(() => strict()
-            .addSessionApi('secure.admin', { ...testSchema, guards: { orgPermission: 'ORG.MANAGE' } }, async (ctx, res) => res.api(null))
-            .addSessionApi('secure.me', { ...testSchema, guards: 'sessionOnly' }, async (ctx, res) => res.api(null)))
+            .addSessionApi('secure.admin', { ...testSchema, guards: { orgPermission: 'ORG.MANAGE' } }, async (ctx, res) => res.api({ result: 'ok' }))
+            .addSessionApi('secure.me', { ...testSchema, guards: 'sessionOnly' }, async (ctx, res) => res.api({ result: 'ok' })))
             .not.toThrow();
     });
 
     it('leaves public APIs alone: authorization there is not a session concern', () => {
-        expect(() => strict().addApi('public.ping', { ...testSchema }, async (ctx, res) => res.api(null))).not.toThrow();
+        expect(() => strict().addApi('public.ping', { ...testSchema }, async (ctx, res) => res.api({ result: 'ok' }))).not.toThrow();
     });
 
     it('needs a guards map to declare from', () => {
@@ -364,7 +364,7 @@ describe('API policies - requireSessionApiGuards', () => {
 
     it('is off by default: a session API without guards still registers', () => {
         const relaxed = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', guards });
-        expect(() => relaxed.addSessionApi('secure.free', { ...testSchema }, async (ctx, res) => res.api(null))).not.toThrow();
+        expect(() => relaxed.addSessionApi('secure.free', { ...testSchema }, async (ctx, res) => res.api({ result: 'ok' }))).not.toThrow();
     });
 
     it('makes a missing guards declaration a compile error', () => {
@@ -401,21 +401,21 @@ describe('API policies - requirePublicApiGuards', () => {
 
     it('accepts a public API that declares a guard, or either named opt-out', () => {
         expect(() => strict()
-            .addApi('public.device', { ...testSchema, guards: 'deviceToken' }, async (ctx, res) => res.api(null))
-            .addApi('public.translations', { ...testSchema, guards: { open: 'Static strings already in the bundle.' } }, async (ctx, res) => res.api(null))
-            .addApi('public.login', { ...testSchema, guards: 'credentialFlow' }, async (ctx, res) => res.api(null)))
+            .addApi('public.device', { ...testSchema, guards: 'deviceToken' }, async (ctx, res) => res.api({ result: 'ok' }))
+            .addApi('public.translations', { ...testSchema, guards: { open: 'Static strings already in the bundle.' } }, async (ctx, res) => res.api({ result: 'ok' }))
+            .addApi('public.login', { ...testSchema, guards: 'credentialFlow' }, async (ctx, res) => res.api({ result: 'ok' })))
             .not.toThrow();
     });
 
     it('leaves session APIs alone: the two requirements are independent', () => {
         // requireSessionApiGuards is off on this instance, so a session API
         // without guards still registers.
-        expect(() => strict().addSessionApi('secure.free', { ...testSchema }, async (ctx, res) => res.api(null))).not.toThrow();
+        expect(() => strict().addSessionApi('secure.free', { ...testSchema }, async (ctx, res) => res.api({ result: 'ok' }))).not.toThrow();
     });
 
     it('is off by default: a public API without guards still registers', () => {
         const relaxed = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', guards });
-        expect(() => relaxed.addApi('public.free', { ...testSchema }, async (ctx, res) => res.api(null))).not.toThrow();
+        expect(() => relaxed.addApi('public.free', { ...testSchema }, async (ctx, res) => res.api({ result: 'ok' }))).not.toThrow();
     });
 
     it('needs a guards map to declare from', () => {
@@ -505,11 +505,11 @@ describe('API policies - an empty guards option declares nothing', () => {
 
     it('still accepts every non-empty form', () => {
         expect(() => strict()
-            .addSessionApi('secure.one', { ...testSchema, guards: 'sessionOnly' }, async (ctx, res) => res.api(null))
-            .addSessionApi('secure.list', { ...testSchema, guards: ['sessionOnly'] }, async (ctx, res) => res.api(null))
-            .addSessionApi('secure.map', { ...testSchema, guards: { orgPermission: 'ORG.READ' } }, async (ctx, res) => res.api(null))
-            .addSessionApi('secure.both', { ...testSchema, guards: { sessionOnly: true, orgPermission: 'ORG.READ' } }, async (ctx, res) => res.api(null))
-            .addApi('public.open', { ...testSchema, guards: { open: 'Nothing here is anybody\'s.' } }, async (ctx, res) => res.api(null)))
+            .addSessionApi('secure.one', { ...testSchema, guards: 'sessionOnly' }, async (ctx, res) => res.api({ result: 'ok' }))
+            .addSessionApi('secure.list', { ...testSchema, guards: ['sessionOnly'] }, async (ctx, res) => res.api({ result: 'ok' }))
+            .addSessionApi('secure.map', { ...testSchema, guards: { orgPermission: 'ORG.READ' } }, async (ctx, res) => res.api({ result: 'ok' }))
+            .addSessionApi('secure.both', { ...testSchema, guards: { sessionOnly: true, orgPermission: 'ORG.READ' } }, async (ctx, res) => res.api({ result: 'ok' }))
+            .addApi('public.open', { ...testSchema, guards: { open: 'Nothing here is anybody\'s.' } }, async (ctx, res) => res.api({ result: 'ok' })))
             .not.toThrow();
     });
 });

@@ -1,8 +1,5 @@
-import {
-    DynamoDBClient,
-    UpdateItemCommand,
-    type UpdateItemCommandInput,
-} from "@aws-sdk/client-dynamodb";
+import type { DynamoDBClient, UpdateItemCommandInput } from "@aws-sdk/client-dynamodb";
+import { loadDynamoClientSdk, type LambderDynamoClientSdk } from "./LambderDdbSdk.js";
 
 /**
  * The fixed windows a policy may cap, smallest first (the evaluation order),
@@ -69,7 +66,10 @@ export class LambderDdbRateLimiter {
     readonly tableName: string;
     readonly keyPrefix: string;
 
-    private readonly client: DynamoDBClient;
+    /** The client given at creation, or one created from `region` on first use; the SDK arrives with it. */
+    private readonly providedClient: DynamoDBClient | undefined;
+    private readonly region: string | undefined;
+    private readyPromise: Promise<{ client: DynamoDBClient; sdk: LambderDynamoClientSdk }> | undefined;
     private readonly ttlWindowMultiplier: number;
     private readonly failOpen: boolean;
 
@@ -84,7 +84,16 @@ export class LambderDdbRateLimiter {
         }
 
         this.failOpen = options.failOpen ?? false;
-        this.client = options.client ?? new DynamoDBClient(options.region ? { region: options.region } : {});
+        this.providedClient = options.client;
+        this.region = options.region;
+    }
+
+    /** The SDK and the client, loaded and created the first time the table is touched (see LambderDdbSdk). */
+    private ready(): Promise<{ client: DynamoDBClient; sdk: LambderDynamoClientSdk }> {
+        this.readyPromise ??= loadDynamoClientSdk("LambderDdbRateLimiter")
+            .then((sdk) => ({ sdk, client: this.providedClient ?? new sdk.DynamoDBClient(this.region ? { region: this.region } : {}) }))
+            .catch((error: unknown) => { this.readyPromise = undefined; throw error; });
+        return this.readyPromise;
     }
 
     /**
@@ -136,7 +145,8 @@ export class LambderDdbRateLimiter {
         };
 
         try {
-            await this.client.send(new UpdateItemCommand(input));
+            const { client, sdk } = await this.ready();
+            await client.send(new sdk.UpdateItemCommand(input));
             return false;
         } catch (error) {
             if ((error as { name?: string; }).name === "ConditionalCheckFailedException") return true;

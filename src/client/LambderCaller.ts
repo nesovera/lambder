@@ -1,64 +1,25 @@
 import Cookies from 'js-cookie';
 import {
-    compressPayloadJson,
+    compressPayloadGzip,
     isRequestCompressionAvailable,
     DEFAULT_REQUEST_COMPRESSION_SETTINGS,
     type LambderRequestCompressionOption,
     type LambderRequestCompressionSettings,
 } from '../shared/LambderRequestPayload.js';
 import { resolveCompressionOption } from '../shared/LambderCompressionOption.js';
-import type { LambderApiResponse } from '../shared/LambderApiContract.js';
 import type { ApiContractShape } from '../shared/LambderApiContract.js';
-import type { z } from "zod";
+import { resolveApiOutcome, type LambderApiOutcome, type LambderValidationError } from '../shared/LambderApiOutcome.js';
+import {
+    mergeGuardInputs,
+    type LambderCallOptionsArg,
+    type LambderGuardInputsProviderOption,
+} from '../shared/LambderCallOptions.js';
 
-type IsAny<T> = 0 extends (1 & T) ? true : false;
-type GuardInputsOf<TEntry> = TEntry extends { guardInputs: infer G } ? G : never;
-/** Input type of guard G on one contract entry; never when that API does not declare it. */
-type GuardInputOf<TEntry, G extends string> = GuardInputsOf<TEntry> extends infer I ? (G extends keyof I ? I[G] : never) : never;
-/**
- * What guardInputsProvider returns: for every provided guard name, the value
- * the contract's APIs expect for it (a union across APIs when they differ).
- * Naming a guard no API declares in guardInput mode resolves to never, so a
- * typo fails the provider's return type instead of going missing at runtime.
- */
-export type LambderProvidedGuardInputs<TContract, TProvided extends string> =
-    IsAny<TContract> extends true ? Record<TProvided, unknown>
-    : { [G in TProvided]: { [K in keyof TContract]: GuardInputOf<TContract[K], G> }[keyof TContract] };
-/**
- * Supplies guardInputs for every call from one place (the organization the
- * UI is on, a device token), keyed by guard name; per-call guardInputs
- * merge on top. Name the guards it covers in the caller's second type
- * parameter, `new LambderCaller<Contract, "orgPermission">`, and calls to
- * APIs whose guardInput guards are all covered no longer require the
- * options argument. May be async; a throw fails the call as an unknown
- * error before anything is sent.
- */
-export type LambderGuardInputsProvider<TContract, TProvided extends string> =
-    (apiName: keyof TContract & string) => LambderProvidedGuardInputs<TContract, TProvided> | Promise<LambderProvidedGuardInputs<TContract, TProvided>>;
-/** Optional until the caller names provided guards: naming them without a provider would send nothing. */
-type GuardInputsProviderOption<TContract, TProvided extends string> =
-    [TProvided] extends [never]
-        ? { guardInputsProvider?: LambderGuardInputsProvider<TContract, TProvided> }
-        : { guardInputsProvider: LambderGuardInputsProvider<TContract, TProvided> };
-/** An API's guardInput guards the provider does not cover: those the call must still pass. */
-type RemainingGuardInputs<TEntry, TProvided extends string> = Omit<GuardInputsOf<TEntry>, TProvided>;
-/**
- * The options argument: optional normally, REQUIRED (with guardInputs) when
- * the API's contract declares guardInput-mode guards the provider does not
- * cover, so forgetting to send a guard's value is a compile error at the
- * call site. Provided guards may still be overridden per call.
- */
-type CallOptionsArg<TContract, TApiName, TProvided extends string> =
-    IsAny<TContract> extends true ? [options?: LambderCallOptions]
-    : TApiName extends keyof TContract
-        ? [GuardInputsOf<TContract[TApiName]>] extends [never]
-            ? [options?: LambderCallOptions]
-            : [keyof RemainingGuardInputs<TContract[TApiName], TProvided>] extends [never]
-                ? [options?: LambderCallOptions & { guardInputs?: Partial<GuardInputsOf<TContract[TApiName]>> }]
-                : [options: LambderCallOptions & {
-                    guardInputs: RemainingGuardInputs<TContract[TApiName], TProvided> & Partial<GuardInputsOf<TContract[TApiName]>>
-                }]
-        : [options?: LambderCallOptions];
+// The outcome vocabulary and the contract-driven option typing are shared
+// with LambderInvokeCaller (src/shared/); re-exported here so the entries
+// keep their names.
+export type { LambderApiOutcome, LambderApiFailureReason, LambderValidationError } from '../shared/LambderApiOutcome.js';
+export type { LambderProvidedGuardInputs, LambderGuardInputsProvider } from '../shared/LambderCallOptions.js';
 
 type VoidFunction = ()=>void|Promise<void>;
 type FetchTracker = { apiName: string, done: boolean, fetchEndCalled: boolean };
@@ -80,7 +41,7 @@ type FetchEndEventHandler = (params: {
 })=>void|Promise<void>;
 
 type ErrorHandler = (err: Error) => void|Promise<void>;
-type ValidationErrorHandler = (zodError: z.ZodError) => (void|false)|Promise<(void|false)>;
+type ValidationErrorHandler = (zodError: LambderValidationError) => (void|false)|Promise<(void|false)>;
 type MessageHandler = (message:any) => void|Promise<void>;
 
 /** One logical operation's rotating idempotency key: see LambderCaller.createIdempotencyKeyScope(). */
@@ -90,41 +51,6 @@ export type LambderIdempotencyKeyScope = {
     /** Call after a confirmed success: the next operation is a new intent. Returns the new key. */
     rotate(): string;
 };
-
-export type LambderApiFailureReason =
-    | 'network'          // fetch rejected: offline, DNS, CORS, or an external abort
-    | 'timeout'          // aborted by the configured timeoutMs
-    | 'server'           // HTTP 5xx, or a response body that is not the API envelope
-    | 'validation'       // HTTP 422: the server rejected the input schema
-    | 'versionExpired'   // envelope flag: client version behind the server
-    | 'sessionExpired'   // envelope flag: session gone (cookies cleared)
-    | 'notAuthorized'    // envelope flag: authenticated but not allowed
-    | 'errorMessage'     // structured refusal on the envelope's errorMessage field
-    | 'unknown';         // unexpected internal failure (e.g. an app handler threw)
-
-/**
- * Discriminated result of an API call: `ok: true` carries the payload, every
- * failure carries a machine-readable reason, so "the server returned null"
- * and "the request failed" are never conflated.
- */
-export type LambderApiOutcome<T> =
-    | { ok: true; payload: T | null | undefined; response: LambderApiResponse<T> }
-    | {
-        ok: false;
-        reason: LambderApiFailureReason;
-        /** HTTP status, when a response was received. */
-        status?: number;
-        /** Envelope errorMessage, when the server provided one. */
-        errorMessage?: any;
-        /** Seconds to wait before retrying, from the response's Retry-After header (rate-limit refusals send it). */
-        retryAfterSeconds?: number;
-        /** Underlying Error for network/timeout/server/unknown failures. */
-        error?: Error;
-        /** Zod issue detail for 'validation'. */
-        zodError?: z.ZodError;
-        /** The parsed envelope, when one was received (protocol-level failures). */
-        response?: LambderApiResponse<T>;
-    };
 
 /** Per-call options: request extras plus overrides for every constructor handler. */
 export type LambderCallOptions = {
@@ -200,7 +126,7 @@ type LambderCallerBaseOptions = {
 
 /** Constructor options: the base options plus guardInputsProvider, mandatory once TProvided names guards. */
 export type LambderCallerOptions<TContract, TProvided extends string = never> =
-    LambderCallerBaseOptions & GuardInputsProviderOption<TContract, TProvided>;
+    LambderCallerBaseOptions & LambderGuardInputsProviderOption<TContract, TProvided>;
 
 /**
  * @typeParam TContract - The API contract, for typed names, payloads and guard inputs.
@@ -400,9 +326,7 @@ export default class LambderCaller<TContract extends ApiContractShape = any, TPr
             const providedGuardInputs = this.guardInputsProvider
                 ? await this.guardInputsProvider(apiName) as Record<string, unknown> | undefined
                 : undefined;
-            const guardInputs = providedGuardInputs !== undefined || options?.guardInputs !== undefined
-                ? { ...providedGuardInputs, ...options?.guardInputs }
-                : undefined;
+            const guardInputs = mergeGuardInputs(providedGuardInputs, options?.guardInputs);
 
             // Compressed when enabled and the payload's JSON reaches the
             // threshold; `compressRequest` overrides both ways, and a runtime
@@ -413,7 +337,7 @@ export default class LambderCaller<TContract extends ApiContractShape = any, TPr
                 : options?.compressRequest === false ? null
                 : this.requestCompression?.minBytes ?? null;
             const compressedPayload = compressionMinBytes !== null && payload !== undefined && isRequestCompressionAvailable()
-                ? await compressPayloadJson(JSON.stringify(payload), compressionMinBytes)
+                ? await compressPayloadGzip(JSON.stringify(payload), compressionMinBytes)
                 : null;
 
             let res: Response;
@@ -440,58 +364,32 @@ export default class LambderCaller<TContract extends ApiContractShape = any, TPr
                 return { ok: false, reason: timedOut ? 'timeout' : 'network', error: wrappedError };
             }
 
-            if(res.status >= 500){
-                // Lambder's own 500 fallback is a JSON envelope, but custom
-                // error handlers may answer text/HTML: parse defensively.
-                let errorMessage: any;
-                try {
-                    const bodyText = await res.text();
-                    try { errorMessage = JSON.parse(bodyText)?.errorMessage; } catch { /* not an envelope */ }
-                } catch { /* body unavailable */ }
-                const wrappedError = new Error("Request failed: " + res.status + " - " + res.statusText);
-                await fetchEnded(wrappedError);
-                await reportError(wrappedError);
-                return { ok: false, reason: 'server', status: res.status, errorMessage, error: wrappedError };
-            }
+            // The reading of the answer is shared with LambderInvokeCaller;
+            // only what to do about each outcome is this caller's.
+            const outcome = await resolveApiOutcome<TOutput>({
+                status: res.status,
+                statusText: res.statusText,
+                header: (name) => res.headers?.get?.(name) ?? null,
+                json: () => res.json(),
+                text: () => res.text(),
+            });
 
-            if(res.status === 422){
-                // A 422 without Lambder's validation body (e.g. a proxy's
-                // error page) is a server failure, not a validation result.
-                let zodError: z.ZodError | undefined;
-                try { zodError = (await res.json() as { error: string, zodError: z.ZodError })?.zodError; }
-                catch { /* not JSON */ }
-                if(zodError === undefined){
-                    const wrappedError = new Error("Request failed: 422 without a validation body");
-                    await fetchEnded(wrappedError);
-                    await reportError(wrappedError);
-                    return { ok: false, reason: 'server', status: res.status, error: wrappedError };
-                }
+            if(!outcome.ok && outcome.reason === 'server'){
+                await fetchEnded(outcome.error);
+                await reportError(outcome.error!);
+                return outcome;
+            }
+            if(!outcome.ok && outcome.reason === 'validation'){
                 await fetchEnded(null);
                 if(apiInputValidationErrorHandler){
-                    await apiInputValidationErrorHandler(zodError);
+                    await apiInputValidationErrorHandler(outcome.zodError!);
                 }else{
-                    await reportError(new Error("API Input Validation Error", { cause: zodError }));
+                    await reportError(new Error("API Input Validation Error", { cause: outcome.zodError }));
                 }
-                return { ok: false, reason: 'validation', status: res.status, zodError };
+                return outcome;
             }
 
-            // Retry-After (delta-seconds) rides every refusal that knows its
-            // reset time, e.g. a rate limit; absent or unreadable is undefined.
-            const retryAfterValue = Number(res.headers.get("retry-after") ?? NaN);
-            const retryAfter = Number.isFinite(retryAfterValue) && retryAfterValue >= 0 ? { retryAfterSeconds: retryAfterValue } : {};
-
-            let data: LambderApiResponse<TOutput>;
-            try {
-                data = await res.json();
-                if(data === null || typeof data !== "object") throw new Error("Response is not an object");
-            }catch(err){
-                // A non-envelope body (e.g. an HTML error page) is a server failure.
-                const wrappedError = new Error("Request failed: response is not a valid API envelope (status " + res.status + ")", { cause: err });
-                await fetchEnded(wrappedError);
-                await reportError(wrappedError);
-                return { ok: false, reason: 'server', status: res.status, error: wrappedError };
-            }
-
+            const data = outcome.response!;
             await fetchEnded(data);
 
             if(data.logList?.length){
@@ -499,30 +397,30 @@ export default class LambderCaller<TContract extends ApiContractShape = any, TPr
                     console.log("[lambder]", record);
                 }
             }
-            if(data.versionExpired){
+            if(!outcome.ok && outcome.reason === 'versionExpired'){
                 if(versionExpiredHandler){ await versionExpiredHandler(); }
                 else{ await reportError(new Error("Version Expired; Please refresh;")); }
-                return { ok: false, reason: 'versionExpired', status: res.status, errorMessage: data.errorMessage, response: data, ...retryAfter };
+                return outcome;
             }
-            if(data.sessionExpired){
+            if(!outcome.ok && outcome.reason === 'sessionExpired'){
                 this.clearSessionCookies();
                 if(sessionExpiredHandler){ await sessionExpiredHandler(); }
                 else{ await reportError(new Error("Session Expired; Please log in again;")); }
-                return { ok: false, reason: 'sessionExpired', status: res.status, errorMessage: data.errorMessage, response: data, ...retryAfter };
+                return outcome;
             }
-            if(data.notAuthorized){
+            if(!outcome.ok && outcome.reason === 'notAuthorized'){
                 if(notAuthorizedHandler){ await notAuthorizedHandler(); }
                 else{ await reportError(new Error("Not Authorized;")); }
-                return { ok: false, reason: 'notAuthorized', status: res.status, errorMessage: data.errorMessage, response: data, ...retryAfter };
+                return outcome;
             }
             if(data.message && messageHandler){
                 await messageHandler(data.message);
             }
-            if(data.errorMessage){
+            if(!outcome.ok && outcome.reason === 'errorMessage'){
                 if(errorMessageHandler){ await errorMessageHandler(data.errorMessage); }
-                return { ok: false, reason: 'errorMessage', status: res.status, errorMessage: data.errorMessage, response: data, ...retryAfter };
+                return outcome;
             }
-            return { ok: true, payload: data.payload, response: data };
+            return outcome;
         }catch(err){
             // Escape hatch for anything above (typically an app handler throwing):
             // dispatch never throws, so api()/apiOutcome() call sites never do.
@@ -548,7 +446,7 @@ export default class LambderCaller<TContract extends ApiContractShape = any, TPr
     >(
         apiName: TApiName,
         payload?: TApiName extends keyof TContract ? TContract[TApiName]['input'] : any,
-        ...rest: CallOptionsArg<TContract, TApiName, TProvidedGuards>
+        ...rest: LambderCallOptionsArg<TContract, TApiName, TProvidedGuards, LambderCallOptions>
     ): Promise<LambderApiOutcome<TOutput>>{
         return await this.dispatch<TOutput>(apiName, payload, rest[0]);
     };
@@ -560,7 +458,7 @@ export default class LambderCaller<TContract extends ApiContractShape = any, TPr
     >(
         apiName: TApiName,
         payload?: TApiName extends keyof TContract ? TContract[TApiName]['input'] : any,
-        ...rest: CallOptionsArg<TContract, TApiName, TProvidedGuards>
+        ...rest: LambderCallOptionsArg<TContract, TApiName, TProvidedGuards, LambderCallOptions>
     ): Promise<TOutput|null|undefined> {
         const outcome = await this.dispatch<TOutput>(apiName, payload, rest[0]);
         if(outcome.ok) return outcome.response?.payload;

@@ -9,6 +9,155 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [6.0.1] - 2026-09-13
+
+A major because this one does break: five exports were renamed with no alias
+kept, and one overload stops compiling code that used to. The migration is
+mechanical and the compiler finds every site.
+
+- `restoreBoundedText(bytes, declaredBytes, encoding)` is now
+  `restoreText(bytes, encoding, { declaredBytes })`, beside `restoreBytes`
+  with the same signature for bytes that are not text.
+- `COMPRESSED_PAYLOAD_FIELD` is `COMPRESSED_PAYLOAD_GZ_FIELD`,
+  `LambderCompressedPayload` is `LambderCompressedGzipPayload`, and
+  `compressPayloadJson` / `decompressPayloadJson` are `compressPayloadGzip` /
+  `decompressPayloadGzip`. Each has a new Brotli sibling.
+- `DEFAULT_MAX_REQUEST_PAYLOAD_BYTES` is `DEFAULT_MAX_RESTORED_PAYLOAD_BYTES`,
+  the same 20,000,000.
+- `res.api(null)` no longer compiles on an API whose output schema does not
+  allow null. Answer the declared output, or pass the reason beside the null
+  (`res.api(null, { errorMessage })`). A handler that returned a bare null on
+  a non-nullable output was the bug this catches.
+
+The wire format is unchanged in both directions, so a deployed callee and an
+older client still understand each other.
+
+### Added
+
+- **`LambderInvokeCaller`**, a server-side caller that invokes a Lambder app
+  running in another Lambda function directly, with no API Gateway in between.
+  It synthesizes the payload-format-2.0 event the gateway would have delivered,
+  invokes the function with `RequestResponse`, and reads the response object
+  Lambder returns, so the callee is an unmodified Lambder app and everything it
+  offers over HTTP applies unchanged: zod validation, the inferred contract
+  (imported type-only, so `api("sendEmail", payload)` is typed end to end),
+  refusals, guards and guard inputs, rate limits, idempotency keys, sessions
+  carried on a user's behalf, `logList`, and compression both ways. `api()`
+  throws a `LambderInvokeError` on any failure (a failed dependency is a failed
+  request) while `apiOutcome()` resolves to a discriminated outcome; `request()`
+  reaches any route of the callee; `onFailure` is awaited for every failed call,
+  whichever method the site used, so failures are reported in one place.
+  `LambderInvokeCaller.localTransport(handler)` runs a callee's real handler
+  in-process for tests and `createEvent` builds the event a call would send, for
+  boot checks. The callee tells an invoke from a browser by the
+  `x-lambder-invoke` marker header, which is for guards and hooks and never an
+  authorization: the `lambda:InvokeFunction` grant is that. A hook that throws
+  (`onFailure`, `onLogList`) is logged and ignored, so `apiOutcome()` keeps its
+  promise never to throw, and the event is serialized exactly once per call
+  (the transport receives that JSON as `eventJson`). Documented in
+  [docs/invoke.md](./docs/invoke.md), with `LambderInvokeError`,
+  `isLambderInvokeError`, the outcome, failure and handler types, the
+  transport and event types, and the protocol constants exported from
+  `lambder`. Nothing a call is built from may escape as a throw either: a
+  guardInputs provider that rejects, or a payload holding a cycle or a BigInt,
+  fails as an `unknown` outcome through `onFailure` like any other failure,
+  so `apiOutcome()` keeps its promise never to throw and `api()` always
+  throws a `LambderInvokeError`. An external `AbortSignal` a call is given is
+  detached from when the call ends, so a signal shared across calls does not
+  accumulate one listener per call.
+- **A `crash` field on the API envelope**, with `describeCrash(err, ctx)` to
+  build it and `errorFromCrashDetail(crash)` to rebuild an Error from it. A
+  global error handler answering a caller it trusts can now hand back the whole
+  failure (name, message, stack, cause chain, the request id and function it
+  happened in) instead of hand-rolling a serialization, and the invoke caller
+  chains it as the `cause` of the error it throws, so an error reporter that
+  walks causes stores the callee's stack without being taught anything.
+  `LambderCaller` ignores the field, so a callee that also faces browsers is
+  unaffected. Both helpers are dependency-free and exported from `lambder` and
+  `lambder/client`.
+- **`payloadBr`**, a Brotli request payload beside the browser's gzip
+  `payloadGz`. The server accepts either (never both) under the same declared
+  byte length, bound and exact-length verification, so a Node caller compresses
+  with the better algorithm while browsers keep sending what they can produce.
+  `compressPayloadBrotli` builds the pair under the same threshold and
+  only-when-smaller rules as `compressPayloadGzip`.
+- **`@aws-sdk/client-lambda` as an optional peer dependency**, imported on the
+  first invoke the way the S3 client is imported on the first read. The Lambda
+  Node runtimes provide it, so a deployed function installs nothing new.
+
+### Changed
+
+- **A null API answer needs a reason.** `res.api` (and `res.apiBinary`,
+  `res.die.api`) is overloaded: the declared output, or `null` beside a
+  config (a refusal flag, an `errorMessage`, a `message`). A bare
+  `res.api(null)` compiles only when the output schema allows null, so a
+  success payload is always the declared output and `LambderInvokeCaller.api()`
+  promises exactly that type instead of `TOutput | null`. Untyped resolvers
+  (routes, hooks, `getResponseBuilder`) accept anything as before; a handler
+  that answered a bare null on a non-nullable output is the one thing that
+  stops compiling, and it was the bug this catches. `LambderApiAnswer` is the
+  exported signature.
+- **The DynamoDB SDK is loaded on first use.** `LambderSessionManager`,
+  `LambderDdbCache`, `LambderDdbRateLimiter` and `LambderDdbIdempotency` used to
+  import `@aws-sdk/client-dynamodb` (and the session manager
+  `@aws-sdk/lib-dynamodb`) at module level, so importing `lambder` loaded both
+  packages and a bundled app referenced them whether or not it kept sessions
+  or used a store. They now import types only and take the classes from one
+  loader (`src/stores/LambderDdbSdk.ts`) the first time a table is touched,
+  the way `LambderS3FileSource` and `LambderInvokeCaller` load theirs. An app
+  without them installed still imports and constructs everything; only the
+  first table access fails, with the install hint naming the store. The
+  `client` option of the stores is honoured as before.
+- **`restoreBytes(bytes, encoding, bound)` and `restoreText(...)` replace
+  `restoreBoundedText`**, with no alias kept: one restore that takes either
+  `{ declaredBytes }` (the bytes' original length, bounding and verifying the
+  result, what records at rest and request payloads use) or `{ maxBytes }` (a
+  ceiling alone, for bytes whose sender recorded no length, what a compressed
+  HTTP answer read by the invoke caller uses). A nonsense ceiling throws a
+  plain Error, since that is the caller's configuration, not a restore
+  failure. `restoreBytes` hands back the buffer and `restoreText` is that plus
+  the UTF-8 decode, because the one restore without a declared length is also
+  the one whose bytes may not be text: a route may answer a compressed wasm
+  module or an image it forced compression on, and decoding those as UTF-8
+  would replace every byte that is not a valid sequence and hand back a body
+  that is silently not what was sent.
+- **`DEFAULT_MAX_RESTORED_PAYLOAD_BYTES` replaces `DEFAULT_MAX_REQUEST_PAYLOAD_BYTES`**:
+  the same 20,000,000, which now also defaults the invoke caller's
+  `maxResponsePayloadBytes`, so the name says what it bounds (any restored
+  payload) rather than one direction.
+- **The `zodError` of a validation outcome is typed as `LambderValidationError`**
+  (`{ name, message, issues }`), the shape that actually crosses the wire,
+  instead of `z.ZodError`, which advertised methods a caller could not call.
+  `LambderCaller`'s `apiInputValidationErrorHandler` receives the same type.
+  Exported from `lambder` and `lambder/client`.
+- **The envelope to outcome mapping moved out of `LambderCaller`** into
+  `src/shared/LambderApiOutcome.ts`, and the contract-driven call option types
+  (`LambderCallOptionsArg`, the guard-input types) into
+  `src/shared/LambderCallOptions.ts`. Both callers now read one implementation,
+  so which status is a crash, in what order the envelope flags are honoured and
+  what an API demands of its caller cannot drift between them. No behavior
+  change for `LambderCaller` except one: a 5xx answer now keeps the parsed
+  envelope on the outcome's `response` when the server sent one, where it
+  previously kept `errorMessage` alone and dropped the rest, which is what makes
+  `crash` and `logList` readable on exactly the answers that carry them.
+
+- **Renamed the gzip request-compression names to match their new Brotli
+  siblings**, with no aliases kept: `COMPRESSED_PAYLOAD_FIELD` is now
+  `COMPRESSED_PAYLOAD_GZ_FIELD` (beside `COMPRESSED_PAYLOAD_BR_FIELD`),
+  `LambderCompressedPayload` is `LambderCompressedGzipPayload` (beside
+  `LambderCompressedBrotliPayload`), and `compressPayloadJson` and
+  `decompressPayloadJson` are `compressPayloadGzip` and
+  `decompressPayloadGzip` (beside `compressPayloadBrotli`). The wire field
+  itself (`payloadGz`) is unchanged.
+
+### Fixed
+
+- The 422 validation body carries the zod issues again. zod 4 keeps
+  `ZodError.issues` as a non-enumerable property, so serializing the error
+  as-is left the issues only inside its message string, and a client's
+  `apiInputValidationErrorHandler` received a `ZodError` with nothing to
+  branch on. The refusal now spells the body out as `{ name, message, issues }`.
+
 ## [5.1.3] - 2026-09-12
 
 ### Changed
