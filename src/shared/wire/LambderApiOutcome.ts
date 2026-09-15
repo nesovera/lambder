@@ -27,7 +27,7 @@ export type LambderApiFailureReason =
     | 'timeout'          // aborted by the configured timeoutMs
     | 'server'           // HTTP 5xx, or a response body that is not the API envelope
     | 'validation'       // HTTP 422: the server rejected the input schema
-    | 'versionExpired'   // envelope flag: client version behind the server
+    | 'versionExpired'   // envelope flag: the client was built against another shape of the endpoint (its signature did not match)
     | 'sessionExpired'   // envelope flag: session gone (cookies cleared)
     | 'notAuthorized'    // envelope flag: authenticated but not allowed
     | 'errorMessage'     // structured refusal on the envelope's errorMessage field

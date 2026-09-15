@@ -99,6 +99,12 @@ export type LambderCreateOptions<TSessionData = any> = {
      */
     files?: LambderFilesOption;
     apiPath?: string;
+    /**
+     * Stamped on every API answer's envelope as `apiVersion`, so a client can
+     * tell which build answered. Informational: whether a client is stale is
+     * decided per endpoint by the signature it sends (see
+     * Lambder.apiSignatures()), not by this string.
+     */
     apiVersion?: string;
     /**
      * Automatic compression for compressible responses. `true` (the default)

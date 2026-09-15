@@ -14,6 +14,9 @@ export { buildTransportEnvelope, LambderTransportFailure, isLambderTransportFail
 export { lambderCookieJarTransport } from "./shared/transport/lambderCookieJarTransport.js";
 export { LambderCookieJar, parseSetCookie } from "./shared/transport/LambderCookieJar.js";
 export { resolveApiOutcome } from "./shared/wire/LambderApiOutcome.js";
+// The per-endpoint signature map a build ships with, how a caller reads it, and the reload-loop window.
+export { apiNameKeyOf, lookupApiSignature, readApiSignature, API_SIGNATURE_HEX_LENGTH } from "./shared/wire/LambderApiSignature.js";
+export { RELOAD_LOOP_WINDOW_MS } from "./client/LambderReloadLoopBreaker.js";
 // Typed API refusals (isomorphic: shared code may throw them from anywhere;
 // in the browser they are plain Errors).
 export { LambderApiRefusal, isLambderApiRefusal, refuse, LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";

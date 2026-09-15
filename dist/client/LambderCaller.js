@@ -7,6 +7,8 @@ import { createCallAbort } from '../shared/util/LambderCallAbort.js';
 import { coerceToError } from '../shared/wire/LambderCrashDetail.js';
 import { isLambderTransportFailure } from '../shared/transport/LambderApiTransport.js';
 import { DEFAULT_SESSION_TOKEN_COOKIE_KEY, DEFAULT_SESSION_CSRF_COOKIE_KEY } from '../shared/wire/LambderSessionCookieNames.js';
+import { readApiSignature } from '../shared/wire/LambderApiSignature.js';
+import { LambderReloadLoopBreaker, RELOAD_LOOP_WINDOW_MS } from './LambderReloadLoopBreaker.js';
 import { lambderFetchTransport } from './lambderFetchTransport.js';
 /**
  * @typeParam TContract - The API contract, for typed names, payloads and guard inputs.
@@ -16,7 +18,10 @@ export default class LambderCaller {
     isCorsEnabled;
     apiPath;
     apiVersion;
+    apiSignatures;
     timeoutMs;
+    /** What keeps a stale bundle from reloading itself forever; see the class. */
+    reloadLoopBreaker = new LambderReloadLoopBreaker();
     /** The calls currently in flight, in the order they started. */
     fetchTrackerList = [];
     /** Whether any call is in flight. Derived, so it cannot drift from the list the way a separate flag did. */
@@ -40,9 +45,10 @@ export default class LambderCaller {
     constructor(options) {
         // The conditional provider option is resolved per instantiation;
         // inside the class it is read through the plain shape.
-        const { apiPath, apiVersion, isCorsEnabled, timeoutMs, versionExpiredHandler, sessionExpiredHandler, messageHandler, errorMessageHandler, notAuthorizedHandler, errorHandler, logListHandler, fetchStartedHandler, fetchEndedHandler, apiInputValidationErrorHandler, sessionCookieDomain, requestCompression, guardInputsProvider, transport, } = options;
+        const { apiPath, apiVersion, apiSignatures, isCorsEnabled, timeoutMs, versionExpiredHandler, sessionExpiredHandler, messageHandler, errorMessageHandler, notAuthorizedHandler, errorHandler, logListHandler, fetchStartedHandler, fetchEndedHandler, apiInputValidationErrorHandler, sessionCookieDomain, requestCompression, guardInputsProvider, transport, } = options;
         this.apiPath = apiPath;
         this.apiVersion = apiVersion;
+        this.apiSignatures = apiSignatures;
         this.isCorsEnabled = isCorsEnabled;
         this.timeoutMs = timeoutMs;
         this.sessionCookieDomain = sessionCookieDomain;
@@ -198,6 +204,10 @@ export default class LambderCaller {
                     activeFetchList: [...this.fetchTrackerList],
                 });
             const version = this.apiVersion;
+            // The server's signature for this endpoint, when this build
+            // carries the map. A name the map lacks fails the call here, as a
+            // provider that threw would: the map predates the endpoint.
+            const signature = this.apiSignatures ? await readApiSignature(this.apiSignatures, apiName) : undefined;
             // js-cookie reads nothing without a document, and there is no
             // location outside a page: both are "" then, and a transport that
             // carries a cookie jar fills the token in from it.
@@ -228,6 +238,7 @@ export default class LambderCaller {
                 answer = await this.transport({
                     apiPath: this.apiPath,
                     apiName, version, token, siteHost,
+                    ...(signature !== undefined ? { signature } : {}),
                     csrfCookieKey: this.sessionCsrfCookieKey,
                     ...(compressedPayload ? { compressed: compressedPayload } : { payload }),
                     ...(guardInputs !== undefined ? { guardInputs } : {}),
@@ -292,6 +303,15 @@ export default class LambderCaller {
             const data = outcome.response;
             await fetchEnded(data);
             if (!outcome.ok && outcome.reason === 'versionExpired') {
+                // A repeat of a recent versionExpired for the same endpoint and
+                // signature means the reload the handler performed brought the
+                // same bundle back, and reloading again would loop. The
+                // handler is not called; the failure is reported instead, and
+                // the outcome still says versionExpired.
+                if (this.reloadLoopBreaker.isRepeat(apiName, signature ?? "")) {
+                    await reportError(new Error(`Version expired again for API "${apiName}" within ${RELOAD_LOOP_WINDOW_MS / 60000} minutes with the same signature: the bundle being served is still the stale one, so versionExpiredHandler was not called again.`));
+                    return outcome;
+                }
                 if (versionExpiredHandler) {
                     await versionExpiredHandler();
                 }

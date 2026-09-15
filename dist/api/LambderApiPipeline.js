@@ -13,7 +13,7 @@ import { DEFAULT_SESSION_CSRF_COOKIE_KEY, DEFAULT_SESSION_TOKEN_COOKIE_KEY } fro
  * are adapters over this class; neither reimplements a step of it.
  *
  * ```
- * version gate → restore payload → rate limits that need no session
+ * signature gate → restore payload → rate limits that need no session
  * → session (session mode) → idempotency replay → the remaining rate limits
  * → guards → input validation → exec, inside the idempotency claim
  * → drain response headers → answer
@@ -36,8 +36,10 @@ export class LambderApiPipeline {
     maxRequestPayloadBytes;
     onInvalidInput;
     sessions;
+    signatures;
     constructor(options = {}) {
         this.apiVersion = options.apiVersion ?? null;
+        this.signatures = options.signatures ?? null;
         this.maxRequestPayloadBytes = assertPositiveInteger(options.maxRequestPayloadBytes ?? DEFAULT_MAX_RESTORED_PAYLOAD_BYTES, "maxRequestPayloadBytes");
         this.onInvalidInput = options.onInvalidInput ?? null;
         this.sessions = options.sessions
@@ -90,16 +92,14 @@ export class LambderApiPipeline {
     assertRegistration(definition) {
         this.policies.assertRegistration(definition);
     }
-    /** True when the gate is on and the request names a different version. */
-    isVersionStale(request) {
-        return !!this.apiVersion && !!request.version && request.version !== this.apiVersion;
-    }
     /**
      * The answer for a request naming no registered API: the apiNotFound
      * refusal, carrying whatever the call already wrote (a CORS header, a
-     * cookie eviction). No version gate here: both adapters run prepare() on
-     * the way in, before a name is resolved, so a stale client has already
-     * been answered by the time anything asks for an unknown name.
+     * cookie eviction). No signature gate here: both adapters run prepare()
+     * on the way in, with the definition the name resolved to or null, so a
+     * signed request for an unknown name (a client built against a contract
+     * that had it) has already been answered versionExpired by the time
+     * anything asks for an unknown name.
      */
     answerUnknownApi(request, ctx) {
         const answer = apiNotFoundAnswer(this.apiVersion, ctx?.logList);
@@ -107,25 +107,35 @@ export class LambderApiPipeline {
         return answer;
     }
     /**
-     * The steps that come before anything may read the request: the version
-     * gate, then the compressed-payload restore that every later reader (a
-     * rate-limit key slice, a guard, the input schema) depends on having
-     * happened.
+     * The steps that come before anything may read the request: the
+     * signature gate, then the compressed-payload restore that every later
+     * reader (a rate-limit key slice, a guard, the input schema) depends on
+     * having happened.
+     *
+     * The gate compares the signature the request carries with the one the
+     * source expects for the endpoint the name resolved to (`definition`,
+     * null for a name the adapter does not know). A match runs; anything
+     * else is a client built against another shape of this endpoint, or
+     * against an endpoint that no longer exists, and is answered
+     * versionExpired. A request carrying no signature is never gated.
      *
      * Public and named because the server runs them earlier than run() does,
      * on the way in, so that its hooks see a plain payload and a stale client
      * is answered before any of them, whether or not the name it asked for
      * exists. run() calls it too, so an adapter that has no such step still
      * gets the whole protocol. Calling it twice is safe by construction: the
-     * gate is a pure comparison and the restore has already removed the wire
-     * fields it reads.
+     * gate compares against a memoized digest and the restore has already
+     * removed the wire fields it reads.
      *
      * Returns the answer that ends the call, or null when the request is
      * ready to dispatch.
      */
-    async prepare(request) {
-        if (this.isVersionStale(request))
-            return versionExpiredAnswer(this.apiVersion);
+    async prepare(request, definition) {
+        if (request.signature !== null && this.signatures) {
+            const expected = await this.signatures.expectedSignatureOf(request.apiName, definition);
+            if (expected !== request.signature)
+                return versionExpiredAnswer(this.apiVersion);
+        }
         const restored = await restoreCompressedPayload(request, this.maxRequestPayloadBytes);
         if (!restored.ok)
             return invalidPayloadAnswer(this.apiVersion, restored.message);
@@ -165,7 +175,7 @@ export class LambderApiPipeline {
         return { answer, ...trace };
     }
     async execute(request, ctx, definition, exec, trace) {
-        const unprepared = await this.prepare(request);
+        const unprepared = await this.prepare(request, definition);
         if (unprepared)
             return unprepared;
         // The limits whose key is known from the request alone, before the

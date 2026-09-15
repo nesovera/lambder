@@ -6,7 +6,8 @@
  * and the call log.
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeAll } from 'vitest';
+import { apiNameKeyOf, type LambderApiSignatureMap } from '../src/shared/wire/LambderApiSignature.js';
 import { LambderMockTransportError } from '../src/mock/LambderMockFailureInjector.js';
 import { z } from 'zod';
 import LambderCaller from '../src/client/LambderCaller.js';
@@ -59,9 +60,20 @@ const mockGuards = {
     }),
 };
 
+/**
+ * The generated map the callers under test carry, filled once the names are
+ * hashed. Three endpoints are enough to exercise the gate; a caller given
+ * this map calls only these.
+ */
+const mockSignatures: LambderApiSignatureMap = {};
+beforeAll(async () => {
+    for(const name of ['user.get', 'admin.run', 'limited']) mockSignatures[await apiNameKeyOf(name)] = `mock-signature-of-${name}`;
+});
+
 const createMockApp = (options: { apiVersion?: string; latency?: number } = {}) => {
     const mockApp = mock.create({
         apiVersion: options.apiVersion,
+        apiSignatures: mockSignatures,
         latency: options.latency,
         sessions: true,
         idempotency: true,
@@ -98,9 +110,9 @@ const createMockApp = (options: { apiVersion?: string; latency?: number } = {}) 
     return { mockApp, orderRuns: () => orderRuns };
 };
 
-const callerFor = (mockApp: ReturnType<typeof createMockApp>['mockApp'], options: { jar?: LambderCookieJar; apiVersion?: string; timeoutMs?: number } = {}) =>
+const callerFor = (mockApp: ReturnType<typeof createMockApp>['mockApp'], options: { jar?: LambderCookieJar; apiVersion?: string; apiSignatures?: LambderApiSignatureMap; timeoutMs?: number } = {}) =>
     new LambderCaller<Contract>({
-        apiPath: '/api', isCorsEnabled: false, apiVersion: options.apiVersion, timeoutMs: options.timeoutMs,
+        apiPath: '/api', isCorsEnabled: false, apiVersion: options.apiVersion, apiSignatures: options.apiSignatures, timeoutMs: options.timeoutMs,
         transport: mockApp.transport(options.jar ? { cookies: options.jar } : {}),
     });
 
@@ -173,12 +185,12 @@ describe('LambderMockApp - answers', () => {
         // server (reload, not "not mocked yet"), and the compressed payload
         // is restored in time to appear on the call log.
         const { mockApp } = createMockApp({ apiVersion: '2' });
-        const stale = await callerFor(mockApp, { apiVersion: '1' }).apiOutcome('admin.run', {});
+        const stale = await callerFor(mockApp, { apiSignatures: { ...mockSignatures, [await apiNameKeyOf('admin.run')]: 'an-older-shape' } }).apiOutcome('admin.run', {});
         expect(stale.ok).toBe(false);
         if(!stale.ok) expect(stale.reason).toBe('versionExpired');
         expect(mockApp.calls.at(-1)?.outcome).toBe('versionExpired');
 
-        const current = await callerFor(mockApp, { apiVersion: '2' }).apiOutcome('admin.run', {});
+        const current = await callerFor(mockApp, { apiSignatures: mockSignatures }).apiOutcome('admin.run', {});
         expect(current.ok).toBe(false);
         if(!current.ok) expect(current.errorMessage).toMatchObject({ code: LAMBDER_REFUSAL_CODES.notMocked });
 
@@ -460,14 +472,19 @@ describe('LambderMockApp - guards, rate limits, idempotency, version', () => {
         error.mockRestore();
     });
 
-    it('the version gate answers versionExpired to a caller on another version', async () => {
+    it('the signature gate answers versionExpired to a caller built against another shape, given the generated map', async () => {
         const { mockApp } = createMockApp({ apiVersion: '2' });
-        const stale = await callerFor(mockApp, { apiVersion: '1' }).apiOutcome('user.get', { userId: '1' });
+        const stale = await callerFor(mockApp, { apiSignatures: { ...mockSignatures, [await apiNameKeyOf('user.get')]: 'an-older-shape' } }).apiOutcome('user.get', { userId: '1' });
         expect(stale.ok).toBe(false);
         if(!stale.ok) expect(stale.reason).toBe('versionExpired');
-        expect((await callerFor(mockApp, { apiVersion: '2' }).apiOutcome('user.get', { userId: '1' })).ok).toBe(true);
-        // A caller that sends no version passes the gate, as on the server.
+        expect((await callerFor(mockApp, { apiSignatures: mockSignatures }).apiOutcome('user.get', { userId: '1' })).ok).toBe(true);
+        // A caller that sends no signature is never gated, as on the server.
         expect((await callerFor(mockApp).apiOutcome('user.get', { userId: '1' })).ok).toBe(true);
+        // A runtime given no map passes every signature: it holds no server
+        // schema to judge one by.
+        const ungated = mock.create({ guards: mockGuards });
+        ungated.registerPartial(ungated.apiSlice(ungated.publicApi('user.get', async ({ payload }) => ({ id: payload.userId, name: 'Ada' }))));
+        expect((await callerFor(ungated, { apiSignatures: { [await apiNameKeyOf('user.get')]: 'whatever' } }).apiOutcome('user.get', { userId: '1' })).ok).toBe(true);
     });
 });
 
@@ -712,7 +729,7 @@ describe('LambderMockApp - overrides, reset, observation', () => {
         ));
 
         const answer = await mockApp.handleRequest({
-            apiName: 'echo', version: null, token: '', siteHost: 'localhost', payload: { notes: ['hi'] },
+            apiName: 'echo', version: null, signature: null, token: '', siteHost: 'localhost', payload: { notes: ['hi'] },
             compressedPayload: null, guardInputs: undefined, idempotencyKey: undefined,
             headers: {}, cookies: {}, ip: '1.2.3.4', host: 'localhost',
         });
@@ -1057,6 +1074,7 @@ describe('LambderMockApp - the rest entry', () => {
     const createRestApp = (options: { apiVersion?: string; sessionStore?: LambderSessionStore<SessionData> } = {}) => {
         const app = mock.create({
             apiVersion: options.apiVersion,
+            apiSignatures: mockSignatures,
             guards: mockGuards,
             sessions: options.sessionStore ? { store: options.sessionStore } : true,
         });
@@ -1145,12 +1163,12 @@ describe('LambderMockApp - the rest entry', () => {
     it('still runs the protocol steps that precede dispatch, so a stale client hears versionExpired first', async () => {
         const app = createRestApp({ apiVersion: '2' });
 
-        const stale = await callerFor(app, { apiVersion: '1' }).apiOutcome('limited', {});
+        const stale = await callerFor(app, { apiSignatures: { ...mockSignatures, [await apiNameKeyOf('limited')]: 'an-older-shape' } }).apiOutcome('limited', {});
         expect(stale.ok).toBe(false);
         if(!stale.ok) expect(stale.reason).toBe('versionExpired');
         expect(app.calls.at(-1)?.outcome).toBe('versionExpired');
 
-        const current = await callerFor(app, { apiVersion: '2' }).apiOutcome('limited', {});
+        const current = await callerFor(app, { apiSignatures: mockSignatures }).apiOutcome('limited', {});
         expect(current.ok).toBe(false);
         if(!current.ok) expect(current.errorMessage).toMatchObject({ code: LAMBDER_REFUSAL_CODES.notMocked });
     });

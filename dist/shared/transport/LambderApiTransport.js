@@ -29,6 +29,7 @@ export const isLambderTransportFailure = (err) => err instanceof Error && err.is
 export const buildEnvelopeFields = (fields) => ({
     apiName: fields.apiName,
     version: fields.version,
+    ...(fields.signature !== undefined ? { signature: fields.signature } : {}),
     token: fields.token,
     siteHost: fields.siteHost,
     ...(fields.compressed ?? fields.payloadSlot ?? {}),
@@ -43,6 +44,7 @@ export const buildEnvelopeFields = (fields) => ({
 export const buildTransportEnvelope = (request) => buildEnvelopeFields({
     apiName: request.apiName,
     version: request.version,
+    signature: request.signature,
     token: request.token,
     siteHost: request.siteHost,
     payloadSlot: { payload: request.payload },

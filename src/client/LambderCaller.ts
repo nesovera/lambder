@@ -22,6 +22,8 @@ import { createCallAbort, type LambderCallAbortStage } from '../shared/util/Lamb
 import { coerceToError } from '../shared/wire/LambderCrashDetail.js';
 import { isLambderTransportFailure, type LambderApiTransport } from '../shared/transport/LambderApiTransport.js';
 import { DEFAULT_SESSION_TOKEN_COOKIE_KEY, DEFAULT_SESSION_CSRF_COOKIE_KEY } from '../shared/wire/LambderSessionCookieNames.js';
+import { readApiSignature, type LambderApiSignatureMap } from '../shared/wire/LambderApiSignature.js';
+import { LambderReloadLoopBreaker, RELOAD_LOOP_WINDOW_MS } from './LambderReloadLoopBreaker.js';
 import { lambderFetchTransport } from './lambderFetchTransport.js';
 
 // The outcome vocabulary and the contract-driven option typing are shared
@@ -85,7 +87,16 @@ export type LambderCallOptions = LambderSharedCallOptions & {
 
 type LambderCallerBaseOptions = {
     apiPath: string,
+    /** Sent with every call as `version`, informational: the server stamps its own on every answer. */
     apiVersion?: string,
+    /**
+     * The server's signature map, generated from its instance
+     * (Lambder.apiSignatures()) and shipped with this build. Sent per call as
+     * `signature`, so the server answers versionExpired to a call built
+     * against another shape of the endpoint and runs every other call. Leave
+     * it out and no call is gated.
+     */
+    apiSignatures?: LambderApiSignatureMap,
     isCorsEnabled: boolean,
     /** Default per-request timeout in ms (none unless set; API Gateway caps around 29s, so ~30000 is a sensible value). Overridable per call. */
     timeoutMs?: number,
@@ -133,7 +144,10 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
     private isCorsEnabled: boolean;
     private apiPath: string;
     private apiVersion?: string;
+    private apiSignatures?: LambderApiSignatureMap;
     private timeoutMs?: number;
+    /** What keeps a stale bundle from reloading itself forever; see the class. */
+    private readonly reloadLoopBreaker = new LambderReloadLoopBreaker();
 
     /** The calls currently in flight, in the order they started. */
     fetchTrackerList: FetchTracker[] = [];
@@ -164,7 +178,7 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
         // The conditional provider option is resolved per instantiation;
         // inside the class it is read through the plain shape.
         const {
-            apiPath, apiVersion,
+            apiPath, apiVersion, apiSignatures,
             isCorsEnabled,
             timeoutMs,
             versionExpiredHandler, sessionExpiredHandler,
@@ -179,6 +193,7 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
         } = options as LambderCallerBaseOptions & { guardInputsProvider?: (apiName: string) => unknown };
         this.apiPath = apiPath;
         this.apiVersion = apiVersion;
+        this.apiSignatures = apiSignatures;
         this.isCorsEnabled = isCorsEnabled;
         this.timeoutMs = timeoutMs;
         this.sessionCookieDomain = sessionCookieDomain;
@@ -345,6 +360,10 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
                 activeFetchList: [...this.fetchTrackerList],
             });
             const version = this.apiVersion;
+            // The server's signature for this endpoint, when this build
+            // carries the map. A name the map lacks fails the call here, as a
+            // provider that threw would: the map predates the endpoint.
+            const signature = this.apiSignatures ? await readApiSignature(this.apiSignatures, apiName) : undefined;
             // js-cookie reads nothing without a document, and there is no
             // location outside a page: both are "" then, and a transport that
             // carries a cookie jar fills the token in from it.
@@ -377,6 +396,7 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
                 answer = await this.transport({
                     apiPath: this.apiPath,
                     apiName, version, token, siteHost,
+                    ...(signature !== undefined ? { signature } : {}),
                     csrfCookieKey: this.sessionCsrfCookieKey,
                     ...(compressedPayload ? { compressed: compressedPayload } : { payload }),
                     ...(guardInputs !== undefined ? { guardInputs } : {}),
@@ -441,6 +461,15 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
             await fetchEnded(data);
 
             if(!outcome.ok && outcome.reason === 'versionExpired'){
+                // A repeat of a recent versionExpired for the same endpoint and
+                // signature means the reload the handler performed brought the
+                // same bundle back, and reloading again would loop. The
+                // handler is not called; the failure is reported instead, and
+                // the outcome still says versionExpired.
+                if(this.reloadLoopBreaker.isRepeat(apiName, signature ?? "")){
+                    await reportError(new Error(`Version expired again for API "${apiName}" within ${RELOAD_LOOP_WINDOW_MS / 60000} minutes with the same signature: the bundle being served is still the stale one, so versionExpiredHandler was not called again.`));
+                    return outcome;
+                }
                 if(versionExpiredHandler){ await versionExpiredHandler(); }
                 else{ await reportError(new Error("Version Expired; Please refresh;")); }
                 return outcome;

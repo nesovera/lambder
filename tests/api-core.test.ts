@@ -17,6 +17,7 @@ import {
 import { readApiEnvelope, restoreCompressedPayload, type LambderApiRequest } from '../src/api/LambderApiRequest.js';
 import { createApiCallContext, type LambderApiCallContext } from '../src/api/LambderApiCallContext.js';
 import { LambderApiPipeline } from '../src/api/LambderApiPipeline.js';
+import type { LambderApiDefinition } from '../src/api/LambderApiDefinition.js';
 import { LambderApiPolicyEngine } from '../src/api/LambderApiPolicyEngine.js';
 import { LambderApiValidationRefusal, isLambderApiValidationRefusal } from '../src/api/LambderApiValidationRefusal.js';
 import { LambderApiRefusal, refuse, LAMBDER_REFUSAL_CODES } from '../src/shared/wire/LambderApiRefusal.js';
@@ -26,7 +27,7 @@ import { LambderMemorySessionStore } from '../src/stores/LambderMemorySessionSto
 import LambderSessionManager from '../src/session/LambderSessionManager.js';
 
 const request = (overrides: Partial<LambderApiRequest> = {}): LambderApiRequest => ({
-    apiName: 'thing.do', version: null, token: '', siteHost: 'localhost', payload: { value: 'x' }, compressedPayload: null,
+    apiName: 'thing.do', version: null, signature: null, token: '', siteHost: 'localhost', payload: { value: 'x' }, compressedPayload: null,
     guardInputs: undefined, idempotencyKey: undefined, headers: {}, cookies: {}, ip: '1.2.3.4', host: 'localhost',
     ...overrides,
 });
@@ -241,21 +242,32 @@ describe('LambderApiPipeline', () => {
         expect(guardsRun).toEqual([]);
     });
 
-    it('gates the version first, then restores the payload, and refuses an unknown name with the call\'s own headers', async () => {
-        const pipeline = new LambderApiPipeline({ apiVersion: '2' });
-        const stale = await pipeline.run(request({ version: '1' }), createApiCallContext(), { name: 'thing.do', mode: 'public' }, okExec);
-        expect(JSON.parse(stale.answer.body).versionExpired).toBe(true);
-        expect(JSON.parse(pipeline.answerUnknownApi(request({ version: '2' })).body).errorMessage.code).toBe(LAMBDER_REFUSAL_CODES.apiNotFound);
-        expect(pipeline.isVersionStale(request({ version: null }))).toBe(false);
-        // Both adapters run prepare() before they resolve a name, so the
-        // version gate has already answered a stale client by the time an
-        // unknown name is reported: the refusal carries the call's headers
-        // instead of a second gate nothing can reach.
+    it('gates the signature first, then restores the payload, and refuses an unknown name with the call\'s own headers', async () => {
+        // A source that knows one signature per known endpoint, as the
+        // server's digests or the mock's map would.
+        const signatures = { expectedSignatureOf: async (apiName: string, definition: LambderApiDefinition | null) => definition ? `sig-of-${apiName}` : null };
+        const pipeline = new LambderApiPipeline({ apiVersion: '2', signatures });
+        const definition: LambderApiDefinition = { name: 'thing.do', mode: 'public' };
+        const stale = await pipeline.run(request({ signature: 'sig-of-an-older-shape' }), createApiCallContext(), definition, okExec);
+        expect(JSON.parse(stale.answer.body)).toEqual({ apiVersion: '2', payload: null, versionExpired: true });
+        const current = await pipeline.run(request({ signature: 'sig-of-thing.do' }), createApiCallContext(), definition, okExec);
+        expect(JSON.parse(current.answer.body).payload).toEqual({ ran: true });
+        // A request carrying no signature is never gated, and a signed request
+        // for a name the adapter does not know is a stale client, not a typo.
+        expect(await pipeline.prepare(request(), null)).toBeNull();
+        expect(JSON.parse((await pipeline.prepare(request({ signature: 'anything' }), null))!.body).versionExpired).toBe(true);
+        // Without a source every signature passes.
+        expect(await new LambderApiPipeline().prepare(request({ signature: 'anything' }), null)).toBeNull();
+        expect(JSON.parse(pipeline.answerUnknownApi(request()).body).errorMessage.code).toBe(LAMBDER_REFUSAL_CODES.apiNotFound);
+        // Both adapters run prepare() with the definition the name resolved
+        // to, or null, so a signed stale client has already been answered by
+        // the time an unknown name is reported: the refusal carries the call's
+        // headers instead of a second gate nothing can reach.
         const ctx = createApiCallContext();
         ctx.responseHeaders.set('X-Cors', 'yes');
-        expect(pipeline.answerUnknownApi(request({ version: '1' }), ctx).headers['X-Cors']).toEqual(['yes']);
+        expect(pipeline.answerUnknownApi(request(), ctx).headers['X-Cors']).toEqual(['yes']);
 
-        const bad = await pipeline.run(request({ compressedPayload: { gzip: 5, brotli: undefined, declaredBytes: 1 } }), createApiCallContext(), { name: 'thing.do', mode: 'public' }, okExec);
+        const bad = await pipeline.run(request({ compressedPayload: { gzip: 5, brotli: undefined, declaredBytes: 1 } }), createApiCallContext(), definition, okExec);
         expect(bad.answer.statusCode).toBe(400);
     });
 

@@ -10,6 +10,8 @@ export type LambderApiTransportRequest = {
     apiPath: string;
     apiName: string;
     version?: string;
+    /** The caller's signature for this endpoint, out of its LambderApiSignatureMap; absent when it carries no map. */
+    signature?: string;
     /** The CSRF token the caller read from its cookie; "" when it holds none. */
     token: string;
     /**
@@ -101,6 +103,7 @@ export type LambderApiTransport = (request: LambderApiTransportRequest) => Promi
 export declare const buildEnvelopeFields: (fields: {
     apiName: string;
     version?: string;
+    signature?: string;
     /** The CSRF token, as the envelope names it. */
     token: string;
     siteHost: string;

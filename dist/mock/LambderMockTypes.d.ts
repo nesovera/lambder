@@ -374,6 +374,8 @@ export type LambderMockRequestEvent = {
     /** Exactly as posted, so `unknown`: the key is client data and only the idempotency engine judges it. */
     idempotencyKey: unknown;
     version: string | null;
+    /** The signature the caller sent for the endpoint; null when it carries no map. */
+    signature: string | null;
     headers: Record<string, string>;
     /** True when the request carried a session cookie. */
     hasSessionCookie: boolean;

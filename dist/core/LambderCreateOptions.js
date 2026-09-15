@@ -23,11 +23,6 @@ export const assertCreateOptions = (options) => {
     if (options.apiPath !== undefined && (options.apiPath === "" || !options.apiPath.startsWith("/"))) {
         throw new Error(`Lambder: apiPath must be a path starting with "/", got ${JSON.stringify(options.apiPath)}.`);
     }
-    // "" is the one string that turns the version gate off while looking like
-    // it was set; say so rather than accepting every version a client names.
-    if (options.apiVersion === "") {
-        throw new Error("Lambder: apiVersion must not be empty. Leave it out to run without the version gate.");
-    }
     // 0 or a negative ceiling turned every response into the size guard's own 500.
     if (options.maxResponseBytes !== undefined)
         assertPositiveInteger(options.maxResponseBytes, "maxResponseBytes");

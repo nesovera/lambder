@@ -9,7 +9,8 @@
  */
 
 import { testPublicFiles } from './helpers.js';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
+import { apiNameKeyOf, type LambderApiSignatureMap } from '../src/shared/wire/LambderApiSignature.js';
 import { z } from 'zod';
 import { initLambder } from '../src/core/Lambder.js';
 import { lambderGuard } from '../src/core/LambderPolicyBuilders.js';
@@ -99,6 +100,7 @@ const createMock = (gate: ReturnType<typeof makeGate>) => {
     const mock = initLambderMock<Contract, SessionData>();
     const mockApp = mock.create({
         apiVersion: '1',
+        apiSignatures: serverSignatures,
         // The mock reveals a thrown handler's message by default, which is a
         // development convenience and a deliberate difference from the server.
         // This suite compares the two in the shape they ship in.
@@ -173,8 +175,12 @@ const observing = (transport: LambderApiTransport, sink: Observed[]): LambderApi
     return { ...answer, text: async () => text, json: async () => JSON.parse(text) };
 };
 
+/** The server's own map, as the generator would write it: what the mock is given so it judges signatures as the server does. */
+const serverSignatures: LambderApiSignatureMap = {};
+beforeAll(async () => { Object.assign(serverSignatures, await createServer(makeGate()).apiSignatures()); });
+
 /** Both sides, side by side: a caller per side over a fresh cookie jar, and what each observed. */
-const createSides = (options: { apiVersion?: string; requestCompression?: boolean } = {}) => {
+const createSides = (options: { apiSignatures?: LambderApiSignatureMap; requestCompression?: boolean } = {}) => {
     const serverGate = makeGate();
     const mockGate = makeGate();
     const server = createServer(serverGate);
@@ -183,11 +189,11 @@ const createSides = (options: { apiVersion?: string; requestCompression?: boolea
     /** One browser per side, from one client address: its own jar, its own session, its own identity. */
     const callerPair = (clientIp: string) => ({
         server: new LambderCaller<Contract>({
-            apiPath: '/api', isCorsEnabled: false, apiVersion: options.apiVersion ?? '1', requestCompression: options.requestCompression,
+            apiPath: '/api', isCorsEnabled: false, apiVersion: '1', apiSignatures: options.apiSignatures, requestCompression: options.requestCompression,
             transport: observing(lambderCookieJarTransport(lambderHandlerTransport(server.getHandler(), { clientIp }), { jar: new LambderCookieJar() }), observed.server),
         }),
         mock: new LambderCaller<Contract>({
-            apiPath: '/api', isCorsEnabled: false, apiVersion: options.apiVersion ?? '1', requestCompression: options.requestCompression,
+            apiPath: '/api', isCorsEnabled: false, apiVersion: '1', apiSignatures: options.apiSignatures, requestCompression: options.requestCompression,
             transport: observing(mockApp.transport({ clientIp }), observed.mock),
         }),
     });
@@ -261,9 +267,12 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
         expect(missing.mockOutcome.ok ? '' : missing.mockOutcome.reason).toBe('validation');
     });
 
-    it('versionExpired for a stale caller', async () => {
-        const { seen } = await same(createSides({ apiVersion: '0' }), 'ok', { n: 1 });
+    it('versionExpired for a caller built against another shape of the endpoint, and a pass for the current one', async () => {
+        const stale = { ...serverSignatures, [await apiNameKeyOf('ok')]: 'an-older-shape' };
+        const { seen } = await same(createSides({ apiSignatures: stale }), 'ok', { n: 1 });
         expect(seen.envelope).toEqual({ apiVersion: '1', payload: null, versionExpired: true });
+        const current = await same(createSides({ apiSignatures: serverSignatures }), 'ok', { n: 21 });
+        expect(current.seen.envelope).toEqual({ apiVersion: '1', payload: { doubled: 42 } });
     });
 
     it('rate limited: the same 429 envelope with a Retry-After', async () => {
@@ -364,12 +373,13 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
         expect(seen.envelope).toEqual({ apiVersion: '1', payload: null, errorMessage: { type: 'warning', code: 'lambder/api-not-found', content: 'API not found.' } });
     });
 
-    it('an unknown api from a stale caller: the version gate answers first on both sides', async () => {
-        // The pre-pass runs before the name is resolved, so which answer comes
-        // back cannot depend on whether the name exists. The mock resolved the
-        // name first and answered apiNotFound where the server answered
-        // versionExpired.
-        const { seen } = await same(createSides({ apiVersion: '0' }), 'nope', {});
+    it('an unknown api from a signed caller: the signature gate answers first on both sides', async () => {
+        // A caller whose map holds a name the server does not have was built
+        // against another contract, so both sides say versionExpired rather
+        // than apiNotFound. The mock used to resolve the name first and
+        // answered apiNotFound where the server did not.
+        const withNope = { ...serverSignatures, [await apiNameKeyOf('nope')]: 'from-another-contract' };
+        const { seen } = await same(createSides({ apiSignatures: withNope }), 'nope', {});
         expect(seen.envelope).toEqual({ apiVersion: '1', payload: null, versionExpired: true });
     });
 

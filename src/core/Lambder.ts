@@ -25,6 +25,8 @@ import { LambderFiles } from "./LambderFiles.js";
 import { isLambderApiRefusal, type LambderApiRefusal } from "../shared/wire/LambderApiRefusal.js";
 import { LambderApiPipeline } from "../api/LambderApiPipeline.js";
 import type { LambderApiDefinition } from "../api/LambderApiDefinition.js";
+import { LambderApiSignatureDigests } from "../api/LambderApiSignature.js";
+import { apiNameKeyOf, type LambderApiSignatureMap } from "../shared/wire/LambderApiSignature.js";
 import type { LambderApiMode } from "../shared/wire/LambderApiContract.js";
 import type {
     LambderApiIdempotencyOption,
@@ -129,6 +131,7 @@ export default class Lambder<
     // Everything an instance is, fixed before the first registration.
     // =====================================================================
     public apiPath: string;
+    /** Stamped on every API answer's envelope as apiVersion. Informational: a client's staleness is judged per endpoint by its signature, see apiSignatures(). */
     public apiVersion: null | string;
     /** The instance's file reader (source + caches), or null without the files option. */
     public files: LambderFiles | null;
@@ -148,7 +151,10 @@ export default class Lambder<
     private actionList: ActionObject[] = [];
     /** The API core: the pipeline every API call runs through, shared in shape with the mock runtime. */
     private readonly pipeline: LambderApiPipeline<LambderRenderContext, TSessionData>;
-    private registeredApiNames = new Set<string>();
+    /** Every registered API by name: what resolves a request's name to its definition ahead of the pipeline, and what apiSignatures() digests. */
+    private readonly apiDefinitions = new Map<string, LambderApiDefinition>();
+    /** The signature of each endpoint as this server serves it, digested once per endpoint on first use. */
+    private readonly signatureDigests: LambderApiSignatureDigests;
     private hookList: {
         "beforeRender": { priority: number, hookFn: LambderBeforeRenderHook }[],
         "afterRender": { priority: number, hookFn: LambderAfterRenderHook }[],
@@ -189,8 +195,10 @@ export default class Lambder<
         }
 
         const session = options.session;
+        this.signatureDigests = new LambderApiSignatureDigests(options.guards);
         this.pipeline = new LambderApiPipeline<LambderRenderContext, TSessionData>({
             apiVersion: this.apiVersion,
+            signatures: this.signatureDigests,
             maxRequestPayloadBytes: options.maxRequestPayloadBytes,
             // The app's own validation handler is read at call time, since
             // setApiInputValidationErrorHandler runs after creation.
@@ -336,7 +344,8 @@ export default class Lambder<
         TRateOpt,
         TIdempotencyOpt>>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired, _TPublicGuardsRequired, _TSessionsEnabled> {
         this.assertApiRegistration(name, "public", schema);
-        const definition: LambderApiDefinition = { name, mode: "public", guards: schema.guards, rateLimit: schema.rateLimit, idempotency: schema.idempotency, input: schema.input };
+        const definition: LambderApiDefinition = { name, mode: "public", guards: schema.guards, rateLimit: schema.rateLimit, idempotency: schema.idempotency, input: schema.input, output: schema.output };
+        this.apiDefinitions.set(name, definition);
         this.actionList.push({
             match: (ctx) => ctx.apiName === name ? {} : false,
             actionFn: (ctx, resolver) => this.runApi(ctx, resolver, definition, handler as never),
@@ -373,7 +382,8 @@ export default class Lambder<
         TRateOpt,
         TIdempotencyOpt>>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired, _TPublicGuardsRequired, _TSessionsEnabled> {
         this.assertApiRegistration(name, "session", schema);
-        const definition: LambderApiDefinition = { name, mode: "session", guards: schema.guards, rateLimit: schema.rateLimit, idempotency: schema.idempotency, input: schema.input };
+        const definition: LambderApiDefinition = { name, mode: "session", guards: schema.guards, rateLimit: schema.rateLimit, idempotency: schema.idempotency, input: schema.input, output: schema.output };
+        this.apiDefinitions.set(name, definition);
         this.actionList.push({
             match: (ctx) => ctx.apiName === name ? {} : false,
             actionFn: (ctx, resolver) => this.runApi(ctx, resolver, definition, handler as never),
@@ -484,6 +494,21 @@ export default class Lambder<
     /** The session manager, for code that works on sessions outside a request (maintenance, tests). */
     getSessionManager(): LambderSessionManager<TSessionData> {
         return this.pipeline.sessionManager;
+    }
+
+    /**
+     * Every registered endpoint's signature, keyed by its hashed name: the
+     * LambderApiSignatureMap a client build ships with. A generator imports
+     * the finished instance, awaits this, and writes the result to a file the
+     * frontend passes to LambderCaller as apiSignatures; at request time the
+     * server compares each call's signature against these same digests. Keys
+     * are sorted, so the generated file diffs by endpoint.
+     */
+    async apiSignatures(): Promise<LambderApiSignatureMap> {
+        const entries = await Promise.all([...this.apiDefinitions.values()].map(async (definition): Promise<[string, string]> =>
+            [await apiNameKeyOf(definition.name), await this.signatureDigests.signatureOf(definition)]));
+        entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+        return Object.fromEntries(entries);
     }
 
     getResponseBuilder(ctx?: LambderRenderContext){
@@ -608,8 +633,9 @@ export default class Lambder<
             // The protocol's own pre-pass, run here rather than left to the
             // pipeline so that hooks and route matching see a plain payload,
             // and so a stale client is answered before any of them, whether or
-            // not the name it asked for exists.
-            const prepared = await this.pipeline.prepare(ctx.api);
+            // not the name it asked for exists: the gate is handed the
+            // definition the name resolves to, or null.
+            const prepared = await this.pipeline.prepare(ctx.api, this.apiDefinitions.get(ctx.api.apiName) ?? null);
             if(prepared) return responseFromAnswer(prepared);
             // ctx.post is the raw body view; it shows the restored payload and
             // none of the wire fields, so nothing reading it sees the format.
@@ -786,7 +812,7 @@ export default class Lambder<
         mode: LambderApiMode,
         options: { rateLimit?: LambderRateLimitOptionValue, guards?: LambderGuardsOptionValue, idempotency?: LambderApiIdempotencyOption },
     ): void {
-        if(this.registeredApiNames.has(name)){
+        if(this.apiDefinitions.has(name)){
             throw new Error(`Lambder: duplicate API name "${name}". Dispatch is first-match, so the second registration would be silently dead code.`);
         }
         // Everything that can refuse this registration runs before the name is
@@ -808,7 +834,6 @@ export default class Lambder<
             );
         }
         this.pipeline.assertRegistration({ name, mode, guards: options.guards, rateLimit: options.rateLimit, idempotency: options.idempotency });
-        this.registeredApiNames.add(name);
     }
 
     /**

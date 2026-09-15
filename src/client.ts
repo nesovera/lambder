@@ -17,6 +17,10 @@ export type { LambderApiTransport, LambderApiTransportRequest, LambderTransportF
 export { LambderCookieJar, parseSetCookie } from "./shared/transport/LambderCookieJar.js";
 export type { LambderStoredCookie } from "./shared/transport/LambderCookieJar.js";
 export { resolveApiOutcome } from "./shared/wire/LambderApiOutcome.js";
+// The per-endpoint signature map a build ships with, how a caller reads it, and the reload-loop window.
+export { apiNameKeyOf, lookupApiSignature, readApiSignature, API_SIGNATURE_HEX_LENGTH } from "./shared/wire/LambderApiSignature.js";
+export type { LambderApiSignatureMap } from "./shared/wire/LambderApiSignature.js";
+export { RELOAD_LOOP_WINDOW_MS } from "./client/LambderReloadLoopBreaker.js";
 // resolveApiOutcome's own return type and the arms of the outcome union, so a
 // consumer reading an answer or narrowing a failure can name what it holds.
 export type {

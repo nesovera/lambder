@@ -117,6 +117,7 @@ export const buildEnvelopeJson = (fields) => {
     const withoutPayload = JSON.stringify(buildEnvelopeFields({
         apiName: fields.apiName,
         version: fields.version,
+        signature: fields.signature,
         token: fields.csrf ?? "",
         siteHost: fields.siteHost,
         compressed: fields.compressed,

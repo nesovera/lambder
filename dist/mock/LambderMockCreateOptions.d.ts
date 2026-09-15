@@ -1,3 +1,4 @@
+import type { LambderApiSignatureMap } from "../shared/wire/LambderApiSignature.js";
 import type { LambderContractGuardNames } from "../shared/wire/LambderApiContract.js";
 import type { LambderApiGuard } from "../api/LambderApiGuards.js";
 import type { LambderApiRateLimitPolicyConfig } from "../api/LambderApiRateLimits.js";
@@ -99,8 +100,16 @@ type LambderMockGuardShapes<S, G> = {
     [N in keyof G]: LambderMockSurplusKeys<G[N], LambderApiGuard<any, any, any, LambderMockCallContext<S>, LambderMockSessionCallContext<S>>>;
 };
 export type LambderMockAppOptions<C, S, G, P extends LambderMockRateLimitPolicies<S> = LambderMockRateLimitPolicies<S>, I extends boolean | LambderMockIdempotencyOptions<S> = boolean | LambderMockIdempotencyOptions<S>> = LambderMockGuardsOption<C, S, G> & {
-    /** Enables the version gate: a call naming another version answers versionExpired, exactly as the server would. */
+    /** Stamped on every answer's envelope as apiVersion, as the server's option is. */
     apiVersion?: string;
+    /**
+     * The generated signature map the caller carries, so the runtime refuses a
+     * stale signature exactly as the server would: a call whose signature is
+     * not the map's entry for its endpoint answers versionExpired. Without it
+     * every signature passes, since the runtime holds no server schema to
+     * digest.
+     */
+    apiSignatures?: LambderApiSignatureMap;
     /** Artificial latency per call; off by default. */
     latency?: LambderMockLatency;
     /** Sessions over the memory store: `true` for the defaults, or the options. Off by default: session endpoints then fail at registration. */

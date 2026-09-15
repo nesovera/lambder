@@ -20,7 +20,7 @@ between runs once, in one place, on Node and in the browser.
                      │                  │
                      ▼                  ▼
             ══════════ LambderApiPipeline (isomorphic core) ══════════
-            version gate → payload restore → ip-keyed rate limits → session
+            signature gate → payload restore → ip-keyed rate limits → session
             → replay → the remaining rate limits → guards → input validation
             → exec → answer
 ```
@@ -102,7 +102,8 @@ store, and a **Controller** the per-request API over a manager.
 ```typescript
 type LambderApiRequest = {
     apiName: string;
-    version: string | null;          // the caller's apiVersion, for the gate
+    version: string | null;          // the caller's apiVersion, informational
+    signature: string | null;        // the caller's signature for the endpoint, for the gate
     token: string;                   // the CSRF token the caller posted
     siteHost: string;
     payload: unknown;                // plain, or restored from its compressed form
@@ -155,7 +156,12 @@ a handler's return with it, so the two sides cannot drift on a byte.
 
 ```typescript
 const pipeline = new LambderApiPipeline<Ctx, SessionData>({
-    apiVersion?: string,
+    apiVersion?: string,                 // stamped on every answer's envelope
+    // Enables the signature gate: what signature a request should carry for
+    // its endpoint (null for an unknown one). The server's is
+    // LambderApiSignatureDigests over its own schemas; the mock's answers from
+    // the generated map.
+    signatures?: LambderApiSignatureSource,
     maxRequestPayloadBytes?: number,
     // null asks for the standard 422, so "no handler, standard 422" is
     // written once, here, rather than in every adapter.
@@ -186,15 +192,18 @@ with `console.error` naming the policy or the API. Set it to false where an
 unmetered or undeduplicated request is worse than a refused one.
 
 `definition` is a `LambderApiDefinition`: `{ name, mode, guards?, rateLimit?,
-idempotency?, input? }`. The schema is optional because the mock has none.
+idempotency?, input?, output? }`. The schemas are optional because the mock has
+none; `output` is read by the signature digest alone.
 `exec(ctx)` is the adapter's step: on the server it calls the app handler and
 converts its `LambderResponse` to an answer; in the mock it calls the mock
 handler and wraps the return in the envelope.
 
 The steps, in the order `run` executes them:
 
-1. **Version gate**: a request naming another version answers
-   `versionExpired`.
+1. **Signature gate**: a request carrying a signature that is not the one
+   the `signatures` source expects for its endpoint answers `versionExpired`
+   (see [APIs](./apis.md#signatures-when-a-client-must-update)); a request
+   carrying none is not gated.
 2. **Payload restore**: a compressed payload is restored before anything
    reads it.
 3. **Rate limits whose key needs no session** (`per: "ip"`), in declared
@@ -223,9 +232,10 @@ one place: a `LambderApiValidationRefusal` through `onInvalidInput` (the app's
 any other refusal as the refusal envelope. Anything else propagates, because
 only the adapter knows what a crash means. `run` never sees a name it has no
 definition for; `answerUnknownApi(request, ctx?)` is what the adapters answer
-with. It carries the call's own headers and holds no version gate: both
-adapters run `prepare()` on the way in, before a name is resolved, so a stale
-client has already been answered by then.
+with. It carries the call's own headers and holds no signature gate: both
+adapters run `prepare(request, definition)` on the way in, with the definition
+the name resolved to or null, so a signed stale client has already been
+answered by then.
 
 `assertRegistration(definition)` runs the registration-time checks (unknown
 policy or guard names, session guards on public endpoints, empty guard and
@@ -299,6 +309,6 @@ templating, finalization and the global error handler. For an API call it
 parses the event into `ctx.api`, runs the pipeline with an `exec` that calls
 the handler and converts its response (`answerFromResponse`,
 `responseFromAnswer`), and hands the answer to hooks, CORS and finalization
-as a `LambderResponse`. The version gate and the payload restore also run
+as a `LambderResponse`. The signature gate and the payload restore also run
 before routing, so hooks see a plain payload and a stale client is answered
 before any of them, whether or not the name it asked for exists.

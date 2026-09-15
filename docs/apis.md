@@ -119,7 +119,7 @@ by hand; see
 ## Request flow per API
 
 ```
-version gate → payload restore
+signature gate → payload restore
   → rate limits keyed on the request alone (per: "ip")
   → session (session APIs)
   → idempotency replay lookup
@@ -138,6 +138,55 @@ either way). An `ip`-keyed policy is checked before the session read and the
 replay lookup instead, because those store reads are what it exists to bound,
 so a retry does count against an `ip` budget. See
 [API policies](./api-policies.md#request-flow).
+
+## Signatures: when a client must update
+
+Every endpoint has a signature: a short digest of its client-facing shape,
+computed from the registration itself. It covers the name and mode, the
+`input` and `output` schemas as JSON Schema, every guard the endpoint
+declares with the schema that guard validates (a `guardInput` the client
+sends, or an `apiInput` slice of the payload), and whether the endpoint takes
+an idempotency key. Rate limits, guard parameters and the handler are not
+part of it, because changing them changes nothing for a client. The schemas
+are digested exactly as zod emits them, descriptions included; what JSON
+Schema cannot express (a transform's output, a custom check) digests as `{}`.
+
+`lambder.apiSignatures()` returns every registered endpoint's signature,
+keyed by the endpoint's hashed name, as a `LambderApiSignatureMap`. A
+generator imports the finished instance, awaits it, and writes the object to
+a file the frontend ships with its build. Run it before every frontend build,
+not by hand:
+
+```typescript
+// tools/generate-api-signatures.ts
+import { writeFileSync } from "node:fs";
+import { lambder } from "../backend/index.js";   // the instance with every API registered
+
+const signatures = await lambder.apiSignatures();
+writeFileSync("frontend/src/generated/apiSignatures.generated.ts",
+    "// Generated from the server's registrations by tools/generate-api-signatures.ts. Do not edit.\n"
+    + "import type { LambderApiSignatureMap } from \"lambder/client\";\n"
+    + `export const apiSignatures: LambderApiSignatureMap = ${JSON.stringify(signatures, null, 4)};\n`);
+```
+
+The frontend passes the map to `LambderCaller` as `apiSignatures`, and every
+call then carries the signature of the endpoint it names. The server compares
+it with the digest of what it serves now. A match runs. A mismatch answers the
+`versionExpired` envelope, which reaches the caller's `versionExpiredHandler`
+(usually a reload). A signed call for a name the server no longer has answers
+`versionExpired` as well, since the client was built against a contract that
+had it. A call carrying no signature is never gated, so a script, a test or a
+client built without the map behaves as before.
+
+What this buys is that a deploy forces a reload only on the clients that call
+an endpoint whose shape actually changed; an open tab whose endpoints are
+unchanged keeps working. `apiVersion` gates nothing any more: it is stamped on
+every answer's envelope so a client can tell which build answered.
+
+A frontend shipped with a stale map would answer `versionExpired` on a changed
+endpoint, reload, and get the same bundle back. `LambderCaller` breaks that
+loop (see [Frontend client](./client.md#the-signature-map)), but the fix is to
+generate the file as part of the build so it can never be stale.
 
 ## Refusals
 

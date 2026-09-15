@@ -50,6 +50,7 @@ export const readApiEnvelope = (post, info) => {
     return {
         apiName: post.apiName,
         version: typeof post.version === "string" ? post.version : null,
+        signature: typeof post.signature === "string" ? post.signature : null,
         token: typeof post.token === "string" ? post.token : "",
         siteHost: typeof post.siteHost === "string" ? post.siteHost : "",
         payload: post.payload,

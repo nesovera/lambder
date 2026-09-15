@@ -1,3 +1,5 @@
+import type { LambderApiSignatureMap } from "../shared/wire/LambderApiSignature.js";
+
 /*
  * What a mock runtime is configured with, and the shapes of what a mock
  * transport takes.
@@ -120,8 +122,16 @@ export type LambderMockAppOptions<
     P extends LambderMockRateLimitPolicies<S> = LambderMockRateLimitPolicies<S>,
     I extends boolean | LambderMockIdempotencyOptions<S> = boolean | LambderMockIdempotencyOptions<S>,
 > = LambderMockGuardsOption<C, S, G> & {
-    /** Enables the version gate: a call naming another version answers versionExpired, exactly as the server would. */
+    /** Stamped on every answer's envelope as apiVersion, as the server's option is. */
     apiVersion?: string;
+    /**
+     * The generated signature map the caller carries, so the runtime refuses a
+     * stale signature exactly as the server would: a call whose signature is
+     * not the map's entry for its endpoint answers versionExpired. Without it
+     * every signature passes, since the runtime holds no server schema to
+     * digest.
+     */
+    apiSignatures?: LambderApiSignatureMap;
     /** Artificial latency per call; off by default. */
     latency?: LambderMockLatency;
     /** Sessions over the memory store: `true` for the defaults, or the options. Off by default: session endpoints then fail at registration. */

@@ -9,6 +9,7 @@ import type LambderSessionController from "../session/LambderSessionController.j
 import { type LambderPublicFilesOptions } from "./LambderPublicFiles.js";
 import { type LambderIndexHtmlOptions } from "./LambderIndexHtml.js";
 import { LambderFiles } from "./LambderFiles.js";
+import { type LambderApiSignatureMap } from "../shared/wire/LambderApiSignature.js";
 import type { LambderApiIdempotencyOption } from "../shared/wire/LambderApiOptionValues.js";
 import type { LambderApiGuard, LambderGuardMetaMap, LambderGuardsOption, LambderGuardDataOf, LambderGuardInputsOf } from "../api/LambderApiGuards.js";
 import type { LambderApiRateLimitPolicyConfig, LambderRateLimitOption } from "../api/LambderApiRateLimits.js";
@@ -50,6 +51,7 @@ export type LambderCreatedHook = (lambderInstance: Lambder<any, any, any, any, a
  */
 export default class Lambder<TSessionData = any, _TContract extends Record<string, any> = {}, _TRateLimitPolicies extends Record<string, LambderApiRateLimitPolicyConfig> = {}, _TGuards extends Record<string, any> = {}, _TIdempotencyEnabled extends boolean = false, _TSessionGuardsRequired extends boolean = false, _TPublicGuardsRequired extends boolean = false, _TSessionsEnabled extends boolean = true> {
     apiPath: string;
+    /** Stamped on every API answer's envelope as apiVersion. Informational: a client's staleness is judged per endpoint by its signature, see apiSignatures(). */
     apiVersion: null | string;
     /** The instance's file reader (source + caches), or null without the files option. */
     files: LambderFiles | null;
@@ -67,7 +69,10 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
     private actionList;
     /** The API core: the pipeline every API call runs through, shared in shape with the mock runtime. */
     private readonly pipeline;
-    private registeredApiNames;
+    /** Every registered API by name: what resolves a request's name to its definition ahead of the pipeline, and what apiSignatures() digests. */
+    private readonly apiDefinitions;
+    /** The signature of each endpoint as this server serves it, digested once per endpoint on first use. */
+    private readonly signatureDigests;
     private hookList;
     private createdHooks;
     private initPromise;
@@ -165,6 +170,15 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
     getSessionController(ctx: LambderRenderContext | LambderSessionRenderContext<any, TSessionData>): LambderSessionController<TSessionData>;
     /** The session manager, for code that works on sessions outside a request (maintenance, tests). */
     getSessionManager(): LambderSessionManager<TSessionData>;
+    /**
+     * Every registered endpoint's signature, keyed by its hashed name: the
+     * LambderApiSignatureMap a client build ships with. A generator imports
+     * the finished instance, awaits this, and writes the result to a file the
+     * frontend passes to LambderCaller as apiSignatures; at request time the
+     * server compares each call's signature against these same digests. Keys
+     * are sorted, so the generated file diffs by endpoint.
+     */
+    apiSignatures(): Promise<LambderApiSignatureMap>;
     getResponseBuilder(ctx?: LambderRenderContext): LambderResponseBuilder<any>;
     private getResolver;
     getHandler(): LambderHandler;

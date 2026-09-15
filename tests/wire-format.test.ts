@@ -101,7 +101,7 @@ describe('The response envelope', () => {
         expect(await bodyOf(lambder, 'nope')).toBe(
             '{"apiVersion":"3","payload":null,"errorMessage":{"type":"warning","code":"lambder/api-not-found","content":"API not found."}}',
         );
-        expect(await bodyOf(lambder, 'secret', { apiName: 'secret', payload: { value: 'x' }, version: '2' }))
+        expect(await bodyOf(lambder, 'secret', { apiName: 'secret', payload: { value: 'x' }, version: '3', signature: 'an-older-shape' }))
             .toBe('{"apiVersion":"3","payload":null,"versionExpired":true}');
     });
 

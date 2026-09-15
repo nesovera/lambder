@@ -277,6 +277,11 @@ type GuardInputsEntries<TGuards, TOpt> = {
 };
 /** The guardInputs map an API's contract requires clients to send; never when no declared guard uses guardInput mode. */
 export type LambderGuardInputsOf<TGuards, TOpt> = keyof GuardInputsEntries<TGuards, TOpt> extends never ? never : GuardInputsEntries<TGuards, TOpt>;
+/** Normalize the three guards-option forms into ordered { name, param } entries. Read by the engine, and by the signature digest for the names alone. */
+export declare const toGuardEntries: (value?: LambderGuardsOptionValue) => {
+    name: string;
+    param: unknown;
+}[];
 /**
  * Runtime side of the guards subsystem: holds the defined guards, asserts
  * API registrations against them at startup, and executes an API's declared

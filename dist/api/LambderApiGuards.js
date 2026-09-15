@@ -7,8 +7,8 @@ import { LAMBDER_RESPONSE_BRAND, isLambderResponseLike } from "../shared/util/La
  * as server guards and run through the same engine.
  */
 export const lambderGuardBuilder = () => ((guard) => guard);
-/** Normalize the three guards-option forms into ordered { name, param } entries. Internal to the engine: nothing outside it reads a guards option. */
-const toGuardEntries = (value) => {
+/** Normalize the three guards-option forms into ordered { name, param } entries. Read by the engine, and by the signature digest for the names alone. */
+export const toGuardEntries = (value) => {
     if (value === undefined)
         return [];
     if (typeof value === "string")

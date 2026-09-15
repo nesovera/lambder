@@ -12,6 +12,7 @@ import { z } from 'zod';
 import { initLambder } from '../src/core/Lambder.js';
 import LambderCaller from '../src/client/LambderCaller.js';
 import LambderInvokeCaller from '../src/invoke/LambderInvokeCaller.js';
+import { apiNameKeyOf } from '../src/shared/wire/LambderApiSignature.js';
 import { lambderHandlerTransport } from '../src/invoke/lambderHandlerTransport.js';
 import { lambderFetchTransport } from '../src/client/lambderFetchTransport.js';
 import type { LambderApiTransport, LambderApiTransportRequest } from '../src/shared/transport/LambderApiTransport.js';
@@ -60,8 +61,9 @@ describe('lambderHandlerTransport', () => {
         expect(big?.rows.length).toBe(400);
     });
 
-    it('a stale caller version is answered versionExpired by the real gate', async () => {
-        const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false, apiVersion: '0', transport: lambderHandlerTransport(server.getHandler()) });
+    it('a caller built against another shape of the endpoint is answered versionExpired by the real gate', async () => {
+        const stale = { ...await server.apiSignatures(), [await apiNameKeyOf('echo')]: 'an-older-shape' };
+        const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false, apiVersion: '1', apiSignatures: stale, transport: lambderHandlerTransport(server.getHandler()) });
         const outcome = await caller.apiOutcome('echo', { text: 'hi' });
         expect(outcome.ok).toBe(false);
         if(!outcome.ok) expect(outcome.reason).toBe('versionExpired');

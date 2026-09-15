@@ -22,6 +22,7 @@
  */
 import { classifyDeliveryFailure, describeFailure, errorFromFunctionError, LambderInvokeError, parseFunctionError, } from "./LambderInvokeOutcome.js";
 import { DEFAULT_SESSION_TOKEN_COOKIE_KEY } from "../shared/wire/LambderSessionCookieNames.js";
+import { readApiSignature } from "../shared/wire/LambderApiSignature.js";
 import { resolveApiOutcome } from "../shared/wire/LambderApiOutcome.js";
 import { mergeGuardInputs, } from "../shared/wire/LambderCallOptions.js";
 import { createCallAbort, stopWaitingWhenAborted } from "../shared/util/LambderCallAbort.js";
@@ -44,6 +45,7 @@ export default class LambderInvokeCaller {
     functionName;
     apiPath;
     apiVersion;
+    apiSignatures;
     host;
     requestCompression;
     maxResponsePayloadBytes;
@@ -57,7 +59,7 @@ export default class LambderInvokeCaller {
     client;
     sdk;
     constructor(options) {
-        const { functionName, client, clientConfig, apiPath, apiVersion, host, requestCompression, maxResponsePayloadBytes, timeoutMs, onLogList, onFailure, sessionTokenCookieKey, transport, guardInputsProvider, } = options;
+        const { functionName, client, clientConfig, apiPath, apiVersion, apiSignatures, host, requestCompression, maxResponsePayloadBytes, timeoutMs, onLogList, onFailure, sessionTokenCookieKey, transport, guardInputsProvider, } = options;
         if (!functionName?.trim())
             throw new Error("LambderInvokeCaller: functionName is required");
         this.functionName = functionName;
@@ -65,6 +67,7 @@ export default class LambderInvokeCaller {
         this.clientConfig = clientConfig;
         this.apiPath = apiPath ?? "/api";
         this.apiVersion = apiVersion;
+        this.apiSignatures = apiSignatures;
         this.host = host ?? functionName;
         // `?? false`: like the browser caller, off unless asked for.
         this.requestCompression = resolveCompressionOption(requestCompression ?? false, DEFAULT_INVOKE_REQUEST_COMPRESSION_SETTINGS);
@@ -93,6 +96,7 @@ export default class LambderInvokeCaller {
             body: buildEnvelopeJson({
                 apiName: init.apiName,
                 version: init.apiVersion,
+                signature: init.signature,
                 csrf: init.session?.csrf,
                 siteHost: host,
                 payloadJson: init.payload !== undefined ? JSON.stringify(init.payload) : undefined,
@@ -290,6 +294,10 @@ export default class LambderInvokeCaller {
         let event;
         let eventJson;
         try {
+            // The callee's signature for this endpoint, when this caller was
+            // built with the callee's map. A name the map lacks fails here,
+            // as a provider that threw would: the map predates the endpoint.
+            const signature = this.apiSignatures ? await readApiSignature(this.apiSignatures, apiName) : undefined;
             // Provider values underneath, per-call values on top.
             const provided = this.guardInputsProvider
                 ? await this.guardInputsProvider(apiName)
@@ -314,6 +322,7 @@ export default class LambderInvokeCaller {
                 body: buildEnvelopeJson({
                     apiName,
                     version: this.apiVersion,
+                    signature,
                     csrf: options.session?.csrf,
                     siteHost: this.host,
                     payloadJson: compressed ? undefined : payloadJson,

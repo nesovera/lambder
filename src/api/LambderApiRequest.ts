@@ -48,8 +48,10 @@ export const lowercaseHeaderNames = (headers: Record<string, string | undefined>
  */
 export type LambderApiRequest = {
     apiName: string;
-    /** The caller's apiVersion, for the version gate; null when it sent none. */
+    /** The caller's apiVersion, informational; null when it sent none. */
     version: string | null;
+    /** The signature the caller carries for this endpoint (see LambderApiSignatureMap), for the signature gate; null when it sent none. */
+    signature: string | null;
     /** The CSRF token the caller posted in the envelope; "" when it holds none. */
     token: string;
     siteHost: string;
@@ -118,6 +120,7 @@ export const readApiEnvelope = (
     return {
         apiName: post.apiName,
         version: typeof post.version === "string" ? post.version : null,
+        signature: typeof post.signature === "string" ? post.signature : null,
         token: typeof post.token === "string" ? post.token : "",
         siteHost: typeof post.siteHost === "string" ? post.siteHost : "",
         payload: post.payload,

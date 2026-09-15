@@ -38,14 +38,15 @@ const user = await caller.api("getCompanyPage", { companyName: "Acme" });
 | Option | Default | Description |
 | --- | --- | --- |
 | `apiPath` | `"/api"` | Must match the server's `apiPath` |
-| `apiVersion` | none | Sent with each call; a server mismatch answers `versionExpired` |
+| `apiVersion` | none | Sent with each call as `version`; informational, the server stamps its own on every answer |
+| `apiSignatures` | none | The server's generated signature map. Every call carries its endpoint's signature, and a stale one answers `versionExpired`. See [The signature map](#the-signature-map) |
 | `isCorsEnabled` | `false` | Send credentialed cross-origin requests |
 | `timeoutMs` | none | Default per-request timeout. API Gateway caps around 29s, so ~30000 is sensible. Overridable per call |
 | `sessionCookieDomain` | none | Must mirror the server's session cookie `Domain`, otherwise expired cookies cannot be cleared |
 | `requestCompression` | `false` | Gzip large payloads. `true` is `{ minBytes: 4096 }` |
 | `guardInputsProvider` | none | Supply guardInput-mode guard values for every call from one place |
 | `transport` | fetch | How a call reaches the server; see [Transports](#transports) |
-| `versionExpiredHandler` | none | The server rejected `apiVersion` |
+| `versionExpiredHandler` | none | The server answered `versionExpired`: this build's signature for the endpoint is not the server's. Usually reloads. Not called again for a repeat, see [The signature map](#the-signature-map) |
 | `sessionExpiredHandler` | none | The session is missing or expired |
 | `messageHandler` | none | The envelope carried a `message` |
 | `errorMessageHandler` | none | The envelope carried an `errorMessage` (a refusal) |
@@ -59,6 +60,44 @@ const user = await caller.api("getCompanyPage", { companyName: "Acme" });
 names. `caller.fetchTrackerList` is the calls currently in flight, in the order
 they started, and `caller.isLoading` is derived from it, so neither holds
 anything about a call that has already settled.
+
+## The signature map
+
+Pass the map `lambder.apiSignatures()` generated for this build (see
+[APIs](./apis.md#signatures-when-a-client-must-update)) and every call carries
+the signature of the endpoint it names:
+
+```typescript
+import { apiSignatures } from "./generated/apiSignatures.generated.js";
+
+const caller = new LambderCaller<ApiContractType>({
+    apiPath: "/api",
+    isCorsEnabled: false,
+    apiSignatures,
+    versionExpiredHandler: () => window.location.reload(),
+});
+```
+
+A server whose shape of the endpoint differs answers `versionExpired`, and
+`versionExpiredHandler` runs; a server whose shape is the same runs the call,
+whatever else changed since this build. A name the map does not hold fails the
+call before anything is sent, as an `unknown` outcome whose error says to
+regenerate the map: the file predates the endpoint.
+
+**The reload loop.** A bundle shipped with a stale map (a generator that did
+not run, a cached bundle, a server deploy that failed behind a fresh frontend)
+would answer `versionExpired`, reload, get the same bundle back, and repeat.
+The caller keeps the last `versionExpired` it saw, per tab in `sessionStorage`,
+and when the same endpoint fails with the same signature within
+`RELOAD_LOOP_WINDOW_MS` (five minutes), it does not call
+`versionExpiredHandler` again: a bundle that had actually changed the endpoint
+would carry a different signature. The failure is reported through
+`errorHandler` instead, and the outcome still says `versionExpired`. Once a
+repeat is confirmed, every `versionExpired` within the window from the first
+one counts, whichever endpoint it names; after the window a reload is allowed
+again, so a stuck client retries a few times an hour and recovers once the
+deploy is fixed. Without `sessionStorage` the record is kept in memory for
+the page's lifetime.
 
 ## Per-call options
 
@@ -103,7 +142,7 @@ if (outcome.ok) {
 | `timeout` | `timeoutMs` elapsed and the fetch was aborted |
 | `server` | 5xx, a body that is not a Lambder envelope, or a transport failure naming `protocol` |
 | `validation` | 422; `zodError` carries the issue detail |
-| `versionExpired` | The server rejected `apiVersion` |
+| `versionExpired` | This build's signature for the endpoint is not the server's, or the app answered `res.versionExpired` |
 | `sessionExpired` | No valid session |
 | `notAuthorized` | The envelope's `notAuthorized` flag |
 | `errorMessage` | A structured refusal; `errorMessage` carries it |
