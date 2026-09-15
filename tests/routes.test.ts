@@ -13,15 +13,22 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import nodeCrypto from 'crypto';
-import { decodeBody } from './helpers.js';
+import { decodeBody, testPublicFiles } from './helpers.js';
 import { mockClient } from 'aws-sdk-client-mock';
 import { DynamoDBDocumentClient, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import Lambder, { initLambder } from '../src/core/Lambder.js';
-import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
+import { LambderDdbSessionStore } from '../src/stores/LambderDdbSessionStore.js';
 import type { APIGatewayProxyEvent, Context } from 'aws-lambda';
 
 // Session records store only hashes of the bearer secrets.
 const hashTok = (value: string) => nodeCrypto.createHash('sha256').update(value).digest('hex');
+
+// A session cookie carries `sessionKeyHash:secret`, both lowercase hex, and a
+// value that is not shaped like a minted token is "no session" before any
+// store read. So the fixtures below carry the real shape.
+const SESSION_KEY_HASH = 'a1'.repeat(32);
+const SESSION_SECRET = 'b2'.repeat(32);
+const SESSION_TOKEN = `${SESSION_KEY_HASH}:${SESSION_SECRET}`;
 
 // Mock DynamoDB
 const ddbMock = mockClient(DynamoDBDocumentClient);
@@ -62,7 +69,7 @@ const createMockContext = (): Context => ({
 describe('Routes - Basic Path Matching', () => {
     it('should match simple string paths', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .addRoute('/hello', (ctx, res) => {
@@ -80,7 +87,7 @@ describe('Routes - Basic Path Matching', () => {
 
     it('should not match wrong paths', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .addRoute('/hello', (ctx, res) => {
@@ -99,7 +106,7 @@ describe('Routes - Basic Path Matching', () => {
 
     it('should match multiple routes', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .addRoute('/home', (ctx, res) => {
@@ -128,7 +135,7 @@ describe('Routes - Basic Path Matching', () => {
 describe('Routes - Path Parameters', () => {
     it('should extract path parameters from string patterns', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .addRoute('/user/:userId', (ctx, res) => {
@@ -146,7 +153,7 @@ describe('Routes - Path Parameters', () => {
 
     it('should extract multiple path parameters', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .addRoute('/users/:userId/posts/:postId', (ctx, res) => {
@@ -167,7 +174,7 @@ describe('Routes - Path Parameters', () => {
 
     it('should handle optional parameters', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .addRoute('/files/:path*', (ctx, res) => {
@@ -186,7 +193,7 @@ describe('Routes - Path Parameters', () => {
 describe('Routes - RegExp Matching', () => {
     it('should match routes using RegExp', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .addRoute(/^\/admin/, (ctx, res) => {
@@ -204,7 +211,7 @@ describe('Routes - RegExp Matching', () => {
 
     it('should extract regex match groups', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .addRoute(/^\/products\/(\d+)$/, (ctx, res) => {
@@ -222,7 +229,7 @@ describe('Routes - RegExp Matching', () => {
 
     it('should support complex regex patterns', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .addRoute(/^\/api\/v\d+/, (ctx, res) => {
@@ -242,7 +249,7 @@ describe('Routes - RegExp Matching', () => {
 describe('Routes - Function-based Conditional Routing', () => {
     it('should match routes using custom functions', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .addRoute((ctx) => ctx.path.startsWith('/custom'), (ctx, res) => {
@@ -258,7 +265,7 @@ describe('Routes - Function-based Conditional Routing', () => {
 
     it('should support complex conditional logic', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .addRoute(
@@ -286,7 +293,7 @@ describe('Routes - Function-based Conditional Routing', () => {
 
     it('should access context variables in condition', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .addRoute(
@@ -315,8 +322,8 @@ describe('Routes - Session Protected Routes', () => {
 
     it('should protect routes with addSessionRoute', async () => {
         const mockSession = {
-            pk: 'hash',
-            sk: hashTok('sortkey'),
+            pk: SESSION_KEY_HASH,
+            sk: hashTok(SESSION_SECRET),
             csrfTokenHash: hashTok('csrf-token'),
             sessionKey: 'user-123',
             data: { userId: '123', role: 'user' },
@@ -329,14 +336,8 @@ describe('Routes - Session Protected Routes', () => {
         ddbMock.on(GetCommand).resolves({ Item: mockSession });
         ddbMock.on(PutCommand).resolves({});
 
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }),
-            apiPath: '/api', session: {
-                    tableName: 'test-sessions',
-                    tableRegion: 'us-east-1',
-                    sessionSalt: 'test-salt',
-                    partitionKey: 'pk',
-                    sortKey: 'sk',
-                } })
+        const lambder = initLambder().create({ files: testPublicFiles(),
+            apiPath: '/api', session: { store: new LambderDdbSessionStore({ tableName: 'test-sessions', region: 'us-east-1', partitionKey: 'pk', sortKey: 'sk' }), sessionSalt: 'test-salt' } })
             .setGlobalErrorHandler((err, ctx, res) => {
                 return res.html(`<h1>Error: ${err.message}</h1>`);
             })
@@ -345,7 +346,7 @@ describe('Routes - Session Protected Routes', () => {
             });
 
         const handler = lambder.getHandler();
-        const event = createMockEvent('/protected', 'GET', 'hash:sortkey');
+        const event = createMockEvent('/protected', 'GET', SESSION_TOKEN);
         const result = await handler(event, createMockContext());
 
         expect(result.statusCode).toBe(200);
@@ -355,14 +356,8 @@ describe('Routes - Session Protected Routes', () => {
     it('should reject access without valid session', async () => {
         ddbMock.on(GetCommand).resolves({}); // No session found
 
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }),
-            apiPath: '/api', session: {
-                    tableName: 'test-sessions',
-                    tableRegion: 'us-east-1',
-                    sessionSalt: 'test-salt',
-                    partitionKey: 'pk',
-                    sortKey: 'sk',
-                } })
+        const lambder = initLambder().create({ files: testPublicFiles(),
+            apiPath: '/api', session: { store: new LambderDdbSessionStore({ tableName: 'test-sessions', region: 'us-east-1', partitionKey: 'pk', sortKey: 'sk' }), sessionSalt: 'test-salt' } })
             .addSessionRoute('/protected', (ctx, res) => {
                 return res.html('Protected');
             })
@@ -379,8 +374,8 @@ describe('Routes - Session Protected Routes', () => {
 
     it('should access session data in session routes', async () => {
         const mockSession = {
-            pk: 'hash',
-            sk: hashTok('sortkey'),
+            pk: SESSION_KEY_HASH,
+            sk: hashTok(SESSION_SECRET),
             csrfTokenHash: hashTok('csrf-token'),
             sessionKey: 'user-456',
             data: { userId: '456', username: 'testuser', role: 'admin' },
@@ -393,14 +388,8 @@ describe('Routes - Session Protected Routes', () => {
         ddbMock.on(GetCommand).resolves({ Item: mockSession });
         ddbMock.on(PutCommand).resolves({});
 
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }),
-            apiPath: '/api', session: {
-                    tableName: 'test-sessions',
-                    tableRegion: 'us-east-1',
-                    sessionSalt: 'test-salt',
-                    partitionKey: 'pk',
-                    sortKey: 'sk',
-                } })
+        const lambder = initLambder().create({ files: testPublicFiles(),
+            apiPath: '/api', session: { store: new LambderDdbSessionStore({ tableName: 'test-sessions', region: 'us-east-1', partitionKey: 'pk', sortKey: 'sk' }), sessionSalt: 'test-salt' } })
             .setGlobalErrorHandler((err, ctx, res) => {
                 return res.json({ error: err.message });
             })
@@ -413,7 +402,7 @@ describe('Routes - Session Protected Routes', () => {
             });
 
         const handler = lambder.getHandler();
-        const event = createMockEvent('/profile', 'GET', 'hash:sortkey');
+        const event = createMockEvent('/profile', 'GET', SESSION_TOKEN);
         const result = await handler(event, createMockContext());
 
         const body = JSON.parse(result.body || '{}');
@@ -426,7 +415,7 @@ describe('Routes - Session Protected Routes', () => {
 describe('Routes - Priority and Ordering', () => {
     it('should match first defined route when multiple routes match', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .addRoute('/item', (ctx, res) => {
@@ -446,7 +435,7 @@ describe('Routes - Priority and Ordering', () => {
 
     it('should respect route definition order', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .addRoute('/users/admin', (ctx, res) => {
@@ -471,7 +460,7 @@ describe('Routes - Priority and Ordering', () => {
 describe('Routes - Wildcard and Catch-all Routes', () => {
     it('should support wildcard routes', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .addRoute('/(.*)', (ctx, res) => {
@@ -489,7 +478,7 @@ describe('Routes - Wildcard and Catch-all Routes', () => {
 
     it('should use wildcard as final fallback', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .addRoute('/specific', (ctx, res) => {
@@ -512,7 +501,7 @@ describe('Routes - Wildcard and Catch-all Routes', () => {
 describe('Routes - Method Filtering', () => {
     it('should match all HTTP methods when no method is specified', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .addRoute('/resource', (ctx, res) => {

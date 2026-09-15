@@ -1,24 +1,27 @@
 /**
- * File Serving Tests
- * 
- * Tests for file serving functionality including:
- * - Serving existing files correctly
- * - Fallback to index.html for non-existent files
- * - Not serving index.html when the requested file exists
+ * Serving files: the reader over the configured source (the path rule, the
+ * memory cache, the mime fallback), the servePublicFiles slot over it, and
+ * res.file / res.templateFile beside it.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { decodeBody } from './helpers.js';
 import { vi } from 'vitest';
+import { mockClient } from 'aws-sdk-client-mock';
+import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 import Lambder from '../src/core/Lambder.js';
-import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
-import type { LambderFileSource, LambderFilesOption } from '../src/core/LambderFiles.js';
+import { LambderFiles } from '../src/core/LambderFiles.js';
+import { LambderLocalFileSource } from '../src/stores/LambderLocalFileSource.js';
+import { LambderS3FileSource } from '../src/stores/LambderS3FileSource.js';
+import { LambderHttpFileSource } from '../src/stores/LambderHttpFileSource.js';
+import type { LambderFileSource } from '../src/shared/contracts/LambderFileSource.js';
+import type { LambderFilesOption } from '../src/core/LambderFiles.js';
 import type { APIGatewayProxyEvent, Context } from 'aws-lambda';
 import path from 'path';
 
 const createMockEvent = (path: string, method: string = 'GET'): APIGatewayProxyEvent => ({
     body: null,
-    headers: { 
+    headers: {
         Host: 'localhost',
     },
     multiValueHeaders: {},
@@ -64,10 +67,10 @@ describe('File Serving with Fallback', () => {
         const result = await handler(event, createMockContext());
 
         expect(result.statusCode).toBe(200);
-        
+
         // Check content type is CSS
         expect(result.multiValueHeaders?.['Content-Type']).toContain('text/css');
-        
+
         // Check body contains CSS content
         const body = decodeBody(result);
         expect(body).toContain('body { margin: 0; }');
@@ -89,10 +92,10 @@ describe('File Serving with Fallback', () => {
         const result = await handler(event, createMockContext());
 
         expect(result.statusCode).toBe(200);
-        
+
         // Check content type is HTML
         expect(result.multiValueHeaders?.['Content-Type']).toContain('text/html');
-        
+
         // Check body contains HTML content from index.html
         const body = decodeBody(result);
         expect(body).toContain('<h1>Test HTML</h1>');
@@ -113,10 +116,10 @@ describe('File Serving with Fallback', () => {
         const result = await handler(event, createMockContext());
 
         expect(result.statusCode).toBe(200);
-        
+
         // Check content type is HTML
         expect(result.multiValueHeaders?.['Content-Type']).toContain('text/html');
-        
+
         // Check body contains HTML content
         const body = decodeBody(result);
         expect(body).toContain('<h1>Test HTML</h1>');
@@ -154,19 +157,19 @@ describe('File Serving with Fallback', () => {
             });
 
         const handler = lambder.getHandler();
-        
+
         // Test specific route still works
         const specificEvent = createMockEvent('/specific');
         const specificResult = await handler(specificEvent, createMockContext());
         const specificBody = decodeBody(specificResult);
         expect(specificBody).toBe('Specific Route');
-        
+
         // Test main.css is served correctly
         const cssEvent = createMockEvent('/main.css');
         const cssResult = await handler(cssEvent, createMockContext());
         const cssBody = decodeBody(cssResult);
         expect(cssBody).toContain('body { margin: 0; }');
-        
+
         // Test fallback to index.html for non-existent files
         const fallbackEvent = createMockEvent('/some-route');
         const fallbackResult = await handler(fallbackEvent, createMockContext());
@@ -188,11 +191,11 @@ describe('File Serving with Fallback', () => {
         const result = await handler(event, createMockContext());
 
         expect(result.statusCode).toBe(200);
-        
+
         // Verify Content-Type header is exactly text/css
         expect(result.multiValueHeaders?.['Content-Type']).toBeDefined();
         expect(result.multiValueHeaders?.['Content-Type']?.[0]).toBe('text/css');
-        
+
         // Verify body contains CSS content
         const body = decodeBody(result);
         expect(body).toContain('body { margin: 0; }');
@@ -331,5 +334,146 @@ describe('Files option', () => {
         const b = new Lambder({ files: sourceB, apiPath: '/api' }).addRoute('/', (ctx, res) => res.templateFile('index.html')).getHandler();
         expect(decodeBody(await a(createMockEvent('/'), createMockContext()))).toBe('A');
         expect(decodeBody(await b(createMockEvent('/'), createMockContext()))).toBe('B');
+    });
+});
+
+describe('The reader path rule', () => {
+    afterEach(() => { vi.unstubAllGlobals(); });
+
+    /** A fetch stand-in whose recorded calls are typed the way the source calls it. */
+    const recordingFetch = (answer: () => Promise<Response>) =>
+        vi.fn<(url: URL, init: { headers: Record<string, string> }) => Promise<Response>>(answer);
+
+    /**
+     * Leading-slash runs a caller can write on any request. Each collapses to
+     * a plain relative path UNDER the source's own root. The old rule stripped
+     * exactly one slash, so "//x" reached a source as "/x", which is
+     * root-relative, and "///attacker.example/evil.html" as
+     * "//attacker.example/evil.html", which is protocol-relative and names a
+     * host of the caller's choosing.
+     */
+    const collapsingPaths: [string, string][] = [
+        ['//x', 'x'],
+        ['///attacker.example/evil.html', 'attacker.example/evil.html'],
+    ];
+
+    /** Paths that name no file at all: no source is asked for any of them. */
+    const refusedPaths = ['/\\x', 'a//b', './a', '/nested/../../b', '/', '/nested/'];
+
+    it('hands a local source only paths that stay under its root', async () => {
+        const source = new LambderLocalFileSource({ root: path.resolve('./tests/fixtures/public') });
+        const read = vi.spyOn(source, 'read');
+        const reader = new LambderFiles(source);
+
+        for(const refused of refusedPaths){
+            expect(await reader.read(refused)).toBeNull();
+        }
+        expect(read).not.toHaveBeenCalled();
+
+        for(const [requested, relative] of collapsingPaths){
+            await reader.read(requested);
+            expect(read).toHaveBeenLastCalledWith(relative);
+        }
+        // And its own belt holds for a caller that reaches it without the reader.
+        expect(await source.read('../../package.json')).toBeNull();
+    });
+
+    it('hands an S3 source only keys that stay under its prefix', async () => {
+        const s3Mock = mockClient(S3Client);
+        s3Mock.reset();
+        s3Mock.on(GetObjectCommand).resolves({ Body: { transformToByteArray: async () => new Uint8Array([1]) } as any });
+        const reader = new LambderFiles(new LambderS3FileSource({ bucket: 'web', prefix: 'v42/', client: new S3Client({}) }));
+
+        for(const refused of refusedPaths){
+            expect(await reader.read(refused)).toBeNull();
+        }
+        expect(s3Mock.calls()).toHaveLength(0);
+
+        for(const [requested, relative] of collapsingPaths){
+            await reader.read(requested);
+            expect(s3Mock.commandCalls(GetObjectCommand).at(-1)?.args[0].input.Key).toBe(`v42/${relative}`);
+        }
+        s3Mock.restore();
+    });
+
+    it('hands an HTTP source only URLs that stay under its base URL', async () => {
+        const fetchSpy = recordingFetch(async () => new Response('x', { status: 200 }));
+        vi.stubGlobal('fetch', fetchSpy);
+        const source = new LambderHttpFileSource({ baseUrl: 'https://cdn.example.com/v42/' });
+        const reader = new LambderFiles(source);
+
+        for(const refused of refusedPaths){
+            expect(await reader.read(refused)).toBeNull();
+        }
+        expect(fetchSpy).not.toHaveBeenCalled();
+
+        for(const [requested, relative] of collapsingPaths){
+            await reader.read(requested);
+            expect(String(fetchSpy.mock.calls.at(-1)?.[0])).toBe(`https://cdn.example.com/v42/${relative}`);
+        }
+
+        // The source's own belt, for a caller that reaches it without the
+        // reader: a value that resolves outside baseUrl is refused unfetched.
+        fetchSpy.mockClear();
+        expect(await source.read('/attacker.example/evil.html')).toBeNull();
+        expect(await source.read('//attacker.example/evil.html')).toBeNull();
+        expect(await source.read('/private/secrets.json')).toBeNull();
+        expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('never fetches an attacker-named origin, so the origin credentials never leave the configured host', async () => {
+        const fetchSpy = recordingFetch(async () => new Response('<script>evil()</script>', { status: 404 }));
+        vi.stubGlobal('fetch', fetchSpy);
+        const lambder = new Lambder({
+            files: new LambderHttpFileSource({
+                baseUrl: 'https://cdn.example.com/v42/',
+                headers: { Authorization: 'Bearer SECRET-ORIGIN-TOKEN' },
+            }),
+            apiPath: '/api',
+        })
+            .servePublicFiles()
+            .setRouteFallbackHandler((ctx, res) => res.text('fallback', { statusCode: 404 }));
+
+        const result = await lambder.getHandler()(createMockEvent('///attacker.example/evil.html'), createMockContext());
+
+        expect(result.statusCode).toBe(404);
+        expect(decodeBody(result)).toBe('fallback');
+        // The one read it did make went to the configured origin, under the
+        // configured version prefix, carrying the Authorization header there
+        // and nowhere else.
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        const [url, init] = fetchSpy.mock.calls[0]!;
+        expect(String(url)).toBe('https://cdn.example.com/v42/attacker.example/evil.html');
+        expect(new URL(String(url)).host).toBe('cdn.example.com');
+        expect(init.headers).toEqual({ Authorization: 'Bearer SECRET-ORIGIN-TOKEN' });
+    });
+});
+
+describe('servePublicFiles method gate', () => {
+    const serve = (options: Parameters<Lambder['servePublicFiles']>[0] = {}) =>
+        new Lambder({ files: new LambderLocalFileSource({ root: path.resolve('./tests/fixtures/public') }), apiPath: '/api' })
+            .servePublicFiles(options)
+            .setRouteFallbackHandler((ctx, res) => res.text(`fallback:${ctx.method}`, { statusCode: 404 }));
+
+    it('serves GET and HEAD by default and falls a write method through to the route fallback', async () => {
+        const lambder = serve();
+
+        const get = await lambder.getHandler()(createMockEvent('/main.css'), createMockContext());
+        expect(get.statusCode).toBe(200);
+        expect(decodeBody(get)).toContain('body { margin: 0; }');
+
+        const head = await lambder.getHandler()(createMockEvent('/main.css', 'HEAD'), createMockContext());
+        expect(head.statusCode).toBe(200);
+
+        const del = await lambder.getHandler()(createMockEvent('/main.css', 'DELETE'), createMockContext());
+        expect(del.statusCode).toBe(404);
+        expect(decodeBody(del)).toBe('fallback:DELETE');
+    });
+
+    it('accepts HEAD for a list that names GET alone, as a route matcher does', async () => {
+        const lambder = serve({ methods: ['GET'] });
+
+        expect((await lambder.getHandler()(createMockEvent('/main.css', 'HEAD'), createMockContext())).statusCode).toBe(200);
+        expect((await lambder.getHandler()(createMockEvent('/main.css', 'POST'), createMockContext())).statusCode).toBe(404);
     });
 });

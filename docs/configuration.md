@@ -21,25 +21,37 @@ policy types; the curried creator is the canonical entry.
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `apiPath` | `"/api"` | Path API calls are posted to |
-| `apiVersion` | none | Version string clients must match; a mismatch answers `versionExpired` |
+| `apiPath` | `"/api"` | Path API calls are posted to; must start with `/` |
+| `apiVersion` | none | Version string clients must match; a mismatch answers `versionExpired`. Leave it out to run without the gate; `""` is refused |
 | `files` | none | Where the app's files come from, for `servePublicFiles`, `serveIndexHtml`, `res.file` and `res.templateFile`. See [Frontend hosting](./frontend-hosting.md) |
 | `compression` | `true` | Automatic response compression. `true` is `{ minBytes: 860, encodings: ["br", "gzip"], quality: 5 }`; `false` disables it. See [Responses](./responses.md#compression) |
 | `etag` | `true` | Automatic ETag and `If-None-Match` 304 handling on GET/HEAD 200 responses |
-| `maxResponseBytes` | `5_500_000` | Guard threshold for Lambda's ~6MB response cap |
+| `maxResponseBytes` | `5_500_000` | Guard threshold for Lambda's ~6MB response cap; a positive integer |
 | `maxRequestPayloadBytes` | `20_000_000` | Ceiling on what a compressed request payload may restore to. See [Frontend client](./client.md#compressed-request-payloads) |
 | `cors` | off | `true` allows any origin, or a `LambderCorsConfig` (below) |
-| `session` | none | DynamoDB-backed sessions; required for `addSessionApi` and `addSessionRoute`. See [Sessions](./sessions.md) |
-| `rateLimits` | none | A limiter instance plus named policies APIs reference by name. See [API policies](./api-policies.md#rate-limits) |
+| `trustedClientIpHeaders` | none | Headers that may name the caller's own address, in order of preference. Empty means `ctx.ip` is the address the gateway observed (below) |
+| `session` | none | Sessions over a store of your choosing; `addSessionApi` and `addSessionRoute` are compile errors without it. See [Sessions](./sessions.md) |
+| `rateLimits` | none | A limiter (`LambderRateLimiter`: DynamoDB, memory, or your own) plus named policies APIs reference by name. See [API policies](./api-policies.md#rate-limits) |
 | `guards` | none | Named guards APIs reference by name; build each with `lambderGuard()`. See [API policies](./api-policies.md#guards) |
-| `idempotency` | none | An idempotency store plus replay defaults. See [API policies](./api-policies.md#idempotency) |
+| `idempotency` | none | An idempotency store (`LambderIdempotencyStore`: DynamoDB, memory, or your own) plus replay defaults. See [API policies](./api-policies.md#idempotency) |
 | `requireSessionApiGuards` | `false` | Make `guards` a required field of every `addSessionApi` |
 | `requirePublicApiGuards` | `false` | Make `guards` a required field of every `addApi` |
+
+A key the options type does not have is a compile error, one level down as
+well: `session` (and `session.cookie`), `idempotency`, `rateLimits` and each
+of its `policies`, each guard in `guards`, the object form of `files`, and
+`cors` and `compression` when either is written as an object. Inferring the
+options as a `const` generic is what makes an app's declaration typed, and it
+also switches TypeScript's own excess-property check off for the whole
+literal, so `idempotency: { failOpn: false }` would otherwise have compiled
+and left the engine failing open, and `cors: { credentials: true, origns:
+[...] }` would have left the allowlist empty, which means every origin, with
+credentials on.
 
 ## A full example
 
 ```typescript
-import { initLambder, LambderLocalFileSource, LambderDdbRateLimiter, LambderDdbIdempotency } from "lambder";
+import { initLambder, LambderLocalFileSource, LambderDdbSessionStore, LambderDdbRateLimiter, LambderDdbIdempotencyStore } from "lambder";
 import * as path from "path";
 
 const lambder = initLambder<SessionData>().create({
@@ -53,20 +65,19 @@ const lambder = initLambder<SessionData>().create({
     cors: { origins: ["https://app.example.com"], credentials: true },
 
     session: {
-        tableName: "app-session",
-        tableRegion: "us-east-1",
+        store: new LambderDdbSessionStore({ tableName: "app-session", region: "us-east-1" }),
         sessionSalt: process.env.SESSION_SALT!,
         enableSlidingExpiration: true,
         cookie: { domain: ".example.com" },
     },
 
     rateLimits: {
-        limiter: new LambderDdbRateLimiter({ tableName: "app-policies", region: "us-east-1", failOpen: true }),
+        limiter: new LambderDdbRateLimiter({ tableName: "app-policies", region: "us-east-1" }),
         policies: { authPerIp: { perMin: 5, perHour: 30, per: "ip" } },
     },
     guards: { orgPermission, sessionOnly },
     idempotency: {
-        store: new LambderDdbIdempotency({ tableName: "app-policies", region: "us-east-1" }),
+        store: new LambderDdbIdempotencyStore({ tableName: "app-policies", region: "us-east-1" }),
         defaultTtlSeconds: 24 * 3600,
         failOpen: true,
     },
@@ -105,21 +116,50 @@ the serving slots in full.
 | `exposeHeaders` | `["Retry-After"]` | Response headers a cross-origin browser caller may read. `Retry-After` is not on the CORS safelist, and a hidden header reads as `null` rather than as an error, so rate-limit refusals stay readable by default |
 | `maxAge` | none | Preflight cache duration in seconds |
 
+## `trustedClientIpHeaders`
+
+`ctx.ip` is the address the gateway observed, and nothing else, unless this
+option names a header to prefer:
+
+```typescript
+trustedClientIpHeaders: ["cf-connecting-ip"],   // behind Cloudflare
+```
+
+The first listed header carrying a value wins, and its leftmost entry is
+taken. Only list a header that something in front of this app always
+overwrites. A header a client can set is a value a client can choose, and
+`per: "ip"` rate limits key off `ctx.ip`: a caller that picks its own key gets
+a fresh budget on every request, which is not a limit.
+
+Behind API Gateway alone, leave this unset. API Gateway APPENDS to
+`x-forwarded-for` rather than replacing it, so the leftmost entry is whatever
+the client sent.
+
+There is no exception for a [lambda-to-lambda invoke](./invoke.md). The
+marker header that would have identified one is an ordinary request header
+that any HTTP caller can set, so honouring it would hand every caller the
+value again. An invoke needs no exception anyway: the event it synthesizes
+carries the caller's `clientIp` in `requestContext.http.sourceIp`, which is
+where `ctx.ip` reads the gateway address from in the first place.
+
 ## `session`
 
 | Field | Default | Description |
 | --- | --- | --- |
-| `tableName` | required | DynamoDB session table |
-| `tableRegion` | required | Its region |
+| `store` | required | `LambderDdbSessionStore`, `LambderMemorySessionStore`, or your own `LambderSessionStore` |
 | `sessionSalt` | required | Peppers the identity-to-partition-key mapping. Treat as a secret |
-| `enableSlidingExpiration` | `false` | Extend the session on each access |
+| `enableSlidingExpiration` | `true` | Extend the session on each access |
 | `slidingWriteIntervalSeconds` | `max(60, 5% of TTL)` | Minimum seconds between sliding-expiration writes |
 | `cookie` | see [Sessions](./sessions.md#cookie-scope) | Cookie scope: `domain`, `path`, `sameSite`, `secure` |
-| `tokenCookieKey` | `"LMDRSESSIONTKID"` | Session token cookie name |
-| `csrfCookieKey` | `"LMDRSESSIONCSTK"` | CSRF token cookie name |
-| `partitionKey` / `sortKey` | `"pk"` / `"sk"` | Key attribute names on the table |
+| `tokenCookieKey` | `"LMDRSESSIONTKID"` | Session token cookie name. Prefix it `__Host-` unless you need cross-subdomain sessions |
+| `csrfCookieKey` | `"LMDRSESSIONCSTK"` | CSRF token cookie name. Prefix it `__Host-` too |
+| `crypto` | WebCrypto | Hashing and randomness for the session tokens |
 | `dataRefresh` | none | Give session data a shelf life. See [Sessions](./sessions.md#keeping-session-data-fresh) |
-| `compression` | `true` | Brotli-compress `session.data` at rest |
+
+A `__Host-` prefix is the browser's own rule that only this exact host, over
+HTTPS, may write the cookie, which is what stops a sibling subdomain from
+planting a session pair on your visitors. [Sessions](./sessions.md) has the
+attack and what it costs (cross-subdomain sessions).
 
 ## `rateLimits`, `guards`, `idempotency`
 
@@ -130,12 +170,12 @@ store. [API policies](./api-policies.md) is the full guide.
 
 ```typescript
 rateLimits: {
-    limiter: new LambderDdbRateLimiter({ tableName, region, failOpen: true }),
+    limiter: new LambderDdbRateLimiter({ tableName, region }),
     policies: { /* name: { perMin, perHour, per, budget, errorMessage } */ },
 },
 guards: { /* name: lambderGuard({ ... }) */ },
 idempotency: {
-    store: new LambderDdbIdempotency({ tableName, region }),
+    store: new LambderDdbIdempotencyStore({ tableName, region }),
     defaultTtlSeconds: 24 * 3600,
     failOpen: true,
 },
@@ -152,7 +192,7 @@ imports no modules:
 // app.ts: declarations plus the fully configured instance
 export const lambderApp = initLambder<SessionData>().create({
     apiPath: "/api",
-    session: { tableName: "app-session", tableRegion: "us-east-1", sessionSalt: "..." },
+    session: { store: new LambderDdbSessionStore({ tableName: "app-session", region: "us-east-1" }), sessionSalt: "..." },
     rateLimits: { limiter, policies: apiRateLimitPolicies },
     idempotency: { store: idempotencyStore },
     guards: apiGuards,
@@ -188,5 +228,5 @@ Everything below chains off the created instance and returns `this`.
 | `setSessionExpiredRouteHandler(handler)` | Response for session routes with no session. Default 401 |
 | `setGlobalErrorHandler(handler)` | Last-resort error response |
 | `getSessionController(ctx)` | The session controller for a request |
-| `getResponseBuilder(ctx?)` | A resolver outside a handler |
+| `getResponseBuilder(ctx?)` | A response builder outside a handler (no `res.die.*`) |
 | `getHandler()` | The Lambda entry point |

@@ -1,7 +1,8 @@
 import type { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { type LambderCompressionOption } from "../shared/LambderCompressionOption.js";
+import { type LambderCompressionOption } from "../shared/wire/LambderCompressionOption.js";
 export interface LambderDdbCacheOptions {
     tableName: string;
+    /** Region the client is created for on first use; the SDK's default chain otherwise. */
     region?: string;
     /** Partition key prefix, keeps cache items separated from other systems in a shared table. Default: "CACHE". */
     keyPrefix?: string;
@@ -18,6 +19,12 @@ export interface LambderDdbCacheOptions {
     maxValueBytes?: number;
     memoryMaxBytes?: number;
     client?: DynamoDBClient;
+    /**
+     * The clock entries are expired against, injectable the way the rate
+     * limiter's and the idempotency store's are, so a test can cross a TTL
+     * boundary without moving the world's clock.
+     */
+    now?: () => number;
 }
 /**
  * Where a value lives. A plain string addresses one entry, as it always has.
@@ -59,7 +66,7 @@ export interface LambderDdbCacheListOptions {
  * Table shape: string hash key `pk`, string range key `sk`, TTL on
  * `expiresAt`. Items are prefixed `CACHE#<namespace>#` by default, so the
  * table can be shared with LambderDdbRateLimiter (`RL#`) and
- * LambderDdbIdempotency (`IDEM#`) without key collisions.
+ * LambderDdbIdempotencyStore (`IDEM#`) without key collisions.
  *
  * A key may also be a `{ pk, sk }` pair, which groups entries under one
  * partition so `deletePartition` and `listSortKeys` can work on the group
@@ -72,19 +79,16 @@ export declare class LambderDdbCache {
     readonly tableName: string;
     readonly keyPrefix: string;
     readonly namespace: string;
-    /** The client given at creation, or one created from `region` on first use; the SDK arrives with it. */
-    private readonly providedClient;
-    private readonly region;
-    private readyPromise;
+    /** The SDK and the client, loaded and created the first time the table is touched (see LambderDdbSdk). */
+    private readonly ready;
     private readonly defaultTtlSeconds;
     private readonly chunkBytes;
     private readonly compression;
     private readonly maxValueBytes;
     private readonly memory;
     private readonly inFlight;
+    private readonly now;
     constructor(options: LambderDdbCacheOptions);
-    /** The SDK and the client, loaded and created the first time the table is touched (see LambderDdbSdk). */
-    private ready;
     get<T>(key: LambderCacheKey): Promise<T | undefined>;
     private getByAddress;
     has(key: LambderCacheKey): Promise<boolean>;
@@ -145,5 +149,4 @@ export declare class LambderDdbCache {
     /** Drop every in-memory copy belonging to one partition. */
     private forgetPartition;
     private nowSeconds;
-    private isConditionalFailure;
 }

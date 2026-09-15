@@ -4,12 +4,11 @@
 
 import { describe, it, expect } from 'vitest';
 import Lambder from '../src/core/Lambder.js';
-import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
-import { decodeBody, createMockEvent, createMockContext } from './helpers.js';
+import { decodeBody, createMockEvent, createMockContext, testPublicFiles } from './helpers.js';
 describe('Thrown responses and die', () => {
     it('a thrown response becomes the response (any call depth)', async () => {
         const guard = (res: any) => { throw res.redirect('/login', 302); };
-        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) })
+        const lambder = new Lambder({ files: testPublicFiles() })
             .addRoute('/deep', (ctx, res) => {
                 guard(res);
                 return res.html('never reached');
@@ -22,7 +21,7 @@ describe('Thrown responses and die', () => {
 
     it('res.die.* halts the handler immediately', async () => {
         let afterDieRan = false;
-        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) })
+        const lambder = new Lambder({ files: testPublicFiles() })
             .addRoute('/die', (ctx, res) => {
                 res.die.status404('Gone');
                 afterDieRan = true;
@@ -37,7 +36,7 @@ describe('Thrown responses and die', () => {
 
     it('die inside a beforeRender hook prevents the route handler from running', async () => {
         let handlerRan = false;
-        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) });
+        const lambder = new Lambder({ files: testPublicFiles() });
         lambder.addHook('beforeRender', async (ctx, res) => {
             if(ctx.cookie.dev !== 'atlas'){ res.die.status404('Not found'); }
             return ctx;
@@ -54,7 +53,7 @@ describe('Thrown responses and die', () => {
 
     it('beforeRender hooks can return a response to short-circuit', async () => {
         let handlerRan = false;
-        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) });
+        const lambder = new Lambder({ files: testPublicFiles() });
         lambder.addHook('beforeRender', async (ctx, res) => res.redirect('/elsewhere', 301));
         lambder.addRoute('/x', (ctx, res) => {
             handlerRan = true;

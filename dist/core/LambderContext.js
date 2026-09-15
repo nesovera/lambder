@@ -1,11 +1,13 @@
-import cookieParser from "cookie";
-import { COMPRESSED_PAYLOAD_GZ_FIELD, COMPRESSED_PAYLOAD_BR_FIELD, COMPRESSED_PAYLOAD_BYTES_FIELD, } from "../shared/LambderRequestPayload.js";
-import { restoreText, LambderCompressionError, LAMBDER_RESTORE_FAILURES, } from "../shared/LambderCompressionCodec.js";
+import { readApiEnvelope, cookieValuesByName, lowercaseHeaderNames } from "../api/LambderApiRequest.js";
+import { resolveClientIp } from "../shared/util/LambderClientIp.js";
+import { base64ToText } from "../shared/util/LambderBase64.js";
+import { LambderAnswerHeaders } from "../shared/wire/LambderAnswerHeaders.js";
 /** True for API Gateway HTTP API / Lambda Function URL (payload v2) events. */
 export const isV2HttpEvent = (event) => !!event && typeof event === "object"
     && event.version === "2.0"
     && !!event.requestContext?.http;
-export const createContext = (event, lambdaContext, apiPath) => {
+/** The render context for one request: everything a route handler, an API handler, a hook or a guard reads about it, built once from the Lambda event. */
+export const createContext = (event, lambdaContext, apiPath, trustedClientIpHeaders = []) => {
     // Normalize the two API Gateway payload formats into one shape.
     const eventFormat = isV2HttpEvent(event) ? "v2" : "v1";
     let host;
@@ -37,126 +39,55 @@ export const createContext = (event, lambdaContext, apiPath) => {
         path = event.path;
         method = event.httpMethod;
         get = event.queryStringParameters || {};
-        cookiePairs = (headers.Cookie || headers.cookie || "").split(";");
+        // A REST API keeps only the LAST value of a repeated header in
+        // `headers` and every value in `multiValueHeaders`, and HTTP/2 lets a
+        // client split its cookies across several Cookie headers. The session
+        // layer weighs every copy of a cookie name, so dropping one is
+        // dropping a candidate session; v2's `event.cookies` already carries
+        // them all.
+        const cookieHeaders = event.multiValueHeaders?.Cookie ?? event.multiValueHeaders?.cookie;
+        cookiePairs = (cookieHeaders?.length ? cookieHeaders.join("; ") : (headers.Cookie || headers.cookie || "")).split(";");
         sourceIp = event.requestContext?.identity?.sourceIp || "";
     }
-    // Parsed pair by pair so a name that arrived more than once keeps every
-    // value; a whole-header parse keeps only the first.
-    const cookieList = {};
-    for (const pair of cookiePairs) {
-        for (const [name, value] of Object.entries(cookieParser.parse(pair))) {
-            if (value !== undefined)
-                (cookieList[name] ??= []).push(value);
-        }
-    }
-    const cookie = Object.fromEntries(Object.entries(cookieList).map(([name, values]) => [name, values[0]]));
-    const lowercasedHeaders = {};
-    for (const [key, value] of Object.entries(headers)) {
-        if (value !== undefined)
-            lowercasedHeaders[key.toLowerCase()] = value;
-    }
+    const cookieList = cookieValuesByName(cookiePairs);
+    const cookie = Object.create(null);
+    for (const [name, values] of Object.entries(cookieList))
+        cookie[name] = values[0];
+    const lowercasedHeaders = lowercaseHeaderNames(headers);
     const header = (name) => lowercasedHeaders[name.toLowerCase()];
-    const forwardedFor = lowercasedHeaders["x-forwarded-for"];
-    const ip = lowercasedHeaders["cf-connecting-ip"]
-        || (forwardedFor ? (forwardedFor.split(",")[0] ?? "").trim() : "")
-        || sourceIp
-        || "";
+    const ip = resolveClientIp(lowercasedHeaders, sourceIp, trustedClientIpHeaders);
     // Decode body: keep the raw string, then parse as JSON with urlencoded fallback.
-    let rawBody = "";
+    const rawBody = event.isBase64Encoded
+        ? (event.body ? base64ToText(event.body) : "")
+        : (event.body || "");
     let post = {};
     try {
-        rawBody = event.isBase64Encoded
-            ? (event.body ? Buffer.from(event.body, "base64").toString() : "")
-            : (event.body || "");
-        try {
-            post = JSON.parse(rawBody || "{}") || {};
-        }
-        catch (e) {
-            const params = new URLSearchParams(rawBody);
-            post = {};
-            for (const [key, value] of params.entries()) {
-                post[key] = value;
-            }
+        post = JSON.parse(rawBody || "{}") || {};
+    }
+    catch (e) {
+        const params = new URLSearchParams(rawBody);
+        post = {};
+        for (const [key, value] of params.entries()) {
+            post[key] = value;
         }
     }
-    catch (e) { }
-    const isApiCall = !!(method === "POST" && apiPath && path === apiPath && post.apiName);
-    const apiName = isApiCall ? post.apiName : null;
-    const apiPayload = isApiCall ? post.payload : null;
-    const requestVersion = isApiCall ? (post.version ?? null) : null;
+    // A POST to the API path whose body names an API is an API call; the
+    // core reads the envelope, and everything downstream reads ctx.api.
+    const api = method === "POST" && !!apiPath && path === apiPath
+        ? readApiEnvelope(post, { headers: lowercasedHeaders, cookies: cookieList, ip, host })
+        : null;
     return {
         host, path, pathParams: {}, method,
         get, post, cookie, cookieList, event,
         session: null,
-        apiName, apiPayload,
+        api,
+        apiName: api?.apiName ?? null,
+        apiPayload: api ? api.payload : null,
         guardData: {},
         headers, rawBody, ip, header,
         lambdaContext,
-        _otherInternal: {
-            isApiCall, requestVersion, eventFormat,
-            setHeaderFnAccumulator: [],
-            addHeaderFnAccumulator: [],
-            logToApiResponseAccumulator: [],
-        }
+        eventFormat,
+        responseHeaders: new LambderAnswerHeaders(),
+        logList: [],
     };
-};
-/**
- * Restores a request payload the caller sent compressed (`payloadGz` or
- * `payloadBr`, beside `payloadBytes`) onto ctx.post.payload and
- * ctx.apiPayload, so every later stage (rate-limit key slices, guards, input
- * validation, the handler) reads an ordinary payload and needs no awareness
- * of the wire format. The field names the encoding; a request carrying both
- * is refused. A request that sent a plain payload passes through untouched.
- *
- * Every failure answers with a message instead of throwing: a malformed body
- * is a client error, not a crash. The declared byte length both bounds the
- * decompression and verifies it, so an over-large or tampered body is
- * refused rather than expanded.
- */
-export const restoreCompressedApiPayload = async (ctx, maxPayloadBytes) => {
-    const post = ctx.post;
-    const hasGzip = post[COMPRESSED_PAYLOAD_GZ_FIELD] !== undefined;
-    const hasBrotli = post[COMPRESSED_PAYLOAD_BR_FIELD] !== undefined;
-    if (!hasGzip && !hasBrotli)
-        return { ok: true };
-    if (hasGzip && hasBrotli) {
-        return { ok: false, message: `Request carries both ${COMPRESSED_PAYLOAD_GZ_FIELD} and ${COMPRESSED_PAYLOAD_BR_FIELD}; send one.` };
-    }
-    const field = hasGzip ? COMPRESSED_PAYLOAD_GZ_FIELD : COMPRESSED_PAYLOAD_BR_FIELD;
-    const encoding = hasGzip ? "gzip" : "br";
-    const compressed = post[field];
-    if (typeof compressed !== "string") {
-        return { ok: false, message: `Request ${field} must be a base64 string.` };
-    }
-    const declaredBytes = post[COMPRESSED_PAYLOAD_BYTES_FIELD];
-    if (typeof declaredBytes !== "number" || !Number.isSafeInteger(declaredBytes) || declaredBytes <= 0) {
-        return { ok: false, message: `Request ${COMPRESSED_PAYLOAD_BYTES_FIELD} must be the payload's byte length.` };
-    }
-    if (declaredBytes > maxPayloadBytes) {
-        return { ok: false, message: `Request payload of ${declaredBytes} bytes exceeds the ${maxPayloadBytes} byte limit.` };
-    }
-    // The bound and the exact-length verification are the codec's, the same
-    // ones a stored record gets; only the wording of the refusal is ours.
-    let json;
-    try {
-        json = await restoreText(Buffer.from(compressed, "base64"), encoding, { declaredBytes });
-    }
-    catch (err) {
-        const reason = err instanceof LambderCompressionError ? err.reason : null;
-        return { ok: false, message: reason === LAMBDER_RESTORE_FAILURES.lengthMismatch
-                ? "Compressed request payload does not match its declared length."
-                : "Compressed request payload could not be decompressed." };
-    }
-    let payload;
-    try {
-        payload = JSON.parse(json);
-    }
-    catch {
-        return { ok: false, message: "Compressed request payload is not valid JSON." };
-    }
-    delete post[field];
-    delete post[COMPRESSED_PAYLOAD_BYTES_FIELD];
-    post.payload = payload;
-    ctx.apiPayload = payload;
-    return { ok: true };
 };

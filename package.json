@@ -1,6 +1,7 @@
 {
   "name": "lambder",
-  "version": "6.0.2",
+  "version": "7.0.1",
+  "sideEffects": false,
   "description": "Opinionated serverless web framework for TypeScript on AWS Lambda: type-safe APIs from Zod schemas, DynamoDB sessions, and declarative rate limits, authorization guards and idempotency.",
   "keywords": [
     "lambda",
@@ -44,18 +45,19 @@
       "types": "./dist/client.d.ts",
       "default": "./dist/client.js"
     },
-    "./testing": {
-      "types": "./dist/testing.d.ts",
-      "default": "./dist/testing.js"
-    }
+    "./mock": {
+      "types": "./dist/mock.d.ts",
+      "default": "./dist/mock.js"
+    },
+    "./package.json": "./package.json"
   },
   "typesVersions": {
     "*": {
       "client": [
         "./dist/client.d.ts"
       ],
-      "testing": [
-        "./dist/testing.d.ts"
+      "mock": [
+        "./dist/mock.d.ts"
       ]
     }
   },
@@ -66,24 +68,29 @@
     "crypto": false
   },
   "files": [
-    "dist"
+    "dist",
+    "CHANGELOG.md"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.tests.json",
-    "test": "npm run typecheck && vitest run",
+    "test": "npm run typecheck && npm run lint && npm run build && vitest run",
     "test:watch": "vitest",
-    "build": "tsc",
-    "lint": "eslint . --ext .ts,.tsx --fix"
+    "build": "rm -rf dist && tsc",
+    "lint": "eslint . --ext .ts,.tsx",
+    "lint:fix": "eslint . --ext .ts,.tsx --fix",
+    "prepublishOnly": "npm test"
   },
   "dependencies": {
+    "@types/aws-lambda": "^8.10.136",
     "cookie": "^1.0.2",
     "js-cookie": "^3.0.5",
     "lru-cache": "^11.5.2",
     "mime-types": "^2.1.35",
-    "path-to-regexp": "^6.2.1"
+    "path-to-regexp": "^6.2.1",
+    "tough-cookie": "^6.0.2"
   },
   "peerDependencies": {
     "@aws-sdk/client-dynamodb": "^3.574.0",
@@ -108,9 +115,6 @@
     },
     "msw": {
       "optional": true
-    },
-    "zod": {
-      "optional": true
     }
   },
   "devDependencies": {
@@ -118,16 +122,14 @@
     "@aws-sdk/client-lambda": "^3.1131.0",
     "@aws-sdk/client-s3": "^3.1127.0",
     "@aws-sdk/lib-dynamodb": "^3.913.0",
-    "@types/aws-lambda": "^8.10.136",
-    "@types/cookie": "^0.6.0",
     "@types/js-cookie": "^3.0.6",
     "@types/mime-types": "^2.1.4",
     "@types/node": "^24.9.0",
-    "@types/path-to-regexp": "^1.7.0",
     "@typescript-eslint/eslint-plugin": "^8.70.0",
     "@typescript-eslint/parser": "^8.70.0",
     "aws-sdk-client-mock": "^4.1.0",
     "eslint": "^8.57.0",
+    "msw": "^2.15.0",
     "typescript": "^6.0.3",
     "vitest": "^5.0.0",
     "zod": "^4.6.2"

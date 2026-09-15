@@ -27,6 +27,21 @@ const compilePathMatcher = (path) => {
         return params;
     };
 };
+/**
+ * Whether a request method is one the slot accepts, with HEAD folded into GET
+ * unless the list names HEAD itself: a HEAD is a GET whose body finalization
+ * strips, so an app that narrowed a slot to ["GET"] did not mean to 404 it.
+ *
+ * The three places that gate on a method (a route matcher's `method`,
+ * servePublicFiles and serveIndexHtml) share this one rule, so neighbouring
+ * slots cannot disagree about what a method means.
+ */
+export const allowsRequestMethod = (methods, requestMethod) => {
+    const method = requestMethod.toUpperCase();
+    if (methods.has(method))
+        return true;
+    return method === "HEAD" && methods.has("GET");
+};
 /** Compile a route condition once at registration time. */
 export const compileRouteMatcher = (condition) => {
     if (typeof condition === "string" || condition instanceof RegExp) {
@@ -42,13 +57,8 @@ export const compileRouteMatcher = (condition) => {
         ? new Set((Array.isArray(matcher.method) ? matcher.method : [matcher.method]).map((m) => m.toUpperCase()))
         : null;
     return (ctx) => {
-        if (methods) {
-            let requestMethod = ctx.method.toUpperCase();
-            if (requestMethod === "HEAD" && !methods.has("HEAD"))
-                requestMethod = "GET";
-            if (!methods.has(requestMethod))
-                return false;
-        }
+        if (methods && !allowsRequestMethod(methods, ctx.method))
+            return false;
         if (matcher.host !== undefined) {
             if (typeof matcher.host === "string") {
                 if (ctx.host.toLowerCase() !== matcher.host.toLowerCase())

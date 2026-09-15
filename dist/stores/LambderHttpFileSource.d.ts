@@ -1,4 +1,4 @@
-import { type LambderFile, type LambderFileSource } from "../core/LambderFiles.js";
+import { type LambderFile, type LambderFileSource } from "../shared/contracts/LambderFileSource.js";
 export type LambderHttpFileSourceOptions = {
     /**
      * The folder URL relative paths resolve under: "https://assets.example.com/v42/".

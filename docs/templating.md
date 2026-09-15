@@ -1,8 +1,8 @@
 # Templating
 
 Two standalone, zero-dependency templating tools. Both are importable directly
-from `lambder` (and from `lambder/client`, since they are isomorphic) and
-usable without the framework.
+from `lambder` and usable without the framework; the tagged templates come from
+`lambder/client` too, since they are isomorphic.
 
 - **`html` / `xml` tagged templates** for building markup in TypeScript.
 - **`LambderTemplatingEngine`** for rendering HTML files whose template
@@ -84,8 +84,13 @@ template.has("title");    // true
 Rules:
 
 - Slot values: strings and numbers escaped; `html`, `raw()` and `jsonScript()`
-  verbatim; arrays flattened; `null`, `undefined` and `false` keep the slot's
-  default content
+  verbatim; arrays flattened
+- A slot keeps its default content only for `undefined`, or for a key the data
+  object does not carry at all. `null`, `false` and `""` are values, and they
+  render the slot empty. So `res.templateFile("index.html", { title:
+  page.seoTitle })` with a `seoTitle` that comes back `null` ships an empty
+  `<title>`; write `page.seoTitle ?? undefined` when a missing value should
+  fall back to the shell's own default
 - Unknown data keys are ignored, so one data object can serve several
   templates with different slots
 - Blocks nest freely; there are intentionally no loops or inline expressions:

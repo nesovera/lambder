@@ -1,5 +1,5 @@
 import type { S3Client, S3ClientConfig } from "@aws-sdk/client-s3";
-import { remoteStoreFile, type LambderFile, type LambderFileSource } from "../core/LambderFiles.js";
+import { remoteStoreFile, type LambderFile, type LambderFileSource } from "../shared/contracts/LambderFileSource.js";
 
 export type LambderS3FileSourceOptions = {
     bucket: string;

@@ -1,11 +1,12 @@
 import type { AttributeValue, DynamoDBClient, WriteRequest } from "@aws-sdk/client-dynamodb";
-import { loadDynamoClientSdk, type LambderDynamoClientSdk } from "./LambderDdbSdk.js";
-import { getCrypto } from "../shared/node-polyfills.js";
-import { compressText, restoreText } from "../shared/LambderCompressionCodec.js";
+import { createDynamoClientLoader, isConditionalCheckFailure, type LambderDynamoClientReady } from "./LambderDdbSdk.js";
+import { getCrypto } from "../shared/util/LambderNodeModules.js";
+import { assertPositiveInteger } from "../shared/util/LambderOptionChecks.js";
+import { compressText, restoreText, LambderCompressionError } from "../shared/wire/LambderCompressionCodec.js";
 import {
     resolveCompressionOption,
     type LambderCompressionOption, type LambderCompressionSettings,
-} from "../shared/LambderCompressionOption.js";
+} from "../shared/wire/LambderCompressionOption.js";
 import { LRUCache } from "lru-cache";
 
 const DEFAULT_TTL_SECONDS = 365 * 24 * 60 * 60;
@@ -28,6 +29,26 @@ const COMPRESSION_DEFAULTS: LambderCompressionSettings = { minBytes: 0, quality:
 /** How a value's bytes are stored: Brotli, or the UTF-8 JSON itself. */
 type CacheEncoding = "br" | "identity";
 
+/**
+ * A stored entry that cannot be trusted: chunks that do not add up to what
+ * the manifest describes, bytes that fail its checksum, or a restore the
+ * codec would not vouch for (a LambderCompressionError, which is the same
+ * answer in the compression layer's own words).
+ *
+ * A type rather than "anything thrown while reading the entry", because the
+ * two are treated in opposite ways: a corrupt entry is dropped so the next
+ * reader refills it, while a throttled or failed Query is the table being
+ * busy. Deleting a healthy 2MB entry over one throttle orphans its chunks
+ * until their TTL and sends every later reader to the origin, which is the
+ * load the cache exists to absorb.
+ */
+class LambderCacheIntegrityError extends Error {
+    constructor(message: string){
+        super(message);
+        this.name = "LambderCacheIntegrityError";
+    }
+}
+
 interface CacheManifest {
     version: string;
     encoding: CacheEncoding;
@@ -48,6 +69,7 @@ interface MemoryEntry {
 
 export interface LambderDdbCacheOptions {
     tableName: string;
+    /** Region the client is created for on first use; the SDK's default chain otherwise. */
     region?: string;
     /** Partition key prefix, keeps cache items separated from other systems in a shared table. Default: "CACHE". */
     keyPrefix?: string;
@@ -64,6 +86,12 @@ export interface LambderDdbCacheOptions {
     maxValueBytes?: number;
     memoryMaxBytes?: number;
     client?: DynamoDBClient;
+    /**
+     * The clock entries are expired against, injectable the way the rate
+     * limiter's and the idempotency store's are, so a test can cross a TTL
+     * boundary without moving the world's clock.
+     */
+    now?: () => number;
 }
 
 /**
@@ -112,11 +140,11 @@ export interface LambderDdbCacheListOptions {
     limit?: number;
 }
 
-// Node builtins are loaded lazily through node-polyfills so this module can
+// Node builtins are loaded lazily through LambderNodeModules so this module can
 // sit in a frontend bundle's import graph (via the package root) without
 // breaking; using the cache at runtime still requires Node. Brotli helpers
-// are shared with LambderDdbIdempotency and LambderSessionManager via
-// ../shared/LambderCompressionCodec.js.
+// are shared with LambderDdbIdempotencyStore and LambderDdbSessionStore via
+// ../shared/wire/LambderCompressionCodec.js.
 const requireCrypto = async () => {
     const crypto = await getCrypto();
     if (!crypto) throw new Error("LambderDdbCache requires a Node.js environment.");
@@ -131,13 +159,6 @@ const sha256 = async (value: string | Buffer): Promise<string> => {
 const randomUUID = async (): Promise<string> => {
     const crypto = await requireCrypto();
     return crypto.randomUUID();
-};
-
-const positiveInteger = (value: number, name: string): number => {
-    if (!Number.isSafeInteger(value) || value <= 0) {
-        throw new Error(`${name} must be a positive safe integer`);
-    }
-    return value;
 };
 
 const sleep = (milliseconds: number): Promise<void> =>
@@ -158,7 +179,7 @@ const sleep = (milliseconds: number): Promise<void> =>
  * Table shape: string hash key `pk`, string range key `sk`, TTL on
  * `expiresAt`. Items are prefixed `CACHE#<namespace>#` by default, so the
  * table can be shared with LambderDdbRateLimiter (`RL#`) and
- * LambderDdbIdempotency (`IDEM#`) without key collisions.
+ * LambderDdbIdempotencyStore (`IDEM#`) without key collisions.
  *
  * A key may also be a `{ pk, sk }` pair, which groups entries under one
  * partition so `deletePartition` and `listSortKeys` can work on the group
@@ -172,16 +193,15 @@ export class LambderDdbCache {
     readonly keyPrefix: string;
     readonly namespace: string;
 
-    /** The client given at creation, or one created from `region` on first use; the SDK arrives with it. */
-    private readonly providedClient: DynamoDBClient | undefined;
-    private readonly region: string;
-    private readyPromise: Promise<{ client: DynamoDBClient; sdk: LambderDynamoClientSdk }> | undefined;
+    /** The SDK and the client, loaded and created the first time the table is touched (see LambderDdbSdk). */
+    private readonly ready: () => Promise<LambderDynamoClientReady>;
     private readonly defaultTtlSeconds: number;
     private readonly chunkBytes: number;
     private readonly compression: LambderCompressionSettings | null;
     private readonly maxValueBytes: number;
     private readonly memory: LRUCache<string, MemoryEntry> | null;
     private readonly inFlight = new Map<string, Promise<unknown>>();
+    private readonly now: () => number;
 
     constructor(options: LambderDdbCacheOptions) {
         if (!options.tableName.trim()) throw new Error("tableName is required");
@@ -192,18 +212,18 @@ export class LambderDdbCache {
             throw new Error("namespace must be at most 128 UTF-8 bytes");
         }
 
-        this.defaultTtlSeconds = positiveInteger(
+        this.defaultTtlSeconds = assertPositiveInteger(
             options.defaultTtlSeconds ?? DEFAULT_TTL_SECONDS,
             "defaultTtlSeconds",
         );
-        this.chunkBytes = positiveInteger(options.chunkBytes ?? DEFAULT_CHUNK_BYTES, "chunkBytes");
+        this.chunkBytes = assertPositiveInteger(options.chunkBytes ?? DEFAULT_CHUNK_BYTES, "chunkBytes");
         if (this.chunkBytes > MAX_SAFE_CHUNK_BYTES) {
             throw new Error(`chunkBytes must not exceed ${MAX_SAFE_CHUNK_BYTES}`);
         }
 
         this.compression = resolveCompressionOption(options.compression, COMPRESSION_DEFAULTS);
 
-        this.maxValueBytes = positiveInteger(
+        this.maxValueBytes = assertPositiveInteger(
             options.maxValueBytes ?? DEFAULT_MAX_VALUE_BYTES,
             "maxValueBytes",
         );
@@ -211,19 +231,11 @@ export class LambderDdbCache {
         this.memory = memoryMaxBytes === 0
             ? null
             : new LRUCache<string, MemoryEntry>({
-                maxSize: positiveInteger(memoryMaxBytes, "memoryMaxBytes"),
+                maxSize: assertPositiveInteger(memoryMaxBytes, "memoryMaxBytes"),
                 sizeCalculation: (entry) => entry.stored.length,
             });
-        this.providedClient = options.client;
-        this.region = options.region ?? "us-east-1";
-    }
-
-    /** The SDK and the client, loaded and created the first time the table is touched (see LambderDdbSdk). */
-    private ready(): Promise<{ client: DynamoDBClient; sdk: LambderDynamoClientSdk }> {
-        this.readyPromise ??= loadDynamoClientSdk("LambderDdbCache")
-            .then((sdk) => ({ sdk, client: this.providedClient ?? new sdk.DynamoDBClient({ region: this.region }) }))
-            .catch((error: unknown) => { this.readyPromise = undefined; throw error; });
-        return this.readyPromise;
+        this.now = options.now ?? (() => Date.now());
+        this.ready = createDynamoClientLoader({ user: "LambderDdbCache", region: options.region, client: options.client });
     }
 
     async get<T>(key: LambderCacheKey): Promise<T | undefined> {
@@ -249,10 +261,10 @@ export class LambderDdbCache {
         try {
             const stored = manifest.inlineData ?? await this.readChunks(pk, address, manifest);
             if (stored.length !== manifest.storedBytes) {
-                throw new Error("stored byte length does not match manifest");
+                throw new LambderCacheIntegrityError("stored byte length does not match manifest");
             }
             if (await sha256(stored) !== manifest.checksum) {
-                throw new Error("stored checksum does not match manifest");
+                throw new LambderCacheIntegrityError("stored checksum does not match manifest");
             }
 
             const json = await this.decode(stored, manifest.encoding, manifest.uncompressedBytes);
@@ -260,6 +272,11 @@ export class LambderDdbCache {
             this.remember(address.memoryKey, stored, manifest.encoding, manifest.uncompressedBytes, manifest.expiresAt);
             return parsed;
         } catch (error) {
+            // Only an entry this read can prove wrong is dropped. Everything
+            // else is the table answering badly, which is the manifest read's
+            // own behaviour one line up: it propagates, and getOrSet's
+            // fail-open handles it as the infrastructure failure it is.
+            if (!(error instanceof LambderCacheIntegrityError || error instanceof LambderCompressionError)) throw error;
             await this.invalidateManifest(pk, address, manifest.version);
             console.warn(`Ignoring corrupt DynamoDB cache entry in ${this.namespace}`, error);
             return undefined;
@@ -282,7 +299,7 @@ export class LambderDdbCache {
     }
 
     private async setByAddress<T>(address: CacheAddress, value: T, options: LambderDdbCacheSetOptions): Promise<void> {
-        const ttlSeconds = positiveInteger(options.ttlSeconds ?? this.defaultTtlSeconds, "ttlSeconds");
+        const ttlSeconds = assertPositiveInteger(options.ttlSeconds ?? this.defaultTtlSeconds, "ttlSeconds");
         const json = JSON.stringify(value);
         if (json === undefined) throw new Error("Cache value must be JSON-serializable");
 
@@ -385,7 +402,7 @@ export class LambderDdbCache {
     async listSortKeys(partition: string, options: LambderDdbCacheListOptions = {}): Promise<string[]> {
         const pk = await this.partitionKey(this.normalizePartition(partition));
         const prefix = `${SORT_KEY_MARKER}${encodeSortKey(options.prefix ?? "")}`;
-        const limit = options.limit === undefined ? undefined : positiveInteger(options.limit, "limit");
+        const limit = options.limit === undefined ? undefined : assertPositiveInteger(options.limit, "limit");
         const nowSeconds = this.nowSeconds();
 
         const items = await this.queryItems(pk, { prefix, projection: "#sk, #expiresAt", extraNames: { "#expiresAt": "expiresAt" } });
@@ -453,8 +470,8 @@ export class LambderDdbCache {
         factory: () => Promise<T>,
         options: LambderDdbCacheGetOrSetOptions,
     ): Promise<T> {
-        const leaseSeconds = positiveInteger(options.leaseSeconds ?? 15, "leaseSeconds");
-        const waitForFillMs = positiveInteger(options.waitForFillMs ?? 5_000, "waitForFillMs");
+        const leaseSeconds = assertPositiveInteger(options.leaseSeconds ?? 15, "leaseSeconds");
+        const waitForFillMs = assertPositiveInteger(options.waitForFillMs ?? 5_000, "waitForFillMs");
         const pk = await this.partitionKey(address.partition);
         const owner = await randomUUID();
 
@@ -509,7 +526,7 @@ export class LambderDdbCache {
             );
             return true;
         } catch (error) {
-            if (this.isConditionalFailure(error)) return false;
+            if (isConditionalCheckFailure(error)) return false;
             throw error;
         }
     }
@@ -527,7 +544,7 @@ export class LambderDdbCache {
                 }),
             );
         } catch (error) {
-            if (!this.isConditionalFailure(error)) {
+            if (!isConditionalCheckFailure(error)) {
                 console.warn(`Failed to release DynamoDB cache lease in ${this.namespace}`, error);
             }
         }
@@ -605,11 +622,11 @@ export class LambderDdbCache {
 
         chunks.sort((left, right) => left.sk.localeCompare(right.sk));
         if (chunks.length !== manifest.chunkCount) {
-            throw new Error(`DynamoDB cache entry is missing chunks (${chunks.length}/${manifest.chunkCount})`);
+            throw new LambderCacheIntegrityError(`DynamoDB cache entry is missing chunks (${chunks.length}/${manifest.chunkCount})`);
         }
         for (let index = 0; index < chunks.length; index += 1) {
             if (chunks[index]?.sk !== this.chunkSortKey(address, manifest.version, index)) {
-                throw new Error(`DynamoDB cache entry has an invalid chunk index at ${index}`);
+                throw new LambderCacheIntegrityError(`DynamoDB cache entry has an invalid chunk index at ${index}`);
             }
         }
         return Buffer.concat(chunks.map((chunk) => chunk.data), manifest.storedBytes);
@@ -664,7 +681,7 @@ export class LambderDdbCache {
                 }),
             );
         } catch (error) {
-            if (!this.isConditionalFailure(error)) {
+            if (!isConditionalCheckFailure(error)) {
                 console.warn(`Failed to invalidate corrupt DynamoDB cache manifest in ${this.namespace}`, error);
             }
         }
@@ -703,7 +720,7 @@ export class LambderDdbCache {
         expiresAt: number,
     ): void {
         if (!this.memory) return;
-        const ttl = expiresAt * 1000 - Date.now();
+        const ttl = expiresAt * 1000 - this.now();
         if (ttl <= 0) return;
         this.memory.set(key, { stored, encoding, uncompressedBytes, expiresAt }, { ttl });
     }
@@ -775,10 +792,7 @@ export class LambderDdbCache {
     }
 
     private nowSeconds(): number {
-        return Math.floor(Date.now() / 1000);
+        return Math.floor(this.now() / 1000);
     }
 
-    private isConditionalFailure(error: unknown): boolean {
-        return !!error && typeof error === "object" && "name" in error && error.name === "ConditionalCheckFailedException";
-    }
 }

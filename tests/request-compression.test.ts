@@ -17,15 +17,17 @@ import Lambder, { initLambder } from '../src/core/Lambder.js';
 import LambderCaller from '../src/client/LambderCaller.js';
 import {
     compressPayloadGzip,
-    decompressPayloadGzip,
+    compressPayloadBrotli,
+    isRequestCompressionAvailable,
     DEFAULT_REQUEST_COMPRESSION_SETTINGS,
-} from '../src/shared/LambderRequestPayload.js';
-import { resolveCompressionOption } from '../src/shared/LambderCompressionOption.js';
-import { LAMBDER_REFUSAL_CODES } from '../src/shared/LambderApiError.js';
-import { lambderGuard } from '../src/policies/LambderApiGuards.js';
-import { lambderRateLimitKey } from '../src/policies/LambderApiRateLimits.js';
+} from '../src/shared/wire/LambderRequestPayload.js';
+import { base64ToBytes } from '../src/shared/util/LambderBase64.js';
+import { restoreText } from '../src/shared/wire/LambderCompressionCodec.js';
+import { resolveCompressionOption } from '../src/shared/wire/LambderCompressionOption.js';
+import { LAMBDER_REFUSAL_CODES } from '../src/shared/wire/LambderApiRefusal.js';
+import { lambderGuard } from '../src/core/LambderPolicyBuilders.js';
+import { lambderRateLimitKey } from '../src/core/LambderPolicyBuilders.js';
 import { createApiEvent, createMockContext, createMockEventV2, decodeBody } from './helpers.js';
-import { compressPayloadBrotli } from '../src/invoke/LambderInvokeCaller.js';
 
 /** A payload big and repetitive enough that gzip is a large win. */
 const bigPayload = (size = 400) => ({ notes: Array.from({ length: size }, (_, i) => `stop-${i} on the main line`) });
@@ -44,7 +46,7 @@ const echoApi = () => initLambder().create({ apiPath: '/api' })
     }, (ctx, res) => res.api({ count: ctx.apiPayload.notes.length }));
 
 describe('Request compression - the caller side', () => {
-    beforeEach(() => { vi.stubGlobal('window', { location: { hostname: 'localhost' } }); });
+    beforeEach(() => { vi.stubGlobal('location', { hostname: 'localhost' }); });
     afterEach(() => { vi.unstubAllGlobals(); });
 
     /** Captures the request body the caller would send. */
@@ -74,7 +76,7 @@ describe('Request compression - the caller side', () => {
         expect(typeof bodies[0].payloadGz).toBe('string');
         expect(bodies[0].payloadBytes).toBe(new TextEncoder().encode(JSON.stringify(payload)).length);
         // Round-trips to the original payload.
-        await expect(decompressPayloadGzip(bodies[0].payloadGz)).resolves.toEqual(payload);
+        await expect(restoreText(base64ToBytes(bodies[0].payloadGz), 'gzip', { declaredBytes: bodies[0].payloadBytes }).then(JSON.parse)).resolves.toEqual(payload);
         // And is meaningfully smaller, base64 overhead included.
         expect(bodies[0].payloadGz.length).toBeLessThan(bodies[0].payloadBytes / 3);
     });
@@ -136,6 +138,21 @@ describe('Request compression - the caller side', () => {
 
         expect('payload' in bodies[0]).toBe(false);
         expect('payloadGz' in bodies[0]).toBe(false);
+    });
+
+    it('sends the payload plainly on a runtime without CompressionStream, rather than failing the call', async () => {
+        // The option is safe to leave on: an old browser, or any runtime
+        // without the web compression API, simply sends what it always sent,
+        // and the server understands both shapes regardless.
+        const bodies = captureBody();
+        vi.stubGlobal('CompressionStream', undefined);
+        expect(isRequestCompressionAvailable()).toBe(false);
+        const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, requestCompression: true });
+
+        await caller.api('echo', bigPayload());
+
+        expect(bodies[0].payload).toBeDefined();
+        expect(bodies[0].payloadGz).toBeUndefined();
     });
 
     it('sends an incompressible payload plainly rather than larger', async () => {
@@ -356,7 +373,7 @@ describe('Request compression - the server side', () => {
     it('does not stringify the payload twice when compression is off', async () => {
         // A payload whose toJSON counts its serializations: an ordinary call
         // must not pay for a feature it did not turn on.
-        vi.stubGlobal('window', { location: { hostname: 'localhost' } });
+        vi.stubGlobal('location', { hostname: 'localhost' });
         vi.stubGlobal('fetch', vi.fn(async () => ({
             status: 200, statusText: 'OK',
             headers: { get: () => 'application/json' },
@@ -430,7 +447,7 @@ describe('Request compression - round trip through the real pipeline', () => {
             }, (ctx, res) => res.api({ received: ctx.apiPayload.notes.length }));
 
         // The caller builds the envelope; the server consumes it verbatim.
-        vi.stubGlobal('window', { location: { hostname: 'localhost' } });
+        vi.stubGlobal('location', { hostname: 'localhost' });
         let capturedBody = '';
         vi.stubGlobal('fetch', vi.fn(async (_url: any, init: any) => {
             capturedBody = init.body;

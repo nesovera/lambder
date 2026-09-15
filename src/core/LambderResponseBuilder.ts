@@ -1,17 +1,19 @@
 import type { LambderRenderContext } from "./LambderContext.js";
-import { serializeCookie, serializeClearCookie, type LambderCookieOptions, type LambderClearCookieOptions } from "./LambderCookie.js";
+import { serializeCookie, serializeClearCookie, type LambderCookieOptions, type LambderClearCookieOptions } from "../shared/wire/LambderCookie.js";
 import type { LambderFiles } from "./LambderFiles.js";
-import { LambderResponse, type HttpStatusCode, type LambderHeadersInput } from "./LambderResponse.js";
+import { LambderResponse, type LambderHeadersInput } from "./LambderResponse.js";
+import type { LambderHttpStatusCode } from "../shared/wire/LambderHttpStatus.js";
 import { LambderSafeHtml } from "../shared/LambderHtml.js";
 import type { LambderTemplateData } from "./LambderTemplatingEngine.js";
 // The API envelope types live with the contract (shared/, browser-safe) so
 // the caller and MSW never have to import this server-side module for them.
-import type { LambderApiResponseConfig } from "../shared/LambderApiContract.js";
+import type { LambderApiResponseConfig, LambderApiNullAnswerConfig } from "../shared/wire/LambderApiContract.js";
+import { buildApiEnvelope } from "../api/LambderApiEnvelope.js";
 
-export type { LambderApiResponse, LambderApiResponseConfig } from "../shared/LambderApiContract.js";
+export type { LambderApiEnvelopeBody, LambderApiResponseConfig } from "../shared/wire/LambderApiContract.js";
 
 export type LambderResponseOptions = {
-    statusCode?: HttpStatusCode;
+    statusCode?: LambderHttpStatusCode;
     headers?: LambderHeadersInput;
     /** Shorthand for the Cache-Control header. */
     cacheControl?: string;
@@ -27,15 +29,16 @@ export type LambderResponseOptions = {
  * `message`). A bare `res.api(null)` compiles only when the output type
  * itself allows null, so a success payload is always the declared output,
  * which is what lets a typed caller (LambderInvokeCaller.api) promise it.
- * Untyped resolvers (`TOutput = any`) accept anything, as before.
+ * Untyped resolvers (`TOutput = any`) accept anything, as before. This is
+ * the resolver's method type; the core's answer type is LambderApiAnswer.
  */
-export type LambderApiAnswer<TOutput, TResult> = {
+export type LambderResolverApiMethod<TOutput, TResult> = {
     (payload: TOutput, config?: LambderApiResponseConfig, options?: LambderResponseOptions): TResult;
-    (payload: null, config: LambderApiResponseConfig, options?: LambderResponseOptions): TResult;
+    (payload: null, config: LambderApiNullAnswerConfig, options?: LambderResponseOptions): TResult;
 };
 
 export type LambderRawResponseInit = {
-    statusCode: HttpStatusCode;
+    statusCode: LambderHttpStatusCode;
     headers?: LambderHeadersInput;
     body: string | Buffer | null;
     /** True when body is already a base64-encoded string. */
@@ -63,7 +66,7 @@ export default class LambderResponseBuilder<TResponse = any> {
     };
 
     private buildResponse(
-        statusCode: HttpStatusCode,
+        statusCode: LambderHttpStatusCode,
         contentType: string | null,
         body: string | Buffer | null,
         options?: LambderResponseOptions,
@@ -85,20 +88,20 @@ export default class LambderResponseBuilder<TResponse = any> {
 
     /** The instance's file reader, which res.file and res.templateFile need. */
     private requireFiles(method: string): LambderFiles {
-        if(!this.files) throw new Error(`${method} requires the files option at creation (e.g. files: new LambderLocalFileSource({ root }))`);
+        if(!this.files) throw new Error(`Lambder: ${method} requires the files option at creation (e.g. files: new LambderLocalFileSource({ root }))`);
         return this.files;
     }
 
+    /** Appends a response header; applied onto the response once the handler has one, in call order. */
     addHeader(key: string, value: string){
-        if(!this.ctx) throw new Error(".addHeader function is not available within this hook");
-        this.ctx._otherInternal.addHeaderFnAccumulator.push({ key, value });
+        if(!this.ctx) throw new Error("Lambder: res.addHeader needs the request context, and this response builder was created without one.");
+        this.ctx.responseHeaders.add(key, value);
     };
 
+    /** Replaces a response header; applied onto the response once the handler has one, in call order. */
     setHeader(key: string, value: string | string[]){
-        if(!this.ctx) throw new Error(".setHeader function is not available within this hook");
-        this.ctx._otherInternal.addHeaderFnAccumulator = this.ctx._otherInternal.addHeaderFnAccumulator
-            .filter((header) => header.key !== key);
-        this.ctx._otherInternal.setHeaderFnAccumulator.push({ key, value });
+        if(!this.ctx) throw new Error("Lambder: res.setHeader needs the request context, and this response builder was created without one.");
+        this.ctx.responseHeaders.set(key, value);
     };
 
     /**
@@ -107,7 +110,7 @@ export default class LambderResponseBuilder<TResponse = any> {
      * HttpOnly, browser-session lifetime.
      */
     setCookie(name: string, value: string, options?: LambderCookieOptions){
-        if(!this.ctx) throw new Error(".setCookie function is not available within this hook");
+        if(!this.ctx) throw new Error("Lambder: res.setCookie needs the request context, and this response builder was created without one.");
         this.addHeader("Set-Cookie", serializeCookie(name, value, options, this.ctx.host));
     };
 
@@ -118,13 +121,13 @@ export default class LambderResponseBuilder<TResponse = any> {
      * different cookie and deletes nothing.
      */
     clearCookie(name: string, options?: LambderClearCookieOptions){
-        if(!this.ctx) throw new Error(".clearCookie function is not available within this hook");
+        if(!this.ctx) throw new Error("Lambder: res.clearCookie needs the request context, and this response builder was created without one.");
         this.addHeader("Set-Cookie", serializeClearCookie(name, options, this.ctx.host));
     };
 
-    logToApiResponse(input: any){
-        if(!this.ctx) throw new Error(".logToApiResponse function is not available within this hook");
-        this.ctx._otherInternal.logToApiResponseAccumulator.push(input);
+    logToApiResponse(input: unknown){
+        if(!this.ctx) throw new Error("Lambder: res.logToApiResponse needs the request context, and this response builder was created without one.");
+        this.ctx.logList.push(input);
     };
 
     raw(init: LambderRawResponseInit): LambderResponse {
@@ -154,7 +157,7 @@ export default class LambderResponseBuilder<TResponse = any> {
         return this.buildResponse(200, "text/html; charset=utf-8", String(data), options);
     };
 
-    status(statusCode: HttpStatusCode, body?: string, options?: LambderResponseOptions): LambderResponse {
+    status(statusCode: LambderHttpStatusCode, body?: string, options?: LambderResponseOptions): LambderResponse {
         return this.buildResponse(statusCode, "text/html; charset=utf-8", body ?? "", options);
     };
 
@@ -162,7 +165,7 @@ export default class LambderResponseBuilder<TResponse = any> {
         return this.buildResponse(404, "text/html; charset=utf-8", data, options);
     };
 
-    redirect(url: string, statusCode: HttpStatusCode = 302, options?: LambderResponseOptions): LambderResponse {
+    redirect(url: string, statusCode: LambderHttpStatusCode = 302, options?: LambderResponseOptions): LambderResponse {
         const response = this.buildResponse(statusCode, null, null, options);
         response.setHeader("Location", url);
         return response;
@@ -213,32 +216,22 @@ export default class LambderResponseBuilder<TResponse = any> {
     };
 
     api(payload: TResponse, config?: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
-    api(payload: null, config: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
+    api(payload: null, config: LambderApiNullAnswerConfig, options?: LambderResponseOptions): LambderResponse;
     api(
         payload: TResponse | null,
-        {
-            versionExpired, sessionExpired, notAuthorized,
-            message, errorMessage, logList, crash,
-        }: LambderApiResponseConfig = {},
+        config: LambderApiResponseConfig = {},
         options?: LambderResponseOptions,
     ): LambderResponse {
-        const finalLogList = logList || this.ctx?._otherInternal?.logToApiResponseAccumulator;
-        return this.json({
-            apiVersion: this.apiVersion,
-            payload,
-            ...(versionExpired ? { versionExpired } : {}),
-            ...(sessionExpired ? { sessionExpired } : {}),
-            ...(notAuthorized ? { notAuthorized } : {}),
-            ...(message ? { message } : {}),
-            ...(errorMessage ? { errorMessage } : {}),
-            ...(crash ? { crash } : {}),
-            ...(finalLogList?.length ? { logList: finalLogList } : {}),
-        }, options);
+        // The envelope is the core's (one writer for both the server and the
+        // mock runtime); the logList channel is what this request accumulated
+        // unless the config names its own.
+        const envelope = buildApiEnvelope(this.apiVersion, payload, { ...config, logList: config.logList || this.ctx?.logList });
+        return this.json(envelope as Record<string, any>, options);
     };
 
     /** Same as api() but forces compression of the response body. */
     apiBinary(payload: TResponse, config?: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
-    apiBinary(payload: null, config: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
+    apiBinary(payload: null, config: LambderApiNullAnswerConfig, options?: LambderResponseOptions): LambderResponse;
     apiBinary(
         payload: TResponse | null,
         config: LambderApiResponseConfig = {},

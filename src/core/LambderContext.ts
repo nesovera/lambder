@@ -1,19 +1,19 @@
-import cookieParser from "cookie";
-import {
-    COMPRESSED_PAYLOAD_GZ_FIELD,
-    COMPRESSED_PAYLOAD_BR_FIELD,
-    COMPRESSED_PAYLOAD_BYTES_FIELD,
-} from "../shared/LambderRequestPayload.js";
-import {
-    restoreText,
-    LambderCompressionError,
-    LAMBDER_RESTORE_FAILURES,
-} from "../shared/LambderCompressionCodec.js";
 import type { APIGatewayProxyEvent, APIGatewayProxyEventV2, APIGatewayProxyEventHeaders, Context } from "aws-lambda";
-import type { LambderSessionContext } from "../session/LambderSessionManager.js";
-import type { LambderHttpEventFormat } from "./LambderResponse.js";
+import type { LambderSessionRecord } from "../shared/contracts/LambderSessionStore.js";
+import { readApiEnvelope, cookieValuesByName, lowercaseHeaderNames, type LambderApiRequest } from "../api/LambderApiRequest.js";
+import { resolveClientIp } from "../shared/util/LambderClientIp.js";
+import { base64ToText } from "../shared/util/LambderBase64.js";
+import { LambderAnswerHeaders } from "../shared/wire/LambderAnswerHeaders.js";
 
 export type LambderHttpEvent = APIGatewayProxyEvent | APIGatewayProxyEventV2;
+
+/**
+ * Which API Gateway payload format an event arrived in, and the format its
+ * response leaves in. Declared here, beside the detection it comes from:
+ * LambderResponse holds the emitters that read it, and having the type there
+ * as well made the two core modules import each other.
+ */
+export type LambderHttpEventFormat = "v1" | "v2";
 
 /** True for API Gateway HTTP API / Lambda Function URL (payload v2) events. */
 export const isV2HttpEvent = (event: unknown): event is APIGatewayProxyEventV2 =>
@@ -21,17 +21,24 @@ export const isV2HttpEvent = (event: unknown): event is APIGatewayProxyEventV2 =
     && (event as APIGatewayProxyEventV2).version === "2.0"
     && !!(event as APIGatewayProxyEventV2).requestContext?.http;
 
+/**
+ * Everything a route or API handler knows about the request. Extends the
+ * API core's call context (session, guardData, responseHeaders, logList),
+ * which is the part the pipeline and the session controller work on; the
+ * rest is the HTTP request as the Lambda event delivered it.
+ */
 export type LambderRenderContext<
     TApiPayload = any,
     TPathParams extends Record<string, string> = Record<string, string>,
     TGuardData = {},
+    TSessionData = any,
 > = {
     host: string;
     path: string;
     pathParams: TPathParams;
     method: string;
     get: Record<string, string | undefined>;
-    post: Record<string, any>;
+    post: Record<string, unknown>;
     /** Cookies by name (the first value when a name arrived more than once; see cookieList). */
     cookie: Record<string, string>;
     /**
@@ -42,8 +49,26 @@ export type LambderRenderContext<
      * browser's order says nothing about which copy is current.
      */
     cookieList: Record<string, string[]>;
-    session: null;
+    /**
+     * The session, once something read or created one: the pipeline sets it on
+     * a session API, and getSessionController(ctx).createSession writes it
+     * here too. Null everywhere else, which is why a route or public API reads
+     * it as `ctx.session?.data`. Typing it as the literal `null` said the
+     * opposite of what the code does: after createSession the field was still
+     * `never`, and addSessionRoute needed a double cast to hand the handler
+     * the same object it already held.
+     */
+    session: LambderSessionRecord<TSessionData> | null;
+    /**
+     * The API call this request is, as the core sees it, or null for a
+     * route. Carries the envelope's fields (name, version, CSRF token,
+     * payload, guard inputs, idempotency key) and the request's headers,
+     * cookies, ip and host.
+     */
+    api: LambderApiRequest | null;
+    /** The API name, or null for a route (api.apiName). */
     apiName: string | null;
+    /** The API payload: as posted until validation, the parsed value inside the handler. */
     apiPayload: TApiPayload;
     /**
      * Outputs of this API's guards, keyed by guard name. Only guards the API
@@ -54,20 +79,24 @@ export type LambderRenderContext<
     headers: APIGatewayProxyEventHeaders;
     /** Decoded request body, exactly as received (e.g. for webhook signature verification). */
     rawBody: string;
-    /** Client IP: CF-Connecting-IP, then X-Forwarded-For, then the API Gateway source IP. */
+    /**
+     * The address the gateway observed, or the leftmost entry of the first
+     * header named in `trustedClientIpHeaders` that carries one; nothing is
+     * trusted by default. One spelling per address (port and brackets
+     * stripped, lowercased, length-bounded), so a `per: "ip"` limit keys one
+     * counter per client.
+     */
     ip: string;
     /** Case-insensitive request header lookup. */
     header: (name: string) => string | undefined;
     event: LambderHttpEvent;
     lambdaContext: Context;
-    _otherInternal: {
-        isApiCall: boolean,
-        requestVersion: string | null;
-        eventFormat: LambderHttpEventFormat;
-        setHeaderFnAccumulator: { key: string, value: string | string[] }[];
-        addHeaderFnAccumulator: { key: string, value: string }[];
-        logToApiResponseAccumulator: any[];
-    };
+    /** Which API Gateway payload format the event arrived in, and the response leaves in. */
+    eventFormat: LambderHttpEventFormat;
+    /** Response headers written during the request (res.setHeader, res.addHeader, session cookies), applied onto the response at the end. */
+    responseHeaders: LambderAnswerHeaders;
+    /** Entries for the API envelope's logList channel (res.logToApiResponse). */
+    logList: unknown[];
 };
 
 export type LambderSessionRenderContext<
@@ -75,12 +104,14 @@ export type LambderSessionRenderContext<
     SessionData = any,
     TPathParams extends Record<string, string> = Record<string, string>,
     TGuardData = {},
-> = Omit<LambderRenderContext<TApiPayload, TPathParams, TGuardData>, 'session'> & { session: LambderSessionContext<SessionData> };
+> = Omit<LambderRenderContext<TApiPayload, TPathParams, TGuardData, SessionData>, 'session'> & { session: LambderSessionRecord<SessionData> };
 
+/** The render context for one request: everything a route handler, an API handler, a hook or a guard reads about it, built once from the Lambda event. */
 export const createContext = (
     event: LambderHttpEvent,
     lambdaContext: Context,
     apiPath: string,
+    trustedClientIpHeaders: readonly string[] = [],
 ): LambderRenderContext => {
     // Normalize the two API Gateway payload formats into one shape.
     const eventFormat: LambderHttpEventFormat = isV2HttpEvent(event) ? "v2" : "v1";
@@ -113,134 +144,58 @@ export const createContext = (
         path = event.path;
         method = event.httpMethod;
         get = event.queryStringParameters || {};
-        cookiePairs = (headers.Cookie || headers.cookie || "").split(";");
+        // A REST API keeps only the LAST value of a repeated header in
+        // `headers` and every value in `multiValueHeaders`, and HTTP/2 lets a
+        // client split its cookies across several Cookie headers. The session
+        // layer weighs every copy of a cookie name, so dropping one is
+        // dropping a candidate session; v2's `event.cookies` already carries
+        // them all.
+        const cookieHeaders = event.multiValueHeaders?.Cookie ?? event.multiValueHeaders?.cookie;
+        cookiePairs = (cookieHeaders?.length ? cookieHeaders.join("; ") : (headers.Cookie || headers.cookie || "")).split(";");
         sourceIp = event.requestContext?.identity?.sourceIp || "";
     }
 
-    // Parsed pair by pair so a name that arrived more than once keeps every
-    // value; a whole-header parse keeps only the first.
-    const cookieList: Record<string, string[]> = {};
-    for(const pair of cookiePairs){
-        for(const [name, value] of Object.entries(cookieParser.parse(pair))){
-            if(value !== undefined) (cookieList[name] ??= []).push(value);
-        }
-    }
-    const cookie: Record<string, string> = Object.fromEntries(
-        Object.entries(cookieList).map(([name, values]) => [name, values[0]!])
-    );
+    const cookieList = cookieValuesByName(cookiePairs);
+    const cookie: Record<string, string> = Object.create(null);
+    for(const [name, values] of Object.entries(cookieList)) cookie[name] = values[0]!;
 
-    const lowercasedHeaders: Record<string, string> = {};
-    for(const [key, value] of Object.entries(headers)){
-        if(value !== undefined) lowercasedHeaders[key.toLowerCase()] = value;
-    }
+    const lowercasedHeaders = lowercaseHeaderNames(headers);
     const header = (name: string): string | undefined => lowercasedHeaders[name.toLowerCase()];
 
-    const forwardedFor = lowercasedHeaders["x-forwarded-for"];
-    const ip = lowercasedHeaders["cf-connecting-ip"]
-        || (forwardedFor ? (forwardedFor.split(",")[0] ?? "").trim() : "")
-        || sourceIp
-        || "";
+    const ip = resolveClientIp(lowercasedHeaders, sourceIp, trustedClientIpHeaders);
 
     // Decode body: keep the raw string, then parse as JSON with urlencoded fallback.
-    let rawBody = "";
-    let post: Record<string, any> = {};
-    try {
-        rawBody = event.isBase64Encoded
-            ? (event.body ? Buffer.from(event.body, "base64").toString() : "")
-            : (event.body || "");
-        try { post = JSON.parse(rawBody || "{}") || {}; }
-        catch(e){
-            const params = new URLSearchParams(rawBody);
-            post = {};
-            for(const [key, value] of params.entries()){
-                post[key] = value;
-            }
+    const rawBody = event.isBase64Encoded
+        ? (event.body ? base64ToText(event.body) : "")
+        : (event.body || "");
+    let post: Record<string, unknown> = {};
+    try { post = JSON.parse(rawBody || "{}") || {}; }
+    catch(e){
+        const params = new URLSearchParams(rawBody);
+        post = {};
+        for(const [key, value] of params.entries()){
+            post[key] = value;
         }
-    }catch(e){}
+    }
 
-    const isApiCall = !!(method === "POST" && apiPath && path === apiPath && post.apiName);
-    const apiName: string | null = isApiCall ? post.apiName : null;
-    const apiPayload: any = isApiCall ? post.payload : null;
-    const requestVersion: string | null = isApiCall ? (post.version ?? null) : null;
+    // A POST to the API path whose body names an API is an API call; the
+    // core reads the envelope, and everything downstream reads ctx.api.
+    const api = method === "POST" && !!apiPath && path === apiPath
+        ? readApiEnvelope(post, { headers: lowercasedHeaders, cookies: cookieList, ip, host })
+        : null;
 
     return {
         host, path, pathParams: {}, method,
         get, post, cookie, cookieList, event,
         session: null,
-        apiName, apiPayload,
+        api,
+        apiName: api?.apiName ?? null,
+        apiPayload: api ? api.payload : null,
         guardData: {},
         headers, rawBody, ip, header,
         lambdaContext,
-        _otherInternal: {
-            isApiCall, requestVersion, eventFormat,
-            setHeaderFnAccumulator: [],
-            addHeaderFnAccumulator: [],
-            logToApiResponseAccumulator: [],
-        }
+        eventFormat,
+        responseHeaders: new LambderAnswerHeaders(),
+        logList: [],
     };
 }
-
-/** Outcome of restoring a compressed request payload; the message is client-facing. */
-export type LambderRestorePayloadResult = { ok: true } | { ok: false; message: string };
-
-/**
- * Restores a request payload the caller sent compressed (`payloadGz` or
- * `payloadBr`, beside `payloadBytes`) onto ctx.post.payload and
- * ctx.apiPayload, so every later stage (rate-limit key slices, guards, input
- * validation, the handler) reads an ordinary payload and needs no awareness
- * of the wire format. The field names the encoding; a request carrying both
- * is refused. A request that sent a plain payload passes through untouched.
- *
- * Every failure answers with a message instead of throwing: a malformed body
- * is a client error, not a crash. The declared byte length both bounds the
- * decompression and verifies it, so an over-large or tampered body is
- * refused rather than expanded.
- */
-export const restoreCompressedApiPayload = async (
-    ctx: LambderRenderContext,
-    maxPayloadBytes: number,
-): Promise<LambderRestorePayloadResult> => {
-    const post = ctx.post as Record<string, unknown>;
-    const hasGzip = post[COMPRESSED_PAYLOAD_GZ_FIELD] !== undefined;
-    const hasBrotli = post[COMPRESSED_PAYLOAD_BR_FIELD] !== undefined;
-    if(!hasGzip && !hasBrotli) return { ok: true };
-    if(hasGzip && hasBrotli){
-        return { ok: false, message: `Request carries both ${COMPRESSED_PAYLOAD_GZ_FIELD} and ${COMPRESSED_PAYLOAD_BR_FIELD}; send one.` };
-    }
-    const field = hasGzip ? COMPRESSED_PAYLOAD_GZ_FIELD : COMPRESSED_PAYLOAD_BR_FIELD;
-    const encoding = hasGzip ? "gzip" : "br";
-    const compressed = post[field];
-    if(typeof compressed !== "string"){
-        return { ok: false, message: `Request ${field} must be a base64 string.` };
-    }
-
-    const declaredBytes = post[COMPRESSED_PAYLOAD_BYTES_FIELD];
-    if(typeof declaredBytes !== "number" || !Number.isSafeInteger(declaredBytes) || declaredBytes <= 0){
-        return { ok: false, message: `Request ${COMPRESSED_PAYLOAD_BYTES_FIELD} must be the payload's byte length.` };
-    }
-    if(declaredBytes > maxPayloadBytes){
-        return { ok: false, message: `Request payload of ${declaredBytes} bytes exceeds the ${maxPayloadBytes} byte limit.` };
-    }
-
-    // The bound and the exact-length verification are the codec's, the same
-    // ones a stored record gets; only the wording of the refusal is ours.
-    let json: string;
-    try {
-        json = await restoreText(Buffer.from(compressed, "base64"), encoding, { declaredBytes });
-    } catch(err) {
-        const reason = err instanceof LambderCompressionError ? err.reason : null;
-        return { ok: false, message: reason === LAMBDER_RESTORE_FAILURES.lengthMismatch
-            ? "Compressed request payload does not match its declared length."
-            : "Compressed request payload could not be decompressed." };
-    }
-
-    let payload: unknown;
-    try { payload = JSON.parse(json); }
-    catch { return { ok: false, message: "Compressed request payload is not valid JSON." }; }
-
-    delete post[field];
-    delete post[COMPRESSED_PAYLOAD_BYTES_FIELD];
-    post.payload = payload;
-    ctx.apiPayload = payload;
-    return { ok: true };
-};

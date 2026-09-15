@@ -5,7 +5,7 @@
 import { describe, it, expect } from 'vitest';
 import path from 'node:path';
 import Lambder from '../src/core/Lambder.js';
-import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
+import { LambderLocalFileSource } from '../src/stores/LambderLocalFileSource.js';
 import { html, jsonScript } from '../src/shared/LambderHtml.js';
 import { decodeBody, createMockEvent, createMockContext } from './helpers.js';
 describe('servePublicFiles + templateFile fallback (frontend hosting recipe)', () => {
@@ -132,7 +132,7 @@ describe('servePublicFiles + templateFile fallback (frontend hosting recipe)', (
 
         const result = await lambder.render(createMockEvent('/page'), createMockContext());
         expect(result.statusCode).toBe(500);
-        expect(decodeBody(result)).toContain('templateFile: file not found');
+        expect(decodeBody(result)).toContain('res.templateFile found no such file');
     });
 
     it('serves cached static files identically on repeat requests', async () => {
@@ -188,6 +188,18 @@ describe('serveIndexHtml', () => {
 
         const result = await lambder.render(createMockEvent('/page', { httpMethod: 'POST' }), createMockContext());
         expect(result.statusCode).toBe(405);
+    });
+
+    it('a narrowed methods list still accepts HEAD, as a route matcher does', async () => {
+        // HEAD is a GET whose body finalization strips, so a list that names
+        // GET and not HEAD 404ing every HEAD was the two slots disagreeing
+        // with compileRouteMatcher about what a method means.
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
+            .serveIndexHtml(undefined, { methods: ['GET'] })
+            .setRouteFallbackHandler((ctx, res) => res.status(405, 'nope'));
+
+        expect((await lambder.render(createMockEvent('/page', { httpMethod: 'HEAD' }), createMockContext())).statusCode).toBe(200);
+        expect((await lambder.render(createMockEvent('/page', { httpMethod: 'POST' }), createMockContext())).statusCode).toBe(405);
     });
 
     it('does not guess at files: a missing dotted path reaches the shell', async () => {
@@ -263,6 +275,37 @@ describe('serveIndexHtml', () => {
         );
         expect(redirected.statusCode).toBe(301);
         expect(redirected.multiValueHeaders?.['Location']).toEqual(['/about?a=1']);
+    });
+
+    /**
+     * The redirect target is built from the request path, which the caller
+     * writes. `//evil.example` is a protocol-relative URL and `/\evil.example`
+     * becomes one the moment a browser normalizes the backslash, so echoing
+     * either into Location handed anybody who could get a link clicked a
+     * redirect off this origin, from a path that never had to exist.
+     */
+    it('never redirects off-origin, whichever leading slashes the caller writes', async () => {
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
+            .serveIndexHtml(undefined, { redirectTrailingSlash: true });
+
+        for(const attack of ['//evil.example/', '/\\evil.example/', '//\\evil.example/', '/\\/evil.example/']){
+            const result = await lambder.render(createMockEvent(attack), createMockContext());
+            const location = result.multiValueHeaders?.['Location']?.[0];
+            if(location !== undefined){
+                expect(location.startsWith('/')).toBe(true);
+                expect(location.startsWith('//')).toBe(false);
+                expect(location.startsWith('/\\')).toBe(false);
+            }
+        }
+    });
+
+    it('still redirects an ordinary trailing-slash path', async () => {
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
+            .serveIndexHtml(undefined, { redirectTrailingSlash: true });
+
+        const result = await lambder.render(createMockEvent('/docs/'), createMockContext());
+        expect(result.statusCode).toBe(301);
+        expect(result.multiValueHeaders?.['Location']).toEqual(['/docs']);
     });
 
     it('indexFile option picks the shell per request', async () => {

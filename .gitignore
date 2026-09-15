@@ -1,3 +1,5 @@
 node_modules
 .DS_Store
 .npmrc
+# Review notes written during a release; the changelog is what ships.
+REVIEW-*.md

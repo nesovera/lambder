@@ -1,6 +1,8 @@
-import type { LambderCompressionOption, LambderCompressionSettingsBase, LambderEncoding } from "../shared/LambderCompressionOption.js";
-import type { LambderRenderContext } from "./LambderContext.js";
-export type HttpStatusCode = 100 | 101 | 200 | 201 | 202 | 203 | 204 | 206 | 300 | 301 | 302 | 303 | 304 | 307 | 308 | 400 | 401 | 402 | 403 | 404 | 405 | 406 | 408 | 409 | 410 | 412 | 413 | 415 | 416 | 418 | 422 | 428 | 429 | 431 | 451 | 500 | 501 | 502 | 503 | 504;
+import { LAMBDER_RESPONSE_BRAND } from "../shared/util/LambderResponseBrand.js";
+import type { LambderCompressionOption, LambderCompressionSettingsBase, LambderEncoding } from "../shared/wire/LambderCompressionOption.js";
+import type { LambderRenderContext, LambderHttpEventFormat } from "./LambderContext.js";
+import type { LambderApiAnswer } from "../api/LambderApiAnswer.js";
+import type { LambderHttpStatusCode } from "../shared/wire/LambderHttpStatus.js";
 export type LambderHeadersInput = Record<string, string | string[]>;
 /**
  * Final Lambda response: v1 (REST API) uses multiValueHeaders, v2 (HTTP API /
@@ -18,10 +20,9 @@ export type LambderHttpResponse = {
     headers?: Record<string, string>;
     cookies?: string[];
 };
-export type LambderHttpEventFormat = "v1" | "v2";
-export declare const normalizeHeaders: (headers?: LambderHeadersInput) => Record<string, string[]>;
-export type LambderResponseInit = {
-    statusCode: HttpStatusCode;
+/** The constructor argument of LambderResponse; built through the resolver rather than by hand, so it is internal to this module. */
+type LambderResponseInit = {
+    statusCode: LambderHttpStatusCode;
     headers?: LambderHeadersInput;
     body?: string | Buffer | null;
     /** True when body is already a base64-encoded string (pre-encoded binary content). */
@@ -41,7 +42,8 @@ export type LambderResponseInit = {
  * the request: the thrown response becomes the response.
  */
 export declare class LambderResponse {
-    statusCode: HttpStatusCode;
+    readonly [LAMBDER_RESPONSE_BRAND]: true;
+    statusCode: LambderHttpStatusCode;
     headers: Record<string, string[]>;
     body: string | Buffer | null;
     isBodyBase64: boolean;
@@ -52,8 +54,16 @@ export declare class LambderResponse {
     setHeader(key: string, value: string | string[]): this;
     addHeader(key: string, value: string): this;
 }
-export declare const isCompressibleContentType: (contentType: string | undefined) => boolean;
-export declare const acceptsEncoding: (acceptEncoding: string | undefined | null, encoding: string) => boolean;
+/**
+ * A handler's response as a core answer: what the API pipeline stores,
+ * replays and hands back. A Buffer body travels base64-encoded and marked
+ * as such, so the idempotency engine never caches it and finalization
+ * passes it through untouched; the compress and etag flags ride along so
+ * nothing a handler asked for is lost on the way through the core.
+ */
+export declare const answerFromResponse: (response: LambderResponse) => LambderApiAnswer;
+/** A core answer as the response hooks, CORS and finalization work on. */
+export declare const responseFromAnswer: (answer: LambderApiAnswer) => LambderResponse;
 /** Response-side settings: the threshold plus what the wire can negotiate. */
 export type LambderResponseCompressionSettings = LambderCompressionSettingsBase & {
     /** Preference order; the first the client accepts wins. */
@@ -81,9 +91,17 @@ export type LambderFinalizeOptions = {
 export declare const DEFAULT_RESPONSE_COMPRESSION_SETTINGS: LambderResponseCompressionSettings;
 export declare const DEFAULT_FINALIZE_OPTIONS: LambderFinalizeOptions;
 /**
+ * Emit the format-specific Lambda response shape. Exported because the
+ * last-resort crash path has to emit without finalizing (finalization may be
+ * what failed) and must still get the shape right; hand-writing it there left
+ * the v1/v2 split in four places.
+ */
+export declare const emitResponse: (format: LambderHttpEventFormat, statusCode: number, headers: Record<string, string[]>, body: string, isBase64Encoded: boolean) => LambderHttpResponse;
+/**
  * Convert an intermediate LambderResponse into the final Lambda response:
  * gzip negotiation (Accept-Encoding), ETag + If-None-Match 304, base64
  * encoding, HEAD body stripping, and Lambda payload size guard. Emits the v1
  * (REST API) or v2 (HTTP API / Function URL) response shape.
  */
-export declare const finalizeResponse: (ctx: Pick<LambderRenderContext, "method" | "headers"> | null, response: LambderResponse, options: LambderFinalizeOptions, format?: LambderHttpEventFormat) => Promise<LambderHttpResponse>;
+export declare const finalizeResponse: (ctx: Pick<LambderRenderContext, "method" | "header"> | null, response: LambderResponse, options: LambderFinalizeOptions, format?: LambderHttpEventFormat) => Promise<LambderHttpResponse>;
+export {};

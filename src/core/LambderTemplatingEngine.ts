@@ -1,7 +1,7 @@
-import { getFS } from "../shared/node-polyfills.js";
+import { getFS } from "../shared/util/LambderNodeModules.js";
 import { renderHtmlValue, type LambderHtmlValue } from "../shared/LambderHtml.js";
 
-/**
+/*
  * LambderTemplatingEngine: a comment-only HTML template engine.
  *
  * Fully standalone: it has no dependency on Lambder routing or file serving,
@@ -34,7 +34,11 @@ import { renderHtmlValue, type LambderHtmlValue } from "../shared/LambderHtml.js
  * slots and conditions.
  *   - strings/numbers are HTML-escaped on insertion (XSS-safe by default)
  *   - html`...` / raw() / jsonScript() values are inserted verbatim
- *   - arrays are flattened; null/undefined/false render the slot default
+ *   - arrays are flattened
+ *   - only `undefined` (or a key the data does not carry) keeps a slot's
+ *     default content; `null`, `false` and `""` render it empty, so write
+ *     `value ?? undefined` when a missing value should fall back to the
+ *     default instead
  *   - unknown data keys are ignored, so one data object can serve several
  *     templates with different slots
  *
@@ -175,7 +179,11 @@ const renderNodes = (nodes: TemplateNode[], data: LambderTemplateData): string =
             const value = Object.prototype.hasOwnProperty.call(data, node.name) ? data[node.name] : undefined;
             out += value === undefined ? renderNodes(node.defaultNodes, data) : renderHtmlValue(value);
         }else{
-            const condition = !!data[node.name] !== node.negated;
+            // Own properties only, the same lookup the slot branch uses:
+            // through the prototype, <!--if:toString--> was unconditionally
+            // true on every render.
+            const value = Object.prototype.hasOwnProperty.call(data, node.name) ? data[node.name] : undefined;
+            const condition = !!value !== node.negated;
             out += renderNodes(condition ? node.thenNodes : node.elseNodes, data);
         }
     }
@@ -224,7 +232,7 @@ export class LambderTemplatingEngine {
     /** Read and parse a template file (compile once, render many times). */
     static async fromFile(filePath: string, options: LambderTemplatingEngineOptions = {}): Promise<LambderTemplatingEngine> {
         const fs = await getFS();
-        if(!fs) throw new Error("LambderTemplatingEngine.fromFile requires a Node.js environment.");
+        if(!fs) throw new Error("Lambder: LambderTemplatingEngine.fromFile requires a Node.js environment.");
         const source = await fs.promises.readFile(filePath, "utf8");
         return new LambderTemplatingEngine(source, options);
     }

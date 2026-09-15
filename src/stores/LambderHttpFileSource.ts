@@ -1,4 +1,4 @@
-import { remoteStoreFile, type LambderFile, type LambderFileSource } from "../core/LambderFiles.js";
+import { remoteStoreFile, type LambderFile, type LambderFileSource } from "../shared/contracts/LambderFileSource.js";
 
 export type LambderHttpFileSourceOptions = {
     /**
@@ -47,6 +47,14 @@ export class LambderHttpFileSource implements LambderFileSource {
 
     async read(relativePath: string): Promise<LambderFile | null> {
         const url = new URL(relativePath.split("/").map(encodeURIComponent).join("/"), this.baseUrl);
+        // The reader's path rule already refuses everything that could make
+        // this reference leave the configured folder (a leading slash makes it
+        // root-relative, two make it protocol-relative and pick the host).
+        // Checked again here rather than trusted, because the value being
+        // resolved is the request path and what leaving costs is a
+        // credentialed fetch of an attacker-named origin, served back from
+        // this app's own domain.
+        if(!url.href.startsWith(this.baseUrl.href)) return null;
         const response = await fetch(url, { headers: this.headers, signal: AbortSignal.timeout(this.timeoutMs) });
         if(!response.ok){
             await response.body?.cancel();

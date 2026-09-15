@@ -11,8 +11,8 @@
 
 import { describe, it, expect } from 'vitest';
 import { gzipSync, brotliCompressSync } from 'node:zlib';
-import { compressText, restoreBytes, restoreText, LambderCompressionError, LAMBDER_RESTORE_FAILURES } from '../src/shared/LambderCompressionCodec.js';
-import { LAMBDER_ENCODINGS } from '../src/shared/LambderCompressionOption.js';
+import { compressText, restoreBytes, restoreText, LambderCompressionError, LAMBDER_RESTORE_FAILURES } from '../src/shared/wire/LambderCompressionCodec.js';
+import { LAMBDER_ENCODINGS } from '../src/shared/wire/LambderCompressionOption.js';
 
 const encodings = [...LAMBDER_ENCODINGS];
 const text = JSON.stringify({ rows: Array.from({ length: 500 }, (_, i) => ({ id: i, name: `Row ${i}` })) });
@@ -125,7 +125,7 @@ describe('Compression codec - restoreBytes keeps bytes that are not text', () =>
     it.each(['br', 'gzip'] as const)('round trips arbitrary %s bytes unchanged', async (encoding) => {
         const compressed = await compressText(binary, encoding, 5);
         const restored = await restoreBytes(compressed, encoding, { maxBytes: 1_000_000 });
-        expect(restored.equals(binary)).toBe(true);
+        expect(Buffer.from(restored).equals(binary)).toBe(true);
         // What restoreText would have done to them, and why a binary body cannot go through it.
         expect(Buffer.from(await restoreText(compressed, encoding, { maxBytes: 1_000_000 }), 'utf8').equals(binary)).toBe(false);
     });

@@ -1,19 +1,21 @@
-import { type LambderRequestCompressionOption } from '../shared/LambderRequestPayload.js';
-import type { ApiContractShape } from '../shared/LambderApiContract.js';
-import { type LambderApiOutcome, type LambderValidationError } from '../shared/LambderApiOutcome.js';
-import { type LambderCallOptionsArg, type LambderGuardInputsProviderOption } from '../shared/LambderCallOptions.js';
-export type { LambderApiOutcome, LambderApiFailureReason, LambderValidationError } from '../shared/LambderApiOutcome.js';
-export type { LambderProvidedGuardInputs, LambderGuardInputsProvider } from '../shared/LambderCallOptions.js';
-type VoidFunction = () => void | Promise<void>;
+import type { LambderAppRefusalMessage } from '../shared/wire/LambderApiRefusal.js';
+import { type LambderRequestCompressionOption } from '../shared/wire/LambderRequestPayload.js';
+import type { LambderApiContractShape } from '../shared/wire/LambderApiContract.js';
+import { type LambderApiOutcome, type LambderValidationError } from '../shared/wire/LambderApiOutcome.js';
+import { type LambderCallArgs, type LambderContractOutputOf, type LambderGuardInputsProviderOption, type LambderSharedCallOptions } from '../shared/wire/LambderCallOptions.js';
+import { type LambderApiTransport } from '../shared/transport/LambderApiTransport.js';
+export type { LambderApiOutcome, LambderApiFailureReason, LambderValidationError } from '../shared/wire/LambderApiOutcome.js';
+export type { LambderProvidedGuardInputs, LambderGuardInputsProvider } from '../shared/wire/LambderCallOptions.js';
+/** A handler told that something happened, with nothing to hand it. */
+type NotifyHandler = () => void | Promise<void>;
+/** One call in flight: pushed when it starts, removed when it settles, so the list is the in-flight list rather than a log of every call ever made. */
 type FetchTracker = {
     apiName: string;
-    done: boolean;
-    fetchEndCalled: boolean;
 };
 type EventHandlerFetchParams = {
     apiName: string;
     payload?: any;
-    headers?: Record<string, any>;
+    headers?: Record<string, string>;
 };
 type FetchStartEventHandler = (params: {
     fetchParams: EventHandlerFetchParams;
@@ -26,7 +28,9 @@ type FetchEndEventHandler = (params: {
 }) => void | Promise<void>;
 type ErrorHandler = (err: Error) => void | Promise<void>;
 type ValidationErrorHandler = (zodError: LambderValidationError) => (void | false) | Promise<(void | false)>;
-type MessageHandler = (message: any) => void | Promise<void>;
+type MessageHandler = (message: LambderAppRefusalMessage | string) => void | Promise<void>;
+/** The logListHandler option: an answer's logList, success or failure, when it has entries. The invoke caller's onLogList, for a browser. */
+export type LambderLogListHandler = (apiName: string, logList: unknown[]) => void | Promise<void>;
 /** One logical operation's rotating idempotency key: see LambderCaller.createIdempotencyKeyScope(). */
 export type LambderIdempotencyKeyScope = {
     /** The key for the operation currently in progress. */
@@ -34,45 +38,19 @@ export type LambderIdempotencyKeyScope = {
     /** Call after a confirmed success: the next operation is a new intent. Returns the new key. */
     rotate(): string;
 };
-/** Per-call options: request extras plus overrides for every constructor handler. */
-export type LambderCallOptions = {
-    headers?: Record<string, any>;
-    /** Abort the request after this many ms; overrides the constructor default. */
-    timeoutMs?: number;
-    /** External abort signal, combined with the timeout when both are set. */
-    signal?: AbortSignal;
-    /**
-     * Overrides the constructor's requestCompression for this call: `false`
-     * sends the payload plainly (a hot path where the CPU matters more than
-     * the bytes), `true` compresses it regardless of the size threshold.
-     * Either way a payload is only sent compressed when that is smaller.
-     */
-    compressRequest?: boolean;
-    /**
-     * Values for the API's guardInput-mode guards, keyed by guard name; sent
-     * beside the payload and consumed by the guards before validation. The
-     * typed contract makes this REQUIRED for APIs that declare such guards,
-     * except the guards a guardInputsProvider covers (these merge on top of
-     * the provider's values).
-     */
-    guardInputs?: Record<string, unknown>;
-    /**
-     * Replay-protection key for APIs declared idempotent on the server.
-     * Generate once per logical operation with createIdempotencyKey() and
-     * send the same key on retries: duplicates of an in-flight request
-     * refuse, and repeats of a completed one replay its stored response
-     * instead of re-executing. Must be UNGUESSABLE random (it scopes the
-     * replay record for logged-out clients) and at least 16 characters; the
-     * server refuses shorter keys with a 400.
-     */
-    idempotencyKey?: string;
-    versionExpiredHandler?: VoidFunction;
-    sessionExpiredHandler?: VoidFunction;
+/**
+ * Per-call options: the request extras both callers share (see
+ * LambderSharedCallOptions) plus an override for every constructor handler.
+ */
+export type LambderCallOptions = LambderSharedCallOptions & {
+    versionExpiredHandler?: NotifyHandler;
+    sessionExpiredHandler?: NotifyHandler;
     messageHandler?: MessageHandler;
     errorMessageHandler?: MessageHandler;
     apiInputValidationErrorHandler?: ValidationErrorHandler;
-    notAuthorizedHandler?: VoidFunction;
+    notAuthorizedHandler?: NotifyHandler;
     errorHandler?: ErrorHandler;
+    logListHandler?: LambderLogListHandler;
     fetchStartedHandler?: FetchStartEventHandler;
     fetchEndedHandler?: FetchEndEventHandler;
 };
@@ -82,12 +60,14 @@ type LambderCallerBaseOptions = {
     isCorsEnabled: boolean;
     /** Default per-request timeout in ms (none unless set; API Gateway caps around 29s, so ~30000 is a sensible value). Overridable per call. */
     timeoutMs?: number;
-    versionExpiredHandler?: VoidFunction;
-    sessionExpiredHandler?: VoidFunction;
+    versionExpiredHandler?: NotifyHandler;
+    sessionExpiredHandler?: NotifyHandler;
     messageHandler?: MessageHandler;
     errorMessageHandler?: MessageHandler;
-    notAuthorizedHandler?: VoidFunction;
+    notAuthorizedHandler?: NotifyHandler;
     errorHandler?: ErrorHandler;
+    /** Receives each answer's logList, with the API name. Default: console.log with a `[lambder]` prefix, one line per entry. */
+    logListHandler?: LambderLogListHandler;
     fetchStartedHandler?: FetchStartEventHandler;
     fetchEndedHandler?: FetchEndEventHandler;
     apiInputValidationErrorHandler?: ValidationErrorHandler;
@@ -103,6 +83,13 @@ type LambderCallerBaseOptions = {
      * Lambda's ~6MB invoke cap, which applies to the compressed bytes.
      */
     requestCompression?: LambderRequestCompressionOption;
+    /**
+     * How a call reaches the server. Default: fetch to apiPath
+     * (lambderFetchTransport, with CORS per isCorsEnabled). A mock runtime,
+     * an in-process Lambder handler, or a cookie-jar decorator over either
+     * are the other transports that ship; see LambderApiTransport.
+     */
+    transport?: LambderApiTransport;
 };
 /** Constructor options: the base options plus guardInputsProvider, mandatory once TProvided names guards. */
 export type LambderCallerOptions<TContract, TProvided extends string = never> = LambderCallerBaseOptions & LambderGuardInputsProviderOption<TContract, TProvided>;
@@ -110,13 +97,15 @@ export type LambderCallerOptions<TContract, TProvided extends string = never> = 
  * @typeParam TContract - The API contract, for typed names, payloads and guard inputs.
  * @typeParam TProvidedGuards - Guard names guardInputsProvider covers; those APIs' options argument becomes optional.
  */
-export default class LambderCaller<TContract extends ApiContractShape = any, TProvidedGuards extends string = never> {
+export default class LambderCaller<TContract extends LambderApiContractShape = any, TProvidedGuards extends string = never> {
     private isCorsEnabled;
     private apiPath;
     private apiVersion?;
     private timeoutMs?;
+    /** The calls currently in flight, in the order they started. */
     fetchTrackerList: FetchTracker[];
-    isLoading: boolean;
+    /** Whether any call is in flight. Derived, so it cannot drift from the list the way a separate flag did. */
+    get isLoading(): boolean;
     private versionExpiredHandler?;
     private sessionExpiredHandler?;
     private messageHandler?;
@@ -124,6 +113,7 @@ export default class LambderCaller<TContract extends ApiContractShape = any, TPr
     private notAuthorizedHandler?;
     private errorHandler?;
     private apiInputValidationErrorHandler?;
+    private logListHandler?;
     private fetchStartedHandler?;
     private fetchEndedHandler?;
     private guardInputsProvider?;
@@ -131,8 +121,11 @@ export default class LambderCaller<TContract extends ApiContractShape = any, TPr
     private sessionCsrfCookieKey;
     private sessionCookieDomain?;
     private requestCompression;
+    private transport;
     constructor(options: LambderCallerOptions<TContract, TProvidedGuards>);
     setSessionCookieKey(sessionTokenCookieKey: string, sessionCsrfCookieKey: string): void;
+    /** Replaces how calls reach the server: a mock runtime, an in-process handler, a decorated transport. */
+    setTransport(transport: LambderApiTransport): this;
     /**
      * A self-rotating idempotency key for a component or form that performs
      * the same logical operation repeatedly. `current` is the key for the
@@ -155,6 +148,11 @@ export default class LambderCaller<TContract extends ApiContractShape = any, TPr
      * confirmed success. Uses crypto.randomUUID when available and falls back
      * to a v4 UUID from getRandomValues, because randomUUID only exists in
      * secure contexts (plain-http LAN device testing lacks it).
+     *
+     * A runtime with neither throws rather than reaching for Math.random: the
+     * key must be UNGUESSABLE, since it is what scopes the replay record for a
+     * logged-out client, and a guessable one hands that client's stored
+     * response to whoever guesses it.
      */
     static createIdempotencyKey(): string;
     private clearSessionCookies;
@@ -162,9 +160,18 @@ export default class LambderCaller<TContract extends ApiContractShape = any, TPr
     private dispatch;
     /**
      * Full-fidelity call: resolves to a discriminated LambderApiOutcome
-     * instead of collapsing every failure to null. Never throws.
+     * instead of collapsing every failure to undefined. Never throws.
+     *
+     * The output is computed from the contract in the return type rather than
+     * taken as a type parameter, so a call site cannot replace it by
+     * annotating what it assigns to.
      */
-    apiOutcome<TApiName extends keyof TContract & string = string, TOutput = TApiName extends keyof TContract ? TContract[TApiName]['output'] : any>(apiName: TApiName, payload?: TApiName extends keyof TContract ? TContract[TApiName]['input'] : any, ...rest: LambderCallOptionsArg<TContract, TApiName, TProvidedGuards, LambderCallOptions>): Promise<LambderApiOutcome<TOutput>>;
-    /** Payload on success, null/undefined otherwise (indistinguishable from a null payload; prefer apiOutcome() when that matters). */
-    api<TApiName extends keyof TContract & string = string, TOutput = TApiName extends keyof TContract ? TContract[TApiName]['output'] : any>(apiName: TApiName, payload?: TApiName extends keyof TContract ? TContract[TApiName]['input'] : any, ...rest: LambderCallOptionsArg<TContract, TApiName, TProvidedGuards, LambderCallOptions>): Promise<TOutput | null | undefined>;
+    apiOutcome<TApiName extends keyof TContract & string = string>(apiName: TApiName, ...rest: LambderCallArgs<TContract, TApiName, TProvidedGuards, LambderCallOptions>): Promise<LambderApiOutcome<LambderContractOutputOf<TContract, TApiName>>>;
+    /**
+     * The payload on success, `undefined` on every failure except a
+     * structured refusal, which hands back whatever payload the envelope
+     * carried (usually null). Neither is distinguishable from a legitimately
+     * null or undefined payload: use apiOutcome() when that matters.
+     */
+    api<TApiName extends keyof TContract & string = string>(apiName: TApiName, ...rest: LambderCallArgs<TContract, TApiName, TProvidedGuards, LambderCallOptions>): Promise<LambderContractOutputOf<TContract, TApiName> | null | undefined>;
 }

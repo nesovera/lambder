@@ -1,58 +1,18 @@
 /**
- * Error Handling Tests
- * 
- * Tests for error handling including:
- * - setGlobalErrorHandler functionality
- * - Error handling with context available
- * - Error handling with null context
- * - Custom error responses
- * - Error in API handlers
- * - Error in route handlers
- * - Error in hooks
- * - Error log accumulation
+ * What a thrown error becomes: setGlobalErrorHandler's response, with or
+ * without a context, for routes, APIs and hooks alike, and the last-resort
+ * answer when there is no handler.
  */
 
 import { describe, it, expect } from 'vitest';
-import { decodeBody } from './helpers.js';
+import { decodeBody, createMockEvent, createApiEvent, createMockContext, testPublicFiles } from './helpers.js';
 import { z } from 'zod';
 import Lambder from '../src/core/Lambder.js';
-import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
-import type { APIGatewayProxyEvent, Context } from 'aws-lambda';
-
-const createMockEvent = (path: string, method: string = 'GET', apiName?: string, payload?: any): APIGatewayProxyEvent => ({
-    body: apiName ? JSON.stringify({ apiName, payload }) : null,
-    headers: { Host: 'localhost' },
-    multiValueHeaders: {},
-    httpMethod: method,
-    isBase64Encoded: false,
-    path: apiName ? '/api' : path,
-    pathParameters: null,
-    queryStringParameters: null,
-    multiValueQueryStringParameters: null,
-    stageVariables: null,
-    requestContext: {} as any,
-    resource: '',
-});
-
-const createMockContext = (): Context => ({
-    callbackWaitsForEmptyEventLoop: false,
-    functionName: 'test',
-    functionVersion: '1',
-    invokedFunctionArn: 'arn',
-    memoryLimitInMB: '128',
-    awsRequestId: '123',
-    logGroupName: 'group',
-    logStreamName: 'stream',
-    getRemainingTimeInMillis: () => 1000,
-    done: () => {},
-    fail: () => {},
-    succeed: () => {},
-});
 
 describe('Error Handling - Global Error Handler', () => {
     it('should catch errors in route handlers', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -72,13 +32,43 @@ describe('Error Handling - Global Error Handler', () => {
         expect(result.body).toBe('Error: Route handler error');
     });
 
+    it('keeps the headers the call wrote, and the CORS headers, when the global handler answers', async () => {
+        // Headers belong to the CALL, not to the response that first carried
+        // them, which is how the success path treats them. A call that set a
+        // cookie and then threw still owes the browser that cookie, and a
+        // cross-origin caller cannot read the error body at all without the
+        // CORS headers.
+        const lambder = new Lambder({
+            files: testPublicFiles(),
+            apiPath: '/api',
+            cors: true,
+        })
+            .setGlobalErrorHandler((err, ctx, res) => res.raw({ statusCode: 500, body: `Error: ${err.message}` }))
+            .addRoute('/boom', (ctx, res) => {
+                res.setHeader('X-Written-During-Call', 'yes');
+                res.addHeader('Set-Cookie', 'session=abc; Path=/');
+                throw new Error('after the header');
+            });
+
+        const event = createMockEvent('/boom');
+        event.headers = { ...event.headers, Origin: 'https://example.com' };
+        const result = await lambder.getHandler()(event, createMockContext());
+
+        expect(result.statusCode).toBe(500);
+        const headers = { ...(result as any).headers, ...(result as any).multiValueHeaders };
+        const flat = JSON.stringify(headers);
+        expect(flat).toContain('X-Written-During-Call');
+        expect(flat).toContain('session=abc');
+        expect(flat.toLowerCase()).toContain('access-control-allow-origin');
+    });
+
     it('should catch errors in API handlers', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
-                if (ctx?._otherInternal.isApiCall) {
+                if (ctx?.api) {
                     return res.api({ error: err.message });
                 }
                 return res.raw({ statusCode: 500, body: err.message });
@@ -91,7 +81,7 @@ describe('Error Handling - Global Error Handler', () => {
             });
 
         const handler = lambder.getHandler();
-        const event = createMockEvent('/api', 'POST', 'errorApi', { value: 'test' });
+        const event = createApiEvent({ apiName: 'errorApi', payload: { value: 'test' } });
         const result = await handler(event, createMockContext());
 
         expect(result.statusCode).toBe(200);
@@ -101,7 +91,7 @@ describe('Error Handling - Global Error Handler', () => {
 
     it('should catch async errors', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -123,7 +113,7 @@ describe('Error Handling - Global Error Handler', () => {
         let capturedContext: any = null;
 
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -146,7 +136,7 @@ describe('Error Handling - Global Error Handler', () => {
         let handlerCalled = false;
 
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -172,11 +162,11 @@ describe('Error Handling - Global Error Handler', () => {
 describe('Error Handling - Custom Error Responses', () => {
     it('should return custom error format for APIs', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
-                if (ctx?._otherInternal.isApiCall) {
+                if (ctx?.api) {
                     return res.api(
                         { success: false, error: err.message },
                         { errorMessage: err.message }
@@ -192,7 +182,7 @@ describe('Error Handling - Custom Error Responses', () => {
             });
 
         const handler = lambder.getHandler();
-        const event = createMockEvent('/api', 'POST', 'testApi', undefined);
+        const event = createApiEvent({ apiName: 'testApi' });
         const result = await handler(event, createMockContext());
 
         const body = JSON.parse(result.body || '{}');
@@ -203,7 +193,7 @@ describe('Error Handling - Custom Error Responses', () => {
 
     it('should return HTML error for routes', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -224,7 +214,7 @@ describe('Error Handling - Custom Error Responses', () => {
 
     it('should return JSON error for routes if desired', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -251,7 +241,7 @@ describe('Error Handling - Custom Error Responses', () => {
 describe('Error Handling - Different Error Types', () => {
     it('should handle Error objects', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -269,7 +259,7 @@ describe('Error Handling - Different Error Types', () => {
 
     it('should handle TypeError', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -291,7 +281,7 @@ describe('Error Handling - Different Error Types', () => {
 
     it('should handle string throws as errors', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -312,7 +302,7 @@ describe('Error Handling - Different Error Types', () => {
 describe('Error Handling - Errors in Hooks', () => {
     it('should catch errors in beforeRender hooks', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -334,7 +324,7 @@ describe('Error Handling - Errors in Hooks', () => {
 
     it('should catch errors in afterRender hooks', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -356,7 +346,7 @@ describe('Error Handling - Errors in Hooks', () => {
 
     it('should handle Error returned from beforeRender hook', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -378,7 +368,7 @@ describe('Error Handling - Errors in Hooks', () => {
 
     it('should handle Error returned from afterRender hook', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -402,7 +392,7 @@ describe('Error Handling - Errors in Hooks', () => {
 describe('Error Handling - Default Error Behavior', () => {
     it('should return 500 when no global error handler is set', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .addRoute('/error', (ctx, res) => {
@@ -420,12 +410,12 @@ describe('Error Handling - Default Error Behavior', () => {
 describe('Error Handling - Input Validation Errors', () => {
     it('should return 400 for invalid API input', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .addApi('testApi', {
-                input: z.object({ 
-                    email: z.string().email(),
+                input: z.object({
+                    email: z.email(),
                     age: z.number().positive()
                 }),
                 output: z.object({ success: z.boolean() })
@@ -434,10 +424,7 @@ describe('Error Handling - Input Validation Errors', () => {
             });
 
         const handler = lambder.getHandler();
-        const event = createMockEvent('/api', 'POST', 'testApi', { 
-            email: 'invalid-email',
-            age: -5
-        });
+        const event = createApiEvent({ apiName: 'testApi', payload: { email: 'invalid-email', age: -5 } });
         const result = await handler(event, createMockContext());
 
         expect(result.statusCode).toBe(422);
@@ -448,7 +435,7 @@ describe('Error Handling - Input Validation Errors', () => {
 
     it('should allow custom handling of validation errors', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -463,7 +450,7 @@ describe('Error Handling - Input Validation Errors', () => {
             });
 
         const handler = lambder.getHandler();
-        const event = createMockEvent('/api', 'POST', 'testApi', { value: 'abc' }); // Too short
+        const event = createApiEvent({ apiName: 'testApi', payload: { value: 'abc' } }); // Too short
         const result = await handler(event, createMockContext());
 
         expect(result.statusCode).toBe(422);
@@ -475,7 +462,7 @@ describe('Error Handling - Error with Additional Context', () => {
         let errorContext: any = null;
 
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -500,7 +487,7 @@ describe('Error Handling - Error with Additional Context', () => {
 
     it('should provide response builder in error handler', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, responseBuilder) => {
@@ -526,7 +513,7 @@ describe('Error Handling - Error with Additional Context', () => {
 describe('Error Handling - Complex Error Scenarios', () => {
     it('should handle errors in chained operations', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -552,11 +539,11 @@ describe('Error Handling - Complex Error Scenarios', () => {
         const errorTypes: string[] = [];
 
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
-                if (ctx?._otherInternal.isApiCall) {
+                if (ctx?.api) {
                     errorTypes.push('api');
                     return res.api({ error: err.message });
                 } else {
@@ -575,10 +562,27 @@ describe('Error Handling - Complex Error Scenarios', () => {
             });
 
         const handler = lambder.getHandler();
-        
+
         await handler(createMockEvent('/route-error'), createMockContext());
-        await handler(createMockEvent('/api', 'POST', 'errorApi', undefined), createMockContext());
+        await handler(createApiEvent({ apiName: 'errorApi' }), createMockContext());
 
         expect(errorTypes).toEqual(['route', 'api']);
+    });
+
+    it('answers a thrown value that cannot even be turned into a string', async () => {
+        // The last-resort catch coerced the thrown value with String() in its
+        // very first statement, so a value that throws on coercion made the
+        // catch itself throw: no error handler, no envelope, and the
+        // invocation rejected with a 502 carrying nothing a client can read.
+        const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
+            .addRoute('/nullproto', () => { throw Object.create(null); })
+            .addRoute('/throwing-tostring', () => {
+                throw { toString(){ throw new Error('nope'); }, [Symbol.toPrimitive](){ throw new Error('nope'); } };
+            });
+
+        for(const path of ['/nullproto', '/throwing-tostring']){
+            const result = await lambder.render(createMockEvent(path), createMockContext());
+            expect(result.statusCode).toBe(500);
+        }
     });
 });

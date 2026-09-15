@@ -1,23 +1,15 @@
 /**
- * Hooks System Tests
- * 
- * Tests for the hooks system including:
- * - beforeRender hook execution
- * - afterRender hook execution
- * - fallback hook execution
- * - created hook execution
- * - Hook priority ordering
- * - Multiple hooks of same type
- * - Hook error handling
- * - Context modification in hooks
- * - Response modification in hooks
+ * The hook lifecycle: beforeRender (every request, including the ones the
+ * fallback chain answers), afterRender, fallback and created, their priority
+ * ordering and what each one may do to a context or a response.
  */
 
 import { describe, it, expect } from 'vitest';
-import { decodeBody } from './helpers.js';
+import path from 'path';
+import { decodeBody, testPublicFiles } from './helpers.js';
 import { z } from 'zod';
 import Lambder from '../src/core/Lambder.js';
-import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
+import { LambderLocalFileSource } from '../src/stores/LambderLocalFileSource.js';
 import type { APIGatewayProxyEvent, Context } from 'aws-lambda';
 
 const createMockEvent = (path: string, method: string = 'GET', apiName?: string, payload?: any): APIGatewayProxyEvent => ({
@@ -55,7 +47,7 @@ describe('Hooks - beforeRender Hook', () => {
         const executionOrder: string[] = [];
 
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         });
 
@@ -77,7 +69,7 @@ describe('Hooks - beforeRender Hook', () => {
 
     it('should allow context modification in beforeRender', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         });
 
@@ -102,7 +94,7 @@ describe('Hooks - beforeRender Hook', () => {
         const executionOrder: number[] = [];
 
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         });
 
@@ -133,7 +125,7 @@ describe('Hooks - beforeRender Hook', () => {
         let routeHandlerCalled = false;
 
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -163,7 +155,7 @@ describe('Hooks - afterRender Hook', () => {
         const executionOrder: string[] = [];
 
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         });
 
@@ -185,7 +177,7 @@ describe('Hooks - afterRender Hook', () => {
 
     it('should allow response modification in afterRender', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         });
 
@@ -213,7 +205,7 @@ describe('Hooks - afterRender Hook', () => {
         const executionOrder: number[] = [];
 
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         });
 
@@ -242,7 +234,7 @@ describe('Hooks - afterRender Hook', () => {
 
     it('should add custom headers in afterRender', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         });
 
@@ -261,7 +253,7 @@ describe('Hooks - afterRender Hook', () => {
 
     it('should stop execution if afterRender returns Error', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
@@ -287,7 +279,7 @@ describe('Hooks - fallback Hook', () => {
         let fallbackCalled = false;
 
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         });
 
@@ -311,7 +303,7 @@ describe('Hooks - fallback Hook', () => {
         const executionOrder: number[] = [];
 
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         });
 
@@ -335,7 +327,7 @@ describe('Hooks - fallback Hook', () => {
         let fallbackCalled = false;
 
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         });
 
@@ -358,7 +350,7 @@ describe('Hooks - created Hook', () => {
         let lambderInstance: Lambder | null = null;
 
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         });
 
@@ -380,7 +372,7 @@ describe('Hooks - created Hook', () => {
 
     it('should allow configuration in created hook', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         });
 
@@ -392,6 +384,38 @@ describe('Hooks - created Hook', () => {
         const result = await handler(createMockEvent('/from-created'), createMockContext());
         expect(decodeBody(result)).toBe('Configured');
     });
+
+    /**
+     * A created hook reaches something that can be briefly unavailable: a
+     * first DynamoDB read, a secret fetch, a warm-up call. The promise the
+     * hooks run under was kept whatever it settled as, so one such failure
+     * answered every later invocation on that warm container with the first
+     * error, forever, and only a cold start recovered.
+     */
+    it('retries the created hooks after one of them fails', async () => {
+        let attempts = 0;
+        const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
+            .addRoute('/test', (ctx, res) => res.html('Ready'))
+            .setGlobalErrorHandler((err, ctx, res) => res.status(500, err.message));
+
+        lambder.addHook('created', async () => {
+            attempts += 1;
+            if(attempts === 1) throw new Error('the secret store was not there yet');
+        });
+
+        const handler = lambder.getHandler();
+        const failed = await handler(createMockEvent('/test'), createMockContext());
+        expect(failed.statusCode).toBe(500);
+        expect(decodeBody(failed)).toContain('the secret store was not there yet');
+
+        const recovered = await handler(createMockEvent('/test'), createMockContext());
+        expect(decodeBody(recovered)).toBe('Ready');
+        expect(attempts).toBe(2);
+
+        // And a hook that has succeeded still runs only once.
+        await handler(createMockEvent('/test'), createMockContext());
+        expect(attempts).toBe(2);
+    });
 });
 
 describe('Hooks - Priority Ordering', () => {
@@ -399,7 +423,7 @@ describe('Hooks - Priority Ordering', () => {
         const executionOrder: number[] = [];
 
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         });
 
@@ -431,7 +455,7 @@ describe('Hooks - Priority Ordering', () => {
         const executionOrder: number[] = [];
 
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         });
 
@@ -462,7 +486,7 @@ describe('Hooks - Priority Ordering', () => {
         const executionOrder: string[] = [];
 
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         });
 
@@ -495,7 +519,7 @@ describe('Hooks - Combined Workflow', () => {
         const executionOrder: string[] = [];
 
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         });
 
@@ -540,7 +564,7 @@ describe('Hooks - Combined Workflow', () => {
         const executionOrder: string[] = [];
 
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         });
 
@@ -567,5 +591,83 @@ describe('Hooks - Combined Workflow', () => {
         await handler(event, createMockContext());
 
         expect(executionOrder).toEqual(['beforeRender', 'apiHandler', 'afterRender']);
+    });
+});
+
+describe('Hooks - beforeRender on the fallback chain', () => {
+    /**
+     * beforeRender used to run only for a matched route or API: the match ran
+     * first and an unmatched request left for the fallback chain before the
+     * loop. So a servePublicFiles asset and a serveIndexHtml shell, which are
+     * the 200s a frontend is made of, skipped the one hook that can inspect a
+     * request, replace its context or answer in its place.
+     */
+    const buildApp = () => new Lambder({
+        files: new LambderLocalFileSource({ root: path.resolve('./tests/fixtures/public') }),
+        apiPath: '/api',
+    })
+        .servePublicFiles()
+        .serveIndexHtml();
+
+    it('runs for a servePublicFiles answer and a serveIndexHtml answer, and its headers reach both', async () => {
+        const seen: string[] = [];
+        const lambder = buildApp()
+            .addRoute('/route', (ctx, res) => res.text('route'))
+            .addHook('beforeRender', async (ctx, res) => {
+                seen.push(ctx.path);
+                res.setHeader('Content-Security-Policy', "default-src 'self'");
+                return ctx;
+            });
+        const handler = lambder.getHandler();
+
+        const asset = await handler(createMockEvent('/main.css'), createMockContext());
+        expect(asset.statusCode).toBe(200);
+        expect(decodeBody(asset)).toContain('body { margin: 0; }');
+        expect(asset.multiValueHeaders?.['Content-Security-Policy']).toEqual(["default-src 'self'"]);
+
+        const shell = await handler(createMockEvent('/some/app/page'), createMockContext());
+        expect(shell.statusCode).toBe(200);
+        expect(decodeBody(shell)).toContain('<h1>Test HTML</h1>');
+        expect(shell.multiValueHeaders?.['Content-Security-Policy']).toEqual(["default-src 'self'"]);
+
+        const route = await handler(createMockEvent('/route'), createMockContext());
+        expect(route.multiValueHeaders?.['Content-Security-Policy']).toEqual(["default-src 'self'"]);
+
+        expect(seen).toEqual(['/main.css', '/some/app/page', '/route']);
+    });
+
+    it('can short-circuit an asset and a shell, the way a maintenance-mode hook has to', async () => {
+        const lambder = buildApp()
+            .addHook('beforeRender', async (ctx, res) => res.text('maintenance', { statusCode: 503 }));
+        const handler = lambder.getHandler();
+
+        for(const requestPath of ['/main.css', '/some/app/page']){
+            const result = await handler(createMockEvent(requestPath), createMockContext());
+            expect(result.statusCode).toBe(503);
+            expect(decodeBody(result)).toBe('maintenance');
+        }
+    });
+
+    it('still has pathParams populated when it runs for a matched route', async () => {
+        let seenParams: Record<string, string> | null = null;
+        const lambder = buildApp()
+            .addRoute('/user/:userId', (ctx, res) => res.text(ctx.pathParams.userId ?? ''))
+            .addHook('beforeRender', async (ctx) => { seenParams = { ...ctx.pathParams }; return ctx; });
+
+        const result = await lambder.getHandler()(createMockEvent('/user/u-7'), createMockContext());
+
+        expect(decodeBody(result)).toBe('u-7');
+        expect(seenParams).toEqual({ userId: 'u-7' });
+    });
+
+    it('runs before the fallback hooks, which still cannot answer', async () => {
+        const order: string[] = [];
+        const lambder = buildApp()
+            .addHook('beforeRender', async (ctx) => { order.push('beforeRender'); return ctx; })
+            .addHook('fallback', async () => { order.push('fallback'); });
+
+        await lambder.getHandler()(createMockEvent('/main.css'), createMockContext());
+
+        expect(order).toEqual(['beforeRender', 'fallback']);
     });
 });

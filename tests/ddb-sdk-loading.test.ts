@@ -19,30 +19,30 @@ describe('DynamoDB SDK absent', () => {
         const lambder = await import('../src/index.js');
         const app = lambder.initLambder<{ userId: string }>().create({
             apiPath: '/api',
-            session: { tableName: 'sessions', tableRegion: 'us-east-1', sessionSalt: 'salt' },
+            session: { store: new lambder.LambderDdbSessionStore({ tableName: 'sessions', region: 'us-east-1' }), sessionSalt: 'salt' },
         });
         expect(app.apiPath).toBe('/api');
         expect(() => new lambder.LambderDdbCache({ tableName: 'cache' })).not.toThrow();
         expect(() => new lambder.LambderDdbRateLimiter({ tableName: 'limits' })).not.toThrow();
-        expect(() => new lambder.LambderDdbIdempotency({ tableName: 'idem' })).not.toThrow();
+        expect(() => new lambder.LambderDdbIdempotencyStore({ tableName: 'idem' })).not.toThrow();
     });
 
     it('the first call that touches a table fails with the install hint, naming the store', async () => {
-        const { LambderDdbCache, LambderDdbRateLimiter, LambderDdbIdempotency, LambderSessionManager } = await import('../src/index.js');
+        const { LambderDdbCache, LambderDdbRateLimiter, LambderDdbIdempotencyStore, LambderSessionManager, LambderDdbSessionStore } = await import('../src/index.js');
 
         await expect(new LambderDdbCache({ tableName: 'cache' }).get('k'))
             .rejects.toThrow('LambderDdbCache requires @aws-sdk/client-dynamodb: npm install @aws-sdk/client-dynamodb');
         await expect(new LambderDdbRateLimiter({ tableName: 'limits' }).isRateLimited('ip:1', { perMin: 1 }))
             .rejects.toThrow('LambderDdbRateLimiter requires @aws-sdk/client-dynamodb');
-        await expect(new LambderDdbIdempotency({ tableName: 'idem' }).peek('scope'))
-            .rejects.toThrow('LambderDdbIdempotency requires @aws-sdk/client-dynamodb');
+        await expect(new LambderDdbIdempotencyStore({ tableName: 'idem' }).peek('scope'))
+            .rejects.toThrow('LambderDdbIdempotencyStore requires @aws-sdk/client-dynamodb');
         const sessions = new LambderSessionManager({
-            tableName: 'sessions', tableRegion: 'us-east-1', partitionKey: 'pk', sortKey: 'sk', sessionSalt: 'salt',
+            store: new LambderDdbSessionStore({ tableName: 'sessions', region: 'us-east-1' }), sessionSalt: 'salt',
         });
         // A call that must query the table (getSession answers null for a token it cannot parse without one).
         const failure = await sessions.deleteSessionAllByKey('key').then(() => null, (err: unknown) => err) as Error & { cause?: Error };
         expect(failure).toBeInstanceOf(Error);
-        expect(`${failure.message} ${failure.cause?.message ?? ''}`).toContain('LambderSessionManager requires @aws-sdk/');
+        expect(`${failure.message} ${failure.cause?.message ?? ''}`).toContain('LambderDdbSessionStore requires @aws-sdk/');
     });
 
     it('a failed load is not memoized, so a later call reports again rather than caching a stale rejection', async () => {

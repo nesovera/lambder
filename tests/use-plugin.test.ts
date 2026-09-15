@@ -4,13 +4,15 @@
  * This file tests the plugin system that allows modular API composition
  */
 
+import { testPublicFiles } from './helpers.js';
 import { describe, it, expect, expectTypeOf } from 'vitest';
 import { z } from 'zod';
 import Lambder, { initLambder } from '../src/core/Lambder.js';
-import { lambderGuard } from '../src/policies/LambderApiGuards.js';
-import type { LambderDdbIdempotency } from '../src/stores/LambderDdbIdempotency.js';
+import { lambderGuard } from '../src/core/LambderPolicyBuilders.js';
+import type { LambderDdbIdempotencyStore } from '../src/stores/LambderDdbIdempotencyStore.js';
 import type { LambderDdbRateLimiter } from '../src/stores/LambderDdbRateLimiter.js';
-import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
+import { LambderLocalFileSource } from '../src/stores/LambderLocalFileSource.js';
+import { LambderMemorySessionStore } from '../src/stores/LambderMemorySessionStore.js';
 import LambderCaller from '../src/client/LambderCaller.js';
 import { APIGatewayProxyEvent, Context } from 'aws-lambda';
 
@@ -64,7 +66,7 @@ describe('Plugin System - Basic Usage', () => {
 
         // Use the plugin
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         }).use(userPlugin);
 
@@ -90,7 +92,7 @@ describe('Plugin System - Basic Usage', () => {
         };
 
         const _lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         }).use(userPlugin);
 
@@ -153,7 +155,7 @@ describe('Plugin System - Multiple Plugins', () => {
 
         // Chain multiple plugins
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .use(userPlugin)
@@ -204,7 +206,7 @@ describe('Plugin System - Multiple Plugins', () => {
         };
 
         const _lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .use(userPlugin)
@@ -242,7 +244,7 @@ describe('Plugin System - Mixed Usage', () => {
         };
 
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             // Direct API
@@ -299,7 +301,7 @@ describe('Plugin System - Routes', () => {
         };
 
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         }).use(healthPlugin);
 
@@ -346,7 +348,7 @@ describe('Plugin System - Complex Composition', () => {
         };
 
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         }).use(extendedPlugin);
 
@@ -375,12 +377,12 @@ describe('Plugin System - Complex Composition', () => {
 
         // Use same plugin in two different instances
         const lambder1 = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         }).use(sharedPlugin);
 
         const lambder2 = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         }).use(sharedPlugin);
 
@@ -422,7 +424,7 @@ describe('Plugin System - Type Safety', () => {
         };
 
         const _lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api'
         })
             .use(plugin1)
@@ -449,7 +451,7 @@ describe('Plugin System - Non-Generic Plugins', () => {
         const plugin1 = (l: Lambder) => l.addApi('api1', { input: z.void(), output: z.void() }, async (ctx, res) => res.raw({ statusCode: 200, body: '' }));
         const plugin2 = (l: Lambder) => l.addApi('api2', { input: z.void(), output: z.void() }, async (ctx, res) => res.raw({ statusCode: 200, body: '' }));
 
-        const _lambder = new Lambder({ files: new LambderLocalFileSource({ root: '' }), apiPath: '' })
+        const _lambder = new Lambder({ files: new LambderLocalFileSource({ root: '' }), apiPath: '/api' })
             .addApi('initialApi', { input: z.void(), output: z.void() }, async (ctx, res) => res.raw({ statusCode: 200, body: '' }))
             .use(plugin1)
             .use(plugin2);
@@ -475,7 +477,7 @@ describe('Plugin System - Policy generics survive use()', () => {
     // with its own derived type. This block is checked by `npm run
     // typecheck`; vitest alone would not see a regression here.
     const guards = {
-        orgPermission: lambderGuard({ session: true, handler: (_ctx, _payload, _res, permission: string) => ({ permission }) }),
+        orgPermission: lambderGuard({ session: true, handler: (_ctx, _payload, permission: string) => ({ permission }) }),
         sessionOnly: lambderGuard({ session: true, handler: () => {} }),
     };
     // The stores are never reached: nothing here is rendered, only registered.
@@ -484,7 +486,8 @@ describe('Plugin System - Policy generics survive use()', () => {
         apiPath: '/api',
         rateLimits: { limiter: {} as LambderDdbRateLimiter, policies: { perIp: { perMin: 5, per: 'ip', budget: 'perApi' } } },
         guards,
-        idempotency: { store: {} as LambderDdbIdempotency },
+        idempotency: { store: {} as LambderDdbIdempotencyStore },
+        session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
         requireSessionApiGuards: true,
     });
     type App = ReturnType<typeof makeApp>;

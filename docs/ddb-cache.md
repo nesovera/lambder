@@ -23,10 +23,10 @@ A key can also be a `{ pk, sk }` pair, which keeps related entries in one partit
 
 ## How it works
 
-- Values are JSON-serialized and **Brotli-compressed** by default (`compression` option, the same one `LambderDdbIdempotency` and sessions take); the manifest records each value's encoding, so the option can be switched on or off on a live table and values written under either setting keep reading.
+- Values are JSON-serialized and **Brotli-compressed** by default (`compression` option, the same one `LambderDdbIdempotencyStore` and sessions take); the manifest records each value's encoding, so the option can be switched on or off on a live table and values written under either setting keep reading.
 - Small values (≤ ~350KB compressed) are stored inline in a single manifest item; larger values are split into **versioned binary chunks** written before the manifest, so readers only ever see complete versions (no torn reads).
 - Integrity is verified with SHA-256 checksums.
-- An **in-memory LRU layer** serves repeat reads within warm Lambda invocations.
+- An **in-memory LRU layer** serves repeat reads within warm Lambda invocations. It is per container: a value another container updates with `set` is served stale here until this copy's own expiry, up to `defaultTtlSeconds`, the same way a `delete` elsewhere leaves this copy in place. Short TTLs where readers have to see a change quickly, `memoryMaxBytes: 0` where they have to see it at once.
 - **Single-flight + DynamoDB lease**: concurrent `getOrSet` calls for the same key are deduplicated in-process, and a short-lived lock item ensures only one Lambda instance fills a missing key while others poll for the result.
 - **Fail-open**: cache infrastructure errors (read/lease/write) fall back to calling the loader directly; loader errors propagate to the caller.
 - `namespace` isolates key spaces; use a version-suffixed namespace (e.g. `` `v${webVersion}` ``) to invalidate everything on deploy.
@@ -108,11 +108,24 @@ Required IAM actions on the table: `dynamodb:GetItem`, `PutItem`, `DeleteItem`, 
 | Option | Default | Description |
 | --- | --- | --- |
 | `tableName` | required | DynamoDB table (pk/sk string keys, `expiresAt` TTL attribute) |
-| `region` | `"us-east-1"` | AWS region |
+| `region` | SDK default | AWS region; left out, the SDK's own default chain (`AWS_REGION`, the Lambda environment, the shared config) decides |
+| `keyPrefix` | `"CACHE"` | Partition key prefix, so cache items stay separate from other systems in a shared table |
 | `namespace` | `"default"` | Key-space isolation prefix |
 | `defaultTtlSeconds` | 1 year | TTL applied when `set`/`getOrSet` omit `ttlSeconds` |
 | `memoryMaxBytes` | 16MB | In-memory LRU budget; `0` disables the memory layer |
 | `compression` | `true` (`{ minBytes: 0, quality: 5 }`) | Brotli compression of stored values: `false` stores them plain, `{ minBytes, quality }` overrides the defaults; switchable on a live table |
+| `maxValueBytes` | 32MB | Largest value the store will write, measured on the JSON and again on the stored bytes; a bigger one throws instead of being chunked without bound |
+| `chunkBytes` | 350KB | Size of one chunk item, and the size at which a value stops being stored inline in its manifest. Capped at 380KB, inside DynamoDB's 400KB item limit |
+| `client` | new client | Supply your own `DynamoDBClient` |
+| `now` | `Date.now` | The clock entries are expired against, for tests |
+
+`set` and `getOrSet` take per-call options too:
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `ttlSeconds` | `defaultTtlSeconds` | How long this value stays readable |
+| `leaseSeconds` | 15 | How long the fill lease one container takes on a missing key is honoured by the others (`getOrSet`) |
+| `waitForFillMs` | 5000 | How long a container waits for somebody else's fill before giving up; it polls and takes the lease itself if the holder never publishes (`getOrSet`) |
 
 ## Methods
 

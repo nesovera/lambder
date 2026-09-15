@@ -1,28 +1,6 @@
 import mimeTypeResolver from "mime-types";
-import { getFS, getPath } from "../shared/node-polyfills.js";
 import { LambderTemplatingEngine } from "./LambderTemplatingEngine.js";
-
-/** A file a source serves: its bytes, and its mime type when the source knows it (otherwise resolved from the extension). */
-export type LambderFile = { body: Buffer; mimeType?: string };
-
-/**
- * Where an app's files come from: the `files` option at creation, read by
- * servePublicFiles, serveIndexHtml, res.file and res.templateFile alike,
- * through the instance's one reader (LambderFiles). Implement `read` over
- * any backing store: LambderLocalFileSource (a folder), LambderS3FileSource
- * (S3, or R2 and other S3-compatible stores), LambderHttpFileSource (any
- * origin serving files by path), or your own. The reader does the rest for
- * every source: traversal check, memory cache, mime fallback from the
- * extension.
- */
-export interface LambderFileSource {
-    /**
-     * The file at a relative path (no leading slash, no ".." segments: the
-     * reader rejects those before calling), or null when there is no such
-     * file, which lets a request fall through to the route fallback.
-     */
-    read(relativePath: string): Promise<LambderFile | null>;
-}
+import type { LambderFileSource } from "../shared/contracts/LambderFileSource.js";
 
 /** In-memory cache of files for warm invocations. Default: { maxBytes: 32MB, maxFileBytes: 2MB }. false disables it. */
 export type LambderFileMemoryCacheOption = false | { maxBytes?: number; maxFileBytes?: number };
@@ -37,47 +15,24 @@ const DEFAULT_MEMORY_CACHE_MAX_BYTES = 32 * 1024 * 1024;
 const DEFAULT_MEMORY_CACHE_MAX_FILE_BYTES = 2 * 1024 * 1024;
 
 /**
- * Files from a folder on the Lambda's filesystem, typically the build output
- * bundled into the deployment package. Reads stay under root.
+ * The path a source is asked for, or null for one that names no file.
+ *
+ * This is the whole path rule, and it belongs to the reader: every source is
+ * handed the result, and a source that resolves it against a base (a URL, a
+ * filesystem root) is safe only if the value really is the plain relative
+ * path the interface promises. Stripping only ONE leading slash would hand a
+ * source "//attacker.example/evil.html" as "/attacker.example/evil.html",
+ * which the HTTP source resolves as a protocol-relative reference: the app's
+ * origin credentials would go to a host the caller chose and its bytes would
+ * come back under the app's own domain. So every leading slash goes, and every segment is
+ * checked rather than only the ".." ones: an empty inner segment is how a
+ * host or a root gets back into the value, and a backslash is a separator to
+ * Windows paths and to every browser reading a Location.
  */
-export class LambderLocalFileSource implements LambderFileSource {
-    private root: string;
-
-    constructor({ root }: { root: string }){
-        this.root = root;
-    }
-
-    async read(relativePath: string): Promise<LambderFile | null> {
-        const fs = await getFS();
-        const path = await getPath();
-        if(!fs || !path) throw new Error("LambderLocalFileSource requires a Node.js environment.");
-
-        const base = path.resolve(this.root);
-        const absolute = path.resolve(base, relativePath);
-        if(absolute !== base && !absolute.startsWith(base + path.sep)) return null;
-
-        const stat = await fs.promises.stat(absolute).catch(() => null);
-        if(!stat?.isFile()) return null;
-        return { body: await fs.promises.readFile(absolute) };
-    }
-}
-
-/**
- * A file a remote store returned: the store's Content-Type unless it is a
- * generic octet-stream, in which case the extension decides, as for local
- * files.
- */
-export const remoteStoreFile = (body: Buffer, contentType: string | null | undefined): LambderFile =>
-    contentType && !contentType.endsWith("octet-stream") ? { body, mimeType: contentType } : { body };
-
-/**
- * The path a source is asked for: leading slash stripped, traversal
- * rejected; null for a path that names no file (empty, or a directory).
- */
-export const toRelativePath = (target: string): string | null => {
-    if(target.split("/").some((segment) => segment === "..")) return null;
-    const relative = target.startsWith("/") ? target.slice(1) : target;
+const toRelativePath = (target: string): string | null => {
+    const relative = target.replace(/^\/+/, "");
     if(relative === "" || relative.endsWith("/")) return null;
+    if(relative.split("/").some((segment) => segment === "" || segment === "." || segment === ".." || segment.includes("\\"))) return null;
     return relative;
 };
 
@@ -136,7 +91,7 @@ export class LambderFiles {
         if(cached) return cached;
 
         const file = await this.read(path);
-        if(!file) throw new Error(`templateFile: file not found in the files source: ${path}`);
+        if(!file) throw new Error(`Lambder: res.templateFile found no such file in the files source: ${path}`);
         const template = new LambderTemplatingEngine(file.body.toString("utf8"), { htmlVirtualSlots: options.htmlVirtualSlots });
         this.templates.set(key, template);
         return template;

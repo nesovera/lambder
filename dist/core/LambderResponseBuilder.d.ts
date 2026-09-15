@@ -1,13 +1,14 @@
 import type { LambderRenderContext } from "./LambderContext.js";
-import { type LambderCookieOptions, type LambderClearCookieOptions } from "./LambderCookie.js";
+import { type LambderCookieOptions, type LambderClearCookieOptions } from "../shared/wire/LambderCookie.js";
 import type { LambderFiles } from "./LambderFiles.js";
-import { LambderResponse, type HttpStatusCode, type LambderHeadersInput } from "./LambderResponse.js";
+import { LambderResponse, type LambderHeadersInput } from "./LambderResponse.js";
+import type { LambderHttpStatusCode } from "../shared/wire/LambderHttpStatus.js";
 import { LambderSafeHtml } from "../shared/LambderHtml.js";
 import type { LambderTemplateData } from "./LambderTemplatingEngine.js";
-import type { LambderApiResponseConfig } from "../shared/LambderApiContract.js";
-export type { LambderApiResponse, LambderApiResponseConfig } from "../shared/LambderApiContract.js";
+import type { LambderApiResponseConfig, LambderApiNullAnswerConfig } from "../shared/wire/LambderApiContract.js";
+export type { LambderApiEnvelopeBody, LambderApiResponseConfig } from "../shared/wire/LambderApiContract.js";
 export type LambderResponseOptions = {
-    statusCode?: HttpStatusCode;
+    statusCode?: LambderHttpStatusCode;
     headers?: LambderHeadersInput;
     /** Shorthand for the Cache-Control header. */
     cacheControl?: string;
@@ -22,14 +23,15 @@ export type LambderResponseOptions = {
  * `message`). A bare `res.api(null)` compiles only when the output type
  * itself allows null, so a success payload is always the declared output,
  * which is what lets a typed caller (LambderInvokeCaller.api) promise it.
- * Untyped resolvers (`TOutput = any`) accept anything, as before.
+ * Untyped resolvers (`TOutput = any`) accept anything, as before. This is
+ * the resolver's method type; the core's answer type is LambderApiAnswer.
  */
-export type LambderApiAnswer<TOutput, TResult> = {
+export type LambderResolverApiMethod<TOutput, TResult> = {
     (payload: TOutput, config?: LambderApiResponseConfig, options?: LambderResponseOptions): TResult;
-    (payload: null, config: LambderApiResponseConfig, options?: LambderResponseOptions): TResult;
+    (payload: null, config: LambderApiNullAnswerConfig, options?: LambderResponseOptions): TResult;
 };
 export type LambderRawResponseInit = {
-    statusCode: HttpStatusCode;
+    statusCode: LambderHttpStatusCode;
     headers?: LambderHeadersInput;
     body: string | Buffer | null;
     /** True when body is already a base64-encoded string. */
@@ -49,7 +51,9 @@ export default class LambderResponseBuilder<TResponse = any> {
     private buildResponse;
     /** The instance's file reader, which res.file and res.templateFile need. */
     private requireFiles;
+    /** Appends a response header; applied onto the response once the handler has one, in call order. */
     addHeader(key: string, value: string): void;
+    /** Replaces a response header; applied onto the response once the handler has one, in call order. */
     setHeader(key: string, value: string | string[]): void;
     /**
      * Adds a Set-Cookie header. A function-form `domain` is resolved against
@@ -64,15 +68,15 @@ export default class LambderResponseBuilder<TResponse = any> {
      * different cookie and deletes nothing.
      */
     clearCookie(name: string, options?: LambderClearCookieOptions): void;
-    logToApiResponse(input: any): void;
+    logToApiResponse(input: unknown): void;
     raw(init: LambderRawResponseInit): LambderResponse;
     json(data: Record<string, any>, options?: LambderResponseOptions): LambderResponse;
     text(data: string, options?: LambderResponseOptions): LambderResponse;
     xml(data: string | LambderSafeHtml, options?: LambderResponseOptions): LambderResponse;
     html(data: string | LambderSafeHtml, options?: LambderResponseOptions): LambderResponse;
-    status(statusCode: HttpStatusCode, body?: string, options?: LambderResponseOptions): LambderResponse;
+    status(statusCode: LambderHttpStatusCode, body?: string, options?: LambderResponseOptions): LambderResponse;
     status404(data: string, options?: LambderResponseOptions): LambderResponse;
-    redirect(url: string, statusCode?: HttpStatusCode, options?: LambderResponseOptions): LambderResponse;
+    redirect(url: string, statusCode?: LambderHttpStatusCode, options?: LambderResponseOptions): LambderResponse;
     versionExpired(options?: LambderResponseOptions): LambderResponse;
     fileBase64(fileBase64: string, mimeType: string, options?: LambderResponseOptions): LambderResponse;
     /** A file from the files source as a response; 404 when there is none. */
@@ -89,8 +93,8 @@ export default class LambderResponseBuilder<TResponse = any> {
         htmlVirtualSlots?: boolean;
     }): Promise<LambderResponse>;
     api(payload: TResponse, config?: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
-    api(payload: null, config: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
+    api(payload: null, config: LambderApiNullAnswerConfig, options?: LambderResponseOptions): LambderResponse;
     /** Same as api() but forces compression of the response body. */
     apiBinary(payload: TResponse, config?: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
-    apiBinary(payload: null, config: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
+    apiBinary(payload: null, config: LambderApiNullAnswerConfig, options?: LambderResponseOptions): LambderResponse;
 }

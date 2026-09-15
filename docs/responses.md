@@ -14,9 +14,9 @@ per call site.
 | `pathParams` | Path parameters (routes) | `{ userId: "123" }` |
 | `method` | HTTP method | `"GET"`, `"POST"` |
 | `get` | Query parameters | `{ page: "1" }` |
-| `post` | POST body (parsed) | `{ name: "John" }` |
+| `post` | POST body, parsed as JSON with a urlencoded fallback (`Record<string, unknown>`) | `{ name: "John" }` |
 | `rawBody` | Decoded request body as received (webhook signatures) | `'{"a":1}'` |
-| `ip` | Client IP (CF-Connecting-IP / X-Forwarded-For / source IP) | `"1.2.3.4"` |
+| `ip` | The address the gateway observed, or the leftmost entry of a header listed in [`trustedClientIpHeaders`](./configuration.md#trustedclientipheaders); no header is trusted by default | `"1.2.3.4"` |
 | `header(name)` | Case-insensitive request header lookup | `ctx.header("accept-language")` |
 | `headers` | Request headers | `{ "Content-Type": "..." }` |
 | `cookie` | Cookies (the first value when a name arrived more than once) | `{ rememberMe: "true" }` |
@@ -26,7 +26,11 @@ per call site.
 | `apiName` | API name (API calls) | `"getUser"` |
 | `apiPayload` | Validated input (API calls) | `{ userId: "123" }` |
 | `guardData` | Values returned by the API's guards, keyed by guard name | `{ orgPermission: { organizationId } }` |
-| `session` | The session, on `addSessionApi` and `addSessionRoute` | |
+| `session` | The session record, or `null` where none was read or created. Non-null on `addSessionApi` and `addSessionRoute` | |
+| `api` | The parsed API request on an API call, `null` on a route | |
+| `eventFormat` | Which payload format the event arrived in | `"v1"`, `"v2"` |
+| `responseHeaders` | Headers written during the call (`res.setHeader`, `res.addHeader`, session cookies), applied onto the response at the end | |
+| `logList` | Entries for the envelope's `logList` channel (`res.logToApiResponse`) | |
 
 ## Response methods
 
@@ -42,6 +46,7 @@ All accept an options object: `{ statusCode?, headers?, cacheControl?, compress?
 | `res.status(code, body?, options?)` | Response with any status code |
 | `res.redirect(url, statusCode?, options?)` | Redirect, default 302 |
 | `res.status404(data, options?)` | 404 Not Found |
+| `res.versionExpired(options?)` | The version-gate refusal envelope: `res.api(null, { versionExpired: true })` |
 | `res.fileBase64(base64, mimeType, options?)` | File from base64 content |
 | `await res.file(path, options?)` | Serve a file from the `files` source (404 when missing) |
 | `await res.templateFile(path, data?, options?)` | Render an HTML file via `LambderTemplatingEngine` (cached; throws when missing) |
@@ -59,10 +64,23 @@ hooks, `getResponseBuilder`) accept anything.
 `{ notAuthorized, message, errorMessage, versionExpired, sessionExpired, logList, crash }`.
 
 `crash` carries a failure described in full (name, message, stack, cause chain,
-and the request id it happened under) for a caller that is allowed to see it,
-built with `describeCrash(err, ctx)` in a global error handler. Browsers get a
-generic `errorMessage` and `LambderCaller` ignores the field; a server-side
-caller reads it back as the cause of the error it throws. See
+and the request id it happened under), built with `describeCrash(err, ctx)` in
+a global error handler. `LambderInvokeCaller` reads it back as the cause of the
+error it throws.
+
+Be deliberate about putting it on a response: the framework never sets `crash`
+itself and never withholds it. It goes to whoever the handler that set it
+answered, in the same JSON envelope as everything else, so a browser that asked
+receives the stack trace whether or not anything on the page displays it.
+`LambderCaller` not surfacing the field is a display choice in one client, not
+a gate. There is no trustworthy in-band signal to condition it on either: the
+`x-lambder-invoke` header an invoke carries is a hint for guards and hooks and
+authorizes nothing, because any client can write it.
+
+The honest gate is deployment: a function with no HTTP trigger, reachable only
+through IAM, has no browser callers to withhold anything from, and a handler on
+a public function should decide by what the caller proved (a guard, a
+signature, an IAM-only path), not by a header. See
 [Calling a Lambder app from another lambda](./invoke.md#errors-and-logs).
 
 ## Headers and cookies
@@ -156,6 +174,10 @@ to what the gateway hands the function and what the function returns.
 
 ## Building a response outside a handler
 
-`lambder.getResponseBuilder(ctx?)` returns a resolver for code that needs to
-build a response without being a handler (a hook helper, a shared error
-mapper).
+`lambder.getResponseBuilder(ctx?)` returns a `LambderResponseBuilder` for code
+that needs to build a response without being a handler (a hook helper, a
+shared error mapper). It has every build method a resolver has and no
+`res.die.*`: throwing a response short-circuits the request, and the code
+calling this is not inside one. Pass `ctx` for the methods that read or write
+the call (`setHeader`, `setCookie`, `logToApiResponse`); without it they
+throw.
