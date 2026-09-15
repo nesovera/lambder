@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { resolveCompressionOption, LAMBDER_ENCODINGS } from '../src/shared/LambderCompressionOption.js';
+import { resolveCompressionOption, LAMBDER_ENCODINGS } from '../src/shared/wire/LambderCompressionOption.js';
 import { DEFAULT_RESPONSE_COMPRESSION_SETTINGS } from '../src/core/LambderResponse.js';
 
 const atRest = { minBytes: 1024, quality: 5 };

@@ -19,30 +19,35 @@
  */
 
 import { describe, it, expect, expectTypeOf, vi, beforeEach, afterEach } from 'vitest';
+import {
+    LambderInvokeError,
+    isLambderInvokeError,
+    type LambderInvokeFailure,
+    type LambderInvokeFunctionError,
+} from '../src/invoke/LambderInvokeOutcome.js';
 import { z } from 'zod';
+import { decodeLambdaHttpResult } from '../src/invoke/LambderLambdaEvent.js';
 import { brotliDecompressSync } from 'node:zlib';
 import { getEventListeners } from 'node:events';
 import type { APIGatewayProxyEventV2 } from 'aws-lambda';
 import { mockClient } from 'aws-sdk-client-mock';
 import { LambdaClient, InvokeCommand } from '@aws-sdk/client-lambda';
 import { initLambder } from '../src/core/Lambder.js';
+import { LambderMemorySessionStore } from '../src/stores/LambderMemorySessionStore.js';
 import LambderInvokeCaller, {
-    LambderInvokeError,
-    isLambderInvokeError,
-    compressPayloadBrotli,
-    LAMBDER_INVOKE_HEADER,
-    LAMBDER_INVOKED_BY_HEADER,
     LAMBDER_INVOKE_MAX_EVENT_BYTES,
     type LambderInvokeTransport,
-    type LambderInvokeFailure,
 } from '../src/invoke/LambderInvokeCaller.js';
+import { LAMBDER_INVOKE_HEADER, LAMBDER_INVOKED_BY_HEADER, synthesizeLambdaHttpEvent } from '../src/invoke/LambderLambdaEvent.js';
 import LambderCaller from '../src/client/LambderCaller.js';
-import { describeCrash, errorFromCrashDetail } from '../src/shared/LambderCrashDetail.js';
-import type { LambderValidationError } from '../src/shared/LambderApiOutcome.js';
-import { lambderGuard } from '../src/policies/LambderApiGuards.js';
-import { refuse, LAMBDER_REFUSAL_CODES } from '../src/shared/LambderApiError.js';
-import { compressPayloadGzip } from '../src/shared/LambderRequestPayload.js';
-import { createApiEvent, createMockContext, brotliBody, decodeBody } from './helpers.js';
+import { describeCrash, errorFromCrashDetail } from '../src/shared/wire/LambderCrashDetail.js';
+import type { LambderValidationError } from '../src/shared/wire/LambderApiOutcome.js';
+import type { LambderApiEnvelopeBody } from '../src/shared/wire/LambderApiContract.js';
+import { lambderGuard } from '../src/core/LambderPolicyBuilders.js';
+import { refuse, LAMBDER_REFUSAL_CODES } from '../src/shared/wire/LambderApiRefusal.js';
+import { compressPayloadBrotli, compressPayloadGzip } from '../src/shared/wire/LambderRequestPayload.js';
+import { LambderTransportFailure } from '../src/shared/transport/LambderApiTransport.js';
+import { createApiEvent, createMockContext, brotliBody, decodeBody, DEFAULT_GATEWAY_SOURCE_IP } from './helpers.js';
 
 /** A payload big and repetitive enough that Brotli is a large win. */
 const bigPayload = (size = 400) => ({ notes: Array.from({ length: size }, (_, i) => `stop-${i} on the main line`) });
@@ -93,8 +98,8 @@ const createCallee = () => initLambder().create({
         output: z.object({ cookie: z.record(z.string(), z.string()), token: z.string() }),
     }, (ctx, res) => res.api({ cookie: ctx.cookie, token: String(ctx.post.token ?? '') }))
     .addRoute('/hello', (ctx, res) => res.text(`hi ${ctx.get.name ?? 'nobody'}`, { headers: { 'X-Seen-Cookie': ctx.cookie.session ?? '' } }))
-    .setGlobalErrorHandler((err, ctx, res, logList) =>
-        res.api(null, { errorMessage: 'Internal server error.', crash: describeCrash(err, ctx), logList }, { statusCode: 500 }));
+    .setGlobalErrorHandler((err, ctx, res) =>
+        res.api(null, { errorMessage: 'Internal server error.', crash: describeCrash(err, ctx), logList: ctx?.logList }, { statusCode: 500 }));
 
 type Callee = ReturnType<typeof createCallee>;
 type Contract = Callee['ApiContract'];
@@ -137,7 +142,10 @@ describe('LambderInvokeCaller - the synthesized event', () => {
         expect(event.headers['content-type']).toBe('application/json');
         expect(event.headers['accept-encoding']).toBe('br, gzip');
         expect(event.headers[LAMBDER_INVOKE_HEADER]).toBe('1');
-        expect(event.headers['x-forwarded-for']).toBe('203.0.113.7');
+        // The address rides in requestContext.http.sourceIp and nowhere else:
+        // written as x-forwarded-for too, it would be the same fact on a
+        // channel a callee may be configured to trust.
+        expect(event.headers['x-forwarded-for']).toBeUndefined();
         expect(event.headers['x-custom']).toBe('yes');
         // The body is LambderCaller's envelope.
         const body = JSON.parse(event.body!);
@@ -157,6 +165,41 @@ describe('LambderInvokeCaller - the synthesized event', () => {
             apiName: 'whoami', session: { token: 'tok-2', csrf: 'csrf-2' }, sessionTokenCookieKey: 'SID',
         });
         expect(custom.cookies).toEqual(['SID=tok-2']);
+    });
+
+    it('owns the forwarded address and the invoke markers, whatever the caller passed as headers', () => {
+        // Forwarding an incoming browser request's headers into `headers` is
+        // an ordinary gateway-lambda pattern. With the caller's values left
+        // standing, a callee configured with trustedClientIpHeaders read an
+        // end-user-chosen ctx.ip, so a per: "ip" rate limit could be evaded
+        // per request and an audit row keyed on ctx.ip recorded a fiction.
+        const event = LambderInvokeCaller.createEvent({
+            apiName: 'echo',
+            clientIp: '203.0.113.7',
+            headers: {
+                'X-Forwarded-For': '198.51.100.9',
+                [LAMBDER_INVOKE_HEADER]: '1',
+                [LAMBDER_INVOKED_BY_HEADER]: 'not-this-function',
+                'X-Custom': 'kept',
+            },
+        });
+        expect(event.headers['x-forwarded-for']).toBeUndefined();
+        expect(event.requestContext.http.sourceIp).toBe('203.0.113.7');
+        expect(event.headers[LAMBDER_INVOKE_HEADER]).toBe('1');
+        // Not running in Lambda, so nothing names an invoking function: the
+        // caller's claim to be one is dropped rather than passed on.
+        expect(event.headers[LAMBDER_INVOKED_BY_HEADER]).toBeUndefined();
+        // Everything else the caller sent still travels.
+        expect(event.headers['x-custom']).toBe('kept');
+
+        // And a browser-shaped event cannot be made to claim it is an invoke.
+        const browserShaped = synthesizeLambdaHttpEvent({
+            method: 'POST', path: '/api', host: 'localhost',
+            headers: { [LAMBDER_INVOKE_HEADER]: '1', [LAMBDER_INVOKED_BY_HEADER]: 'caller-fn', 'X-Forwarded-For': '198.51.100.9' },
+        }, { invoke: false });
+        expect(browserShaped.headers[LAMBDER_INVOKE_HEADER]).toBeUndefined();
+        expect(browserShaped.headers[LAMBDER_INVOKED_BY_HEADER]).toBeUndefined();
+        expect(browserShaped.headers['x-forwarded-for']).toBeUndefined();
     });
 
     it('names the invoking function when it runs in Lambda', () => {
@@ -269,10 +312,10 @@ describe('LambderInvokeCaller - round trips through a real Lambder app', () => {
     it('a rejected input is reason validation with the zod issues', async () => {
         const outcome = await callerFor(createCallee()).apiOutcome('echo', { text: 42 as unknown as string });
         expect(outcome.ok).toBe(false);
-        if(outcome.ok) throw new Error('unreachable');
-        expect(outcome.reason).toBe('validation');
+        if(outcome.ok || outcome.reason !== 'validation') throw new Error('unreachable');
         expect(outcome.status).toBe(422);
-        expect(outcome.zodError?.issues?.[0]?.path).toEqual(['text']);
+        // No optional read: the validation arm carries the issues.
+        expect(outcome.zodError.issues[0]?.path).toEqual(['text']);
         expect(outcome.error.message).toBe('callee-fn echo failed (validation): the callee rejected the input');
     });
 
@@ -281,8 +324,7 @@ describe('LambderInvokeCaller - round trips through a real Lambder app', () => {
         const outcome = await callerFor(callee).apiOutcome('crash', {});
 
         expect(outcome.ok).toBe(false);
-        if(outcome.ok) throw new Error('unreachable');
-        expect(outcome.reason).toBe('server');
+        if(outcome.ok || outcome.reason !== 'server') throw new Error('unreachable');
         expect(outcome.status).toBe(500);
         expect(outcome.errorMessage).toBe('Internal server error.');
         // The detail the callee's global error handler described.
@@ -332,6 +374,32 @@ describe('LambderInvokeCaller - round trips through a real Lambder app', () => {
         expect(outcome.reason).toBe('server');
         expect(outcome.status).toBe(404);
         expect(outcome.error.message).toBe('callee-fn echo failed (server): no API at /secure on callee-fn (HTTP 404): does apiPath match the callee\'s?');
+    });
+});
+
+describe('LambderInvokeCaller - the logs of an answer that failed', () => {
+    /** A transport that answers with one HTTP result, whatever the call. */
+    const answering = (statusCode: number, body: unknown): LambderInvokeTransport => async () => ({
+        functionError: null,
+        result: { statusCode, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) },
+    });
+
+    it.each([
+        ['a 500 envelope', 500, { apiVersion: null, payload: null, errorMessage: 'Internal server error.', logList: [{ step: 'before the crash' }] }],
+        ['a 422 validation body', 422, { error: 'Input validation failed', zodError: { name: 'ZodError', message: '', issues: [] }, logList: [{ step: 'before the crash' }] }],
+    ] as const)('%s carries its logList to onLogList, like every other answer', async (_label, statusCode, body) => {
+        const seen: unknown[][] = [];
+        const caller = new LambderInvokeCaller<Contract>({
+            functionName: 'callee-fn',
+            transport: answering(statusCode, body),
+            onLogList: (apiName, logList) => { seen.push([apiName, logList]); },
+        });
+
+        const outcome = await caller.apiOutcome('echo', { text: 'hi' });
+
+        expect(outcome.ok).toBe(false);
+        expect(seen).toEqual([['echo', [{ step: 'before the crash' }]]]);
+        if(!outcome.ok) expect(outcome.logList).toEqual([{ step: 'before the crash' }]);
     });
 });
 
@@ -433,8 +501,7 @@ describe('LambderInvokeCaller - compression', () => {
         const outcome = await caller.apiOutcome('big', { notes: ['x'.repeat(LAMBDER_INVOKE_MAX_EVENT_BYTES)] }, { compressRequest: false });
 
         expect(outcome.ok).toBe(false);
-        if(outcome.ok) throw new Error('unreachable');
-        expect(outcome.reason).toBe('payloadTooLarge');
+        if(outcome.ok || outcome.reason !== 'payloadTooLarge') throw new Error('unreachable');
         expect(outcome.bytes).toBeGreaterThan(LAMBDER_INVOKE_MAX_EVENT_BYTES);
         expect(seen).toHaveLength(0);
     });
@@ -459,7 +526,7 @@ describe('LambderInvokeCaller - onFailure is the single reporting point', () => 
         expect(onFailure).toHaveBeenCalledTimes(2);
         expect(order).toEqual(['reported callee-fn:refuse:errorMessage', 'reported callee-fn:crash:server', 'thrown']);
         const [failure] = onFailure.mock.calls[1]!;
-        expect(failure.crash?.message).toBe('boom');
+        expect(failure.reason === 'server' && failure.crash?.message).toBe('boom');
         expect(failure.error).toBeInstanceOf(LambderInvokeError);
     });
 });
@@ -477,6 +544,29 @@ describe('LambderInvokeCaller - request() for routes', () => {
         const missing = await caller.request({ path: '/nowhere' });
         expect(missing.statusCode).toBe(404);
         expect(missing.text()).toBe('Not found.');
+    });
+
+    it('refuses an event over the invoke cap, as an API call does: the cap is on the delivery path', async () => {
+        // request() serialized its event and sent whatever it got, so a large
+        // body came back as the SDK's RequestEntityTooLargeException
+        // classified `protocol`, which is the outcome the cap exists to avoid.
+        let transportCalls = 0;
+        const caller = new LambderInvokeCaller<Contract>({
+            functionName: 'callee-fn',
+            transport: async () => {
+                transportCalls += 1;
+                return { functionError: null, result: { statusCode: 200, headers: {}, body: '{}' } };
+            },
+        });
+
+        const thrown = await caller.request({ method: 'POST', path: '/upload', body: 'x'.repeat(LAMBDER_INVOKE_MAX_EVENT_BYTES) })
+            .catch((err: unknown) => err);
+
+        expect(isLambderInvokeError(thrown)).toBe(true);
+        expect((thrown as LambderInvokeError).reason).toBe('payloadTooLarge');
+        expect((thrown as LambderInvokeError).bytes).toBeGreaterThan(LAMBDER_INVOKE_MAX_EVENT_BYTES);
+        expect((thrown as LambderInvokeError).message).toContain('over the 5500000 byte invoke cap');
+        expect(transportCalls).toBe(0);
     });
 
     it('a large answer is restored like an API answer', async () => {
@@ -543,8 +633,8 @@ describe('LambderInvokeCaller - the transport\'s own failures', () => {
 
         const outcome = await caller.apiOutcome('echo', {});
         expect(outcome.ok).toBe(false);
-        if(outcome.ok) throw new Error('unreachable');
-        expect(outcome.reason).toBe('crash');
+        if(outcome.ok || outcome.reason !== 'crash') throw new Error('unreachable');
+        // No optional read: the crash arm carries Lambda's error payload.
         expect(outcome.functionError).toEqual({ errorType: 'RangeError', errorMessage: 'out of memory', trace: ['RangeError: out of memory', '    at handler'] });
         expect(outcome.error.message).toBe('remote-fn echo failed (crash): RangeError: out of memory');
         const cause = outcome.error.cause as Error;
@@ -552,18 +642,56 @@ describe('LambderInvokeCaller - the transport\'s own failures', () => {
         expect(cause.stack).toBe('RangeError: out of memory\n    at handler');
     });
 
-    it('a rejected send is reason network with the SDK error as the cause', async () => {
-        const throttled = new Error('Rate Exceeded.');
-        throttled.name = 'TooManyRequestsException';
-        lambdaMock.on(InvokeCommand).rejects(throttled);
+    it('a rejected send keeps the SDK error as the cause, and a connectivity failure is reason network', async () => {
+        // No $fault and no "...Exception" name: nothing came back at all,
+        // which is the one case that really is the network.
+        const offline = new TypeError('fetch failed');
+        lambdaMock.on(InvokeCommand).rejects(offline);
         const caller = new LambderInvokeCaller({ functionName: 'remote-fn' });
 
         const outcome = await caller.apiOutcome('echo', {});
         expect(outcome.ok).toBe(false);
         if(outcome.ok) throw new Error('unreachable');
         expect(outcome.reason).toBe('network');
-        expect(outcome.error.cause).toBe(throttled);
-        expect(outcome.error.message).toBe('remote-fn echo failed (network): Rate Exceeded.');
+        expect(outcome.error.cause).toBe(offline);
+        expect(outcome.error.message).toBe('remote-fn echo failed (network): fetch failed');
+    });
+
+    it('a service exception is reason protocol, not network: the invoke was answered, by the service', async () => {
+        // AccessDenied and ResourceNotFound are a missing IAM grant and a
+        // wrong function name, which are wiring faults to go and fix.
+        // Reported as `network`, they sent whoever read them to look at their
+        // connection instead.
+        for(const [name, message] of [
+            ['AccessDeniedException', 'User is not authorized to perform: lambda:InvokeFunction'],
+            ['ResourceNotFoundException', 'Function not found'],
+            ['RequestEntityTooLargeException', 'Request must be smaller than 6291456 bytes'],
+            ['TooManyRequestsException', 'Rate Exceeded.'],
+        ]){
+            const refused = Object.assign(new Error(message), { name, $fault: 'client' });
+            lambdaMock.reset();
+            lambdaMock.on(InvokeCommand).rejects(refused);
+
+            const outcome = await new LambderInvokeCaller({ functionName: 'remote-fn' }).apiOutcome('echo', {});
+
+            expect(outcome.ok).toBe(false);
+            if(outcome.ok) throw new Error('unreachable');
+            expect(outcome.reason).toBe('protocol');
+            expect(outcome.error.cause).toBe(refused);
+        }
+    });
+
+    it('believes a transport that names its own reason, as the transport contract says', async () => {
+        const failing = (reason: 'network' | 'protocol'): LambderInvokeTransport =>
+            async () => { throw new LambderTransportFailure(reason, `the transport says ${reason}`, { cause: new Error('underneath') }); };
+
+        for(const reason of ['network', 'protocol'] as const){
+            const outcome = await new LambderInvokeCaller({ functionName: 'remote-fn', transport: failing(reason) }).apiOutcome('echo', {});
+            expect(outcome.ok).toBe(false);
+            if(outcome.ok) throw new Error('unreachable');
+            expect(outcome.reason).toBe(reason);
+            expect((outcome.error.cause as Error).message).toBe(`the transport says ${reason}`);
+        }
     });
 
     it('an answer that is not an HTTP response object is reason protocol', async () => {
@@ -649,7 +777,7 @@ describe('describeCrash and errorFromCrashDetail', () => {
 describe('LambderCaller and LambderInvokeCaller read the same envelope the same way', () => {
     /** fetch, answered by the callee itself: the browser path to the same app. */
     const stubFetchWith = (callee: Callee) => {
-        vi.stubGlobal('window', { location: { hostname: 'localhost' } });
+        vi.stubGlobal('location', { hostname: 'localhost' });
         vi.stubGlobal('fetch', vi.fn(async (_url: string, init: { body: string }) => {
             const result = await callee.render(createApiEvent(JSON.parse(init.body), {
                 headers: { Host: 'localhost', [LAMBDER_INVOKE_HEADER]: '1' },
@@ -680,7 +808,9 @@ describe('LambderCaller and LambderInvokeCaller read the same envelope the same 
         const server = new LambderInvokeCaller({ functionName: 'callee-fn', host: 'localhost', transport: LambderInvokeCaller.localTransport(callee.getHandler()) });
 
         const fromBrowser = await browser.apiOutcome(apiName, payload);
-        const fromServer = await server.apiOutcome(apiName, payload);
+        // The same address the browser path's gateway event reports, so
+        // `echo`, which answers with ctx.ip, answers identically too.
+        const fromServer = await server.apiOutcome(apiName, payload, { clientIp: DEFAULT_GATEWAY_SOURCE_IP });
 
         expect(fromServer.ok).toBe(fromBrowser.ok);
         if(fromBrowser.ok && fromServer.ok){
@@ -689,8 +819,12 @@ describe('LambderCaller and LambderInvokeCaller read the same envelope the same 
             expect(fromServer.reason).toBe(fromBrowser.reason);
             expect(fromServer.status).toBe(fromBrowser.status);
             expect(fromServer.errorMessage).toEqual(fromBrowser.errorMessage);
-            expect(fromServer.response?.crash?.message).toEqual(fromBrowser.response?.crash?.message);
-            expect(fromServer.response?.logList).toEqual(fromBrowser.response?.logList);
+            // Both sides answered a 5xx here, which is the arm that keeps the
+            // envelope beside its Error.
+            if(fromBrowser.reason === 'server' && fromServer.reason === 'server'){
+                expect(fromServer.response?.crash?.message).toEqual(fromBrowser.response?.crash?.message);
+                expect(fromServer.response?.logList).toEqual(fromBrowser.response?.logList);
+            }
         }
     });
 });
@@ -786,15 +920,15 @@ describe('LambderInvokeCaller - validation issues are typed as what crosses the 
     it('zodError is the plain name, message and issues, not a ZodError instance', async () => {
         const outcome = await callerFor(createCallee()).apiOutcome('echo', { text: 42 as unknown as string });
         expect(outcome.ok).toBe(false);
-        if(outcome.ok) throw new Error('unreachable');
-        expectTypeOf(outcome.zodError).toEqualTypeOf<LambderValidationError | undefined>();
-        expect(outcome.zodError?.name).toBe('ZodError');
-        expect(outcome.zodError?.issues[0]).toMatchObject({ code: 'invalid_type', path: ['text'] });
+        if(outcome.ok || outcome.reason !== 'validation') throw new Error('unreachable');
+        expectTypeOf(outcome.zodError).toEqualTypeOf<LambderValidationError>();
+        expect(outcome.zodError.name).toBe('ZodError');
+        expect(outcome.zodError.issues[0]).toMatchObject({ code: 'invalid_type', path: ['text'] });
     });
 
     it('the browser caller hands its validation handler the same shape', async () => {
         const callee = createCallee();
-        vi.stubGlobal('window', { location: { hostname: 'localhost' } });
+        vi.stubGlobal('location', { hostname: 'localhost' });
         vi.stubGlobal('fetch', vi.fn(async (_url: string, init: { body: string }) => {
             const result = await callee.render(createApiEvent(JSON.parse(init.body), {
                 headers: { Host: 'localhost', [LAMBDER_INVOKE_HEADER]: '1' },
@@ -873,6 +1007,29 @@ describe('LambderInvokeCaller - an external abort signal is not accumulated on',
         expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
     });
 
+    it('leaves no pending timer once a call settles, so a timeoutMs does not outlive its call', async () => {
+        // detach() clears the timeout as well as releasing the signal, and
+        // only the listener half was pinned: deleting the clearTimeout left
+        // the suite green and a timer per call behind it.
+        vi.useFakeTimers();
+        try {
+            const caller = new LambderInvokeCaller<Contract>({
+                functionName: 'callee-fn', timeoutMs: 30_000,
+                transport: async () => ({
+                    functionError: null,
+                    result: { statusCode: 200, headers: {}, body: JSON.stringify({ apiVersion: null, payload: { text: 'hi', ip: '', host: 'callee-fn', invokedBy: null } }) },
+                }),
+            });
+
+            const outcome = await caller.apiOutcome('echo', { text: 'hi' });
+
+            expect(outcome.ok).toBe(true);
+            expect(vi.getTimerCount()).toBe(0);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
     it('still aborts the call when the external signal fires', async () => {
         const controller = new AbortController();
         const caller = new LambderInvokeCaller<Contract>({
@@ -890,5 +1047,251 @@ describe('LambderInvokeCaller - an external abort signal is not accumulated on',
         if(outcome.ok) throw new Error('unreachable');
         expect(outcome.reason).toBe('network');
         expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+    });
+});
+
+describe('LambderInvokeCaller - an answer that arrives after the call was given up on', () => {
+    it('reports timeout rather than a success, through localTransport and through a custom transport', async () => {
+        // The browser caller learned this and the invoke caller did not, so a
+        // 20ms timeoutMs reported ok: true at 300ms and the call site acted on
+        // data it had already abandoned. localTransport was the easiest way
+        // to reach it: it ran the handler to completion and ignored the
+        // signal entirely, which made timeoutMs a no-op there.
+        // Set when the 300ms handler finishes: the caller must have answered
+        // before that.
+        let slowHandlerFinished = false;
+        const slowCallee = initLambder().create({ apiPath: '/api' })
+            .addApi('slow', { input: z.object({}), output: z.object({ ok: z.boolean() }) },
+                async (_ctx, res) => {
+                    await new Promise((resolve) => setTimeout(resolve, 300));
+                    slowHandlerFinished = true;
+                    return res.api({ ok: true });
+                });
+
+        const local = new LambderInvokeCaller<typeof slowCallee.ApiContract>({
+            functionName: 'callee-fn', timeoutMs: 20,
+            transport: LambderInvokeCaller.localTransport(slowCallee.getHandler()),
+        });
+        const fromLocal = await local.apiOutcome('slow', {});
+        expect(fromLocal.ok).toBe(false);
+        if(!fromLocal.ok) expect(fromLocal.reason).toBe('timeout');
+        // And the wait ended with the timeout rather than with the handler:
+        // the handler is still running, which is what a timeout buys here. An
+        // elapsed-milliseconds bound says the same thing less reliably on a
+        // loaded machine.
+        expect(slowHandlerFinished).toBe(false);
+
+        // A transport that answers late without ever looking at the signal:
+        // the caller cannot assume every transport honours it.
+        const deafToAbort: LambderInvokeTransport = async () => {
+            await new Promise((resolve) => setTimeout(resolve, 60));
+            return { functionError: null, result: { statusCode: 200, headers: {}, body: JSON.stringify({ apiVersion: null, payload: { ok: true } }) } };
+        };
+        const custom = new LambderInvokeCaller<typeof slowCallee.ApiContract>({ functionName: 'callee-fn', timeoutMs: 10, transport: deafToAbort });
+        const fromCustom = await custom.apiOutcome('slow', {});
+        expect(fromCustom.ok).toBe(false);
+        if(!fromCustom.ok) expect(fromCustom.reason).toBe('timeout');
+    });
+
+    it('refuses a call whose signal had already aborted, without reaching the transport', async () => {
+        // Through a transport that never looks at the signal, because that is
+        // what makes this the CALLER's guard under test: driven through
+        // localTransport, its own throwIfAborted produces the same outcome,
+        // so the caller's check could be deleted with the suite still green.
+        let transportCalls = 0;
+        const controller = new AbortController();
+        controller.abort();
+        const caller = new LambderInvokeCaller<Contract>({
+            functionName: 'callee-fn',
+            transport: async () => {
+                transportCalls += 1;
+                return { functionError: null, result: { statusCode: 200, headers: {}, body: '{"apiVersion":null,"payload":null}' } };
+            },
+        });
+
+        const outcome = await caller.apiOutcome('echo', { text: 'hi' }, { signal: controller.signal });
+
+        expect(outcome.ok).toBe(false);
+        if(!outcome.ok) expect(outcome.reason).toBe('network');
+        expect(transportCalls).toBe(0);
+    });
+
+    it('refuses a call whose signal had already aborted, without running the callee', async () => {
+        let handlerRan = false;
+        const callee = createCallee();
+        const handler = callee.getHandler();
+        const controller = new AbortController();
+        controller.abort();
+        const caller = new LambderInvokeCaller<Contract>({
+            functionName: 'callee-fn',
+            transport: LambderInvokeCaller.localTransport(async (event, context) => { handlerRan = true; return handler(event, context); }),
+        });
+
+        const outcome = await caller.apiOutcome('echo', { text: 'hi' }, { signal: controller.signal });
+
+        expect(outcome.ok).toBe(false);
+        if(!outcome.ok) expect(outcome.reason).toBe('network');
+        expect(handlerRan).toBe(false);
+    });
+});
+
+describe('LambderInvokeCaller - the answer\'s cookies', () => {
+    it('surfaces them on a success and on a failure, so a rotated or cleared session is visible', async () => {
+        const callee = initLambder<{ userId: string }>().create({
+            apiPath: '/api',
+            session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
+        })
+            .addApi('login', { input: z.object({ user: z.string() }), output: z.object({ ok: z.boolean() }) },
+                async (ctx, res) => { await callee.getSessionController(ctx).createSession(ctx.apiPayload.user, { userId: ctx.apiPayload.user }); return res.api({ ok: true }); })
+            .addSessionApi('me', { input: z.object({}), output: z.object({ userId: z.string() }) },
+                async (ctx, res) => res.api({ userId: ctx.session.data.userId }))
+            .addSessionApi('signOut', { input: z.object({}), output: z.null() }, async (ctx, res) => {
+                await callee.getSessionController(ctx).endSession();
+                return res.api(null, { errorMessage: { type: 'info', content: 'Signed out.' } });
+            });
+        const caller = new LambderInvokeCaller<typeof callee.ApiContract>({
+            functionName: 'callee-fn',
+            transport: LambderInvokeCaller.localTransport(callee.getHandler()),
+        });
+
+        const signedIn = await caller.apiOutcome('login', { user: 'ada' });
+        expect(signedIn.ok).toBe(true);
+        // The two session cookies the callee set: a caller carrying a user's
+        // session is the browser for that call, and nothing else is.
+        expect(signedIn.cookies.map((cookie) => cookie.split('=')[0]).sort()).toEqual(['LMDRSESSIONCSTK', 'LMDRSESSIONTKID']);
+
+        // Carrying the session forward is what the cookies are for: the two
+        // values a browser would have stored come straight off the answer.
+        const cookieValue = (cookies: string[], name: string) =>
+            cookies.map((cookie) => cookie.split(';')[0]!.split('='))
+                .find(([key]) => key === name)?.[1] ?? '';
+        const session = {
+            token: cookieValue(signedIn.cookies, 'LMDRSESSIONTKID'),
+            csrf: cookieValue(signedIn.cookies, 'LMDRSESSIONCSTK'),
+        };
+        expect(await caller.api('me', {}, { session })).toEqual({ userId: 'ada' });
+
+        // A failure carries them too, which is the case that matters: the
+        // answer that CLEARS a session is a refusal, and a caller that cannot
+        // see its Set-Cookie keeps sending a token the callee has dropped.
+        const signedOut = await caller.apiOutcome('signOut', {}, { session });
+        expect(signedOut.ok).toBe(false);
+        if(signedOut.ok) throw new Error('unreachable');
+        expect(signedOut.reason).toBe('errorMessage');
+        expect(signedOut.cookies.map((cookie) => cookie.split('=')[0]).sort()).toEqual(['LMDRSESSIONCSTK', 'LMDRSESSIONTKID']);
+
+        // And a failure with no answer at all reports an empty list rather
+        // than leaving the field missing.
+        const noAnswer = await new LambderInvokeCaller({
+            functionName: 'callee-fn',
+            transport: async () => { throw new Error('offline'); },
+        }).apiOutcome('login', { user: 'ada' });
+        expect(noAnswer.ok).toBe(false);
+        if(!noAnswer.ok) expect(noAnswer.cookies).toEqual([]);
+    });
+});
+
+describe('LambderInvokeCaller - a failure narrows to what its reason carries', () => {
+    it('narrowing on reason narrows the fields, with no optional reads', () => {
+        const failure = {} as LambderInvokeFailure;
+
+        if(failure.reason === 'validation'){
+            expectTypeOf(failure.zodError).toEqualTypeOf<LambderValidationError>();
+        }else if(failure.reason === 'crash'){
+            expectTypeOf(failure.functionError).toEqualTypeOf<LambderInvokeFunctionError>();
+        }else if(failure.reason === 'payloadTooLarge'){
+            expectTypeOf(failure.bytes).toEqualTypeOf<number>();
+        }else if(failure.reason === 'errorMessage'){
+            // An envelope refusal always came with the envelope.
+            expectTypeOf(failure.response).toEqualTypeOf<LambderApiEnvelopeBody<any>>();
+        }else{
+            // A delivery failure may or may not have got an answer at all.
+            expectTypeOf(failure.response).toEqualTypeOf<LambderApiEnvelopeBody<any> | undefined>();
+        }
+        // And what one reason has, another does not.
+        expectTypeOf(failure.error).toEqualTypeOf<LambderInvokeError>();
+        expectTypeOf(failure.logList).toEqualTypeOf<unknown[]>();
+        expectTypeOf(failure.cookies).toEqualTypeOf<string[]>();
+    });
+
+    it('does not offer another reason\'s evidence', () => {
+        const failure = {} as LambderInvokeFailure;
+        if(failure.reason === 'crash'){
+            // @ts-expect-error Lambda's FunctionError is not a rejected input
+            void failure.zodError;
+        }
+        if(failure.reason === 'validation'){
+            // @ts-expect-error a rejected input has issues, not a crash detail
+            void failure.crash;
+        }
+        if(failure.reason === 'network'){
+            // @ts-expect-error nothing was measured: bytes belongs to payloadTooLarge
+            void failure.bytes;
+        }
+    });
+});
+
+describe('LambderInvokeCaller - an idempotent API demands its key at the call site', () => {
+    type KeyedContract = {
+        'orders.place': { input: { sku: string }; output: { orderId: string }; mode: 'public'; idempotency: true };
+        'orders.list': { input: undefined; output: { orderId: string }; mode: 'public' };
+        'orders.draft': { input: { sku: string }; output: { orderId: string }; mode: 'public'; idempotency: false };
+    };
+
+    it('requires idempotencyKey exactly where the contract declares idempotency', async () => {
+        const caller = new LambderInvokeCaller<KeyedContract>({
+            functionName: 'callee-fn',
+            transport: async () => ({
+                functionError: null,
+                result: { statusCode: 200, headers: {}, body: JSON.stringify({ apiVersion: null, payload: { orderId: 'o-1' } }) },
+            }),
+        });
+
+        expect(await caller.api('orders.place', { sku: 'a' }, { idempotencyKey: 'k-abcdefabcdefabcdef' })).toEqual({ orderId: 'o-1' });
+        // @ts-expect-error a declared-idempotent API cannot be called without a key
+        await caller.api('orders.place', { sku: 'a' });
+        // @ts-expect-error nor with options that leave it out
+        await caller.apiOutcome('orders.place', { sku: 'a' }, { timeoutMs: 50 });
+        // An API that declares none, or declares it off, is unaffected.
+        await caller.api('orders.list');
+        await caller.api('orders.draft', { sku: 'a' });
+    });
+});
+
+describe('LambderInvokeCaller - what the contract decides at the call site', () => {
+    it('computes the output from the contract, and requires the payload the input demands', async () => {
+        const caller = callerFor(createCallee());
+
+        const answer = await caller.api('echo', { text: 'hi' });
+        expectTypeOf(answer).toEqualTypeOf<{ text: string; ip: string; host: string; invokedBy: string | null }>();
+
+        // @ts-expect-error the contract's output is not { madeUp: number }
+        const wrong: { madeUp: number } = await caller.api('echo', { text: 'hi' });
+        void wrong;
+        // @ts-expect-error a required input cannot be omitted
+        void caller.api('echo').catch(() => {});
+        // @ts-expect-error nor on the outcome form
+        void caller.apiOutcome('echo').catch(() => {});
+        // @ts-expect-error a header value is a string
+        void caller.api('echo', { text: 'hi' }, { headers: { count: 123 } }).catch(() => {});
+    });
+});
+
+describe('decodeLambdaHttpResult', () => {
+    it('accepts Content-Encoding: identity as no encoding', async () => {
+        // A legal value meaning "not encoded", which a hook or a proxy may
+        // set; reading it as an unsupported encoding turned the whole invoke
+        // into a protocol failure.
+        const decoded = await decodeLambdaHttpResult({
+            statusCode: 200,
+            headers: { 'content-type': 'application/json', 'content-encoding': 'identity' },
+            body: '{"a":1}',
+            isBase64Encoded: false,
+        }, 1_000_000);
+        expect(decoded.text()).toBe('{"a":1}');
+        expect(decoded.json()).toEqual({ a: 1 });
+        await expect(decodeLambdaHttpResult({
+            statusCode: 200, headers: { 'content-encoding': 'deflate' }, body: 'x', isBase64Encoded: false,
+        }, 1_000_000)).rejects.toThrow(/unsupported Content-Encoding/);
     });
 });

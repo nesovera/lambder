@@ -1,5 +1,5 @@
 /**
- * LambderI18n — standalone, framework-free, isomorphic typed translation module.
+ * LambderI18n: standalone, framework-free, isomorphic typed translation module.
  *
  * Zero dependencies, no Node/DOM requirements (browser detection is feature-gated),
  * safe to import in both lambda backends and frontend bundles.
@@ -29,7 +29,7 @@ export type LambderI18nExtractParams<S extends string> =
     S extends `${string}{${infer P}}${infer Rest}` ? P | LambderI18nExtractParams<Rest> : never;
 
 /**
- * Typed translator: `t(key)` — and when the key's contract value contains
+ * Typed translator: `t(key)`, and when the key's contract value contains
  * `{tokens}`, a params object with exactly those tokens is required.
  */
 export type LambderI18nTranslator<TContract extends Record<string, string>> = <
@@ -87,7 +87,7 @@ export interface LambderI18nInstance<
     forLanguage(code: keyof TLanguages & string): LambderI18nTranslator<TContract>;
     /**
      * Strict extension: every language must provide every new key. Keys must
-     * be new — redeclaring a parent key is a compile-time and runtime error.
+     * be new: redeclaring a parent key is a compile-time and runtime error.
      * Returns a new instance whose key space = parent keys + new keys.
      */
     extend<const TExt extends { [D in TDefault]: Record<string, string> }>(
@@ -97,8 +97,8 @@ export interface LambderI18nInstance<
     ): LambderI18nInstance<TLanguages, TDefault, TEnforced, TContract & TExt[TDefault]>;
     /**
      * Partial extension: only the `enforced` languages are required; all other
-     * languages are optional (and may provide a subset of keys) — missing
-     * translations fall back to the default language. Keys must be new —
+     * languages are optional (and may provide a subset of keys), and missing
+     * translations fall back to the default language. Keys must be new:
      * redeclaring a parent key is a compile-time and runtime error.
      */
     extendPartial<const TExt extends { [D in TDefault]: Record<string, string> }>(
@@ -138,7 +138,7 @@ export interface LambderI18nInstance<
     isLanguageCode(value: string): value is keyof TLanguages & string;
     readonly languages: TLanguages;
     readonly languageList: (keyof TLanguages & string)[];
-    /** Ordered language metadata (declaration order), with `code` injected — ready for switcher menus. */
+    /** Ordered language metadata (declaration order), with `code` injected, ready for switcher menus. */
     readonly languageMetaList: (TLanguages[keyof TLanguages] & { code: keyof TLanguages & string })[];
     readonly defaultLanguage: TDefault;
     readonly enforced: TEnforced;

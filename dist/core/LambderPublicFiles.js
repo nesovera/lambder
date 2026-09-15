@@ -1,4 +1,5 @@
 import { LambderResponse } from "./LambderResponse.js";
+import { allowsRequestMethod } from "./LambderRouting.js";
 // Content-hashed build outputs (Vite/webpack/Rollup): a [-.] separated run of
 // 8+ hash chars containing at least one digit, before the extension.
 const DEFAULT_IMMUTABLE_PATTERN = /[-.](?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9]+$/;
@@ -7,20 +8,24 @@ const DEFAULT_CACHE_CONTROL = "public, max-age=3600";
 /**
  * Terminal public-file handler registered via lambder.servePublicFiles().
  * Runs only when no route matched, so it can never shadow routes registered
- * after it. Serves files through the instance's reader (traversal-safe,
+ * after it. Serves files through the instance's reader (one path rule,
  * mime-typed, memory-cached) with the immutable-cache heuristic for
  * content-hashed assets, and falls through to the route fallback when the
- * source has no such file.
+ * method is not configured or the source has no such file.
  */
 export class LambderPublicFilesHandler {
     files;
     options;
+    methods;
     constructor(files, options) {
         this.files = files;
         this.options = options;
+        this.methods = new Set((options.methods ?? ["GET", "HEAD"]).map((method) => method.toUpperCase()));
     }
     /** Serve the mapped file, or return null to fall through. */
     async handle(ctx) {
+        if (!allowsRequestMethod(this.methods, ctx.method))
+            return null;
         const mappedPath = this.options.path ? this.options.path(ctx) : ctx.path;
         if (!mappedPath)
             return null;

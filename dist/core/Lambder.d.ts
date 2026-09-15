@@ -2,195 +2,28 @@ import type { z } from "zod";
 import type { Context } from "aws-lambda";
 import LambderResolver from "./LambderResolver.js";
 import LambderResponseBuilder from "./LambderResponseBuilder.js";
-import { LambderResponse, type LambderHttpResponse, type LambderResponseCompressionOption } from "./LambderResponse.js";
-import { type ConditionFunction, type LambderRouteMatcher, type PathParamsOf } from "./LambderRouting.js";
-import { type LambderCorsConfig } from "./LambderCors.js";
-import { type LambderSessionDataRefreshConfig } from "../session/LambderSessionManager.js";
-import { type LambderCompressionOption } from "../shared/LambderCompressionOption.js";
-import LambderSessionController, { type LambderSessionCookieOptions } from "../session/LambderSessionController.js";
+import { LambderResponse, type LambderHttpResponse } from "./LambderResponse.js";
+import { type LambderRouteConditionFn, type LambderRouteMatcher, type LambderPathParamsOf, type LambderRoutePath } from "./LambderRouting.js";
+import LambderSessionManager from "../session/LambderSessionManager.js";
+import type LambderSessionController from "../session/LambderSessionController.js";
 import { type LambderPublicFilesOptions } from "./LambderPublicFiles.js";
-import { LambderFiles, type LambderFilesOption } from "./LambderFiles.js";
-import type { LambderApiGuard, LambderGuardMetaMap, LambderGuardsOption, LambderGuardDataOf, LambderGuardInputsOf } from "../policies/LambderApiGuards.js";
-import type { LambderApiRateLimitPolicyConfig, LambderApiRateLimitsConfig, LambderRateLimitOption } from "../policies/LambderApiRateLimits.js";
-import type { LambderApiIdempotencyConfig } from "../policies/LambderApiIdempotency.js";
-import type { MergeContract } from "../shared/LambderApiContract.js";
+import { type LambderIndexHtmlOptions } from "./LambderIndexHtml.js";
+import { LambderFiles } from "./LambderFiles.js";
+import type { LambderApiIdempotencyOption } from "../shared/wire/LambderApiOptionValues.js";
+import type { LambderApiGuard, LambderGuardMetaMap, LambderGuardsOption, LambderGuardDataOf, LambderGuardInputsOf } from "../api/LambderApiGuards.js";
+import type { LambderApiRateLimitPolicyConfig, LambderRateLimitOption } from "../api/LambderApiRateLimits.js";
+import type { LambderApiIdempotencyConfig } from "../api/LambderApiIdempotency.js";
+import type { LambderContractEntry, LambderMergeContract } from "../shared/wire/LambderApiContract.js";
 import { type LambderHttpEvent, type LambderRenderContext, type LambderSessionRenderContext } from "./LambderContext.js";
-export type { PathParamsOf, RouteCondition, ConditionFunction, LambderRouteMatcher } from "./LambderRouting.js";
-export type { LambderCorsConfig } from "./LambderCors.js";
-type MaybePromise<T> = T | Promise<T>;
-type Path = `/${string}`;
-type ActionFunction = (ctx: LambderRenderContext, resolver: LambderResolver) => MaybePromise<LambderResponse>;
-type SessionActionFunction<SessionData = any> = (ctx: LambderSessionRenderContext<any, SessionData>, resolver: LambderResolver) => MaybePromise<LambderResponse>;
-type HookCreatedFunction = (lambderInstance: Lambder<any, any, any, any, any, any, any>) => void | Promise<void>;
-/** Return the (possibly replaced) ctx to continue, a LambderResponse to short-circuit, or an Error to fail. */
-type HookBeforeRenderFunction = (ctx: LambderRenderContext, resolver: LambderResolver) => MaybePromise<LambderRenderContext | LambderResponse | Error>;
-type HookAfterRenderFunction = (ctx: LambderRenderContext, resolver: LambderResolver, response: LambderResponse) => MaybePromise<LambderResponse | Error>;
-type HookFallbackFunction = (ctx: LambderRenderContext, resolver: LambderResolver) => void | Promise<void>;
-type GlobalErrorHandlerFunction = (err: Error, ctx: LambderRenderContext | null, response: LambderResponseBuilder, logListToApiResponse?: any[]) => MaybePromise<LambderResponse>;
-type FallbackHandlerFunction = (ctx: LambderRenderContext, resolver: LambderResolver) => MaybePromise<LambderResponse>;
-type ApiInputValidationErrorHandlerFunction = (ctx: LambderRenderContext, resolver: LambderResolver, zodError: z.ZodError) => MaybePromise<LambderResponse>;
-export type LambderIndexHtmlOptions = {
-    /** Methods that reach the index handler. Default: ["GET", "HEAD"]. */
-    methods?: string[];
-    /**
-     * Skip paths whose last segment contains a dot, treating them as missing
-     * assets rather than app routes. Default: false — real files have already
-     * been served by servePublicFiles at this point, and plenty of app routes
-     * carry dots (JWTs, coordinates, domain names, version numbers). Turn it
-     * on to get 404s instead of a 200 shell for missing-asset requests.
-     */
-    skipFilePaths?: boolean;
-    /** 301-redirect trailing-slash paths to the canonical no-slash URL. Default: false. */
-    redirectTrailingSlash?: boolean;
-    /** Shell served by the default handler. Default: "index.html". */
-    indexFile?: string | ((ctx: LambderRenderContext) => string);
-    /** Compression override, like servePublicFiles: "auto" (default), true/false, or (ctx) => boolean | "auto". */
-    compress?: boolean | "auto" | ((ctx: LambderRenderContext) => boolean | "auto");
-};
+import type { MaybePromise } from "../shared/util/LambderTypeUtilities.js";
+import { type LambderRouteHandler, type LambderInputValidationHandler, type LambderFallbackHandler, type LambderGlobalErrorHandler, type LambderAfterRenderHook, type LambderBeforeRenderHook, type LambderFallbackHook, type LambderActionTools, type LambderCreateOptions, type LambderGivenOption, type LambderHandler, type LambderNestedOptionChecks, type LambderNoExtraKeys, type LambderRequirableGuardsField, type LambderSessionEnabledInstance, type LambderSessionRouteHandler } from "./LambderCreateOptions.js";
 /**
- * Second argument of an addAction handler. Discriminated on `ctx`: HTTP
- * invocations get the full context and a resolver, non-HTTP invocations get
- * null for both.
+ * The "created" hook: run once the instance exists, with the instance. It is
+ * declared here rather than beside the other hooks in LambderCreateOptions
+ * because its parameter is the class, and an options module that names the
+ * class cannot be read without it.
  */
-export type LambderActionTools = {
-    ctx: LambderRenderContext;
-    res: LambderResolver;
-    lambdaContext: Context;
-} | {
-    ctx: null;
-    res: null;
-    lambdaContext: Context;
-};
-/** Overloaded handler type returned by getHandler(): HTTP events get a typed response, others dispatch to actions. */
-export type LambderHandler = {
-    (event: LambderHttpEvent, context: Context): Promise<LambderHttpResponse>;
-    (event: unknown, context: Context): Promise<unknown>;
-};
-/** DynamoDB session configuration (the `session` option of create/new). */
-export type LambderSessionOptions<TSessionData = any> = {
-    tableName: string;
-    tableRegion: string;
-    sessionSalt: string;
-    enableSlidingExpiration?: boolean;
-    /** Min seconds between sliding-expiration writes. Default: max(60, 5% of TTL). */
-    slidingWriteIntervalSeconds?: number;
-    /** Session cookie attributes, e.g. { domain: ".example.com" } for cross-subdomain sessions. `domain` may be a (hostname) => string function for multi-domain deployments. */
-    cookie?: LambderSessionCookieOptions;
-    /** Session cookie names. Defaults: LMDRSESSIONTKID / LMDRSESSIONCSTK. */
-    tokenCookieKey?: string;
-    csrfCookieKey?: string;
-    partitionKey?: string;
-    sortKey?: string;
-    /**
-     * Opt-in freshness for session.data derived from external state (roles,
-     * permissions, feature flags...). Every session read renews data past
-     * its ttlSeconds via your refresh callback, persisting in place on the
-     * same record: same tokens, same cookies. Return null from refresh to
-     * end the session. See LambderSessionDataRefreshConfig for the exact
-     * semantics.
-     */
-    dataRefresh?: LambderSessionDataRefreshConfig<TSessionData>;
-    /**
-     * Brotli compression of session.data at rest. `true` (the default)
-     * compresses every record, the same as `{ minBytes: 0 }`; `false` turns
-     * it off; `{ minBytes }` compresses only records whose JSON is at least
-     * that many bytes. Records written under either setting read back, so
-     * it can be switched on or off on a live table.
-     */
-    compression?: LambderCompressionOption;
-};
-/**
- * Everything an instance is configured with, in ONE declaration: base
- * serving options plus the type-affecting policy layer (rate limits,
- * guards, idempotency) and session/CORS config. There are no enable/define
- * chain methods; the instance is born fully configured and fully typed
- * (via initLambder), so no ordering rules exist and no partially-configured
- * instance type ever needs a name.
- */
-export type LambderCreateOptions<TSessionData = any> = {
-    /**
-     * Where the app's files come from, for servePublicFiles, serveIndexHtml,
-     * res.file and res.templateFile: a LambderLocalFileSource over a folder
-     * (the build output bundled with the deployment), a LambderS3FileSource
-     * (S3, R2), or any LambderFileSource; or `{ source, memoryCache }` to
-     * tune or disable the in-memory file cache. Required by those features.
-     */
-    files?: LambderFilesOption;
-    apiPath?: string;
-    apiVersion?: string;
-    /**
-     * Automatic compression for compressible responses. `true` (the default)
-     * is `{ minBytes: 860, encodings: ["br", "gzip"], quality: 5 }`; `false`
-     * disables it. `encodings` is a preference order, so `["gzip"]` opts out
-     * of Brotli for a client or CDN that mishandles it, and `quality` is the
-     * Brotli quality, the same field the at-rest stores take.
-     */
-    compression?: LambderResponseCompressionOption;
-    /** Automatic ETag + If-None-Match 304 on GET/HEAD 200 responses. Default: true. */
-    etag?: boolean;
-    /** Guard threshold for Lambda's ~6MB response cap. Default: 5,500,000. */
-    maxResponseBytes?: number;
-    /**
-     * Ceiling on what a gzipped request payload may restore to (Lambda's
-     * ~6MB invoke cap already bounds the compressed bytes). Default:
-     * 20,000,000. Requests over it are refused rather than decompressed.
-     * The restored JSON is parsed in full before any policy or session
-     * check, so size it to the function's memory.
-     */
-    maxRequestPayloadBytes?: number;
-    /** CORS: true allows any origin; or pass a LambderCorsConfig. Default: off. */
-    cors?: boolean | LambderCorsConfig;
-    /** DynamoDB-backed sessions; required for addSessionApi/addSessionRoute. */
-    session?: LambderSessionOptions<TSessionData>;
-    /** Declarative per-API rate limiting: your limiter plus named policies APIs reference (typed) via the `rateLimit` option. */
-    rateLimits?: LambderApiRateLimitsConfig<Record<string, LambderApiRateLimitPolicyConfig>>;
-    /** Named guards APIs reference (typed) via the `guards` option; build each with lambderGuard(). */
-    guards?: Record<string, LambderApiGuard<any, any, any>>;
-    /**
-     * Make an authorization declaration part of registering a session API:
-     * every addSessionApi must declare `guards`, at the type level (a
-     * missing `guards` is a compile error) and at registration (a plain-JS
-     * caller throws). An API that legitimately needs none, because the
-     * session itself is the whole authorization (the signed-in user's own
-     * account), declares a named no-op session guard, so every opt-out is
-     * explicit and one grep lists them all. Needs a guards map to pick
-     * from. Default: false.
-     */
-    requireSessionApiGuards?: boolean;
-    /**
-     * The same for public APIs: every addApi must declare `guards`, at the
-     * type level and at registration.
-     *
-     * Public APIs are open by default and that is the right default, so this
-     * is off unless an app decides otherwise. What it buys an app that turns
-     * it on is that a public endpoint's openness becomes a written decision
-     * rather than an omission: the ones anybody may call declare a named no-op
-     * guard carrying the reason, and the ones that authorize their caller some
-     * other way (a signature, a device secret, a one-shot token) name where
-     * that happens. One grep over the guard names then lists every public
-     * door and why it is open, which is the review question a growing public
-     * surface makes expensive to answer any other way. Needs a guards map to
-     * pick from. Default: false.
-     */
-    requirePublicApiGuards?: boolean;
-    /** Declarative idempotency: your store plus replay defaults; APIs opt in via `idempotency: true | { ttlSeconds }`. */
-    idempotency?: LambderApiIdempotencyConfig;
-};
-/**
- * The `guards` field of an API's options: optional by default, required once
- * create() received the require*ApiGuards flag for that kind of API, so that
- * an authorization declaration cannot be forgotten at the type level.
- *
- * One type for both kinds: the requirement is the same shape either way, and
- * only which flag switches it on differs.
- */
-type LambderRequirableGuardsField<TRequired extends boolean, TGuardsOpt> = TRequired extends true ? {
-    /** Named guards, run in declared order before input validation: a name, a non-empty list of names, or a non-empty { name: param } map for parameterized guards. Required on this instance: an API that needs no authorization declares a named no-op guard, so every opt-out is explicit and one grep lists them all. Their input requirements merge into this API's contract input; their return values land typed on ctx.guardData. */
-    guards: TGuardsOpt;
-} : {
-    /** Named guards, run in declared order before input validation: a name, a non-empty list of names, or a non-empty { name: param } map for parameterized guards. Their input requirements merge into this API's contract input; their return values land typed on ctx.guardData. */
-    guards?: TGuardsOpt;
-};
+export type LambderCreatedHook = (lambderInstance: Lambder<any, any, any, any, any, any, any, any>) => void | Promise<void>;
 /**
  * Main Lambder class for building type-safe serverless APIs. Create
  * instances with initLambder<SessionData>().create({...}) (see below): the
@@ -204,6 +37,7 @@ type LambderRequirableGuardsField<TRequired extends boolean, TGuardsOpt> = TRequ
  * @typeParam _TIdempotencyEnabled - @internal True when create() received idempotency (do not pass manually)
  * @typeParam _TSessionGuardsRequired - @internal True when create() received requireSessionApiGuards (do not pass manually)
  * @typeParam _TPublicGuardsRequired - @internal True when create() received requirePublicApiGuards (do not pass manually)
+ * @typeParam _TSessionsEnabled - @internal True when create() received the session option (do not pass manually). It defaults to TRUE, unlike its siblings: a plugin module annotates its parameter as the bare Lambder<SessionData>, and that annotation has to keep registering session APIs. create() is where the option is actually known, so create() is where the false comes from; `new Lambder(...)` keeps only the registration-time throw.
  *
  * @example
  * ```typescript
@@ -214,7 +48,7 @@ type LambderRequirableGuardsField<TRequired extends boolean, TGuardsOpt> = TRequ
  *   .addApi('createUser', { input: z.object({...}), output: z.object({...}) }, handler);
  * ```
  */
-export default class Lambder<TSessionData = any, _TContract extends Record<string, any> = {}, _TRateLimitPolicies extends Record<string, LambderApiRateLimitPolicyConfig> = {}, _TGuards extends Record<string, any> = {}, _TIdempotencyEnabled extends boolean = false, _TSessionGuardsRequired extends boolean = false, _TPublicGuardsRequired extends boolean = false> {
+export default class Lambder<TSessionData = any, _TContract extends Record<string, any> = {}, _TRateLimitPolicies extends Record<string, LambderApiRateLimitPolicyConfig> = {}, _TGuards extends Record<string, any> = {}, _TIdempotencyEnabled extends boolean = false, _TSessionGuardsRequired extends boolean = false, _TPublicGuardsRequired extends boolean = false, _TSessionsEnabled extends boolean = true> {
     apiPath: string;
     apiVersion: null | string;
     /** The instance's file reader (source + caches), or null without the files option. */
@@ -231,7 +65,8 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
      */
     readonly ApiContract: _TContract;
     private actionList;
-    private apiPolicyEngine;
+    /** The API core: the pipeline every API call runs through, shared in shape with the mock runtime. */
+    private readonly pipeline;
     private registeredApiNames;
     private hookList;
     private createdHooks;
@@ -242,32 +77,29 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
     private apiInputValidationErrorHandler;
     private sessionExpiredRouteHandler;
     private publicFilesHandler;
-    private indexHtmlConfig;
+    private indexHtmlHandler;
     private eventActionList;
     private corsConfig;
     private finalizeOptions;
-    private maxRequestPayloadBytes;
     private requireSessionApiGuards;
+    private readonly trustedClientIpHeaders;
     private requirePublicApiGuards;
-    private lambderSessionManager?;
-    private sessionCookieOptions;
-    private sessionTokenCookieKey;
-    private sessionCsrfCookieKey;
     constructor(options?: LambderCreateOptions<TSessionData>);
-    setRouteFallbackHandler(routeFallbackHandler: FallbackHandlerFunction): this;
-    setApiFallbackHandler(apiFallbackHandler: FallbackHandlerFunction): this;
-    setApiInputValidationErrorHandler(apiInputValidationErrorHandler: ApiInputValidationErrorHandlerFunction): this;
-    setGlobalErrorHandler(globalErrorHandler: GlobalErrorHandlerFunction): this;
+    setRouteFallbackHandler(routeFallbackHandler: LambderFallbackHandler): this;
+    setApiFallbackHandler(apiFallbackHandler: LambderFallbackHandler): this;
+    setApiInputValidationErrorHandler(apiInputValidationErrorHandler: LambderInputValidationHandler): this;
+    setGlobalErrorHandler(globalErrorHandler: LambderGlobalErrorHandler): this;
     /** Response for session routes when the session is missing/expired (non-API). Default: 401. */
-    setSessionExpiredRouteHandler(handler: FallbackHandlerFunction): this;
+    setSessionExpiredRouteHandler(handler: LambderFallbackHandler): this;
     /**
      * Terminal public-file layer. Runs only when no route matched, so it can
      * never shadow routes registered after it. Serves files from the `files`
-     * source configured at creation, traversal-safe, mime-typed,
+     * source configured at creation, under the reader's path rule, mime-typed,
      * memory-cached, with the immutable-cache heuristic for content-hashed
-     * assets; when the source has no such file the request falls through to
-     * setRouteFallbackHandler, where the app decides what remains (e.g.
-     * render an app shell with res.templateFile).
+     * assets. Only configured methods reach it, default GET/HEAD, as for
+     * serveIndexHtml; a gated-out method and a path the source has no file
+     * for both fall through to setRouteFallbackHandler, where the app decides
+     * what remains (e.g. render an app shell with res.templateFile).
      */
     servePublicFiles(options?: LambderPublicFilesOptions): this;
     /**
@@ -279,64 +111,33 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
      * Without a handler, index.html from the files source is served via
      * res.templateFile (markers optional) with no-cache.
      */
-    serveIndexHtml(handler?: FallbackHandlerFunction, options?: LambderIndexHtmlOptions): this;
-    /** Apply the serveIndexHtml gates; null means fall through. */
-    private tryServeIndexHtml;
-    private getOrCreatePolicyEngine;
-    /**
-     * The response for a rejected input: the app's
-     * setApiInputValidationErrorHandler when set, otherwise the standard 422
-     * body. The API's own schema and every preflight slice (guard inputs,
-     * rate-limit keys) answer through here, so one failure has one shape.
-     */
-    private inputValidationRefusal;
-    /** Registration-time checks shared by addApi/addSessionApi. */
-    private assertApiRegistration;
-    addRoute<TPath extends Path>(condition: TPath, actionFn: (ctx: LambderRenderContext<any, PathParamsOf<TPath>>, resolver: LambderResolver) => MaybePromise<LambderResponse>): this;
-    addRoute(condition: RegExp | ConditionFunction | LambderRouteMatcher, actionFn: ActionFunction): this;
-    addSessionRoute<TPath extends Path>(condition: TPath, actionFn: (ctx: LambderSessionRenderContext<any, TSessionData, PathParamsOf<TPath>>, resolver: LambderResolver) => MaybePromise<LambderResponse>): this;
-    addSessionRoute(condition: RegExp | ConditionFunction | LambderRouteMatcher, actionFn: SessionActionFunction<TSessionData>): this;
-    use<_TNewContract extends Record<string, any>>(plugin: (lambder: Lambder<TSessionData, _TContract, any, any, any, any, any>) => Lambder<TSessionData, _TNewContract, any, any, any, any, any>): Lambder<TSessionData, _TNewContract extends _TContract ? _TNewContract : (_TContract & _TNewContract), _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired, _TPublicGuardsRequired>;
-    addApi<TName extends string, TInput extends z.ZodType, TOutput extends z.ZodType, const TRateOpt extends LambderRateLimitOption<_TRateLimitPolicies, z.infer<TInput>, false> = never, const TGuardsOpt extends LambderGuardsOption<_TGuards, z.infer<TInput>, false> = never>(name: TName, schema: {
+    serveIndexHtml(handler?: LambderFallbackHandler, options?: LambderIndexHtmlOptions): this;
+    addRoute<TPath extends LambderRoutePath>(condition: TPath, actionFn: (ctx: LambderRenderContext<any, LambderPathParamsOf<TPath>>, resolver: LambderResolver) => MaybePromise<LambderResponse>): this;
+    addRoute(condition: RegExp | LambderRouteConditionFn | LambderRouteMatcher, actionFn: LambderRouteHandler): this;
+    addSessionRoute<TPath extends LambderRoutePath>(condition: TPath, actionFn: ((ctx: LambderSessionRenderContext<any, TSessionData, LambderPathParamsOf<TPath>>, resolver: LambderResolver) => MaybePromise<LambderResponse>) & LambderSessionEnabledInstance<_TSessionsEnabled>): this;
+    addSessionRoute(condition: RegExp | LambderRouteConditionFn | LambderRouteMatcher, actionFn: LambderSessionRouteHandler<TSessionData> & LambderSessionEnabledInstance<_TSessionsEnabled>): this;
+    addApi<TName extends string, TInput extends z.ZodType, TOutput extends z.ZodType, const TRateOpt extends LambderRateLimitOption<_TRateLimitPolicies, z.infer<TInput>, false> = never, const TGuardsOpt extends LambderGuardsOption<_TGuards, z.infer<TInput>, false> = never, const TIdempotencyOpt extends LambderApiIdempotencyOption = never>(name: TName, schema: {
         input: TInput;
         output: TOutput;
     } & {
         /** Named rate limits, checked in declared order before guards and validation: a name, a list of names, or a { name: true | override } map (windows overridable on perApi budgets, errorMessage on any). The first exceeded one refuses (429 envelope + Retry-After); attempts count on every counter checked before it. */
         rateLimit?: TRateOpt;
         /** Replay-protect this API per client idempotencyKey. Requires the idempotency option at creation. */
-        idempotency?: _TIdempotencyEnabled extends true ? (boolean | {
-            ttlSeconds?: number;
-        }) : never;
-    } & LambderRequirableGuardsField<_TPublicGuardsRequired, TGuardsOpt>, handler: (ctx: LambderRenderContext<z.infer<TInput>, Record<string, string>, LambderGuardDataOf<_TGuards, TGuardsOpt>>, resolver: LambderResolver<z.infer<TOutput>>) => MaybePromise<LambderResponse>): Lambder<TSessionData, MergeContract<_TContract, TName, z.infer<TInput>, z.infer<TOutput>, LambderGuardInputsOf<_TGuards, TGuardsOpt>, TGuardsOpt>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired, _TPublicGuardsRequired>;
-    addSessionApi<TName extends string, TInput extends z.ZodType, TOutput extends z.ZodType, const TRateOpt extends LambderRateLimitOption<_TRateLimitPolicies, z.infer<TInput>, true> = never, const TGuardsOpt extends LambderGuardsOption<_TGuards, z.infer<TInput>, true> = never>(name: TName, schema: {
+        idempotency?: _TIdempotencyEnabled extends true ? TIdempotencyOpt : never;
+    } & LambderRequirableGuardsField<_TPublicGuardsRequired, TGuardsOpt>, handler: (ctx: LambderRenderContext<z.infer<TInput>, Record<string, string>, LambderGuardDataOf<_TGuards, TGuardsOpt>>, resolver: LambderResolver<z.infer<TOutput>>) => MaybePromise<LambderResponse>): Lambder<TSessionData, LambderMergeContract<_TContract, TName, LambderContractEntry<z.infer<TInput>, z.infer<TOutput>, "public", LambderGuardInputsOf<_TGuards, TGuardsOpt>, TGuardsOpt, TRateOpt, TIdempotencyOpt>>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired, _TPublicGuardsRequired, _TSessionsEnabled>;
+    addSessionApi<TName extends string, TInput extends z.ZodType, TOutput extends z.ZodType, const TRateOpt extends LambderRateLimitOption<_TRateLimitPolicies, z.infer<TInput>, true> = never, const TGuardsOpt extends LambderGuardsOption<_TGuards, z.infer<TInput>, true> = never, const TIdempotencyOpt extends LambderApiIdempotencyOption = never>(name: TName, schema: {
         input: TInput;
         output: TOutput;
     } & {
         /** Named rate limits, checked in declared order before guards and validation: a name, a list of names, or a { name: true | override } map (windows overridable on perApi budgets, errorMessage on any). The first exceeded one refuses (429 envelope + Retry-After); attempts count on every counter checked before it. */
         rateLimit?: TRateOpt;
         /** Replay-protect this API per client idempotencyKey. Requires the idempotency option at creation. */
-        idempotency?: _TIdempotencyEnabled extends true ? (boolean | {
-            ttlSeconds?: number;
-        }) : never;
-    } & LambderRequirableGuardsField<_TSessionGuardsRequired, TGuardsOpt>, handler: (ctx: LambderSessionRenderContext<z.infer<TInput>, TSessionData, Record<string, string>, LambderGuardDataOf<_TGuards, TGuardsOpt>>, resolver: LambderResolver<z.infer<TOutput>>) => MaybePromise<LambderResponse>): Lambder<TSessionData, MergeContract<_TContract, TName, z.infer<TInput>, z.infer<TOutput>, LambderGuardInputsOf<_TGuards, TGuardsOpt>, TGuardsOpt>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired, _TPublicGuardsRequired>;
-    /**
-     * Fetch the session or short-circuit the request: API calls get the
-     * protocol's { sessionExpired: true } response (handled by LambderCaller),
-     * routes get the sessionExpiredRouteHandler response (default 401).
-     */
-    private requireSession;
-    addHook(hookEvent: 'created', hookFn: HookCreatedFunction, priority?: number): this;
-    addHook(hookEvent: 'beforeRender', hookFn: HookBeforeRenderFunction, priority?: number): this;
-    addHook(hookEvent: 'afterRender', hookFn: HookAfterRenderFunction, priority?: number): this;
-    addHook(hookEvent: 'fallback', hookFn: HookFallbackFunction, priority?: number): this;
-    getSessionController(ctx: LambderRenderContext | LambderSessionRenderContext<any, TSessionData>): LambderSessionController<TSessionData>;
-    getResponseBuilder(ctx?: LambderRenderContext): LambderResponseBuilder<any>;
-    private getResolver;
-    /** Map a thrown LambderApiError onto the structured API envelope. */
-    private apiErrorResponse;
-    getHandler(): LambderHandler;
-    /** True when the Lambda event is an API Gateway HTTP event (REST API v1 or HTTP API / Function URL v2). */
-    static isHttpEvent(event: unknown): event is LambderHttpEvent;
+        idempotency?: _TIdempotencyEnabled extends true ? TIdempotencyOpt : never;
+    } & LambderRequirableGuardsField<_TSessionGuardsRequired, TGuardsOpt> & LambderSessionEnabledInstance<_TSessionsEnabled>, handler: (ctx: LambderSessionRenderContext<z.infer<TInput>, TSessionData, Record<string, string>, LambderGuardDataOf<_TGuards, TGuardsOpt>>, resolver: LambderResolver<z.infer<TOutput>>) => MaybePromise<LambderResponse>): Lambder<TSessionData, LambderMergeContract<_TContract, TName, LambderContractEntry<z.infer<TInput>, z.infer<TOutput>, "session", LambderGuardInputsOf<_TGuards, TGuardsOpt>, TGuardsOpt, TRateOpt, TIdempotencyOpt>>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired, _TPublicGuardsRequired, _TSessionsEnabled>;
+    addHook(hookEvent: 'created', hookFn: LambderCreatedHook, priority?: number): this;
+    addHook(hookEvent: 'beforeRender', hookFn: LambderBeforeRenderHook, priority?: number): this;
+    addHook(hookEvent: 'afterRender', hookFn: LambderAfterRenderHook, priority?: number): this;
+    addHook(hookEvent: 'fallback', hookFn: LambderFallbackHook, priority?: number): this;
     /**
      * Register an action that filters on the raw Lambda event and, for HTTP
      * invocations, the context (ctx is null otherwise).
@@ -355,13 +156,76 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
      */
     addAction<TEvent>(filter: (event: unknown, ctx: LambderRenderContext | null) => event is TEvent, actionFn: (event: TEvent, tools: LambderActionTools) => MaybePromise<unknown>): this;
     addAction(filter: (event: unknown, ctx: LambderRenderContext | null) => boolean, actionFn: (event: unknown, tools: LambderActionTools) => MaybePromise<unknown>): this;
-    /** Dispatch a non-HTTP Lambda event to the registered actions. */
-    renderEvent(event: unknown, lambdaContext: Context): Promise<unknown>;
+    use<_TNewContract extends Record<string, any>>(plugin: (lambder: Lambder<TSessionData, _TContract, any, any, any, any, any, any>) => Lambder<TSessionData, _TNewContract, any, any, any, any, any, any>): Lambder<TSessionData, _TNewContract extends _TContract ? _TNewContract : (_TContract & _TNewContract), _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired, _TPublicGuardsRequired, _TSessionsEnabled>;
+    /**
+     * Sessions for this request: what handlers create, rotate, refresh and
+     * end sessions with. An API call presents its posted CSRF token; a route
+     * presents cookies alone.
+     */
+    getSessionController(ctx: LambderRenderContext | LambderSessionRenderContext<any, TSessionData>): LambderSessionController<TSessionData>;
+    /** The session manager, for code that works on sessions outside a request (maintenance, tests). */
+    getSessionManager(): LambderSessionManager<TSessionData>;
+    getResponseBuilder(ctx?: LambderRenderContext): LambderResponseBuilder<any>;
+    private getResolver;
+    getHandler(): LambderHandler;
+    /** True when the Lambda event is an API Gateway HTTP event (REST API v1 or HTTP API / Function URL v2). */
+    static isHttpEvent(event: unknown): event is LambderHttpEvent;
     private ensureInitialized;
     private applyCors;
+    /**
+     * The beforeRender hooks, in priority order: the replaced context to
+     * continue with, or the response one of them answered with.
+     *
+     * Its own method because BOTH request paths run it. Left inline after the
+     * match, it ran for routes and APIs and for nothing else, so a
+     * servePublicFiles or serveIndexHtml answer, which is every asset and
+     * every app-shell page, skipped the one hook that can inspect a request,
+     * replace its context or short-circuit it: a security header written in a
+     * hook reached the API answers and not the HTML it was written for, and a
+     * maintenance-mode hook served the whole frontend anyway.
+     */
+    private runBeforeRenderHooks;
     private handleNoMatchedAction;
+    /**
+     * True for the OPTIONS request the CORS layer answers by itself. Asked
+     * twice: once to build the 204, once at the end of render() to decide
+     * which form of the headers goes on. Asking once and letting the tail
+     * apply the ordinary headers on top of the 204's would put both forms on
+     * a preflight, answering `Vary: Origin, Origin` and an
+     * Access-Control-Expose-Headers that means nothing before a request.
+     */
+    private isCorsPreflight;
     private resolveRequest;
     render(event: LambderHttpEvent, lambdaContext: Context): Promise<LambderHttpResponse>;
+    /**
+     * Fetch the session for a session route or short-circuit it with the
+     * sessionExpiredRouteHandler response (default 401). Session APIs never
+     * come through here: the pipeline answers them with the protocol's
+     * { sessionExpired: true } envelope itself.
+     */
+    private requireSession;
+    /** Dispatch a non-HTTP Lambda event to the registered actions. */
+    renderEvent(event: unknown, lambdaContext: Context): Promise<unknown>;
+    /** Registration-time checks shared by addApi/addSessionApi. */
+    private assertApiRegistration;
+    /**
+     * The answer for a rejected input: the app's
+     * setApiInputValidationErrorHandler when set, otherwise the standard 422
+     * body. The API's own schema and every preflight slice (guard inputs,
+     * rate-limit keys) answer through here, so one failure has one shape.
+     */
+    private inputValidationRefusal;
+    /**
+     * One API call through the core: the pipeline runs the protocol steps and
+     * calls back for the handler, whose LambderResponse (returned, or thrown
+     * via res.die.*) becomes the answer the pipeline stores and hands back.
+     * The context is the pipeline's context, so a session it fetched is on
+     * ctx.session and the validated payload is on ctx.apiPayload when the
+     * handler runs.
+     */
+    private runApi;
+    /** A thrown LambderApiRefusal (from a hook, say) as the structured API envelope: the core's one mapping. */
+    private apiErrorResponse;
 }
 /**
  * The canonical way to create an instance: fix the session data type first,
@@ -375,7 +239,7 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
  * // app.ts (imports no api modules, so modules can import the type back)
  * export const lambderApp = initLambder<SessionData>().create({
  *     apiPath: "/api",
- *     session: { tableName: "app-session", tableRegion: "us-east-1", sessionSalt: "..." },
+ *     session: { store: new LambderDdbSessionStore({ tableName: "app-session", region: "us-east-1" }), sessionSalt: "..." },
  *     rateLimits: { limiter, policies },
  *     guards,
  *     idempotency: { store },
@@ -399,7 +263,7 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
  * for untyped or session-data-free instances.
  */
 export declare const initLambder: <TSessionData = any>() => {
-    create<const TOptions extends LambderCreateOptions<TSessionData>>(options: TOptions): Lambder<TSessionData, {}, TOptions["rateLimits"] extends {
+    create<const TOptions extends LambderCreateOptions<TSessionData>>(options: LambderNoExtraKeys<TOptions, LambderCreateOptions<TSessionData>> & LambderNestedOptionChecks<TSessionData, TOptions>): Lambder<TSessionData, {}, TOptions["rateLimits"] extends {
         policies: infer TPolicies extends Record<string, LambderApiRateLimitPolicyConfig>;
-    } ? TPolicies : {}, TOptions["guards"] extends Record<string, LambderApiGuard<any, any, any>> ? LambderGuardMetaMap<TOptions["guards"]> : {}, TOptions["idempotency"] extends LambderApiIdempotencyConfig ? true : false, TOptions["requireSessionApiGuards"] extends true ? true : false, TOptions["requirePublicApiGuards"] extends true ? true : false>;
+    } ? TPolicies : {}, TOptions["guards"] extends Record<string, LambderApiGuard<any, any, any>> ? LambderGuardMetaMap<TOptions["guards"]> : {}, TOptions["idempotency"] extends LambderApiIdempotencyConfig ? true : false, [LambderGivenOption<TOptions, "requireSessionApiGuards">] extends [false | undefined] ? false : true, [LambderGivenOption<TOptions, "requirePublicApiGuards">] extends [false | undefined] ? false : true, [LambderGivenOption<TOptions, "session">] extends [undefined] ? false : true>;
 };

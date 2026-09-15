@@ -10,12 +10,12 @@
 import { describe, it, expect, expectTypeOf, vi, beforeEach, afterEach } from 'vitest';
 import { z } from 'zod';
 import Lambder, { initLambder } from '../src/core/Lambder.js';
-import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
-import { lambderGuard } from '../src/policies/LambderApiGuards.js';
-import type { LambderGuardMetaMap } from '../src/policies/LambderApiGuards.js';
+import { LambderMemorySessionStore } from '../src/stores/LambderMemorySessionStore.js';
+import { lambderGuard } from '../src/core/LambderPolicyBuilders.js';
+import type { LambderGuardMetaMap } from '../src/api/LambderApiGuards.js';
 import LambderCaller from '../src/client/LambderCaller.js';
-import type { ApiContractShape } from '../src/shared/LambderApiContract.js';
-import { createApiEvent, createMockContext } from './helpers.js';
+import type { LambderApiContractShape } from '../src/shared/wire/LambderApiContract.js';
+import { createApiEvent, createMockContext, testPublicFiles } from './helpers.js';
 
 type Permission = 'USERS.MANAGE' | 'USERS.VIEW' | 'BILLING.MANAGE';
 
@@ -23,7 +23,7 @@ type Permission = 'USERS.MANAGE' | 'USERS.VIEW' | 'BILLING.MANAGE';
 const guards = {
     /** Parameterized: the API names the permission it needs. */
     orgPermission: lambderGuard({
-        handler: async (_ctx, _payload, _res, permission: Permission) => ({ permission }),
+        handler: async (_ctx, _payload, permission: Permission) => ({ permission }),
     }),
     /** guardInput mode: the value travels beside the payload, in options.guardInputs. */
     captcha: lambderGuard({
@@ -37,8 +37,9 @@ const guards = {
 } as const;
 
 const createApp = () => initLambder<{ userId: string }>().create({
-    files: new LambderLocalFileSource({ root: './public' }),
+    files: testPublicFiles(),
     apiPath: '/api',
+    session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
     guards,
 });
 
@@ -93,8 +94,9 @@ describe('ApiContract - the guards option on the contract', () => {
 
     it('session APIs carry their guards too, including on a requireSessionApiGuards instance', () => {
         const _app = initLambder<{ userId: string }>().create({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api',
+            session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
             guards,
             requireSessionApiGuards: true,
         })
@@ -231,12 +233,27 @@ describe('ApiContract - the added guards entry changes nothing for consumers', (
             text: async () => JSON.stringify({ apiVersion: '1', payload: { result: 'ok' } }),
         }));
         vi.stubGlobal('fetch', fetchMock);
-        vi.stubGlobal('window', { location: { hostname: 'localhost' } });
+        vi.stubGlobal('location', { hostname: 'localhost' });
     });
     afterEach(() => { vi.unstubAllGlobals(); });
 
-    it('the contract still satisfies ApiContractShape', () => {
-        expectTypeOf<Contract>().toExtend<ApiContractShape>();
+    it('the contract still satisfies LambderApiContractShape', () => {
+        expectTypeOf<Contract>().toExtend<LambderApiContractShape>();
+    });
+
+    it('holds a hand-written contract to the real option shapes, so a typo in one is a compile error', () => {
+        // LambderApiContractShape typed mode, guards, rateLimit and idempotency as
+        // `any`, so a hand-written contract (what a client holds, and what
+        // the mock registry is checked against) could say mode: "sesion" and
+        // every mode-dependent check silently answered "either".
+        type Typo = { thing: { input: { value: string }; output: null; mode: 'sesion' } };
+        // @ts-expect-error "sesion" is not a mode; the modes are "public" and "session"
+        expectTypeOf<Typo>().toExtend<LambderApiContractShape>();
+
+        type Written = {
+            thing: { input: { value: string }; output: null; mode: 'session'; guards: readonly ['notBanned']; rateLimit: 'perIp'; idempotency: { ttlSeconds: 60 } };
+        };
+        expectTypeOf<Written>().toExtend<LambderApiContractShape>();
     });
 
     it('call options still follow guardInputs only: a guard with no client input adds no argument', async () => {
@@ -248,7 +265,7 @@ describe('ApiContract - the added guards entry changes nothing for consumers', (
         // A guardInput-mode guard still does.
         await caller.api('captchaed', { value: 'x' }, { guardInputs: { captcha: { token: 'abc' } } });
         // @ts-expect-error the captcha token cannot be omitted
-        void caller.api('captchaed', { value: 'x' }).catch(() => {});
+        await caller.api('captchaed', { value: 'x' }).catch(() => {});
 
         expect(fetchMock).toHaveBeenCalledTimes(4);
     });
@@ -272,11 +289,11 @@ describe('ApiContract - the declaration is what runs', () => {
     it('the param the contract records is the param the guard receives', async () => {
         let sawPermission: Permission | null = null;
         const app = initLambder().create({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api',
             guards: {
                 orgPermission: lambderGuard({
-                    handler: async (_ctx, _payload, _res, permission: Permission) => { sawPermission = permission; },
+                    handler: async (_ctx, _payload, permission: Permission) => { sawPermission = permission; },
                 }),
             },
         })

@@ -2,13 +2,16 @@
  * LambderCaller: outcome semantics, per-call handler overrides, timeout.
  *
  * - apiOutcome() resolves to a discriminated { ok } union and never throws.
- * - api() keeps its payload-shortcut shape (null/undefined on failure).
+ * - api() keeps its payload-shortcut shape (undefined on failure).
  * - Per-call handlers override the constructor handlers.
  * - timeoutMs aborts the fetch and reports reason 'timeout'.
+ * - What the contract decides at the call site: the output, the payload and
+ *   the header types, none of which an annotation may replace.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, expectTypeOf, vi, beforeEach, afterEach } from 'vitest';
 import LambderCaller from '../src/client/LambderCaller.js';
+import type { LambderApiOutcome } from '../src/shared/wire/LambderApiOutcome.js';
 
 /** Minimal Response stand-in: enough surface for the caller's dispatch. */
 const mockResponse = (body: any, init: { status?: number, statusText?: string, rawText?: string, invalidJson?: boolean } = {}) => ({
@@ -29,7 +32,7 @@ const stubFetch = (impl: (url: any, init: any) => any) => {
 };
 
 beforeEach(() => {
-    vi.stubGlobal('window', { location: { hostname: 'localhost' } });
+    vi.stubGlobal('location', { hostname: 'localhost' });
 });
 afterEach(() => {
     vi.unstubAllGlobals();
@@ -63,9 +66,37 @@ describe('LambderCaller - outcomes', () => {
         const outcome = await caller.apiOutcome('doThing', {});
         expect(outcome).toMatchObject({ ok: false, reason: 'errorMessage', errorMessage: { type: 'warning', content: 'Denied.' } });
         expect(errorMessageHandler).toHaveBeenCalledWith({ type: 'warning', content: 'Denied.' });
-        if(!outcome.ok) expect(outcome.response?.errorMessage).toEqual({ type: 'warning', content: 'Denied.' });
+        // An envelope refusal always carries the envelope, so the narrowed
+        // outcome needs no optional read to reach it.
+        if(!outcome.ok && outcome.reason === 'errorMessage') expect(outcome.response.errorMessage).toEqual({ type: 'warning', content: 'Denied.' });
 
         expect(await caller.api('doThing', {})).toBe(null);
+    });
+
+    it('a refusal an app spelled out as the empty string is still a refusal', async () => {
+        // The envelope keeps errorMessage: "" on purpose, since an app that
+        // refuses with a lookup that came back empty still meant to refuse.
+        // The reader tested truthiness, so the refusal arrived, was dropped,
+        // and the call resolved ok: true with a null payload.
+        stubFetch(async () => mockResponse({ apiVersion: '1', payload: null, errorMessage: '' }));
+        const errorMessageHandler = vi.fn();
+        const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, errorMessageHandler });
+
+        const outcome = await caller.apiOutcome('doThing', {});
+
+        expect(outcome).toMatchObject({ ok: false, reason: 'errorMessage', errorMessage: '' });
+        expect(errorMessageHandler).toHaveBeenCalledWith('');
+    });
+
+    it('a message an app spelled out as the empty string still reaches messageHandler', async () => {
+        stubFetch(async () => mockResponse({ apiVersion: '1', payload: 'ok', message: '' }));
+        const messageHandler = vi.fn();
+        const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, messageHandler });
+
+        const outcome = await caller.apiOutcome('doThing', {});
+
+        expect(outcome.ok).toBe(true);
+        expect(messageHandler).toHaveBeenCalledWith('');
     });
 
     it('sessionExpired envelope: reason sessionExpired, handler called, api() null', async () => {
@@ -191,6 +222,17 @@ describe('LambderCaller - createIdempotencyKey', () => {
         expect(key).toMatch(V4_SHAPE);
     });
 
+    it('refuses to invent a key on a runtime with no random source at all', () => {
+        // The key is what scopes the replay record for a logged-out client, so
+        // a Math.random fallback handed that client's stored response to
+        // whoever guessed the key. Every browser with crypto at all has
+        // getRandomValues (only randomUUID is secure-context gated), so this
+        // is a runtime that cannot have an idempotency key rather than one
+        // that gets a weaker one.
+        vi.stubGlobal('crypto', undefined);
+        expect(() => LambderCaller.createIdempotencyKey()).toThrow(/unguessable/);
+    });
+
     it('createIdempotencyKeyScope keeps one key per operation and rotates to a fresh one', () => {
         const scope = LambderCaller.createIdempotencyKeyScope();
         const first = scope.current;
@@ -258,6 +300,48 @@ describe('LambderCaller - timeout and abort', () => {
         expect(outcome.ok).toBe(true);
     });
 
+    it('lets go of a shared external signal when the call settles', async () => {
+        // One controller per page or per view is the normal shape, so it
+        // outlives the calls made under it. A listener left behind per call
+        // pins that call's own AbortController for as long as the signal
+        // lives, and they accumulate.
+        stubFetch(async () => mockResponse({ apiVersion: '1', payload: 'ok' }));
+        const controller = new AbortController();
+        let listeners = 0;
+        const { addEventListener, removeEventListener } = controller.signal;
+        controller.signal.addEventListener = ((...args: Parameters<typeof addEventListener>) => {
+            listeners += 1;
+            return addEventListener.apply(controller.signal, args);
+        }) as typeof addEventListener;
+        controller.signal.removeEventListener = ((...args: Parameters<typeof removeEventListener>) => {
+            listeners -= 1;
+            return removeEventListener.apply(controller.signal, args);
+        }) as typeof removeEventListener;
+        const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, timeoutMs: 5000 });
+
+        for(let i = 0; i < 10; i += 1) await caller.apiOutcome('thing', {}, { signal: controller.signal });
+
+        expect(listeners).toBe(0);
+    });
+
+    it('refuses a call whose signal had already aborted, without reaching the transport', async () => {
+        // No timeoutMs, so nothing chains a controller: the caller itself has
+        // to notice. Honouring the signal is the transport's obligation and
+        // not every transport does, and a call already given up on should
+        // never leave.
+        const fetchMock = stubFetch(async () => mockResponse({ apiVersion: '1', payload: 'ok' }));
+        const controller = new AbortController();
+        controller.abort();
+        const errors: Error[] = [];
+        const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, errorHandler: (err) => { errors.push(err); } });
+
+        const outcome = await caller.apiOutcome('anything', {}, { signal: controller.signal });
+
+        expect(outcome).toMatchObject({ ok: false, reason: 'network' });
+        expect(fetchMock).not.toHaveBeenCalled();
+        expect(errors.length).toBe(1);
+    });
+
     it('an already-aborted external signal fails as network, not timeout', async () => {
         stubFetch((url: any, init: any) => new Promise((_, reject) => {
             if(init.signal?.aborted) reject(new DOMException('The operation was aborted.', 'AbortError'));
@@ -269,6 +353,142 @@ describe('LambderCaller - timeout and abort', () => {
 
         const outcome = await caller.apiOutcome('anything', {}, { signal: controller.signal });
         expect(outcome).toMatchObject({ ok: false, reason: 'network' });
+    });
+});
+
+describe('LambderCaller - the answer\'s logList', () => {
+    it('goes to logListHandler when there is one, and to console.log when there is not', async () => {
+        stubFetch(async () => mockResponse({ apiVersion: '1', payload: 'ok', logList: [{ step: 1 }, { step: 2 }] }));
+        const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => {});
+        try {
+            await new LambderCaller({ apiPath: '/api', isCorsEnabled: false }).api('thing', {});
+            expect(consoleLog).toHaveBeenCalledTimes(2);
+            expect(consoleLog).toHaveBeenCalledWith('[lambder]', { step: 1 });
+
+            consoleLog.mockClear();
+            const seen: unknown[] = [];
+            const caller = new LambderCaller({
+                apiPath: '/api', isCorsEnabled: false,
+                logListHandler: (apiName, logList) => { seen.push([apiName, logList]); },
+            });
+            await caller.api('thing', {});
+            expect(seen).toEqual([['thing', [{ step: 1 }, { step: 2 }]]]);
+            // The handler replaces the printing rather than adding to it.
+            expect(consoleLog).not.toHaveBeenCalled();
+
+            // And, like every other handler, it can be overridden per call.
+            const perCall: unknown[] = [];
+            await caller.api('thing', {}, { logListHandler: (_apiName, logList) => { perCall.push(logList); } });
+            expect(perCall).toEqual([[{ step: 1 }, { step: 2 }]]);
+            expect(seen.length).toBe(1);
+        } finally {
+            consoleLog.mockRestore();
+        }
+    });
+});
+
+describe('LambderCaller - the logs of an answer that failed', () => {
+    it('reach the handler for a 500 and for a 422, not only for an answer the caller read on', async () => {
+        // The surfacing sat after the early returns for 'server' and
+        // 'validation', so a 500 whose global error handler attached the crash
+        // and the log trail was the one answer whose logs were never printed,
+        // which is the answer whose logs are worth the most.
+        const seen: unknown[][] = [];
+        const caller = new LambderCaller({
+            apiPath: '/api', isCorsEnabled: false,
+            logListHandler: (apiName, logList) => { seen.push([apiName, logList]); },
+        });
+
+        stubFetch(async () => mockResponse(null, {
+            status: 500, statusText: 'Internal Server Error',
+            rawText: JSON.stringify({ apiVersion: '1', payload: null, errorMessage: 'Internal server error.', logList: [{ step: 'before the crash' }] }),
+        }));
+        expect((await caller.apiOutcome('crash', {})).ok).toBe(false);
+
+        // The callee writes the call's logList onto the 422 body as it does
+        // onto a success, and both readers used to drop it there.
+        stubFetch(async () => mockResponse({
+            error: 'Input validation failed',
+            zodError: { name: 'ZodError', message: '', issues: [] },
+            logList: [{ step: 'before the rejection' }],
+        }, { status: 422 }));
+        expect((await caller.apiOutcome('register', { email: 'nope' })).ok).toBe(false);
+
+        expect(seen).toEqual([
+            ['crash', [{ step: 'before the crash' }]],
+            ['register', [{ step: 'before the rejection' }]],
+        ]);
+    });
+});
+
+describe('LambderCaller - what the contract decides at the call site', () => {
+    type Contract = {
+        'user.get': { input: { id: string }, output: { name: string } },
+        'ping': { input: undefined, output: string },
+    };
+
+    it('computes the output from the contract, so an annotation cannot replace it', async () => {
+        stubFetch(async () => mockResponse({ apiVersion: '1', payload: { name: 'Ada' } }));
+        const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false });
+
+        const out = await caller.api('user.get', { id: '1' });
+        expectTypeOf(out).toEqualTypeOf<{ name: string } | null | undefined>();
+
+        // @ts-expect-error the contract's output is not { madeUp: number }
+        const wrong: { madeUp: number } | null | undefined = await caller.api('user.get', { id: '1' });
+        void wrong;
+
+        const outcome = await caller.apiOutcome('user.get', { id: '1' });
+        // @ts-expect-error the same holds for the full outcome
+        const wrongOutcome: LambderApiOutcome<{ madeUp: number }> = outcome;
+        void wrongOutcome;
+    });
+
+    it('requires the payload unless the API\'s input accepts undefined', async () => {
+        stubFetch(async () => mockResponse({ apiVersion: '1', payload: 'ok' }));
+        const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false });
+
+        await caller.api('user.get', { id: '1' });
+        // @ts-expect-error a required input cannot be omitted
+        await caller.api('user.get');
+        // @ts-expect-error nor on the outcome form
+        await caller.apiOutcome('user.get');
+        // An input that accepts undefined keeps the one-argument call.
+        await caller.api('ping');
+        await caller.apiOutcome('ping');
+    });
+
+    it('requires an idempotencyKey exactly where the contract declares idempotency', async () => {
+        stubFetch(async () => mockResponse({ apiVersion: '1', payload: 'ok' }));
+        type KeyedContract = {
+            'order.create': { input: { qty: number }, output: { orderId: string }, idempotency: true },
+            'order.list': { input: undefined, output: string[] },
+            'order.draft': { input: { qty: number }, output: null, idempotency: false },
+            'order.gift': { input: { qty: number }, output: null, idempotency: true, guardInputs: { turnstile: { token: string } } },
+        };
+        const caller = new LambderCaller<KeyedContract>({ apiPath: '/api', isCorsEnabled: false });
+
+        await caller.api('order.create', { qty: 1 }, { idempotencyKey: 'k-abcdefabcdefabcdef' });
+        // @ts-expect-error a declared-idempotent API cannot be called without a key
+        await caller.api('order.create', { qty: 1 });
+        // @ts-expect-error nor with options that leave it out
+        await caller.apiOutcome('order.create', { qty: 1 }, { timeoutMs: 50 });
+        // The requirement composes with the guardInputs one, on the same argument.
+        await caller.api('order.gift', { qty: 1 }, { idempotencyKey: 'k-abcdefabcdefabcdef', guardInputs: { turnstile: { token: 't' } } });
+        // @ts-expect-error the key is missing beside the guard input that is there
+        await caller.api('order.gift', { qty: 1 }, { guardInputs: { turnstile: { token: 't' } } });
+        // An API that declares none, or declares it off, is unaffected.
+        await caller.api('order.list');
+        await caller.api('order.draft', { qty: 1 });
+    });
+
+    it('types per-call headers as strings, since that is what a header is', async () => {
+        stubFetch(async () => mockResponse({ apiVersion: '1', payload: 'ok' }));
+        const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false });
+
+        await caller.api('ping', undefined, { headers: { 'X-Count': '123' } });
+        // @ts-expect-error a header value is a string; a number used to compile and reach fetch
+        await caller.api('ping', undefined, { headers: { count: 123 } });
     });
 });
 
@@ -344,7 +564,7 @@ describe('LambderCaller - lifecycle handlers and resilience', () => {
 
         const outcome = await caller.apiOutcome('doThing', {});
         expect(outcome).toMatchObject({ ok: false, reason: 'unknown' });
-        if(!outcome.ok) expect(outcome.error?.message).toBe('handler bug');
+        if(!outcome.ok && outcome.reason === 'unknown') expect(outcome.error.message).toBe('handler bug');
     });
 });
 
@@ -442,7 +662,7 @@ describe('LambderCaller - a 5xx keeps the envelope the server sent', () => {
 
         const outcome = await caller.apiOutcome('crash', {});
         expect(outcome).toMatchObject({ ok: false, reason: 'server', status: 500, errorMessage: 'Internal server error.' });
-        if(outcome.ok) throw new Error('unreachable');
+        if(outcome.ok || outcome.reason !== 'server') throw new Error('unreachable');
         expect(outcome.response?.crash).toEqual(crash);
         expect(outcome.response?.logList).toEqual([{ before: 'the throw' }]);
     });

@@ -119,9 +119,11 @@ by hand; see
 ## Request flow per API
 
 ```
-session (session APIs)
+version gate → payload restore
+  → rate limits keyed on the request alone (per: "ip")
+  → session (session APIs)
   → idempotency replay lookup
-  → rate limits
+  → the remaining rate limits (per: "session", custom keys)
   → guards
   → zod validation
   → idempotency claim
@@ -129,9 +131,13 @@ session (session APIs)
   → idempotency store
 ```
 
-The replay lookup runs first on purpose: a completed idempotent request answers
-its stored response without burning rate-limit quota or re-running guards (the
-original already passed them, and no handler executes either way).
+The replay lookup runs before the policies below it on purpose: a completed
+idempotent request answers its stored response without burning that quota or
+re-running guards (the original already passed them, and no handler executes
+either way). An `ip`-keyed policy is checked before the session read and the
+replay lookup instead, because those store reads are what it exists to bound,
+so a retry does count against an `ip` budget. See
+[API policies](./api-policies.md#request-flow).
 
 ## Refusals
 
@@ -175,22 +181,50 @@ the reserved `lambder/` prefix, so app codes never collide:
 | `invalidIdempotencyKey` | `lambder/invalid-idempotency-key` | The `idempotencyKey` is malformed (400) |
 | `apiNotFound` | `lambder/api-not-found` | No API is registered under the requested name |
 | `invalidRequestPayload` | `lambder/invalid-request-payload` | A compressed request payload (`payloadGz` or `payloadBr`) is malformed, carries both fields, or exceeds `maxRequestPayloadBytes` (400) |
+| `notMocked` | `lambder/not-mocked` | The mock runtime was asked for an endpoint registered as `notMocked` (200; the mock runtime only) |
 
 A rate-limit policy's own `errorMessage` inherits `lambder/rate-limited` unless
 it sets a code, so an `errorMessageHandler` can treat every rate limit alike and
 still special-case the ones you name.
 
-### `LambderApiError`
-
-For full control of the `errorMessage` payload (apps with their own message
-vocabulary), throw `LambderApiError` directly; `refuse()` is sugar over it:
+On the client, name your own vocabulary as the type argument of
+`LambderRefusalMessage` and the switch is checked: every framework code plus
+yours, and nothing else.
 
 ```typescript
-import { LambderApiError } from "lambder";
+import { LAMBDER_REFUSAL_CODES, type LambderRefusalMessage } from "lambder/client";
+
+type AppCode = "app/not-verified" | "app/quota-exhausted";
+
+const describe = (message: LambderRefusalMessage<AppCode>): string => {
+    switch (message.code) {
+        case "app/not-verified": return t("verifyYourAddress");
+        case "app/quota-exhausted": return t("buyMore");
+        case LAMBDER_REFUSAL_CODES.rateLimited: return t("slowDown");
+        // ... the other lambder/ codes ...
+        default: return message.content;   // a code this client does not know yet
+    }
+};
+```
+
+Leave the argument off (`LambderRefusalMessage`) and the codes are the
+framework's alone, so a `default: never` assertion holds and adding a code to
+the framework breaks the switch rather than falling through it. Messages your
+app WRITES take `LambderAppRefusalMessage`, where any code is welcome: that is
+what a rate-limit policy's `errorMessage` and the mock's failure injection
+accept.
+
+### `LambderApiRefusal`
+
+For full control of the `errorMessage` payload (apps with their own message
+vocabulary), throw `LambderApiRefusal` directly; `refuse()` is sugar over it:
+
+```typescript
+import { LambderApiRefusal } from "lambder";
 
 // In any helper, no resolver needed:
 export const requirePermission = (granted: boolean) => {
-    if (!granted) throw new LambderApiError("Permission denied.", {
+    if (!granted) throw new LambderApiRefusal("Permission denied.", {
         notAuthorized: true,                                         // envelope flag -> caller's notAuthorizedHandler
         errorMessage: { type: "warning", content: "Not allowed." },  // any shape your errorMessageHandler expects
         // sessionExpired: true,                                     // optional envelope flag
@@ -201,11 +235,11 @@ export const requirePermission = (granted: boolean) => {
 ```
 
 `errorMessage` defaults to the error's message string, so
-`throw new LambderApiError("Nope.")` alone is already visible to the client.
+`throw new LambderApiRefusal("Nope.")` alone is already visible to the client.
 Thrown outside an API call (in a route handler, say) it behaves like a normal
 error. The class is isomorphic and dependency-free, so shared server/browser
 packages can import it safely. Detection is brand-based
-(`isLambderApiError`), so it works even when two copies of lambder end up in
+(`isLambderApiRefusal`), so it works even when two copies of lambder end up in
 one bundle.
 
 ## Benefits of the typed contract

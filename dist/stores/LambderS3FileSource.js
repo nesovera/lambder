@@ -1,4 +1,4 @@
-import { remoteStoreFile } from "../core/LambderFiles.js";
+import { remoteStoreFile } from "../shared/contracts/LambderFileSource.js";
 /**
  * Files from an S3 bucket, or any S3-compatible store such as Cloudflare
  * R2 (pass its endpoint in clientConfig). Needs @aws-sdk/client-s3, an

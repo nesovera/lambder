@@ -3,6 +3,9 @@
  * lambder is imported. The mock factory records the moment the package is
  * first imported; everything up to the first table access must happen
  * before that moment.
+ *
+ * The client that load makes is here too, since it is the same step: which
+ * region it is built for, for every store that has one.
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -24,7 +27,7 @@ describe('DynamoDB SDK loading order', () => {
 
         lambder.initLambder().create({
             apiPath: '/api',
-            session: { tableName: 'sessions', tableRegion: 'us-east-1', sessionSalt: 'salt' },
+            session: { store: new lambder.LambderDdbSessionStore({ tableName: 'sessions', region: 'us-east-1' }), sessionSalt: 'salt' },
         });
         // A client that answers nothing, so the call completes without a table.
         const fakeClient = { send: async () => ({}) } as unknown as import('@aws-sdk/client-dynamodb').DynamoDBClient;
@@ -51,5 +54,31 @@ describe('DynamoDB SDK loading order', () => {
 
         expect(sent).toHaveLength(1);
         expect(sent[0]).toBeInstanceOf(UpdateItemCommand);
+    });
+});
+
+describe('the client the loader makes', () => {
+    it('is built for the region the store was given', async () => {
+        const { createDynamoClientLoader } = await import('../src/stores/LambderDdbSdk.js');
+        const { client } = await createDynamoClientLoader({ user: 'LambderDdbCache', region: 'eu-west-1' })();
+
+        expect(await client.config.region()).toBe('eu-west-1');
+    });
+
+    it('falls to the SDK default chain when the store was given none', async () => {
+        // The rule all four stores now share. LambderDdbCache used to default
+        // to "us-east-1" instead, so an app that deployed to another region
+        // and left the option out got a cache in Virginia, quietly, while its
+        // sibling stores followed the deployment.
+        const { createDynamoClientLoader } = await import('../src/stores/LambderDdbSdk.js');
+        const before = process.env.AWS_REGION;
+        process.env.AWS_REGION = 'ap-south-1';
+        try {
+            const { client } = await createDynamoClientLoader({ user: 'LambderDdbCache' })();
+            expect(await client.config.region()).toBe('ap-south-1');
+        } finally {
+            if(before === undefined) delete process.env.AWS_REGION;
+            else process.env.AWS_REGION = before;
+        }
     });
 });

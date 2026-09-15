@@ -5,11 +5,11 @@
  * while maintaining type safety at compile time.
  */
 
+import { testPublicFiles } from './helpers.js';
 import { describe, it, expect } from 'vitest';
 import { APIGatewayProxyEvent, Context } from 'aws-lambda';
 import { z } from 'zod';
 import Lambder from '../src/core/Lambder.js';
-import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
 
 // Mock AWS Lambda event and context
 const createMockEvent = (apiName: string, payload: any): APIGatewayProxyEvent => ({
@@ -49,7 +49,7 @@ const createMockContext = (): Context => ({
 describe('Output Type Enforcement - Runtime', () => {
     it('should return correct primitive types', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api',
         })
         .addApi('add', {
@@ -72,7 +72,7 @@ describe('Output Type Enforcement - Runtime', () => {
 
     it('should return correct object types', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api',
         })
         .addApi('getUser', {
@@ -103,7 +103,7 @@ describe('Output Type Enforcement - Runtime', () => {
 
     it('should return correct array types', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api',
         })
         .addApi('listUsers', {
@@ -130,7 +130,7 @@ describe('Output Type Enforcement - Runtime', () => {
 
     it('should handle null returns correctly', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api',
         })
         .addApi('findUser', {
@@ -165,7 +165,7 @@ describe('Output Type Enforcement - Runtime', () => {
 
     it('should return boolean types correctly', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api',
         })
         .addApi('deleteUser', {
@@ -189,7 +189,7 @@ describe('Output Type Enforcement - Runtime', () => {
 
     it('should work with die.api()', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api',
         })
         .addApi('echo', {
@@ -208,34 +208,18 @@ describe('Output Type Enforcement - Runtime', () => {
         expect(body.payload).toEqual({ echo: 'Hello!' });
     });
 
-    it('should work with session APIs', async () => {
+    it('refuses a session API at registration when no session store is configured', () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api',
-        })
-        .addSessionApi('getUser', {
+        });
+        // Before: a 500 on the first request. A session API that can never
+        // find a session is a configuration error, so it fails at startup.
+        expect(() => lambder.addSessionApi('getUser', {
             input: z.object({ userId: z.string() }),
             output: z.object({ id: z.string(), name: z.string(), age: z.number() })
-        }, async (ctx, resolver) => {
-            return resolver.api({
-                id: ctx.apiPayload.userId,
-                name: 'Session User',
-                age: 25
-            });
-        });
-
-        // This will return 500 error because session is not configured
-        const event = createMockEvent('getUser', { userId: '123' });
-        const context = createMockContext();
-        
-        const response = await lambder.render(event, context);
-        
-        // Should return a 500 when session is not configured; API calls get
-        // the JSON envelope so clients can parse the failure.
-        expect(response.statusCode).toBe(500);
-        const body = JSON.parse(response.body || '{}');
-        expect(body.payload).toBe(null);
-        expect(body.errorMessage).toBe('Internal server error.');
+        }, async (ctx, resolver) => resolver.api({ id: ctx.apiPayload.userId, name: 'Session User', age: 25 })))
+            .toThrow(/session API "getUser" needs the session option at creation/);
     });
 });
 
@@ -246,7 +230,7 @@ describe('Output Type Enforcement - Runtime', () => {
 describe('Input Type Enforcement - Runtime', () => {
     it('should receive correctly typed input', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api',
         })
         .addApi('echo', {
@@ -266,7 +250,7 @@ describe('Input Type Enforcement - Runtime', () => {
 
     it('should handle void input correctly', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api',
         })
         .addApi('listUsers', {
@@ -285,7 +269,7 @@ describe('Input Type Enforcement - Runtime', () => {
 
     it('should handle complex input objects', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api',
         })
         .addApi('add', {
@@ -314,7 +298,7 @@ describe('Input Type Enforcement - Runtime', () => {
 describe('Edge Cases', () => {
     it('should handle empty arrays', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api',
         })
         .addApi('listUsers', {
@@ -335,7 +319,7 @@ describe('Edge Cases', () => {
 
     it('should handle zero as a valid number', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api',
         })
         .addApi('add', {
@@ -356,7 +340,7 @@ describe('Edge Cases', () => {
 
     it('should handle empty strings in objects', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api',
         })
         .addApi('getUser', {
@@ -391,7 +375,7 @@ describe('Edge Cases', () => {
 describe('Output Type Enforcement - a null answer needs a reason', () => {
     it('res.api(null) compiles only for an output that allows null; beside a reason it always does; the answers run as written', async () => {
         const lambder = new Lambder({
-            files: new LambderLocalFileSource({ root: './public' }),
+            files: testPublicFiles(),
             apiPath: '/api',
         })
         .addApi('strict', {
@@ -423,7 +407,7 @@ describe('Output Type Enforcement - a null answer needs a reason', () => {
     });
 
     it('an untyped resolver (any output) accepts a bare null, as before', async () => {
-        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api' })
+        const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
             .addRoute('/api-shaped', (_ctx, res) => res.api(null));
         const response = await lambder.render({ ...createMockEvent('unused', {}), path: '/api-shaped', httpMethod: 'GET', body: null }, createMockContext());
         expect(JSON.parse(response.body || '{}').payload).toBe(null);

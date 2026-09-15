@@ -12,13 +12,14 @@ import { LambderDdbRateLimiter } from "lambder";
 const limiter = new LambderDdbRateLimiter({
     tableName: "app-policies",
     region: "us-east-1",
-    failOpen: true,
 });
 
 const exceeded = await limiter.isRateLimited(ctx.ip, { perMin: 5, perHour: 30 });
 if (exceeded) {
     // { window: "perMin", limit: 5, resetAt: 1700000060 }
-    refuse("Too many attempts.", { statusCode: 429, headers: { "Retry-After": String(exceeded.resetAt - nowSeconds) } });
+    // Clamped to at least 1, the way the engine's own refusal does it: a
+    // window that resets this second would otherwise send "Retry-After: 0".
+    refuse("Too many attempts.", { statusCode: 429, headers: { "Retry-After": String(Math.max(1, exceeded.resetAt - nowSeconds)) } });
 }
 ```
 
@@ -29,6 +30,12 @@ and the limit check happen atomically in one request. Windows are evaluated
 from smallest to largest and evaluation stops at the first exceeded window,
 which keeps blocked requests cheap and spares the larger counters.
 
+**One round trip per window.** A `{ perMin, perHour, perDay }` policy is three
+conditional `UpdateItem` calls on the request's critical path, run in sequence
+and stopped at the first exceeded window: that is what lets a blocked request
+skip the counters behind it, and it is the per-request cost to size latency
+against.
+
 **Attempts count, not successes.** A counter checked before the refusing one
 keeps its increment; there is no compensating decrement, which would give up
 the conditional-ADD atomicity. This matters when stacking policies: order them
@@ -36,6 +43,15 @@ so the counter you want charged on a refusal is checked first.
 
 Items carry an `expiresAt` attribute for DynamoDB TTL, so expired counters
 clean themselves up.
+
+**A DynamoDB error propagates.** A limiter says whether the caller is over its
+limit, and it cannot answer that when it cannot reach the table, so it does not
+answer: the error reaches the caller. Whether an unanswerable limit lets the
+request through is the application's decision, and for the policies Lambder
+runs it is made once, for every limiter, at
+[`rateLimits.failOpen`](./api-policies.md#rate-limits), which logs the failure
+with the policy and window it was checking. Calling the limiter directly means
+making that decision at the call site.
 
 ## Windows
 
@@ -62,8 +78,8 @@ wall-clock minute, and `resetAt` is that boundary.
 | `region` | SDK default | AWS region |
 | `keyPrefix` | `"RL"` | Partition key prefix, so counters stay separate from other systems in a shared table |
 | `ttlWindowMultiplier` | `2` | Multiplier applied to the window length when setting the item TTL. Must be at least 1 |
-| `failOpen` | `false` | Allow the request when DynamoDB itself errors |
 | `client` | new client | Supply your own `DynamoDBClient` |
+| `now` | `Date.now` | The clock the windows are computed against, for tests |
 
 ## Methods
 
@@ -82,8 +98,18 @@ sk = "<window>#<windowStart>"          e.g. "perMin#1700000040"
 ```
 
 The `RL#` prefix means the table can be shared with `LambderDdbCache`
-(`CACHE#`) and `LambderDdbIdempotency` (`IDEM#`) without key collisions. Keep
+(`CACHE#`) and `LambderDdbIdempotencyStore` (`IDEM#`) without key collisions. Keep
 sessions in their own table so IAM can be scoped to them separately.
+
+A tracker key is caller data, and a DynamoDB partition key stops at 2048
+bytes. Lambder's own policy engine never gets near it: the variable half of a
+key (a session key, whatever a custom handler returned) is replaced by
+`<kind>:h:<sha256 hex>` once it passes 1024 bytes, so distinct callers stay on
+distinct counters and short keys stay readable in the table. Calling the
+limiter directly, a key whose `RL#<trackerKey>` passes 2048 bytes is refused
+here with an error naming the byte count, before any window is counted: left
+to DynamoDB it would come back as a `ValidationException`, which a caller
+failing open on storage errors turns into no limit at all.
 
 ## Table setup
 
@@ -93,6 +119,20 @@ policy. Required IAM actions on the table: `dynamodb:UpdateItem`.
 
 ## Exported types
 
-`LambderDdbRateLimiterOptions`, `LambderRateLimitWindow`,
-`LambderRateLimitPolicy`, `LambderRateLimitExceeded`, `LambderRateLimitResult`,
-and the `RATE_LIMIT_WINDOWS` table the window type derives from.
+`LambderDdbRateLimiterOptions`, and from the shared vocabulary
+`LambderRateLimiter` (the interface this class implements, one method:
+`isRateLimited`), `LambderRateLimitWindow`, `LambderRateLimitPolicy`,
+`LambderRateLimitExceeded`, `LambderRateLimitResult`, and the
+`RATE_LIMIT_WINDOWS` table the window type derives from.
+`LambderMemoryRateLimiter` is the in-memory implementation with the same
+semantics, for tests and the mock runtime. Its options are `now` (the clock, so
+a test can cross a window boundary without waiting) and `maxEntries`.
+
+`maxEntries` is the one way it differs from the table. A process cannot hold
+counters without bound, so it holds at most 100,000 at once and past that the
+counters closest to their window's end are dropped: a key whose counter was
+dropped starts that window again from zero. It takes one distinct key per
+counter to get there, which a limit keyed per IP under a flood from many of
+them can do, and the counters with the most life left (the long-window ones)
+are the last to go. A deployment where that matters wants this store, whose
+counters are not held in the process at all.

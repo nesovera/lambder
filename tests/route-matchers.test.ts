@@ -4,11 +4,10 @@
 
 import { describe, it, expect } from 'vitest';
 import Lambder from '../src/core/Lambder.js';
-import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
-import { decodeBody, createMockEvent, createMockContext } from './helpers.js';
+import { decodeBody, createMockEvent, createMockContext, testPublicFiles } from './helpers.js';
 describe('Structured route matchers', () => {
     it('matches on method', async () => {
-        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) })
+        const lambder = new Lambder({ files: testPublicFiles() })
             .addRoute({ path: '/hook', method: 'POST' }, (ctx, res) => res.html('posted'))
             .addRoute({ path: '/hook', method: 'GET' }, (ctx, res) => res.html('got'));
 
@@ -20,7 +19,7 @@ describe('Structured route matchers', () => {
     });
 
     it('HEAD requests match GET routes and return no body', async () => {
-        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) })
+        const lambder = new Lambder({ files: testPublicFiles() })
             .addRoute({ path: '/page', method: 'GET' }, (ctx, res) => res.html('page body'));
 
         const result = await lambder.render(createMockEvent('/page', { httpMethod: 'HEAD' }), createMockContext());
@@ -29,7 +28,7 @@ describe('Structured route matchers', () => {
     });
 
     it('matches on host', async () => {
-        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) })
+        const lambder = new Lambder({ files: testPublicFiles() })
             .addRoute({ path: '/x', host: 'admin.example.com' }, (ctx, res) => res.html('admin'))
             .addRoute({ path: '/x', host: /\.example\.com$/ }, (ctx, res) => res.html('any sub'));
 
@@ -47,7 +46,7 @@ describe('Structured route matchers', () => {
     });
 
     it('extracts path params from matcher objects', async () => {
-        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) })
+        const lambder = new Lambder({ files: testPublicFiles() })
             .addRoute({ path: '/sitemap-:country', method: 'GET' }, (ctx, res) =>
                 res.text(String(ctx.pathParams.country)));
 

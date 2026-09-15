@@ -1,1279 +1,892 @@
 /**
- * Session and Session Types Tests
- * 
- * This file tests session management functionality including:
- * - Session type safety
- * - Session lifecycle (create, fetch, update, delete, regenerate)
- * - Session validation and security
- * - Session controller operations
+ * The session model, over the in-memory store: how sessions are minted,
+ * found, validated, renewed, rotated and ended, and how the controller
+ * reads them onto a call context and writes their cookies. Nothing here
+ * touches DynamoDB; the DynamoDB store's own mapping and compression are
+ * tests/ddb-session-store.test.ts.
+ *
+ * The last groups drive session routes and session APIs through a real
+ * Lambder instance with the memory store, which is the first time the
+ * session layer has been testable end to end without the AWS SDK mocked.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import nodeCrypto from 'crypto';
-import zlib from 'zlib';
-import { decodeBody } from './helpers.js';
-import { mockClient } from 'aws-sdk-client-mock';
-import { DynamoDBDocumentClient, GetCommand, PutCommand, DeleteCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { z } from 'zod';
-import LambderSessionManager, { LambderSessionDataRefreshError, LambderSessionReadError, type LambderSessionContext } from '../src/session/LambderSessionManager.js';
-import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
-import LambderSessionController from '../src/session/LambderSessionController.js';
-import { lambderGuard } from '../src/policies/LambderApiGuards.js';
+import type { APIGatewayProxyEvent, Context } from 'aws-lambda';
+import { decodeBody, testPublicFiles } from './helpers.js';
+import LambderSessionManager, { LambderSessionDataRefreshError, LambderSessionReadError } from '../src/session/LambderSessionManager.js';
+import type { LambderSessionRecord } from '../src/shared/contracts/LambderSessionStore.js';
+import LambderSessionController, { LambderSessionNotFoundError, LambderSessionAmbiguousError } from '../src/session/LambderSessionController.js';
+import { LambderMemorySessionStore } from '../src/stores/LambderMemorySessionStore.js';
+import { LambderWebCrypto, LambderPlainSessionCrypto } from '../src/session/LambderSessionCrypto.js';
+import { LambderDdbSessionStore } from '../src/stores/LambderDdbSessionStore.js';
+import type { LambderSessionStore } from '../src/shared/contracts/LambderSessionStore.js';
+import { createApiCallContext } from '../src/api/LambderApiCallContext.js';
+import { LambderLocalFileSource } from '../src/stores/LambderLocalFileSource.js';
+import { lambderGuard } from '../src/core/LambderPolicyBuilders.js';
 import Lambder, { initLambder } from '../src/core/Lambder.js';
 import type { LambderRenderContext, LambderSessionRenderContext } from '../src/core/LambderContext.js';
-import type { APIGatewayProxyEvent, Context } from 'aws-lambda';
+import { LambderAnswerHeaders } from '../src/shared/wire/LambderAnswerHeaders.js';
 
-// Mock DynamoDB
-const ddbMock = mockClient(DynamoDBDocumentClient);
+const nowSec = () => Math.floor(Date.now() / 1000);
+const webCrypto = new LambderWebCrypto();
+const SALT = 'test-salt-12345';
 
-// Sessions store only hashes of the bearer secrets: mock items carry
-// hashTok(<raw>) where the presented cookie carries <raw>.
-const hashTok = (value: string) => nodeCrypto.createHash('sha256').update(value).digest('hex');
+/** sha256 the way the manager hashes, for records planted straight into a store. */
+const sha256 = (value: string) => webCrypto.sha256Hex(value);
 
-// Session data is stored Brotli-compressed by default (dataBr + dataBytes);
-// records below minBytes or with compression off keep a plain `data` map.
-const storedData = (item: Record<string, any>) =>
-    item.dataBr ? JSON.parse(zlib.brotliDecompressSync(item.dataBr).toString('utf8')) : item.data;
-const compressedItem = (data: unknown) => {
-    const raw = Buffer.from(JSON.stringify(data), 'utf8');
-    return { dataBr: zlib.brotliCompressSync(raw), dataBytes: raw.byteLength };
+/**
+ * A session read, as the controller performs it: look the record up by the
+ * presented token, then renew it. The manager keeps the two halves apart so a
+ * caller weighing several cookies can decide which one is this visitor's
+ * before anything is written on their behalf.
+ */
+const readSession = async <T>(manager: LambderSessionManager<T>, token: string): Promise<LambderSessionRecord<T> | null> => {
+    const found = await manager.lookupSession(token);
+    return found ? await manager.renewSession(found) : null;
 };
 
-// Test session data types
+/**
+ * A record planted directly into a store: `sessionKeyHash:secret` is its token
+ * and `csrf` its CSRF token. The stand-ins are hex because the controller
+ * checks every candidate against the minted token format before it reads
+ * anything, so a cookie shaped like "hash:sortkey" is no session at all.
+ */
+const plantRecord = async (store: LambderSessionStore<any>, overrides: Partial<LambderSessionRecord<any>> & { secret?: string; csrf?: string } = {}) => {
+    const { secret = 'facade', csrf = 'csrf-token', ...rest } = overrides;
+    const record: LambderSessionRecord<any> = {
+        sessionKeyHash: 'deadbeef',
+        secretHash: await sha256(secret),
+        csrfTokenHash: await sha256(csrf),
+        sessionKey: 'user-123',
+        data: { userId: '123', username: 'testuser', role: 'user' },
+        createdAt: nowSec(),
+        expiresAt: nowSec() + 3600,
+        lastAccessedAt: nowSec(),
+        ttlInSeconds: 3600,
+        ...rest,
+    };
+    await store.put(record);
+    return { record, token: `${record.sessionKeyHash}:${secret}`, csrf };
+};
+
+/** The Set-Cookie values a context has pending. */
+const setCookiesOf = (ctx: { responseHeaders: LambderAnswerHeaders }): string[] => {
+    const headers: Record<string, string[]> = {};
+    ctx.responseHeaders.applyInto(headers);
+    return headers['Set-Cookie'] ?? [];
+};
+
 interface UserSessionData {
     userId: string;
     username: string;
     role: 'admin' | 'user' | 'guest';
-    preferences?: {
-        theme: 'light' | 'dark';
-        language: string;
-    };
-}
-
-interface AdminSessionData extends UserSessionData {
-    role: 'admin';
-    permissions: string[];
+    preferences?: { theme: 'light' | 'dark'; language: string };
 }
 
 describe('Session Type Safety', () => {
-    it('should correctly type LambderSessionContext', () => {
-        // Type test: LambderSessionContext should have correct structure
-        const session: LambderSessionContext<UserSessionData> = {
+    it('LambderSessionRecord is the stored record', () => {
+        const session: LambderSessionRecord<UserSessionData> = {
+            sessionKeyHash: 'hash',
+            secretHash: 'secret-hash',
             csrfTokenHash: 'csrf-token-hash',
             sessionKey: 'user-123',
-            data: {
-                userId: '123',
-                username: 'testuser',
-                role: 'user',
-            },
+            data: { userId: '123', username: 'testuser', role: 'user' },
             createdAt: Date.now(),
             expiresAt: Date.now() + 3600000,
             lastAccessedAt: Date.now(),
             ttlInSeconds: 3600,
         };
-
         expect(session.data.userId).toBe('123');
         expect(session.data.role).toBe('user');
     });
 
-    it('should correctly type LambderSessionRenderContext', () => {
-        // Type test: Session render context should extend regular context
+    it('LambderSessionRenderContext is the render context with a present session', () => {
         const sessionCtx = {
-            host: 'localhost',
-            path: '/test',
-            pathParams: {},
-            method: 'GET',
-            get: {},
-            post: {},
-            cookie: {},
-            cookieList: {},
+            host: 'localhost', path: '/test', pathParams: {}, method: 'GET',
+            get: {}, post: {}, cookie: {}, cookieList: {},
             session: {
-                csrfTokenHash: 'csrf-token-hash',
+                sessionKeyHash: 'hash', secretHash: 'secret-hash', csrfTokenHash: 'csrf-token-hash',
                 sessionKey: 'user-123',
-                data: {
-                    userId: '123',
-                    username: 'testuser',
-                    role: 'admin' as const,
-                    permissions: ['read', 'write'],
-                },
-                createdAt: Date.now(),
-                expiresAt: Date.now() + 3600000,
-                lastAccessedAt: Date.now(),
-                ttlInSeconds: 3600,
+                data: { userId: '123', username: 'testuser', role: 'admin' as const, permissions: ['read', 'write'] },
+                createdAt: Date.now(), expiresAt: Date.now() + 3600000, lastAccessedAt: Date.now(), ttlInSeconds: 3600,
             },
-            apiName: '',
-            apiPayload: {},
-            guardData: {},
-            headers: {},
-            rawBody: '',
-            ip: '',
-            header: () => undefined,
-            event: {} as any,
-            lambdaContext: {} as any,
-            _otherInternal: {
-                isApiCall: false,
-                requestVersion: null,
-                eventFormat: 'v1' as const,
-                setHeaderFnAccumulator: [],
-                addHeaderFnAccumulator: [],
-                logToApiResponseAccumulator: [],
-            },
-        } as LambderSessionRenderContext<any, AdminSessionData>;
-
-        // Type assertions - these should compile
-        expect(sessionCtx.session.data.userId).toBe('123');
-        expect(sessionCtx.session.data.role).toBe('admin');
+            api: null, apiName: null, apiPayload: {},
+            guardData: {}, headers: {}, rawBody: '', ip: '', header: () => undefined,
+            event: {} as any, lambdaContext: {} as any, eventFormat: 'v1' as const,
+            responseHeaders: new LambderAnswerHeaders(), logList: [],
+        } satisfies LambderRenderContext | LambderSessionRenderContext<any, UserSessionData & { permissions: string[] }>;
         expect(sessionCtx.session.data.permissions).toContain('read');
     });
 });
 
-describe('LambderSessionManager', () => {
-    let sessionManager: LambderSessionManager;
+describe('LambderSessionManager over the memory store', () => {
+    let store: LambderMemorySessionStore<UserSessionData>;
+    let manager: LambderSessionManager<UserSessionData>;
 
     beforeEach(() => {
-        ddbMock.reset();
-        sessionManager = new LambderSessionManager({
-            tableName: 'test-sessions',
-            tableRegion: 'us-east-1',
-            partitionKey: 'pk',
-            sortKey: 'sk',
-            sessionSalt: 'test-salt-12345',
-            enableSlidingExpiration: true,
-        });
+        store = new LambderMemorySessionStore<UserSessionData>();
+        manager = new LambderSessionManager<UserSessionData>({ store, sessionSalt: SALT, enableSlidingExpiration: true });
     });
 
     describe('createSession', () => {
-        it('should create a new session with correct structure', async () => {
-            ddbMock.on(PutCommand).resolves({});
+        it('creates a record with the expected structure and stores it', async () => {
+            const data: UserSessionData = { userId: '123', username: 'testuser', role: 'user' };
+            const { session, sessionToken, csrfToken } = await manager.createSession('user-123', data, 3600);
 
-            const sessionData: UserSessionData = {
-                userId: '123',
-                username: 'testuser',
-                role: 'user',
-            };
-
-            const { session, sessionToken, csrfToken } = await sessionManager.createSession('user-123', sessionData, 3600);
-
-            expect(session).toBeDefined();
-            expect(sessionToken).toBeDefined();
-            expect(csrfToken).toBeDefined();
+            expect(sessionToken).toMatch(/^[0-9a-f]{64}:[0-9a-f]{64}$/);
+            expect(csrfToken).toMatch(/^[0-9a-f]{64}$/);
             expect(session.sessionKey).toBe('user-123');
-            expect(session.data).toEqual(sessionData);
-            expect(session.createdAt).toBeDefined();
-            expect(session.expiresAt).toBeDefined();
+            expect(session.data).toEqual(data);
             expect(session.ttlInSeconds).toBe(3600);
+            expect(session.expiresAt).toBe(session.createdAt + 3600);
+            expect(store.size).toBe(1);
         });
 
         it('stores only hashes of the bearer secrets, never the raw tokens', async () => {
-            ddbMock.on(PutCommand).resolves({});
+            const { sessionToken, csrfToken } = await manager.createSession('user-123', {} as UserSessionData, 3600);
+            const [sessionKeyHash, secret] = sessionToken.split(':') as [string, string];
+            const [stored] = store.list();
 
-            const { sessionToken, csrfToken } = await sessionManager.createSession('user-123', {}, 3600);
-
-            const putItem = ddbMock.commandCalls(PutCommand)[0]!.args[0].input.Item!;
-            const sortKeySecret = sessionToken.split(':')[1]!;
-            // The range key is the hash of the cookie's secret half; the CSRF
-            // token is stored as its hash. Neither raw value appears anywhere
-            // in the record, so a table read yields no usable cookies.
-            expect(putItem.sk).toBe(hashTok(sortKeySecret));
-            expect(putItem.csrfTokenHash).toBe(hashTok(csrfToken));
-            const serialized = JSON.stringify(putItem);
-            expect(serialized).not.toContain(sortKeySecret);
+            expect(stored!.sessionKeyHash).toBe(sessionKeyHash);
+            expect(stored!.sessionKeyHash).toBe(await sha256(`user-123${SALT}`));
+            expect(stored!.secretHash).toBe(await sha256(secret));
+            expect(stored!.csrfTokenHash).toBe(await sha256(csrfToken));
+            const serialized = JSON.stringify(stored);
+            expect(serialized).not.toContain(secret);
             expect(serialized).not.toContain(csrfToken);
-            expect(putItem.sessionToken).toBe(undefined);
-            expect(putItem.csrfToken).toBe(undefined);
         });
 
-        it('should create session with default TTL', async () => {
-            ddbMock.on(PutCommand).resolves({});
-
-            const { session } = await sessionManager.createSession('user-123', {});
-
-            expect(session.ttlInSeconds).toBe(30 * 24 * 60 * 60); // 30 days default
+        it('defaults the TTL to thirty days', async () => {
+            const { session } = await manager.createSession('user-123', {} as UserSessionData);
+            expect(session.ttlInSeconds).toBe(30 * 24 * 60 * 60);
         });
 
-        it('should generate unique session tokens', async () => {
-            ddbMock.on(PutCommand).resolves({});
-
-            const created1 = await sessionManager.createSession('user-123', {});
-            const created2 = await sessionManager.createSession('user-123', {});
-
-            expect(created1.sessionToken).not.toBe(created2.sessionToken);
-            expect(created1.csrfToken).not.toBe(created2.csrfToken);
+        it('mints unique tokens per session', async () => {
+            const first = await manager.createSession('user-123', {} as UserSessionData);
+            const second = await manager.createSession('user-123', {} as UserSessionData);
+            expect(first.sessionToken).not.toBe(second.sessionToken);
+            expect(first.csrfToken).not.toBe(second.csrfToken);
+            expect(store.size).toBe(2);
         });
     });
 
-    describe('getSession', () => {
-        it('should retrieve a valid session', async () => {
-            const mockSession = {
-                pk: 'hashed-key',
-                sk: hashTok('sort-key'),
-                csrfTokenHash: hashTok('csrf-token'),
-                sessionKey: 'user-123',
-                data: { userId: '123', username: 'testuser', role: 'user' },
-                createdAt: Math.floor(Date.now() / 1000),
-                expiresAt: Math.floor(Date.now() / 1000) + 3600,
-                lastAccessedAt: Math.floor(Date.now() / 1000),
-                ttlInSeconds: 3600,
-            };
-
-            ddbMock.on(GetCommand).resolves({ Item: mockSession });
-            ddbMock.on(PutCommand).resolves({});
-
-            const session = await sessionManager.getSession('hashed-key:sort-key');
-
-            expect(session).toBeDefined();
+    describe('lookupSession and renewSession', () => {
+        it('finds a session by its token: the secret half proves possession', async () => {
+            const { token } = await plantRecord(store);
+            const session = await readSession(manager, token);
             expect(session?.sessionKey).toBe('user-123');
             expect(session?.data.userId).toBe('123');
         });
 
-        it('should return null for invalid session token format', async () => {
-            const session = await sessionManager.getSession('invalid-token');
-            expect(session).toBeNull();
+        it('answers null for a malformed token, a wrong secret, an expired record and an unknown one', async () => {
+            await plantRecord(store);
+            expect(await readSession(manager, 'invalid-token')).toBeNull();
+            expect(await readSession(manager, 'deadbeef:bad1')).toBeNull();
+            expect(await readSession(manager, 'f00d:facade')).toBeNull();
+
+            const { token } = await plantRecord(store, { secret: 'dec0de', expiresAt: nowSec() - 3600, createdAt: nowSec() - 7200 });
+            expect(await readSession(manager, token)).toBeNull();
         });
 
-        it('should return null for expired session', async () => {
-            const expiredSession = {
-                pk: 'hashed-key',
-                sk: hashTok('sort-key'),
-                csrfTokenHash: hashTok('csrf-token'),
-                sessionKey: 'user-123',
-                data: {},
-                createdAt: Math.floor(Date.now() / 1000) - 7200,
-                expiresAt: Math.floor(Date.now() / 1000) - 3600, // Expired 1 hour ago
-                lastAccessedAt: Math.floor(Date.now() / 1000) - 7200,
-                ttlInSeconds: 3600,
-            };
-
-            ddbMock.on(GetCommand).resolves({ Item: expiredSession });
-
-            const session = await sessionManager.getSession('hashed-key:sort-key');
-            expect(session).toBeNull();
-        });
-
-        it('should return null for non-existent session', async () => {
-            ddbMock.on(GetCommand).resolves({});
-
-            const session = await sessionManager.getSession('hashed-key:sort-key');
-            expect(session).toBeNull();
-        });
-
-        it('propagates DynamoDB read failures as LambderSessionReadError instead of null', async () => {
+        it('propagates store read failures as LambderSessionReadError instead of null', async () => {
             // Null would read as sessionExpired and make the caller clear the
             // client's cookies: an infra blip must not force a logout.
-            ddbMock.on(GetCommand).rejects(new Error('ddb down'));
-
-            await expect(sessionManager.getSession('hashed-key:sort-key'))
-                .rejects.toBeInstanceOf(LambderSessionReadError);
+            const failing: LambderSessionStore<UserSessionData> = {
+                isMemoryOnly: true,
+                get: async () => { throw new Error('store down'); },
+                put: store.put.bind(store), delete: store.delete.bind(store),
+                listSecretHashes: store.listSecretHashes.bind(store), markDataExpired: store.markDataExpired.bind(store),
+            };
+            const broken = new LambderSessionManager({ store: failing, sessionSalt: SALT });
+            await expect(readSession(broken, 'deadbeef:facade')).rejects.toBeInstanceOf(LambderSessionReadError);
         });
 
-        it('should update lastAccessedAt with sliding expiration', async () => {
-            const mockSession = {
-                pk: 'hashed-key',
-                sk: hashTok('sort-key'),
-                csrfTokenHash: hashTok('csrf-token'),
-                sessionKey: 'user-123',
-                data: {},
-                createdAt: Math.floor(Date.now() / 1000) - 1800,
-                expiresAt: Math.floor(Date.now() / 1000) + 1800,
-                lastAccessedAt: Math.floor(Date.now() / 1000) - 1800,
-                ttlInSeconds: 3600,
+        it('slides the expiry and writes back once the write interval has passed', async () => {
+            const { token } = await plantRecord(store, { lastAccessedAt: nowSec() - 1800, expiresAt: nowSec() + 1800, createdAt: nowSec() - 1800 });
+            const session = await readSession(manager, token);
+            expect(session?.expiresAt).toBeGreaterThanOrEqual(nowSec() + 3599);
+            expect(store.list()[0]!.expiresAt).toBe(session!.expiresAt);
+        });
+
+        it('skips the sliding write when the session was accessed recently', async () => {
+            const { token, record } = await plantRecord(store, { lastAccessedAt: nowSec() - 10 });
+            const put = vi.spyOn(store, 'put');
+            const session = await readSession(manager, token);
+            expect(session?.expiresAt).toBe(record.expiresAt);
+            expect(put).not.toHaveBeenCalled();
+        });
+
+        it('reads a record the store hands back past its expiry as no session', async () => {
+            // The store interface allows it on purpose: a DynamoDB TTL deletes
+            // within days rather than at the second, and a store over a plain
+            // table sweeps nothing at all. Expiry is the manager's to enforce,
+            // so a store that never sweeps is still correct.
+            const expiredStore: LambderSessionStore<any> = {
+                isMemoryOnly: true,
+                get: async () => ({
+                    sessionKeyHash: 'deadbeef', secretHash: await sha256('facade'), csrfTokenHash: await sha256('csrf-token'),
+                    sessionKey: 'user-123', data: { role: 'user' },
+                    createdAt: nowSec() - 7200, expiresAt: nowSec() - 3600, lastAccessedAt: nowSec() - 7200, ttlInSeconds: 3600,
+                }),
+                put: async () => {}, delete: async () => {},
+                listSecretHashes: async () => [], markDataExpired: async () => {},
             };
+            const overExpired = new LambderSessionManager({ store: expiredStore, sessionSalt: SALT });
 
-            ddbMock.on(GetCommand).resolves({ Item: mockSession });
-            ddbMock.on(PutCommand).resolves({});
+            expect(await overExpired.lookupSession('deadbeef:facade')).toBeNull();
+        });
 
-            const session = await sessionManager.getSession('hashed-key:sort-key');
+        it('logs a failed renewal write instead of swallowing it, and still serves the session', async () => {
+            // A store failing every renewal means sliding expiration has
+            // quietly stopped working and every session now ends at its
+            // creation TTL, which otherwise shows up only as users being
+            // signed out sooner than the app promises.
+            const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+            const { token } = await plantRecord(store, { lastAccessedAt: nowSec() - 3600, expiresAt: nowSec() + 1800 });
+            vi.spyOn(store, 'put').mockRejectedValue(new Error('ddb down'));
 
-            expect(session).toBeDefined();
-            // Note: The update happens async, so we just verify session is returned
+            expect((await readSession(manager, token))?.sessionKey).toBe('user-123');
+
+            expect(error).toHaveBeenCalledOnce();
+            expect(String(error.mock.calls[0]![0])).toContain('ddb down');
+            expect(String(error.mock.calls[0]![0])).not.toContain(token);
+            vi.restoreAllMocks();
+        });
+
+        it('refuses a TTL that is not a positive whole number of seconds', async () => {
+            // It becomes the record's expiresAt and the store's own expiry
+            // attribute, so a NaN from an unparsed environment variable would
+            // write a record nothing ever retires and no read ever accepts.
+            await expect(manager.createSession('user-123', {} as UserSessionData, Number('not a number'))).rejects.toThrow(/ttlInSeconds must be a positive integer/);
+            await expect(manager.createSession('user-123', {} as UserSessionData, 0)).rejects.toThrow(/positive integer/);
+            await expect(manager.createSession('user-123', {} as UserSessionData, 60.5)).rejects.toThrow(/positive integer/);
+        });
+
+        it('refuses an empty sessionKey, which would write a record no read accepts', async () => {
+            // The same class as the TTL refusal above: lookupSession rejects a
+            // record without a sessionKey, so an empty one hands the caller a
+            // valid-looking cookie pair for a session that can never be read
+            // back, and every request after it looks like a silent logout.
+            await expect(manager.createSession('', {} as UserSessionData)).rejects.toThrow(/sessionKey is empty/);
+            expect(store.size).toBe(0);
+        });
+
+        it('honours slidingWriteIntervalSeconds', async () => {
+            const eager = new LambderSessionManager({ store, sessionSalt: SALT, slidingWriteIntervalSeconds: 5 });
+            const { token } = await plantRecord(store, { lastAccessedAt: nowSec() - 10 });
+            const put = vi.spyOn(store, 'put');
+            await readSession(eager, token);
+            expect(put).toHaveBeenCalledOnce();
+        });
+
+        it('renews only the session the cookies resolved to, never a candidate it merely weighed', async () => {
+            // The split into lookupSession and renewSession is what stops a
+            // planted cookie being kept alive by the victim's own traffic:
+            // every candidate is read, exactly one is renewed. A per-candidate
+            // read that also renewed would put twice here and zero times in
+            // the ambiguous case.
+            vi.spyOn(console, 'warn').mockImplementation(() => {});
+            const eager = new LambderSessionManager<UserSessionData>({ store, sessionSalt: SALT, slidingWriteIntervalSeconds: 5 });
+            const live = await plantRecord(store, { lastAccessedAt: nowSec() - 10 });
+            const put = vi.spyOn(store, 'put');
+            const controllerOn = (cookies: Record<string, string[]>) => new LambderSessionController<UserSessionData>({
+                manager: eager, tokenCookieKey: 'sessionToken', csrfCookieKey: 'csrfToken', ctx: createApiCallContext<UserSessionData>(),
+                request: { host: 'localhost', cookies, csrfToken: 'csrf-token' },
+            });
+
+            // A live cookie beside a well-formed candidate the store does not hold: one renewal, for the live one.
+            const resolved = await controllerOn({ sessionToken: [`${'a'.repeat(64)}:${'b'.repeat(64)}`, live.token] }).fetchSession();
+            expect(resolved.sessionKeyHash).toBe(live.record.sessionKeyHash);
+            expect(put).toHaveBeenCalledOnce();
+
+            // Two live candidates: refused, and neither is renewed.
+            const other = await plantRecord(store, { sessionKey: 'attacker', lastAccessedAt: nowSec() - 10, secret: 'facade2', csrf: 'other-csrf' });
+            put.mockClear();
+            await expect(controllerOn({ sessionToken: [other.token, live.token] }).fetchSession()).rejects.toBeInstanceOf(LambderSessionAmbiguousError);
+            expect(put).not.toHaveBeenCalled();
+            vi.restoreAllMocks();
         });
     });
 
-    describe('isSessionValid', () => {
-        it('should validate a correct session', () => {
-            const session = {
-                pk: 'hash',
-                sk: hashTok('sortkey'),
-                csrfTokenHash: hashTok('csrf-token'),
-                sessionKey: 'user-123',
-                data: {},
-                createdAt: Math.floor(Date.now() / 1000),
-                expiresAt: Math.floor(Date.now() / 1000) + 3600,
-                lastAccessedAt: Math.floor(Date.now() / 1000),
-                ttlInSeconds: 3600,
-            };
+    describe('isSessionTokenValid and isSessionCsrfTokenValid', () => {
+        it('accept the matching token and CSRF token, and reject any mismatch or expiry', async () => {
+            // Two named methods rather than one with a trailing boolean: a
+            // route asks the first alone, an API call asks both, and a flag at
+            // the call site said neither.
+            const { record } = await plantRecord(store);
+            expect(await manager.isSessionTokenValid(record, 'deadbeef:facade')).toBe(true);
+            expect(await manager.isSessionTokenValid(record, 'feed:babe')).toBe(false);
+            expect(await manager.isSessionTokenValid(record, null)).toBe(false);
+            expect(await manager.isSessionTokenValid(null, 'deadbeef:facade')).toBe(false);
+            expect(await manager.isSessionCsrfTokenValid(record, 'csrf-token')).toBe(true);
+            expect(await manager.isSessionCsrfTokenValid(record, 'wrong-csrf')).toBe(false);
+            expect(await manager.isSessionCsrfTokenValid(record, null)).toBe(false);
+            expect(await manager.isSessionCsrfTokenValid(null, 'csrf-token')).toBe(false);
 
-            const isValid = sessionManager.isSessionValid(
-                session,
-                'hash:sortkey',
-                'csrf-token'
-            );
-
-            expect(isValid).toBe(true);
-        });
-
-        it('should reject session with wrong token', () => {
-            const session = {
-                pk: 'hash',
-                sk: hashTok('sortkey'),
-                csrfTokenHash: hashTok('csrf-token'),
-                sessionKey: 'user-123',
-                data: {},
-                createdAt: Math.floor(Date.now() / 1000),
-                expiresAt: Math.floor(Date.now() / 1000) + 3600,
-                lastAccessedAt: Math.floor(Date.now() / 1000),
-                ttlInSeconds: 3600,
-            };
-
-            const isValid = sessionManager.isSessionValid(
-                session,
-                'wrong:token',
-                'csrf-token'
-            );
-
-            expect(isValid).toBe(false);
-        });
-
-        it('should reject session with wrong CSRF token', () => {
-            const session = {
-                pk: 'hash',
-                sk: hashTok('sortkey'),
-                csrfTokenHash: hashTok('csrf-token'),
-                sessionKey: 'user-123',
-                data: {},
-                createdAt: Math.floor(Date.now() / 1000),
-                expiresAt: Math.floor(Date.now() / 1000) + 3600,
-                lastAccessedAt: Math.floor(Date.now() / 1000),
-                ttlInSeconds: 3600,
-            };
-
-            const isValid = sessionManager.isSessionValid(
-                session,
-                'hash:sortkey',
-                'wrong-csrf'
-            );
-
-            expect(isValid).toBe(false);
-        });
-
-        it('should skip CSRF validation when requested', () => {
-            const session = {
-                pk: 'hash',
-                sk: hashTok('sortkey'),
-                csrfTokenHash: hashTok('csrf-token'),
-                sessionKey: 'user-123',
-                data: {},
-                createdAt: Math.floor(Date.now() / 1000),
-                expiresAt: Math.floor(Date.now() / 1000) + 3600,
-                lastAccessedAt: Math.floor(Date.now() / 1000),
-                ttlInSeconds: 3600,
-            };
-
-            const isValid = sessionManager.isSessionValid(
-                session,
-                'hash:sortkey',
-                null,
-                true // Skip CSRF check
-            );
-
-            expect(isValid).toBe(true);
-        });
-
-        it('should reject expired session', () => {
-            const session = {
-                pk: 'hash',
-                sk: hashTok('sortkey'),
-                csrfTokenHash: hashTok('csrf-token'),
-                sessionKey: 'user-123',
-                data: {},
-                createdAt: Math.floor(Date.now() / 1000) - 7200,
-                expiresAt: Math.floor(Date.now() / 1000) - 3600, // Expired
-                lastAccessedAt: Math.floor(Date.now() / 1000) - 7200,
-                ttlInSeconds: 3600,
-            };
-
-            const isValid = sessionManager.isSessionValid(
-                session,
-                'hash:sortkey',
-                'csrf-token'
-            );
-
-            expect(isValid).toBe(false);
+            const { record: expired } = await plantRecord(store, { secret: 'dec0de', expiresAt: nowSec() - 3600 });
+            expect(await manager.isSessionTokenValid(expired, 'deadbeef:dec0de')).toBe(false);
         });
     });
 
     describe('updateSessionData', () => {
-        it('should update session data', async () => {
-            const session: LambderSessionContext<UserSessionData> = {
-                pk: 'hashed-key',
-                sk: hashTok('sort-key'),
-                csrfTokenHash: hashTok('csrf-token'),
-                sessionKey: 'user-123',
-                data: {
-                    userId: '123',
-                    username: 'testuser',
-                    role: 'user',
-                },
-                createdAt: Math.floor(Date.now() / 1000),
-                expiresAt: Math.floor(Date.now() / 1000) + 3600,
-                lastAccessedAt: Math.floor(Date.now() / 1000),
-                ttlInSeconds: 3600,
-            };
-
-            ddbMock.on(PutCommand).resolves({});
-
-            const updatedData: UserSessionData = {
-                ...session.data,
-                preferences: { theme: 'dark', language: 'en' },
-            };
-
-            const updatedSession = await sessionManager.updateSessionData(session, updatedData);
-
-            expect(updatedSession.data.preferences?.theme).toBe('dark');
-            expect(updatedSession.lastAccessedAt).toBeGreaterThanOrEqual(session.lastAccessedAt);
-        });
-
-        it('should extend expiration with sliding expiration enabled', async () => {
-            const session: LambderSessionContext = {
-                pk: 'hashed-key',
-                sk: hashTok('sort-key'),
-                csrfTokenHash: hashTok('csrf-token'),
-                sessionKey: 'user-123',
-                data: {},
-                createdAt: Math.floor(Date.now() / 1000) - 1800,
-                expiresAt: Math.floor(Date.now() / 1000) + 1800,
-                lastAccessedAt: Math.floor(Date.now() / 1000) - 1800,
-                ttlInSeconds: 3600,
-            };
-
-            ddbMock.on(PutCommand).resolves({});
-
-            const originalExpiresAt = session.expiresAt;
-            const updatedSession = await sessionManager.updateSessionData(session, { updated: true });
-
-            expect(updatedSession.expiresAt).toBeGreaterThan(originalExpiresAt);
+        it('writes the new data, stamps lastAccessedAt and slides the expiry', async () => {
+            const { record } = await plantRecord(store, { lastAccessedAt: nowSec() - 1800, expiresAt: nowSec() + 1800 });
+            const before = record.expiresAt;
+            const updated = await manager.updateSessionData(record, { ...record.data, preferences: { theme: 'dark', language: 'en' } });
+            expect(updated.data.preferences?.theme).toBe('dark');
+            expect(updated.expiresAt).toBeGreaterThan(before);
+            expect(store.list()[0]!.data.preferences?.theme).toBe('dark');
         });
     });
 
-    describe('deleteSession', () => {
-        it('should delete a session', async () => {
-            ddbMock.on(DeleteCommand).resolves({});
+    describe('deleteSession, deleteSessionAll, deleteSessionAllByKey', () => {
+        it('deletes one, every session of the subject, or every session of a sessionKey', async () => {
+            const a = await manager.createSession('user-123', {} as UserSessionData);
+            const b = await manager.createSession('user-123', {} as UserSessionData);
+            await manager.createSession('user-456', {} as UserSessionData);
+            expect(store.size).toBe(3);
 
-            const session = {
-                pk: 'hashed-key',
-                sk: hashTok('sort-key'),
-            };
+            expect(await manager.deleteSession(a.session)).toBe(true);
+            expect(store.size).toBe(2);
+            expect(await readSession(manager, a.sessionToken)).toBeNull();
+            expect(await readSession(manager, b.sessionToken)).not.toBeNull();
 
-            const result = await sessionManager.deleteSession(session);
-            expect(result).toBe(true);
+            expect(await manager.deleteSessionAll(b.session)).toBe(true);
+            expect(store.size).toBe(1);
+
+            expect(await manager.deleteSessionAllByKey('user-456')).toBe(true);
+            expect(store.size).toBe(0);
         });
     });
 
     describe('regenerateSession', () => {
-        it('should regenerate session with new tokens', async () => {
-            const originalSession: LambderSessionContext<UserSessionData> = {
-                pk: 'hashed-key',
-                sk: hashTok('sort-key'),
-                csrfTokenHash: hashTok('old-csrf-token'),
-                sessionKey: 'user-123',
-                data: {
-                    userId: '123',
-                    username: 'testuser',
-                    role: 'user',
-                },
-                createdAt: Math.floor(Date.now() / 1000) - 1800,
-                expiresAt: Math.floor(Date.now() / 1000) + 1800,
-                lastAccessedAt: Math.floor(Date.now() / 1000),
-                ttlInSeconds: 3600,
-            };
+        it('rotates both secrets and keeps the subject, data and TTL', async () => {
+            const original = await manager.createSession('user-123', { userId: '123', username: 'testuser', role: 'user' }, 3600);
+            const { session, sessionToken, csrfToken } = await manager.regenerateSession(original.session);
 
-            ddbMock.on(DeleteCommand).resolves({});
-            ddbMock.on(PutCommand).resolves({});
-
-            const { session: newSession, sessionToken, csrfToken } = await sessionManager.regenerateSession(originalSession);
-
-            // Fresh raw secrets, stored only as hashes on the new record.
-            expect(newSession.sk).toBe(hashTok(sessionToken.split(':')[1]!));
-            expect(newSession.sk).not.toBe(originalSession.sk);
-            expect(newSession.csrfTokenHash).toBe(hashTok(csrfToken));
-            expect(newSession.csrfTokenHash).not.toBe(originalSession.csrfTokenHash);
-            expect(newSession.sessionKey).toBe(originalSession.sessionKey);
-            expect(newSession.data).toEqual(originalSession.data);
-            expect(newSession.ttlInSeconds).toBe(originalSession.ttlInSeconds);
+            expect(sessionToken).not.toBe(original.sessionToken);
+            expect(csrfToken).not.toBe(original.csrfToken);
+            expect(session.secretHash).toBe(await sha256(sessionToken.split(':')[1]!));
+            expect(session.secretHash).not.toBe(original.session.secretHash);
+            expect(session.csrfTokenHash).not.toBe(original.session.csrfTokenHash);
+            expect(session.sessionKey).toBe('user-123');
+            expect(session.data).toEqual(original.session.data);
+            expect(session.ttlInSeconds).toBe(3600);
+            // The old record is gone; only the new token finds a session.
+            expect(store.size).toBe(1);
+            expect(await readSession(manager, original.sessionToken)).toBeNull();
+            expect(await readSession(manager, sessionToken)).not.toBeNull();
         });
     });
 
-    describe('deleteSessionAll', () => {
-        it('should delete all sessions for a partition key', async () => {
-            const mockSessions = [
-                { pk: 'hashed-key', sk: 'sort-key-1' },
-                { pk: 'hashed-key', sk: 'sort-key-2' },
-            ];
+    describe('crypto', () => {
+        it('the plain crypto stand-in mints and validates sessions too, without hashing', async () => {
+            const plainStore = new LambderMemorySessionStore();
+            const plain = new LambderSessionManager({ store: plainStore, sessionSalt: SALT, crypto: new LambderPlainSessionCrypto() });
+            const { sessionToken, csrfToken, session } = await plain.createSession('user-123', {} as UserSessionData, 60);
+            expect(await readSession(plain, sessionToken)).not.toBeNull();
+            expect(await plain.isSessionTokenValid(session, sessionToken)).toBe(true);
+            expect(await plain.isSessionCsrfTokenValid(session, csrfToken)).toBe(true);
+            expect(await plain.isSessionCsrfTokenValid(session, 'other')).toBe(false);
+        });
 
-            ddbMock.on(QueryCommand).resolves({ Items: mockSessions });
-            ddbMock.on(DeleteCommand).resolves({});
+        it('refuses the plain crypto stand-in over a store that outlives the process', () => {
+            // It neither hashes nor draws random bytes, so every record in a
+            // persistent store would be a usable credential and the salt would
+            // be readable straight out of the partition key. A docstring is not
+            // enough to keep that out of production, so the manager will not
+            // assemble the pair at all.
+            const persistent = new LambderDdbSessionStore({ tableName: 'test-sessions', region: 'us-east-1' });
+            expect(() => new LambderSessionManager({ store: persistent, sessionSalt: SALT, crypto: new LambderPlainSessionCrypto() }))
+                .toThrow(/may only sit in front of a store that dies with the process/);
+        });
 
-            const session = { pk: 'hashed-key', sk: 'sort-key-1' };
-            const result = await sessionManager.deleteSessionAll(session);
+        it('refuses an empty sessionSalt', () => {
+            // It salts the hash that partitions the store, so an unset
+            // environment variable stringifying to nothing has to be loud.
+            expect(() => new LambderSessionManager({ store: new LambderMemorySessionStore(), sessionSalt: '' }))
+                .toThrow(/sessionSalt is empty/);
+        });
+    });
 
-            expect(result).toBe(true);
+    describe('the memory store key', () => {
+        it('escapes the separator, so two records cannot collapse into one', async () => {
+            // Both halves are hex today, but a custom LambderSessionCrypto
+            // writes whatever it likes into them, and a plain `a|b` join makes
+            // ('x|a', 'b') and ('x', 'a|b') one key: one record would silently
+            // overwrite the other, which is one visitor reading another's
+            // session.
+            const keyed = new LambderMemorySessionStore();
+            const record = (sessionKeyHash: string, secretHash: string, sessionKey: string): LambderSessionRecord => ({
+                sessionKeyHash, secretHash, sessionKey,
+                csrfTokenHash: 'csrf-hash', data: {},
+                createdAt: nowSec(), expiresAt: nowSec() + 3600, lastAccessedAt: nowSec(), ttlInSeconds: 3600,
+            });
+            await keyed.put(record('part|a', 'b', 'straddling'));
+            await keyed.put(record('part', 'a|b', 'neighbour'));
+
+            expect((await keyed.get('part|a', 'b'))?.sessionKey).toBe('straddling');
+            expect((await keyed.get('part', 'a|b'))?.sessionKey).toBe('neighbour');
+            expect(keyed.size).toBe(2);
+
+            // And the deletion reaches exactly the one record it names.
+            await keyed.delete('part|a', 'b');
+            expect(await keyed.get('part|a', 'b')).toBeNull();
+            expect((await keyed.get('part', 'a|b'))?.sessionKey).toBe('neighbour');
+        });
+    });
+
+    describe('the memory store ceiling', () => {
+        it('maxEntries bounds the sessions held, and the evicted one is a logout', async () => {
+            // The ceiling is reachable through the store's own options now, and
+            // what it costs is worth saying out loud: the soonest to expire is
+            // dropped, and whoever held that session is signed out.
+            const bounded = new LambderMemorySessionStore({ maxEntries: 2 });
+            const overBounded = new LambderSessionManager({ store: bounded, sessionSalt: SALT });
+            const shortest = await overBounded.createSession('user-1', {}, 60);
+            await overBounded.createSession('user-2', {}, 3600);
+            const longest = await overBounded.createSession('user-3', {}, 7200);
+
+            expect(bounded.size).toBeLessThanOrEqual(2);
+            expect(await overBounded.lookupSession(shortest.sessionToken)).toBeNull();
+            expect(await overBounded.lookupSession(longest.sessionToken)).not.toBeNull();
         });
     });
 });
 
-describe('LambderSessionController', () => {
-    let sessionManager: LambderSessionManager;
-    let sessionController: LambderSessionController<UserSessionData>;
-    let mockCtx: LambderRenderContext<any> & { session: LambderSessionContext<UserSessionData> | null };
+describe('LambderSessionController over the memory store', () => {
+    let store: LambderMemorySessionStore<UserSessionData>;
+    let manager: LambderSessionManager<UserSessionData>;
+    let ctx: ReturnType<typeof createApiCallContext<UserSessionData>>;
+
+    const controllerFor = (cookies: Record<string, string[]>, csrfToken: string | null = 'csrf-token') =>
+        new LambderSessionController<UserSessionData>({
+            manager, tokenCookieKey: 'sessionToken', csrfCookieKey: 'csrfToken', ctx,
+            request: { host: 'localhost', cookies, csrfToken },
+        });
 
     beforeEach(() => {
-        ddbMock.reset();
-        
-        sessionManager = new LambderSessionManager({
-            tableName: 'test-sessions',
-            tableRegion: 'us-east-1',
-            partitionKey: 'pk',
-            sortKey: 'sk',
-            sessionSalt: 'test-salt-12345',
-        });
-
-        mockCtx = {
-            host: 'localhost',
-            path: '/test',
-            pathParams: {},
-            method: 'POST',
-            get: {},
-            post: { token: 'csrf-token' },
-            cookie: { sessionToken: 'hash:sortkey' },
-            cookieList: { sessionToken: ['hash:sortkey'] },
-            session: null,
-            apiName: 'test.api',
-            apiPayload: {},
-            guardData: {},
-            headers: {},
-            rawBody: '',
-            ip: '',
-            header: () => undefined,
-            event: {} as any,
-            lambdaContext: {} as any,
-            _otherInternal: {
-                isApiCall: true,
-                requestVersion: '1.0',
-                eventFormat: 'v1' as const,
-                setHeaderFnAccumulator: [],
-                addHeaderFnAccumulator: [],
-                logToApiResponseAccumulator: [],
-            },
-        };
-
-        sessionController = new LambderSessionController({
-            lambderSessionManager: sessionManager,
-            sessionTokenCookieKey: 'sessionToken',
-            sessionCsrfCookieKey: 'csrfToken',
-            ctx: mockCtx,
-        });
+        store = new LambderMemorySessionStore<UserSessionData>();
+        manager = new LambderSessionManager<UserSessionData>({ store, sessionSalt: SALT });
+        ctx = createApiCallContext<UserSessionData>();
     });
 
-    describe('createSession', () => {
-        it('should create session and set cookies', async () => {
-            ddbMock.on(PutCommand).resolves({});
+    it('createSession stores the record, sets ctx.session and writes both cookies with the raw secrets', async () => {
+        const data: UserSessionData = { userId: '123', username: 'testuser', role: 'user' };
+        const session = await controllerFor({}).createSession('user-123', data);
 
-            const sessionData: UserSessionData = {
-                userId: '123',
-                username: 'testuser',
-                role: 'user',
-            };
-
-            const session = await sessionController.createSession('user-123', sessionData);
-
-            expect(session).toBeDefined();
-            expect(session.data).toEqual(sessionData);
-            expect(mockCtx._otherInternal.addHeaderFnAccumulator.length).toBeGreaterThan(0);
-            
-            // Check that Set-Cookie headers were added
-            const cookieHeaders = mockCtx._otherInternal.addHeaderFnAccumulator.filter(
-                h => h.key === 'Set-Cookie'
-            );
-            expect(cookieHeaders.length).toBe(2); // Session token and CSRF token
-        });
+        expect(session.data).toEqual(data);
+        expect(ctx.session).toBe(session);
+        const cookies = setCookiesOf(ctx);
+        expect(cookies.length).toBe(2);
+        expect(cookies[0]).toMatch(/^sessionToken=[0-9a-f]{64}:[0-9a-f]{64}; Path=\/; Expires=.*; HttpOnly; Secure; SameSite=Lax$/);
+        expect(cookies[1]).toMatch(/^csrfToken=[0-9a-f]{64}; Path=\/; Expires=.*; Secure; SameSite=Lax$/);
+        // The cookie carries the raw secret whose hash is the record's range key.
+        const rawSecret = cookies[0]!.split(';')[0]!.split(':')[1]!;
+        expect(await sha256(rawSecret)).toBe(session.secretHash);
     });
 
-    describe('fetchSession', () => {
-        it('should fetch and validate session', async () => {
-            const mockSession = {
-                pk: 'hash',
-                sk: hashTok('sortkey'),
-                csrfTokenHash: hashTok('csrf-token'),
-                sessionKey: 'user-123',
-                data: { userId: '123', username: 'testuser', role: 'user' },
-                createdAt: Math.floor(Date.now() / 1000),
-                expiresAt: Math.floor(Date.now() / 1000) + 3600,
-                lastAccessedAt: Math.floor(Date.now() / 1000),
-                ttlInSeconds: 3600,
-            };
-
-            ddbMock.on(GetCommand).resolves({ Item: mockSession });
-            ddbMock.on(PutCommand).resolves({});
-
-            const session = await sessionController.fetchSession();
-
-            expect(session).toBeDefined();
-            expect(session.data.userId).toBe('123');
-            expect(mockCtx.session).toBe(session);
-        });
-
-        it('should throw error if session tokens are invalid', async () => {
-            mockCtx.cookie = {}; mockCtx.cookieList = {}; // No session token
-
-            await expect(sessionController.fetchSession()).rejects.toThrow('Session tokens are invalid');
-        });
+    it('fetchSession reads the session the cookie names, checked against the posted CSRF token', async () => {
+        const { token } = await plantRecord(store);
+        const session = await controllerFor({ sessionToken: [token] }).fetchSession();
+        expect(session.data.userId).toBe('123');
+        expect(ctx.session).toBe(session);
     });
 
-    describe('fetchSessionIfExists', () => {
-        it('should return null if session does not exist', async () => {
-            mockCtx.cookie = {}; mockCtx.cookieList = {}; // No session token
-
-            const session = await sessionController.fetchSessionIfExists();
-            expect(session).toBeNull();
-        });
-
-        it('should return session if it exists', async () => {
-            const mockSession = {
-                pk: 'hash',
-                sk: hashTok('sortkey'),
-                csrfTokenHash: hashTok('csrf-token'),
-                sessionKey: 'user-123',
-                data: { userId: '123', username: 'testuser', role: 'user' },
-                createdAt: Math.floor(Date.now() / 1000),
-                expiresAt: Math.floor(Date.now() / 1000) + 3600,
-                lastAccessedAt: Math.floor(Date.now() / 1000),
-                ttlInSeconds: 3600,
-            };
-
-            ddbMock.on(GetCommand).resolves({ Item: mockSession });
-            ddbMock.on(PutCommand).resolves({});
-
-            const session = await sessionController.fetchSessionIfExists();
-            expect(session).toBeDefined();
-            expect(session?.data.userId).toBe('123');
-        });
-
-        it('reads a compressed record that fails to decode as no session', async () => {
-            const { dataBr, dataBytes } = compressedItem({ userId: '123', username: 'testuser', role: 'user' });
-            ddbMock.on(GetCommand).resolves({ Item: {
-                pk: 'hash',
-                sk: hashTok('sortkey'),
-                csrfTokenHash: hashTok('csrf-token'),
-                sessionKey: 'user-123',
-                dataBr: dataBr.subarray(0, 8), // Truncated: the length check fails.
-                dataBytes,
-                createdAt: Math.floor(Date.now() / 1000),
-                expiresAt: Math.floor(Date.now() / 1000) + 3600,
-                lastAccessedAt: Math.floor(Date.now() / 1000),
-                ttlInSeconds: 3600,
-            } });
-
-            const session = await sessionController.fetchSessionIfExists();
-            expect(session).toBeNull();
-        });
+    it('fetchSession refuses without a session cookie, without a CSRF token on API calls, or with the wrong one', async () => {
+        const { token } = await plantRecord(store);
+        await expect(controllerFor({}).fetchSession()).rejects.toThrow('Session tokens are invalid');
+        await expect(controllerFor({ sessionToken: [token] }, '').fetchSession()).rejects.toThrow('Session tokens are invalid');
+        await expect(controllerFor({ sessionToken: [token] }, 'wrong-csrf').fetchSession()).rejects.toThrow('Session not found');
     });
 
-    describe('regenerateSession', () => {
-        it('should regenerate session and update cookies', async () => {
-            const originalSession: LambderSessionContext<UserSessionData> = {
-                pk: 'hash',
-                sk: hashTok('sortkey'),
-                csrfTokenHash: hashTok('csrf-token'),
-                sessionKey: 'user-123',
-                data: { userId: '123', username: 'testuser', role: 'user' },
-                createdAt: Math.floor(Date.now() / 1000),
-                expiresAt: Math.floor(Date.now() / 1000) + 3600,
-                lastAccessedAt: Math.floor(Date.now() / 1000),
-                ttlInSeconds: 3600,
-            };
-
-            (mockCtx as any).session = originalSession;
-
-            ddbMock.on(DeleteCommand).resolves({});
-            ddbMock.on(PutCommand).resolves({});
-
-            const newSession = await sessionController.regenerateSession();
-
-            // Fresh secrets: new hashes at rest, new raw values in the cookies.
-            expect(newSession.sk).not.toBe(originalSession.sk);
-            expect(newSession.csrfTokenHash).not.toBe(originalSession.csrfTokenHash);
-
-            const cookieHeaders = mockCtx._otherInternal.addHeaderFnAccumulator.filter(
-                h => h.key === 'Set-Cookie'
-            );
-            expect(cookieHeaders.length).toBe(2);
-            // The cookie carries the raw secret whose hash is the record's range key.
-            const tokenCookie = cookieHeaders.find(h => h.value.startsWith('sessionToken='))!.value;
-            const rawSecret = tokenCookie.split(';')[0]!.split(':')[1]!;
-            expect(hashTok(rawSecret)).toBe(newSession.sk);
-        });
-
-        it('should throw error if no session exists', async () => {
-            mockCtx.session = null;
-
-            await expect(sessionController.regenerateSession()).rejects.toThrow('Session not found');
-        });
+    it('a route (no CSRF token posted) needs the cookie alone', async () => {
+        const { token } = await plantRecord(store);
+        const session = await controllerFor({ sessionToken: [token] }, null).fetchSession();
+        expect(session.sessionKey).toBe('user-123');
     });
 
-    describe('updateSessionData', () => {
-        it('should update session data', async () => {
-            const session: LambderSessionContext<UserSessionData> = {
-                pk: 'hash',
-                sk: hashTok('sortkey'),
-                csrfTokenHash: hashTok('csrf-token'),
-                sessionKey: 'user-123',
-                data: { userId: '123', username: 'testuser', role: 'user' },
-                createdAt: Math.floor(Date.now() / 1000),
-                expiresAt: Math.floor(Date.now() / 1000) + 3600,
-                lastAccessedAt: Math.floor(Date.now() / 1000),
-                ttlInSeconds: 3600,
-            };
-
-            (mockCtx as any).session = session;
-
-            ddbMock.on(PutCommand).resolves({});
-
-            const newData: UserSessionData = {
-                ...session.data,
-                preferences: { theme: 'dark', language: 'en' },
-            };
-
-            const updatedSession = await sessionController.updateSessionData(newData);
-
-            expect(updatedSession.data.preferences?.theme).toBe('dark');
-        });
+    it('fetchSessionIfExists answers null for a missing session and the session otherwise', async () => {
+        expect(await controllerFor({}).fetchSessionIfExists()).toBeNull();
+        const { token } = await plantRecord(store);
+        expect((await controllerFor({ sessionToken: [token] }).fetchSessionIfExists())?.data.userId).toBe('123');
     });
 
-    describe('endSession', () => {
-        it('should delete session and clear cookies', async () => {
-            const session: LambderSessionContext<UserSessionData> = {
-                pk: 'hash',
-                sk: hashTok('sortkey'),
-                csrfTokenHash: hashTok('csrf-token'),
-                sessionKey: 'user-123',
-                data: { userId: '123', username: 'testuser', role: 'user' },
-                createdAt: Math.floor(Date.now() / 1000),
-                expiresAt: Math.floor(Date.now() / 1000) + 3600,
-                lastAccessedAt: Math.floor(Date.now() / 1000),
-                ttlInSeconds: 3600,
-            };
+    it('regenerateSession rotates the secrets and rewrites the cookies', async () => {
+        const { token } = await plantRecord(store);
+        const controller = controllerFor({ sessionToken: [token] });
+        const before = await controller.fetchSession();
 
-            (mockCtx as any).session = session;
+        const after = await controller.regenerateSession();
 
-            ddbMock.on(DeleteCommand).resolves({});
-
-            await sessionController.endSession();
-
-            expect(mockCtx.session).toBeNull();
-            
-            const cookieHeaders = mockCtx._otherInternal.addHeaderFnAccumulator.filter(
-                h => h.key === 'Set-Cookie'
-            );
-            expect(cookieHeaders.length).toBe(2);
-            
-            // Verify cookies are expired
-            cookieHeaders.forEach(header => {
-                expect(header.value).toContain('Expires=');
-            });
-        });
+        expect(after.secretHash).not.toBe(before.secretHash);
+        expect(after.csrfTokenHash).not.toBe(before.csrfTokenHash);
+        const cookies = setCookiesOf(ctx);
+        expect(cookies.length).toBe(2);
+        const rawSecret = cookies.find((cookie) => cookie.startsWith('sessionToken='))!.split(';')[0]!.split(':')[1]!;
+        expect(await sha256(rawSecret)).toBe(after.secretHash);
+        expect(store.size).toBe(1);
     });
 
-    describe('endSessionAll', () => {
-        it('should delete all sessions and clear cookies', async () => {
-            const session: LambderSessionContext<UserSessionData> = {
-                pk: 'hash',
-                sk: hashTok('sortkey'),
-                csrfTokenHash: hashTok('csrf-token'),
-                sessionKey: 'user-123',
-                data: { userId: '123', username: 'testuser', role: 'user' },
-                createdAt: Math.floor(Date.now() / 1000),
-                expiresAt: Math.floor(Date.now() / 1000) + 3600,
-                lastAccessedAt: Math.floor(Date.now() / 1000),
-                ttlInSeconds: 3600,
-            };
+    it('regenerateSession, updateSessionData, endSession and endSessionAll need a fetched session', async () => {
+        const controller = controllerFor({});
+        await expect(controller.regenerateSession()).rejects.toThrow('Session not found');
+        await expect(controller.updateSessionData({} as UserSessionData)).rejects.toThrow('Session not found');
+        await expect(controller.endSession()).rejects.toThrow('Session not found');
+        await expect(controller.endSessionAll()).rejects.toThrow('Session not found');
+    });
 
-            (mockCtx as any).session = session;
+    it('updateSessionData writes through and updates ctx.session', async () => {
+        const { token } = await plantRecord(store);
+        const controller = controllerFor({ sessionToken: [token] });
+        const session = await controller.fetchSession();
+        const updated = await controller.updateSessionData({ ...session.data, preferences: { theme: 'dark', language: 'en' } });
+        expect(updated.data.preferences?.theme).toBe('dark');
+        expect(ctx.session?.data.preferences?.theme).toBe('dark');
+        expect(store.list()[0]!.data.preferences?.theme).toBe('dark');
+    });
 
-            const mockSessions = [
-                { pk: 'hash', sk: 'sortkey' },
-                { pk: 'hash', sk: 'sortkey2' },
-            ];
+    it('endSession deletes the record, nulls ctx.session and clears both cookies', async () => {
+        const { token } = await plantRecord(store);
+        const controller = controllerFor({ sessionToken: [token] });
+        await controller.fetchSession();
 
-            ddbMock.on(QueryCommand).resolves({ Items: mockSessions });
-            ddbMock.on(DeleteCommand).resolves({});
+        await controller.endSession();
 
-            await sessionController.endSessionAll();
+        expect(ctx.session).toBeNull();
+        expect(store.size).toBe(0);
+        const cookies = setCookiesOf(ctx);
+        expect(cookies).toEqual([
+            'sessionToken=; Max-Age=0; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Secure; SameSite=Lax',
+            'csrfToken=; Max-Age=0; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure; SameSite=Lax',
+        ]);
+    });
 
-            expect(mockCtx.session).toBeNull();
+    it('endSessionAll deletes every session of the subject', async () => {
+        const { token } = await plantRecord(store);
+        await plantRecord(store, { secret: 'b0b' });
+        await plantRecord(store, { secret: 'ace', sessionKeyHash: 'beef', sessionKey: 'user-456' });
+        const controller = controllerFor({ sessionToken: [token] });
+        await controller.fetchSession();
+
+        await controller.endSessionAll();
+
+        expect(ctx.session).toBeNull();
+        expect(store.list().map((record) => record.sessionKey)).toEqual(['user-456']);
+    });
+
+    it('a token cookie that is not the minted format is no session, and never a store read', async () => {
+        // The format check is the controller's, before any read: hex, a
+        // colon, hex, each half under a generous ceiling so a custom crypto
+        // may mint longer halves in either case. Anything else cannot name a
+        // record, so reading for it buys nothing and costs a store round trip
+        // per planted cookie.
+        await plantRecord(store);
+        const get = vi.spyOn(store, 'get');
+
+        for(const planted of ['not-hex:at-all', 'deadbeef', `${'a'.repeat(1100)}:${'b'.repeat(64)}`, 'dead beef:facade', ':facade', 'xyz:facade']){
+            expect(await controllerFor({ sessionToken: [planted] }).fetchSessionIfExists()).toBeNull();
+        }
+
+        expect(get).not.toHaveBeenCalled();
+    });
+
+    it('reads a session whose token halves are longer than the default crypto mints', async () => {
+        // The plain crypto hex-encodes its input instead of hashing it, so a
+        // long session key mints a long first half; a custom crypto may do
+        // the same. The format bound exists for planted oversized cookies and
+        // must leave such sessions readable.
+        const plainStore = new LambderMemorySessionStore<UserSessionData>();
+        const plain = new LambderSessionManager<UserSessionData>({ store: plainStore, sessionSalt: SALT, crypto: new LambderPlainSessionCrypto() });
+        const longKey = 'k'.repeat(200);
+        const created = await plain.createSession(longKey, { userId: 'u1', role: 'user' } as UserSessionData, 3600);
+        expect(created.sessionToken.split(':')[0]!.length).toBeGreaterThan(256);
+
+        const controller = new LambderSessionController<UserSessionData>({
+            manager: plain, tokenCookieKey: 'sessionToken', csrfCookieKey: 'csrfToken', ctx: createApiCallContext<UserSessionData>(),
+            request: { host: 'localhost', cookies: { sessionToken: [created.sessionToken] }, csrfToken: created.csrfToken },
         });
+        expect((await controller.fetchSession()).sessionKey).toBe(longKey);
+    });
+
+    it('fetchSession throws the typed no-session exits, and fetchSessionIfExists swallows only those', async () => {
+        const { token } = await plantRecord(store);
+        await expect(controllerFor({}).fetchSession()).rejects.toBeInstanceOf(LambderSessionNotFoundError);
+        await expect(controllerFor({ sessionToken: [token] }, 'wrong-csrf').fetchSession()).rejects.toBeInstanceOf(LambderSessionNotFoundError);
+
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const manyCopies = Array.from({ length: 6 }, (_, index) => `deadbeef:0a${index}`);
+        await expect(controllerFor({ sessionToken: manyCopies }).fetchSession()).rejects.toBeInstanceOf(LambderSessionAmbiguousError);
+        warn.mockRestore();
+    });
+
+    it('a crash inside the manager surfaces as a crash, not as a logout', async () => {
+        // The reason the exits are typed at all. Returning null for anything
+        // thrown made a TypeError in a custom store, or a bug in this layer,
+        // answer sessionExpired: the client then clears its cookies, so the
+        // defect presented as the user being signed out and nothing was logged.
+        const { token } = await plantRecord(store);
+        vi.spyOn(manager, 'renewSession').mockRejectedValue(new TypeError('cannot read properties of undefined'));
+
+        await expect(controllerFor({ sessionToken: [token] }).fetchSessionIfExists()).rejects.toBeInstanceOf(TypeError);
+        vi.restoreAllMocks();
+    });
+
+    it('re-issues both cookies when a sliding write moved the expiry, and stays silent when it did not', async () => {
+        // Sliding expiration moved the record and left the browser holding a
+        // cookie that still expires at createdAt + ttl, so a visitor who never
+        // stopped using the app was signed out anyway, on the one deadline
+        // sliding expiration exists to push back.
+        const fresh = await plantRecord(store, { lastAccessedAt: nowSec() });
+        await controllerFor({ sessionToken: [fresh.token] }).fetchSession();
+        expect(setCookiesOf(ctx)).toEqual([]);
+
+        ctx = createApiCallContext<UserSessionData>();
+        const slid = await plantRecord(store, { secret: 'b0b', lastAccessedAt: nowSec() - 3600, expiresAt: nowSec() + 1800 });
+        const session = await controllerFor({ sessionToken: [slid.token] }).fetchSession();
+
+        const cookies = setCookiesOf(ctx);
+        expect(cookies.length).toBe(2);
+        expect(cookies[0]).toContain(`sessionToken=${slid.token};`);
+        expect(cookies[1]).toContain('csrfToken=csrf-token;');
+        // Both carry the renewed expiry, which is what the browser was missing.
+        expect(cookies[0]).toContain(`Expires=${new Date(session.expiresAt * 1000).toUTCString()}`);
+        expect(cookies[1]).toContain(`Expires=${new Date(session.expiresAt * 1000).toUTCString()}`);
+    });
+
+    it('slides a route with the CSRF cookie it carries, and only once that cookie pairs', async () => {
+        // A route posts no CSRF token, so the value to re-issue is the cookie
+        // that arrived, and re-issuing one that does not pair would overwrite
+        // this visitor's real CSRF cookie with a planted one.
+        const slid = await plantRecord(store, { lastAccessedAt: nowSec() - 3600, expiresAt: nowSec() + 1800 });
+        const routeController = new LambderSessionController<UserSessionData>({
+            manager, tokenCookieKey: 'sessionToken', csrfCookieKey: 'csrfToken', ctx,
+            request: { host: 'localhost', cookies: { sessionToken: [slid.token], csrfToken: ['csrf-token'] }, csrfToken: null },
+        });
+
+        await routeController.fetchSession();
+        expect(setCookiesOf(ctx).map((cookie) => cookie.split('=')[0])).toEqual(['sessionToken', 'csrfToken']);
+
+        ctx = createApiCallContext<UserSessionData>();
+        const other = await plantRecord(store, { secret: 'b0b', lastAccessedAt: nowSec() - 3600, expiresAt: nowSec() + 1800 });
+        const plantedCsrf = new LambderSessionController<UserSessionData>({
+            manager, tokenCookieKey: 'sessionToken', csrfCookieKey: 'csrfToken', ctx,
+            request: { host: 'localhost', cookies: { sessionToken: [other.token], csrfToken: ['planted'] }, csrfToken: null },
+        });
+
+        await plantedCsrf.fetchSession();
+        expect(setCookiesOf(ctx).map((cookie) => cookie.split('=')[0])).toEqual(['sessionToken']);
+    });
+});
+
+describe('The session option after the store moved out of it', () => {
+    it('refuses a table field that now belongs to the store, instead of ignoring it', () => {
+        // create() is generic over `const TOptions`, which switches
+        // excess-property checking off, so these compile. Silently dropping
+        // them would point the app at pk/sk on a table keyed otherwise, and
+        // the first sign would be that nobody can log in.
+        const withMovedField = (extra: Record<string, unknown>) => () => new Lambder({
+            files: testPublicFiles(),
+            apiPath: '/api',
+            session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt', ...extra },
+        } as never);
+
+        expect(withMovedField({ partitionKey: 'myPk' })).toThrow(/no longer takes partitionKey/);
+        expect(withMovedField({ tableName: 't', tableRegion: 'us-east-1' })).toThrow(/no longer takes tableName, tableRegion/);
+        expect(withMovedField({ sortKey: 'mySk' })).toThrow(/LambderDdbSessionStore/);
+        expect(withMovedField({ compression: false })).toThrow(/no longer takes compression/);
+    });
+
+    it('takes a current session option without complaint', () => {
+        expect(() => new Lambder({
+            files: testPublicFiles(),
+            apiPath: '/api',
+            session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt', tokenCookieKey: 'sid' },
+        })).not.toThrow();
     });
 });
 
 describe('Session Endpoint Protection', () => {
-    let lambder: Lambder<UserSessionData>;
-    
-    const createMockEvent = (path: string, method: string, sessionToken?: string, apiName?: string, payload?: any, csrfToken?: string): APIGatewayProxyEvent => {
-        const cookieHeader = sessionToken ? `LMDRSESSIONTKID=${sessionToken}` : '';
-        return {
-            body: apiName ? JSON.stringify({ 
-                apiName, 
-                payload: payload || {}, 
-                token: csrfToken ?? 'csrf-token' 
-            }) : null,
-            headers: {
-                Host: 'localhost',
-                Cookie: cookieHeader,
-            },
-            multiValueHeaders: {},
-            httpMethod: method,
-            isBase64Encoded: false,
-            path,
-            pathParameters: null,
-            queryStringParameters: null,
-            multiValueQueryStringParameters: null,
-            stageVariables: null,
-            requestContext: {} as any,
-            resource: '',
-        };
-    };
+    let store: LambderMemorySessionStore<UserSessionData>;
+    let lambder: ReturnType<typeof makeApp>;
+
+    const makeApp = (store: LambderMemorySessionStore<UserSessionData>) => initLambder<UserSessionData>().create({
+        files: new LambderLocalFileSource({ root: '/public' }),
+        apiPath: '/api',
+        session: { store, sessionSalt: 'test-salt' },
+    }).setGlobalErrorHandler((err, ctx, responseBuilder) => {
+        if (ctx?.api) return responseBuilder.api({ error: err.message });
+        return responseBuilder.html(`<h1>Error: ${err.message}</h1>`);
+    });
+
+    const createMockEvent = (path: string, method: string, sessionToken?: string, apiName?: string, payload?: any, csrfToken?: string): APIGatewayProxyEvent => ({
+        body: apiName ? JSON.stringify({ apiName, payload: payload || {}, token: csrfToken ?? 'csrf-token' }) : null,
+        headers: { Host: 'localhost', Cookie: sessionToken ? `LMDRSESSIONTKID=${sessionToken}` : '' },
+        multiValueHeaders: {},
+        httpMethod: method,
+        isBase64Encoded: false,
+        path,
+        pathParameters: null,
+        queryStringParameters: null,
+        multiValueQueryStringParameters: null,
+        stageVariables: null,
+        requestContext: {} as any,
+        resource: '',
+    });
 
     const createMockContext = (): Context => ({
-        callbackWaitsForEmptyEventLoop: false,
-        functionName: 'test',
-        functionVersion: '1',
-        invokedFunctionArn: 'arn',
-        memoryLimitInMB: '128',
-        awsRequestId: 'request-id',
-        logGroupName: 'log-group',
-        logStreamName: 'log-stream',
-        getRemainingTimeInMillis: () => 1000,
-        done: () => {},
-        fail: () => {},
-        succeed: () => {},
+        callbackWaitsForEmptyEventLoop: false, functionName: 'test', functionVersion: '1', invokedFunctionArn: 'arn',
+        memoryLimitInMB: '128', awsRequestId: 'request-id', logGroupName: 'log-group', logStreamName: 'log-stream',
+        getRemainingTimeInMillis: () => 1000, done: () => {}, fail: () => {}, succeed: () => {},
     });
 
     beforeEach(() => {
-        ddbMock.reset();
-        
-        lambder = initLambder().create({ files: new LambderLocalFileSource({ root: '/public' }),
-            apiPath: '/api', session: {
-                    tableName: 'test-sessions',
-                    tableRegion: 'us-east-1',
-                    sessionSalt: 'test-salt',
-                    partitionKey: 'pk',
-                    sortKey: 'sk',
-                } })
-            // Set up error handler to expose actual error messages for testing
-            .setGlobalErrorHandler((err, ctx, responseBuilder) => {
-                if (ctx?._otherInternal.isApiCall) {
-                    return responseBuilder.api({ error: err.message });
-                }
-                return responseBuilder.html(`<h1>Error: ${err.message}</h1>`);
-            });
+        store = new LambderMemorySessionStore<UserSessionData>();
+        lambder = makeApp(store);
     });
 
     describe('addSessionRoute', () => {
-        it('should throw error when no session exists', async () => {
-            ddbMock.on(GetCommand).resolves({}); // No session found
-
-            lambder.addSessionRoute('/protected', async (ctx, resolver) => {
-                return resolver.html('<h1>Protected Page</h1>');
-            });
-
-            const event = createMockEvent('/protected', 'GET', 'hash:sortkey');
-            const context = createMockContext();
-
-            const response = await lambder.render(event, context);
-
-            // Missing sessions on routes short-circuit to a 401 response.
+        it('answers 401 when no session exists', async () => {
+            lambder.addSessionRoute('/protected', async (ctx, resolver) => resolver.html('<h1>Protected Page</h1>'));
+            const response = await lambder.render(createMockEvent('/protected', 'GET', 'deadbeef:facade'), createMockContext());
             expect(response.statusCode).toBe(401);
             expect(decodeBody(response)).toContain('Session required');
         });
 
-        it('should succeed when valid session exists', async () => {
-            const mockSession = {
-                pk: 'hash',
-                sk: hashTok('sortkey'),
-                csrfTokenHash: hashTok('csrf-token'),
-                sessionKey: 'user-123',
-                data: { userId: '123', username: 'testuser', role: 'user' },
-                createdAt: Math.floor(Date.now() / 1000),
-                expiresAt: Math.floor(Date.now() / 1000) + 3600,
-                lastAccessedAt: Math.floor(Date.now() / 1000),
-                ttlInSeconds: 3600,
-            };
-
-            ddbMock.on(GetCommand).resolves({ Item: mockSession });
-            ddbMock.on(PutCommand).resolves({});
-
-            lambder.addSessionRoute('/protected', async (ctx, resolver) => {
-                return resolver.html('<h1>Protected Page</h1>');
-            });
-
-            const event = createMockEvent('/protected', 'GET', 'hash:sortkey');
-            const context = createMockContext();
-
-            const response = await lambder.render(event, context);
-
+        it('runs the handler with the session when the cookie names a live one', async () => {
+            const { token } = await plantRecord(store);
+            lambder.addSessionRoute('/protected', async (ctx, resolver) => resolver.html(`<h1>Protected ${ctx.session.data.userId}</h1>`));
+            const response = await lambder.render(createMockEvent('/protected', 'GET', token), createMockContext());
             expect(response.statusCode).toBe(200);
-            expect(decodeBody(response)).toContain('Protected Page');
+            expect(decodeBody(response)).toContain('Protected 123');
         });
 
-        it('should throw error when session is expired', async () => {
-            const expiredSession = {
-                pk: 'hash',
-                sk: hashTok('sortkey'),
-                csrfTokenHash: hashTok('csrf-token'),
-                sessionKey: 'user-123',
-                data: { userId: '123' },
-                createdAt: Math.floor(Date.now() / 1000) - 7200,
-                expiresAt: Math.floor(Date.now() / 1000) - 3600, // Expired
-                lastAccessedAt: Math.floor(Date.now() / 1000) - 7200,
-                ttlInSeconds: 3600,
-            };
-
-            ddbMock.on(GetCommand).resolves({ Item: expiredSession });
-
-            lambder.addSessionRoute('/protected', async (ctx, resolver) => {
-                return resolver.html('<h1>Protected Page</h1>');
-            });
-
-            const event = createMockEvent('/protected', 'GET', 'hash:sortkey');
-            const context = createMockContext();
-
-            const response = await lambder.render(event, context);
-
-            // Expired sessions on routes short-circuit to a 401 response.
+        it('answers 401 when the session is expired', async () => {
+            const { token } = await plantRecord(store, { expiresAt: nowSec() - 3600, createdAt: nowSec() - 7200 });
+            lambder.addSessionRoute('/protected', async (ctx, resolver) => resolver.html('<h1>Protected Page</h1>'));
+            const response = await lambder.render(createMockEvent('/protected', 'GET', token), createMockContext());
             expect(response.statusCode).toBe(401);
-            expect(decodeBody(response)).toContain('Session required');
+        });
+
+        it('a session API without the session option is refused at registration', () => {
+            const bare = new Lambder({ apiPath: '/api' });
+            expect(() => bare.addSessionApi('x', { input: z.any(), output: z.any() }, async (ctx, res) => res.api(null)))
+                .toThrow(/needs the session option at creation/);
         });
     });
 
     describe('addSessionApi', () => {
-        it('should throw error when no session exists', async () => {
-            ddbMock.on(GetCommand).resolves({}); // No session found
+        const profileApi = () => lambder.addSessionApi('user.profile', { input: z.any(), output: z.any() },
+            async (ctx, resolver) => resolver.api({ userId: ctx.session.data.userId }));
 
-            lambder.addSessionApi('user.profile', {
-                input: z.any(),
-                output: z.any()
-            }, async (ctx, resolver) => {
-                return resolver.api({ userId: ctx.session.data.userId });
-            });
-
-            const event = createMockEvent('/api', 'POST', 'hash:sortkey', 'user.profile');
-            const context = createMockContext();
-
-            const response = await lambder.render(event, context);
-
-            // Missing sessions on APIs return the protocol's sessionExpired flag
-            // (LambderCaller clears cookies and calls sessionExpiredHandler).
+        it('answers the protocol\'s sessionExpired flag when no session exists', async () => {
+            profileApi();
+            const response = await lambder.render(createMockEvent('/api', 'POST', 'deadbeef:facade', 'user.profile'), createMockContext());
             const body = JSON.parse(decodeBody(response) || '{}');
             expect(body.sessionExpired).toBe(true);
             expect(body.payload ?? null).toBeNull();
         });
 
-        it('should succeed when valid session exists', async () => {
-            const mockSession = {
-                pk: 'hash',
-                sk: hashTok('sortkey'),
-                csrfTokenHash: hashTok('csrf-token'),
-                sessionKey: 'user-123',
-                data: { userId: '123', username: 'testuser', role: 'user' },
-                createdAt: Math.floor(Date.now() / 1000),
-                expiresAt: Math.floor(Date.now() / 1000) + 3600,
-                lastAccessedAt: Math.floor(Date.now() / 1000),
-                ttlInSeconds: 3600,
-            };
+        it('runs the handler with the session when the cookie and CSRF token match', async () => {
+            const { token } = await plantRecord(store);
+            profileApi();
+            const response = await lambder.render(createMockEvent('/api', 'POST', token, 'user.profile'), createMockContext());
+            expect(JSON.parse(decodeBody(response) || '{}').payload?.userId).toBe('123');
+        });
 
-            ddbMock.on(GetCommand).resolves({ Item: mockSession });
-            ddbMock.on(PutCommand).resolves({});
-
-            lambder.addSessionApi('user.profile', {
-                input: z.any(),
-                output: z.any()
-            }, async (ctx, resolver) => {
-                return resolver.api({ userId: ctx.session.data.userId });
-            });
-
-            const event = createMockEvent('/api', 'POST', 'hash:sortkey', 'user.profile');
-            const context = createMockContext();
-
-            const response = await lambder.render(event, context);
-
-            const body = JSON.parse(decodeBody(response) || '{}');
-            expect(body.payload?.userId).toBe('123');
+        it('answers sessionExpired when the CSRF token is missing or wrong', async () => {
+            const { token } = await plantRecord(store);
+            profileApi();
+            for(const csrf of ['', 'wrong-csrf-token']){
+                const response = await lambder.render(createMockEvent('/api', 'POST', token, 'user.profile', {}, csrf), createMockContext());
+                expect(JSON.parse(decodeBody(response) || '{}').sessionExpired).toBe(true);
+            }
         });
 
         it('session guards see ctx.session, receive their param, and feed ctx.guardData', async () => {
-            const mockSession = {
-                pk: 'hash',
-                sk: hashTok('sortkey'),
-                csrfTokenHash: hashTok('csrf-token'),
-                sessionKey: 'user-123',
-                data: { userId: '123', role: 'admin' },
-                createdAt: Math.floor(Date.now() / 1000),
-                expiresAt: Math.floor(Date.now() / 1000) + 3600,
-                lastAccessedAt: Math.floor(Date.now() / 1000),
-                ttlInSeconds: 3600,
-            };
-            ddbMock.on(GetCommand).resolves({ Item: mockSession });
-            ddbMock.on(PutCommand).resolves({});
-
-            const guardedLambder = initLambder().create({
+            const { token } = await plantRecord(store, { data: { userId: '123', username: 'testuser', role: 'admin' } });
+            const guarded = initLambder<UserSessionData>().create({
                 files: new LambderLocalFileSource({ root: '/public' }),
                 apiPath: '/api',
-                session: {
-                    tableName: 'test-sessions',
-                    tableRegion: 'us-east-1',
-                    sessionSalt: 'test-salt',
-                    partitionKey: 'pk',
-                    sortKey: 'sk',
-                },
+                session: { store, sessionSalt: 'test-salt' },
                 guards: {
                     orgPermission: lambderGuard({
                         session: true,
-                        handler: (ctx, _payload, _res, permission: string) => {
-                            // The session is fetched before guards run on session APIs.
-                            return { subject: ctx.session.sessionKey, permission };
-                        },
+                        handler: (ctx, _payload, permission: string) => ({ subject: ctx.session.sessionKey, permission }),
                     }),
                 },
-            })
-                .addSessionApi('org.action', {
-                    input: z.any(),
-                    output: z.any(),
-                    guards: { orgPermission: 'ORG.MANAGE' },
-                }, async (ctx, resolver) => {
-                    return resolver.api(ctx.guardData.orgPermission);
-                });
+            }).addSessionApi('org.action', { input: z.any(), output: z.any(), guards: { orgPermission: 'ORG.MANAGE' } },
+                async (ctx, resolver) => resolver.api(ctx.guardData.orgPermission));
 
-            const event = createMockEvent('/api', 'POST', 'hash:sortkey', 'org.action');
-            const response = await guardedLambder.render(event, createMockContext());
-
-            const body = JSON.parse(decodeBody(response) || '{}');
-            expect(body.payload).toEqual({ subject: 'user-123', permission: 'ORG.MANAGE' });
+            const response = await guarded.render(createMockEvent('/api', 'POST', token, 'org.action'), createMockContext());
+            expect(JSON.parse(decodeBody(response) || '{}').payload).toEqual({ subject: 'user-123', permission: 'ORG.MANAGE' });
         });
 
         it('the named opt-out guard under requireSessionApiGuards lets the handler run on the session alone', async () => {
-            const mockSession = {
-                pk: 'hash',
-                sk: hashTok('sortkey'),
-                csrfTokenHash: hashTok('csrf-token'),
-                sessionKey: 'user-123',
-                data: { userId: '123' },
-                createdAt: Math.floor(Date.now() / 1000),
-                expiresAt: Math.floor(Date.now() / 1000) + 3600,
-                lastAccessedAt: Math.floor(Date.now() / 1000),
-                ttlInSeconds: 3600,
-            };
-            ddbMock.on(GetCommand).resolves({ Item: mockSession });
-            ddbMock.on(PutCommand).resolves({});
-
-            const strictLambder = initLambder().create({
+            const { token } = await plantRecord(store);
+            const strict = initLambder<UserSessionData>().create({
                 files: new LambderLocalFileSource({ root: '/public' }),
                 apiPath: '/api',
-                session: {
-                    tableName: 'test-sessions',
-                    tableRegion: 'us-east-1',
-                    sessionSalt: 'test-salt',
-                    partitionKey: 'pk',
-                    sortKey: 'sk',
-                },
-                guards: {
-                    sessionOnly: lambderGuard({ session: true, handler: () => {} }),
-                },
+                session: { store, sessionSalt: 'test-salt' },
+                guards: { sessionOnly: lambderGuard({ session: true, handler: () => {} }) },
                 requireSessionApiGuards: true,
-            })
-                .addSessionApi('me.session', {
-                    input: z.any(),
-                    output: z.any(),
-                    guards: 'sessionOnly',
-                }, async (ctx, resolver) => {
-                    return resolver.api({ userId: ctx.session.data.userId });
-                });
+            }).addSessionApi('me.session', { input: z.any(), output: z.any(), guards: 'sessionOnly' },
+                async (ctx, resolver) => resolver.api({ userId: ctx.session.data.userId }));
 
-            const event = createMockEvent('/api', 'POST', 'hash:sortkey', 'me.session');
-            const response = await strictLambder.render(event, createMockContext());
-
-            const body = JSON.parse(decodeBody(response) || '{}');
-            expect(body.payload).toEqual({ userId: '123' });
+            const response = await strict.render(createMockEvent('/api', 'POST', token, 'me.session'), createMockContext());
+            expect(JSON.parse(decodeBody(response) || '{}').payload).toEqual({ userId: '123' });
         });
 
-        it('should throw error when CSRF token is missing', async () => {
-            const mockSession = {
-                pk: 'hash',
-                sk: hashTok('sortkey'),
-                csrfTokenHash: hashTok('csrf-token'),
-                sessionKey: 'user-123',
-                data: { userId: '123' },
-                createdAt: Math.floor(Date.now() / 1000),
-                expiresAt: Math.floor(Date.now() / 1000) + 3600,
-                lastAccessedAt: Math.floor(Date.now() / 1000),
-                ttlInSeconds: 3600,
-            };
-
-            ddbMock.on(GetCommand).resolves({ Item: mockSession });
-
-            lambder.addSessionApi('user.profile', {
-                input: z.any(),
-                output: z.any()
-            }, async (ctx, resolver) => {
-                return resolver.api({ userId: ctx.session.data.userId });
-            });
-
-            // Create event without CSRF token
-            const event = createMockEvent('/api', 'POST', 'hash:sortkey', 'user.profile', {}, ''); // Empty CSRF token
-            const context = createMockContext();
-
-            const response = await lambder.render(event, context);
-
-            const body = JSON.parse(decodeBody(response) || '{}');
-            expect(body.sessionExpired).toBe(true);
-        });
-
-        it('should throw error when CSRF token is invalid', async () => {
-            const mockSession = {
-                pk: 'hash',
-                sk: hashTok('sortkey'),
-                csrfTokenHash: hashTok('csrf-token'),
-                sessionKey: 'user-123',
-                data: { userId: '123' },
-                createdAt: Math.floor(Date.now() / 1000),
-                expiresAt: Math.floor(Date.now() / 1000) + 3600,
-                lastAccessedAt: Math.floor(Date.now() / 1000),
-                ttlInSeconds: 3600,
-            };
-
-            ddbMock.on(GetCommand).resolves({ Item: mockSession });
-
-            lambder.addSessionApi('user.profile', {
-                input: z.any(),
-                output: z.any()
-            }, async (ctx, resolver) => {
-                return resolver.api({ userId: ctx.session.data.userId });
-            });
-
-            // Create event with wrong CSRF token
-            const event = createMockEvent('/api', 'POST', 'hash:sortkey', 'user.profile', {}, 'wrong-csrf-token');
-            const context = createMockContext();
-
-            const response = await lambder.render(event, context);
-
-            const body = JSON.parse(decodeBody(response) || '{}');
-            expect(body.sessionExpired).toBe(true);
-        });
-
-        it('should have typed session data in context', async () => {
-            const mockSession = {
-                pk: 'hash',
-                sk: hashTok('sortkey'),
-                csrfTokenHash: hashTok('csrf-token'),
-                sessionKey: 'user-123',
-                data: { userId: '123', username: 'testuser', role: 'admin' as const },
-                createdAt: Math.floor(Date.now() / 1000),
-                expiresAt: Math.floor(Date.now() / 1000) + 3600,
-                lastAccessedAt: Math.floor(Date.now() / 1000),
-                ttlInSeconds: 3600,
-            };
-
-            ddbMock.on(GetCommand).resolves({ Item: mockSession });
-            ddbMock.on(PutCommand).resolves({});
-
-            lambder.addSessionApi('user.profile', {
-                input: z.any(),
-                output: z.any()
-            }, async (ctx, resolver) => {
-                // Type test: ctx.session.data should have UserSessionData type
+        it('hands the handler typed session data', async () => {
+            const { token } = await plantRecord(store, { data: { userId: '123', username: 'testuser', role: 'admin' } });
+            lambder.addSessionApi('user.profile', { input: z.any(), output: z.any() }, async (ctx, resolver) => {
                 const userId: string = ctx.session.data.userId;
-                const username: string = ctx.session.data.username;
                 const role: 'admin' | 'user' | 'guest' = ctx.session.data.role;
-                
-                return resolver.api({ userId, username, role });
+                return resolver.api({ userId, role });
             });
+            const response = await lambder.render(createMockEvent('/api', 'POST', token, 'user.profile'), createMockContext());
+            expect(JSON.parse(decodeBody(response) || '{}').payload).toEqual({ userId: '123', role: 'admin' });
+        });
 
-            const event = createMockEvent('/api', 'POST', 'hash:sortkey', 'user.profile');
-            const context = createMockContext();
-
-            const response = await lambder.render(event, context);
-
-            const body = JSON.parse(decodeBody(response) || '{}');
-            expect(body.payload?.userId).toBe('123');
-            expect(body.payload?.username).toBe('testuser');
-            expect(body.payload?.role).toBe('admin');
+        it('a handler creates a session through the controller and the answer carries its cookies', async () => {
+            lambder.addApi('login', { input: z.object({ user: z.string() }), output: z.any() }, async (ctx, res) => {
+                const session = await lambder.getSessionController(ctx).createSession(ctx.apiPayload.user, { userId: '9', username: ctx.apiPayload.user, role: 'user' });
+                return res.api({ key: session.sessionKey });
+            });
+            const response = await lambder.render(createMockEvent('/api', 'POST', undefined, 'login', { user: 'ada' }), createMockContext());
+            expect(JSON.parse(decodeBody(response) || '{}').payload).toEqual({ key: 'ada' });
+            const cookies = response.multiValueHeaders?.['Set-Cookie'] ?? [];
+            expect(cookies.length).toBe(2);
+            expect(cookies[0]).toMatch(/^LMDRSESSIONTKID=/);
+            expect(cookies[1]).toMatch(/^LMDRSESSIONCSTK=/);
+            expect(store.size).toBe(1);
         });
     });
 
     describe('addSessionApi with dataRefresh', () => {
-        const staleSession = () => ({
-            pk: 'hash',
-            sk: hashTok('sortkey'),
-            csrfTokenHash: hashTok('csrf-token'),
-            sessionKey: 'user-123',
-            data: { userId: '123', username: 'testuser', role: 'user' as const },
-            createdAt: Math.floor(Date.now() / 1000) - 1200,
-            expiresAt: Math.floor(Date.now() / 1000) + 3600,
-            lastAccessedAt: Math.floor(Date.now() / 1000),
-            ttlInSeconds: 3600,
-            dataExpiresAt: Math.floor(Date.now() / 1000) - 10, // Stale data
-        });
-
-        const makeRefreshingLambder = (refresh: (session: LambderSessionContext<UserSessionData>) => Promise<UserSessionData | null>) =>
-            initLambder<UserSessionData>().create({ files: new LambderLocalFileSource({ root: '/public' }), apiPath: '/api', session: {
-                    tableName: 'test-sessions',
-                    tableRegion: 'us-east-1',
-                    sessionSalt: 'test-salt',
-                    partitionKey: 'pk',
-                    sortKey: 'sk',
-                    dataRefresh: { ttlSeconds: 600, refresh },
-                } });
-
-        it('should hand handlers renewed data when the session data is stale', async () => {
-            ddbMock.on(GetCommand).resolves({ Item: staleSession() });
-            ddbMock.on(PutCommand).resolves({});
-
-            const refreshingLambder = makeRefreshingLambder(
-                async (session) => ({ ...session.data, role: 'admin' as const })
-            );
-            refreshingLambder.addSessionApi('user.profile', {
-                input: z.any(),
-                output: z.any()
-            }, async (ctx, resolver) => {
-                return resolver.api({ role: ctx.session.data.role });
+        const makeRefreshingLambder = (refresh: (session: LambderSessionRecord<UserSessionData>) => Promise<UserSessionData | null>) =>
+            initLambder<UserSessionData>().create({
+                files: new LambderLocalFileSource({ root: '/public' }), apiPath: '/api',
+                session: { store, sessionSalt: 'test-salt', dataRefresh: { ttlSeconds: 600, refresh } },
             });
 
-            const response = await refreshingLambder.render(
-                createMockEvent('/api', 'POST', 'hash:sortkey', 'user.profile'),
-                createMockContext()
-            );
-
-            const body = JSON.parse(decodeBody(response) || '{}');
-            expect(body.payload?.role).toBe('admin');
+        it('hands handlers renewed data when the session data is stale', async () => {
+            const { token } = await plantRecord(store, { dataExpiresAt: nowSec() - 10 });
+            const app = makeRefreshingLambder(async (session) => ({ ...session.data, role: 'admin' as const }))
+                .addSessionApi('user.profile', { input: z.any(), output: z.any() }, async (ctx, resolver) => resolver.api({ role: ctx.session.data.role }));
+            const response = await app.render(createMockEvent('/api', 'POST', token, 'user.profile'), createMockContext());
+            expect(JSON.parse(decodeBody(response) || '{}').payload?.role).toBe('admin');
+            expect(store.list()[0]!.data.role).toBe('admin');
         });
 
-        it('should answer sessionExpired when the refresh callback ends the session', async () => {
-            ddbMock.on(GetCommand).resolves({ Item: staleSession() });
-            ddbMock.on(DeleteCommand).resolves({});
-
-            const refreshingLambder = makeRefreshingLambder(async () => null);
-            refreshingLambder.addSessionApi('user.profile', {
-                input: z.any(),
-                output: z.any()
-            }, async (ctx, resolver) => {
-                return resolver.api({ role: ctx.session.data.role });
-            });
-
-            const response = await refreshingLambder.render(
-                createMockEvent('/api', 'POST', 'hash:sortkey', 'user.profile'),
-                createMockContext()
-            );
-
-            const body = JSON.parse(decodeBody(response) || '{}');
-            expect(body.sessionExpired).toBe(true);
+        it('answers sessionExpired when the refresh callback ends the session', async () => {
+            const { token } = await plantRecord(store, { dataExpiresAt: nowSec() - 10 });
+            const app = makeRefreshingLambder(async () => null)
+                .addSessionApi('user.profile', { input: z.any(), output: z.any() }, async (ctx, resolver) => resolver.api({ role: ctx.session.data.role }));
+            const response = await app.render(createMockEvent('/api', 'POST', token, 'user.profile'), createMockContext());
+            expect(JSON.parse(decodeBody(response) || '{}').sessionExpired).toBe(true);
+            expect(store.size).toBe(0);
         });
     });
 });
@@ -1281,543 +894,195 @@ describe('Session Endpoint Protection', () => {
 // ── dataRefresh: opt-in freshness for session.data ───────────────────────────
 
 describe('LambderSessionManager dataRefresh', () => {
-    const nowSec = () => Math.floor(Date.now() / 1000);
+    let store: LambderMemorySessionStore;
+    beforeEach(() => { store = new LambderMemorySessionStore(); });
 
-    const makeSessionItem = (overrides: Record<string, any> = {}) => ({
-        pk: 'hashed-key',
-        sk: hashTok('sort-key'),
-        csrfTokenHash: hashTok('csrf-token'),
-        sessionKey: 'user-123',
-        data: { role: 'user' },
-        createdAt: nowSec() - 1000,
-        expiresAt: nowSec() + 3600,
-        lastAccessedAt: nowSec(), // Recent: no sliding write due
-        ttlInSeconds: 3600,
-        ...overrides,
-    });
-
-    const makePlainManager = () => new LambderSessionManager({
-        tableName: 'test-sessions',
-        tableRegion: 'us-east-1',
-        partitionKey: 'pk',
-        sortKey: 'sk',
-        sessionSalt: 'test-salt-12345',
-    });
-
-    const makeManager = (refresh: (session: LambderSessionContext) => Promise<any>) =>
-        new LambderSessionManager({
-            tableName: 'test-sessions',
-            tableRegion: 'us-east-1',
-            partitionKey: 'pk',
-            sortKey: 'sk',
-            sessionSalt: 'test-salt-12345',
-            enableSlidingExpiration: true,
-            dataRefresh: { ttlSeconds: 600, refresh },
-        });
-
-    beforeEach(() => { ddbMock.reset(); });
+    const makePlainManager = () => new LambderSessionManager({ store, sessionSalt: SALT });
+    const makeManager = (refresh: (session: LambderSessionRecord) => Promise<any>) =>
+        new LambderSessionManager({ store, sessionSalt: SALT, enableSlidingExpiration: true, dataRefresh: { ttlSeconds: 600, refresh } });
 
     it('createSession stamps dataExpiresAt only when configured', async () => {
-        ddbMock.on(PutCommand).resolves({});
-
         const { session } = await makeManager(async (s) => s.data).createSession('user-123', {}, 3600);
         expect(session.dataExpiresAt).toBeGreaterThanOrEqual(nowSec() + 599);
-
         const { session: plainSession } = await makePlainManager().createSession('user-123', {}, 3600);
         expect(plainSession.dataExpiresAt).toBeUndefined();
     });
 
     it('does not run refresh before dataExpiresAt', async () => {
         const refresh = vi.fn(async () => ({ role: 'admin' }));
-        ddbMock.on(GetCommand).resolves({ Item: makeSessionItem({ dataExpiresAt: nowSec() + 600 }) });
-        ddbMock.on(PutCommand).resolves({});
-
-        const session = await makeManager(refresh).getSession('hashed-key:sort-key');
-
+        const { token } = await plantRecord(store, { data: { role: 'user' }, dataExpiresAt: nowSec() + 600 });
+        const session = await readSession(makeManager(refresh), token);
         expect(refresh).not.toHaveBeenCalled();
         expect(session?.data).toEqual({ role: 'user' });
     });
 
-    it('renews stale data and shares one put with the sliding-expiration write', async () => {
+    it('renews stale data and shares one write with the sliding-expiration write', async () => {
         const refresh = vi.fn(async () => ({ role: 'admin' }));
-        // Stale data AND a due sliding write: both updates must share one put.
-        ddbMock.on(GetCommand).resolves({ Item: makeSessionItem({
-            dataExpiresAt: nowSec() - 10,
-            lastAccessedAt: nowSec() - 3000,
-        }) });
-        ddbMock.on(PutCommand).resolves({});
+        const { token } = await plantRecord(store, { data: { role: 'user' }, dataExpiresAt: nowSec() - 10, lastAccessedAt: nowSec() - 3000 });
+        const put = vi.spyOn(store, 'put');
 
-        const session = await makeManager(refresh).getSession('hashed-key:sort-key');
+        const session = await readSession(makeManager(refresh), token);
 
         expect(refresh).toHaveBeenCalledOnce();
         expect(session?.data).toEqual({ role: 'admin' });
         expect(session?.dataExpiresAt).toBeGreaterThanOrEqual(nowSec() + 599);
-
-        const puts = ddbMock.commandCalls(PutCommand);
-        expect(puts.length).toBe(1);
-        expect(storedData(puts[0]!.args[0].input.Item!)).toEqual({ role: 'admin' });
+        expect(put).toHaveBeenCalledOnce();
+        expect(store.list()[0]!.data).toEqual({ role: 'admin' });
     });
 
-    it('renews legacy records that predate dataRefresh on first read', async () => {
+    it('renews records that predate dataRefresh on first read', async () => {
         const refresh = vi.fn(async () => ({ role: 'admin' }));
-        ddbMock.on(GetCommand).resolves({ Item: makeSessionItem() }); // No dataExpiresAt
-        ddbMock.on(PutCommand).resolves({});
-
-        const session = await makeManager(refresh).getSession('hashed-key:sort-key');
-
+        const { token } = await plantRecord(store, { data: { role: 'user' } });
+        const session = await readSession(makeManager(refresh), token);
         expect(refresh).toHaveBeenCalledOnce();
         expect(session?.data).toEqual({ role: 'admin' });
     });
 
     it('refresh returning null deletes the session and reports no session', async () => {
-        ddbMock.on(GetCommand).resolves({ Item: makeSessionItem({ dataExpiresAt: nowSec() - 10 }) });
-        ddbMock.on(DeleteCommand).resolves({});
-
-        const session = await makeManager(async () => null).getSession('hashed-key:sort-key');
-
-        expect(session).toBeNull();
-        expect(ddbMock.commandCalls(DeleteCommand).length).toBe(1);
+        const { token } = await plantRecord(store, { dataExpiresAt: nowSec() - 10 });
+        expect(await readSession(makeManager(async () => null), token)).toBeNull();
+        expect(store.size).toBe(0);
     });
 
     it('a throwing refresh fails the read and keeps the session record', async () => {
-        ddbMock.on(GetCommand).resolves({ Item: makeSessionItem({ dataExpiresAt: nowSec() - 10 }) });
-
-        const manager = makeManager(async () => { throw new Error('db down'); });
-
-        await expect(manager.getSession('hashed-key:sort-key')).rejects.toBeInstanceOf(LambderSessionDataRefreshError);
-        expect(ddbMock.commandCalls(DeleteCommand).length).toBe(0);
+        const { token } = await plantRecord(store, { dataExpiresAt: nowSec() - 10 });
+        await expect(readSession(makeManager(async () => { throw new Error('db down'); }), token)).rejects.toBeInstanceOf(LambderSessionDataRefreshError);
+        expect(store.size).toBe(1);
     });
 
     it('updateSessionData re-stamps dataExpiresAt', async () => {
-        ddbMock.on(PutCommand).resolves({});
-        const session = makeSessionItem({ dataExpiresAt: nowSec() - 10 }) as LambderSessionContext;
-
-        const updated = await makeManager(async (s) => s.data).updateSessionData(session, { role: 'editor' });
-
+        const { record } = await plantRecord(store, { dataExpiresAt: nowSec() - 10 });
+        const updated = await makeManager(async (s) => s.data).updateSessionData(record, { role: 'editor' });
         expect(updated.dataExpiresAt).toBeGreaterThanOrEqual(nowSec() + 599);
     });
 
     it('refreshSessionData forces a renewal even when data is fresh', async () => {
         const refresh = vi.fn(async () => ({ role: 'admin' }));
-        ddbMock.on(PutCommand).resolves({});
-        const session = makeSessionItem({ dataExpiresAt: nowSec() + 600 }) as LambderSessionContext;
-
-        const refreshed = await makeManager(refresh).refreshSessionData(session);
-
+        const { record } = await plantRecord(store, { dataExpiresAt: nowSec() + 600 });
+        const refreshed = await makeManager(refresh).refreshSessionData(record);
         expect(refresh).toHaveBeenCalledOnce();
         expect(refreshed?.data).toEqual({ role: 'admin' });
+        expect(store.list()[0]!.data).toEqual({ role: 'admin' });
     });
 
     it('refreshSessionData throws when dataRefresh is not configured', async () => {
-        await expect(
-            makePlainManager().refreshSessionData(makeSessionItem() as LambderSessionContext)
-        ).rejects.toThrow('dataRefresh is not configured');
+        const { record } = await plantRecord(store);
+        await expect(makePlainManager().refreshSessionData(record)).rejects.toThrow('dataRefresh is not configured');
     });
 
     it('regenerateSession carries dataExpiresAt over instead of extending it', async () => {
-        ddbMock.on(DeleteCommand).resolves({});
-        ddbMock.on(PutCommand).resolves({});
         const oldStamp = nowSec() + 120;
-        const session = makeSessionItem({ dataExpiresAt: oldStamp }) as LambderSessionContext;
-
-        const regenerated = await makeManager(async (s) => s.data).regenerateSession(session);
-
+        const { record } = await plantRecord(store, { dataExpiresAt: oldStamp });
+        const regenerated = await makeManager(async (s) => s.data).regenerateSession(record);
         expect(regenerated.session.dataExpiresAt).toBe(oldStamp);
     });
 
-    it('deleteSessionAllByKey derives the partition key internally', async () => {
-        ddbMock.on(QueryCommand).resolves({ Items: [{ pk: 'x', sk: 'a' }, { pk: 'x', sk: 'b' }] });
-        ddbMock.on(DeleteCommand).resolves({});
-
-        await makeManager(async (s) => s.data).deleteSessionAllByKey('user-123');
-
-        const expectedPk = nodeCrypto.createHash('sha256').update('user-123test-salt-12345').digest('hex');
-        const query = ddbMock.commandCalls(QueryCommand)[0]!.args[0].input;
-        expect(query.ExpressionAttributeValues?.[':pv']).toBe(expectedPk);
-        expect(ddbMock.commandCalls(DeleteCommand).length).toBe(2);
+    it('deleteSessionAllByKey derives the partition hash internally', async () => {
+        const manager = makeManager(async (s) => s.data);
+        await manager.createSession('user-123', {});
+        await manager.createSession('user-123', {});
+        await manager.createSession('user-999', {});
+        await manager.deleteSessionAllByKey('user-123');
+        expect(store.list().map((record) => record.sessionKey)).toEqual(['user-999']);
     });
 });
 
 describe('LambderSessionController dataRefresh', () => {
-    const nowSec = () => Math.floor(Date.now() / 1000);
+    let store: LambderMemorySessionStore;
+    beforeEach(() => { store = new LambderMemorySessionStore(); });
 
-    const makeCtx = (): any => ({
-        host: 'localhost',
-        path: '/test',
-        pathParams: {},
-        method: 'POST',
-        get: {},
-        post: { token: 'csrf-token' },
-        cookie: { sessionToken: 'hashed-key:sort-key' },
-        cookieList: { sessionToken: ['hashed-key:sort-key'] },
-        session: null,
-        apiName: 'test.api',
-        apiPayload: {},
-        headers: {},
-        rawBody: '',
-        ip: '',
-        header: () => undefined,
-        event: {} as any,
-        lambdaContext: {} as any,
-        _otherInternal: {
-            isApiCall: true,
-            requestVersion: '1.0',
-            eventFormat: 'v1' as const,
-            setHeaderFnAccumulator: [],
-            addHeaderFnAccumulator: [],
-            logToApiResponseAccumulator: [],
-        },
-    });
-
-    const makeController = (refresh: (session: LambderSessionContext) => Promise<any>) => {
-        const manager = new LambderSessionManager({
-            tableName: 'test-sessions',
-            tableRegion: 'us-east-1',
-            partitionKey: 'pk',
-            sortKey: 'sk',
-            sessionSalt: 'test-salt-12345',
-            dataRefresh: { ttlSeconds: 600, refresh },
-        });
-        const ctx = makeCtx();
+    const makeController = (refresh: (session: LambderSessionRecord) => Promise<any>, token: string) => {
+        const manager = new LambderSessionManager({ store, sessionSalt: SALT, dataRefresh: { ttlSeconds: 600, refresh } });
+        const ctx = createApiCallContext();
         const controller = new LambderSessionController({
-            lambderSessionManager: manager,
-            sessionTokenCookieKey: 'sessionToken',
-            sessionCsrfCookieKey: 'csrfToken',
-            ctx,
+            manager, tokenCookieKey: 'sessionToken', csrfCookieKey: 'csrfToken', ctx,
+            request: { host: 'localhost', cookies: { sessionToken: [token] }, csrfToken: 'csrf-token' },
         });
         return { controller, ctx };
     };
 
-    const makeSessionItem = (overrides: Record<string, any> = {}) => ({
-        pk: 'hashed-key',
-        sk: hashTok('sort-key'),
-        csrfTokenHash: hashTok('csrf-token'),
-        sessionKey: 'user-123',
-        data: { role: 'user' },
-        createdAt: nowSec(),
-        expiresAt: nowSec() + 3600,
-        lastAccessedAt: nowSec(),
-        ttlInSeconds: 3600,
-        ...overrides,
-    });
-
-    beforeEach(() => { ddbMock.reset(); });
-
     it('refreshSessionData updates ctx.session in place', async () => {
-        const { controller, ctx } = makeController(async () => ({ role: 'admin' }));
-        ctx.session = makeSessionItem({ dataExpiresAt: nowSec() + 600 });
-        ddbMock.on(PutCommand).resolves({});
-
+        const { token } = await plantRecord(store, { data: { role: 'user' }, dataExpiresAt: nowSec() + 600 });
+        const { controller, ctx } = makeController(async () => ({ role: 'admin' }), token);
+        await controller.fetchSession();
         const refreshed = await controller.refreshSessionData();
-
         expect(refreshed?.data).toEqual({ role: 'admin' });
-        expect(ctx.session.data).toEqual({ role: 'admin' });
+        expect(ctx.session?.data).toEqual({ role: 'admin' });
     });
 
     it('refreshSessionData ending the session clears cookies and nulls ctx.session', async () => {
-        const { controller, ctx } = makeController(async () => null);
-        ctx.session = makeSessionItem();
-        ddbMock.on(DeleteCommand).resolves({});
-
+        const { token } = await plantRecord(store, { dataExpiresAt: nowSec() + 600 });
+        const { controller, ctx } = makeController(async () => null, token);
+        await controller.fetchSession();
         const refreshed = await controller.refreshSessionData();
-
         expect(refreshed).toBeNull();
         expect(ctx.session).toBeNull();
-        const cookieHeaders = ctx._otherInternal.addHeaderFnAccumulator.filter((h: any) => h.key === 'Set-Cookie');
-        expect(cookieHeaders.length).toBe(2);
+        expect(setCookiesOf(ctx).length).toBe(2);
     });
 
     it('fetchSessionIfExists rethrows dataRefresh failures instead of reporting no session', async () => {
-        const { controller } = makeController(async () => { throw new Error('db down'); });
-        ddbMock.on(GetCommand).resolves({ Item: makeSessionItem({ dataExpiresAt: nowSec() - 10 }) });
-
+        const { token } = await plantRecord(store, { dataExpiresAt: nowSec() - 10 });
+        const { controller } = makeController(async () => { throw new Error('db down'); }, token);
         await expect(controller.fetchSessionIfExists()).rejects.toBeInstanceOf(LambderSessionDataRefreshError);
     });
 
-    it('deleteSessionAllByKey works without a fetched session', async () => {
-        const { controller } = makeController(async (s) => s.data);
-        ddbMock.on(QueryCommand).resolves({ Items: [{ pk: 'x', sk: 'a' }] });
-        ddbMock.on(DeleteCommand).resolves({});
-
+    it('deleteSessionAllByKey and expireSessionDataAllByKey work without a fetched session', async () => {
+        const manager = new LambderSessionManager({ store, sessionSalt: SALT, dataRefresh: { ttlSeconds: 600, refresh: async (s) => s.data } });
+        await manager.createSession('user-123', {});
+        const { controller } = makeController(async (s) => s.data, 'f00d:0ff');
+        await controller.expireSessionDataAllByKey('user-123');
+        expect(store.list()[0]!.dataExpiresAt).toBeLessThanOrEqual(nowSec());
         await controller.deleteSessionAllByKey('user-123');
-
-        expect(ddbMock.commandCalls(DeleteCommand).length).toBe(1);
-    });
-});
-
-// ── compression: session.data at rest ───────────────────────────────────────
-
-describe('LambderSessionManager compression', () => {
-    const nowSec = () => Math.floor(Date.now() / 1000);
-    const baseOptions = {
-        tableName: 'test-sessions',
-        tableRegion: 'us-east-1',
-        partitionKey: 'pk',
-        sortKey: 'sk',
-        sessionSalt: 'test-salt-12345',
-    };
-    const makeItem = (overrides: Record<string, any> = {}) => ({
-        pk: 'hashed-key',
-        sk: hashTok('sort-key'),
-        csrfTokenHash: hashTok('csrf-token'),
-        sessionKey: 'user-123',
-        createdAt: nowSec() - 1000,
-        expiresAt: nowSec() + 3600,
-        lastAccessedAt: nowSec(), // Recent: no sliding write due
-        ttlInSeconds: 3600,
-        ...overrides,
-    });
-    const data = {
-        userId: '3f1c2b6e-9d1a-4f7e-8c1b-2a9d7e6f5c4b',
-        permissions: ['TRANSIT.LINES.VIEW', 'TRANSIT.LINES.EDIT', 'TRANSIT.STOPS.VIEW', 'TRANSIT.STOPS.EDIT'],
-    };
-    const dataJsonBytes = Buffer.byteLength(JSON.stringify(data), 'utf8');
-
-    beforeEach(() => { ddbMock.reset(); });
-
-    it('stores data Brotli-compressed by default, beside its JSON byte length', async () => {
-        ddbMock.on(PutCommand).resolves({});
-
-        const { session } = await new LambderSessionManager(baseOptions).createSession('user-123', data, 3600);
-
-        const item = ddbMock.commandCalls(PutCommand)[0]!.args[0].input.Item!;
-        expect(item.data).toBeUndefined();
-        expect(item.dataBytes).toBe(dataJsonBytes);
-        expect(Buffer.isBuffer(item.dataBr)).toBe(true);
-        expect((item.dataBr as Buffer).byteLength).toBeLessThan(dataJsonBytes);
-        expect(storedData(item)).toEqual(data);
-        // The in-memory session keeps the plain data and none of the storage fields.
-        expect(session.data).toEqual(data);
-        expect(session.dataBr).toBeUndefined();
-        expect(session.dataBytes).toBeUndefined();
-    });
-
-    it('compression: true is the default and equals { minBytes: 0 }', async () => {
-        ddbMock.on(PutCommand).resolves({});
-        const tiny = { role: 'user' }; // Far below any threshold: only minBytes 0 compresses it.
-
-        await new LambderSessionManager(baseOptions).createSession('user-123', tiny, 3600);
-        await new LambderSessionManager({ ...baseOptions, compression: true }).createSession('user-123', tiny, 3600);
-        await new LambderSessionManager({ ...baseOptions, compression: { minBytes: 0 } }).createSession('user-123', tiny, 3600);
-
-        const items = ddbMock.commandCalls(PutCommand).map((call) => call.args[0].input.Item!);
-        expect(items.length).toBe(3);
-        for (const item of items) {
-            expect(item.data).toBeUndefined();
-            expect(item.dataBytes).toBe(Buffer.byteLength(JSON.stringify(tiny), 'utf8'));
-            expect(storedData(item)).toEqual(tiny);
-        }
-    });
-
-    it('compression: false stores data as a plain attribute', async () => {
-        ddbMock.on(PutCommand).resolves({});
-
-        await new LambderSessionManager({ ...baseOptions, compression: false }).createSession('user-123', data, 3600);
-
-        const item = ddbMock.commandCalls(PutCommand)[0]!.args[0].input.Item!;
-        expect(item.data).toEqual(data);
-        expect(item.dataBr).toBeUndefined();
-        expect(item.dataBytes).toBeUndefined();
-    });
-
-    it('minBytes compresses only records whose JSON reaches the threshold', async () => {
-        ddbMock.on(PutCommand).resolves({});
-        const manager = new LambderSessionManager({ ...baseOptions, compression: { minBytes: dataJsonBytes } });
-
-        await manager.createSession('user-123', data, 3600);          // exactly at the threshold
-        await manager.createSession('user-123', { role: 'user' }, 3600); // below it
-
-        const [atThreshold, below] = ddbMock.commandCalls(PutCommand).map((call) => call.args[0].input.Item!);
-        expect(atThreshold!.dataBr).toBeDefined();
-        expect(atThreshold!.data).toBeUndefined();
-        expect(below!.data).toEqual({ role: 'user' });
-        expect(below!.dataBr).toBeUndefined();
-    });
-
-    it('decodes a compressed record on read and hands the caller plain data', async () => {
-        ddbMock.on(GetCommand).resolves({ Item: makeItem(compressedItem(data)) });
-
-        const session = await new LambderSessionManager(baseOptions).getSession('hashed-key:sort-key');
-
-        expect(session?.data).toEqual(data);
-        expect(session?.dataBr).toBeUndefined();
-        expect(session?.dataBytes).toBeUndefined();
-        expect(ddbMock.commandCalls(PutCommand).length).toBe(0);
-    });
-
-    it('after switching compression off, records written while it was on still read', async () => {
-        ddbMock.on(GetCommand).resolves({ Item: makeItem(compressedItem(data)) });
-
-        const session = await new LambderSessionManager({ ...baseOptions, compression: false }).getSession('hashed-key:sort-key');
-
-        expect(session?.data).toEqual(data);
-    });
-
-    it('after switching compression on, plain records still read and are rewritten compressed on their next write', async () => {
-        // A due sliding-expiration write on a record written while compression was off.
-        ddbMock.on(GetCommand).resolves({ Item: makeItem({ data, lastAccessedAt: nowSec() - 3000 }) });
-        ddbMock.on(PutCommand).resolves({});
-
-        const session = await new LambderSessionManager(baseOptions).getSession('hashed-key:sort-key');
-
-        expect(session?.data).toEqual(data);
-        const puts = ddbMock.commandCalls(PutCommand);
-        expect(puts.length).toBe(1);
-        const item = puts[0]!.args[0].input.Item!;
-        expect(item.data).toBeUndefined();
-        expect(storedData(item)).toEqual(data);
-    });
-
-    it('updateSessionData and regenerateSession persist compressed too', async () => {
-        ddbMock.on(GetCommand).resolves({ Item: makeItem(compressedItem(data)) });
-        ddbMock.on(PutCommand).resolves({});
-        ddbMock.on(DeleteCommand).resolves({});
-        const manager = new LambderSessionManager(baseOptions);
-
-        const session = (await manager.getSession('hashed-key:sort-key'))!;
-        await manager.updateSessionData(session, { ...data, theme: 'dark' });
-        const regenerated = await manager.regenerateSession(session);
-
-        const items = ddbMock.commandCalls(PutCommand).map((call) => call.args[0].input.Item!);
-        expect(items.length).toBe(2);
-        for (const item of items) {
-            expect(item.data).toBeUndefined();
-            expect(storedData(item)).toEqual({ ...data, theme: 'dark' });
-        }
-        expect(regenerated.session.data).toEqual({ ...data, theme: 'dark' });
-    });
-
-    it('a compressed record that fails to decode throws (the controller reads that as no session)', async () => {
-        const manager = new LambderSessionManager(baseOptions);
-        ddbMock.on(PutCommand).resolves({});
-        const { dataBr, dataBytes } = compressedItem(data);
-
-        // Truncated bytes with the original length: the length check fails.
-        ddbMock.on(GetCommand).resolves({ Item: makeItem({ dataBr: dataBr.subarray(0, 8), dataBytes }) });
-        await expect(manager.getSession('hashed-key:sort-key')).rejects.toThrow();
-
-        // Missing byte length: nothing bounds the decompression, so it is refused.
-        ddbMock.on(GetCommand).resolves({ Item: makeItem({ dataBr }) });
-        await expect(manager.getSession('hashed-key:sort-key')).rejects.toThrow();
-
-        expect(ddbMock.commandCalls(PutCommand).length).toBe(0);
-    });
-
-    it('rejects invalid compression options at construction', () => {
-        expect(() => new LambderSessionManager({ ...baseOptions, compression: { minBytes: -1 } })).toThrow();
-        expect(() => new LambderSessionManager({ ...baseOptions, compression: { minBytes: 1.5 } })).toThrow();
-        expect(() => new LambderSessionManager({ ...baseOptions, compression: { quality: 12 } })).toThrow();
-        expect(() => new LambderSessionManager({ ...baseOptions, compression: { quality: 1.5 } })).toThrow();
-        expect(() => new LambderSessionManager({ ...baseOptions, compression: { minBytes: 0, quality: 11 } })).not.toThrow();
-    });
-
-    it('is configurable through the session option of initLambder().create', async () => {
-        ddbMock.on(PutCommand).resolves({});
-        const plain = initLambder().create({
-            apiPath: '/api',
-            session: { ...baseOptions, compression: false },
-        });
-        const manager = (plain as any).lambderSessionManager as LambderSessionManager;
-
-        await manager.createSession('user-123', data, 3600);
-
-        const item = ddbMock.commandCalls(PutCommand)[0]!.args[0].input.Item!;
-        expect(item.data).toEqual(data);
-        expect(item.dataBr).toBeUndefined();
+        expect(store.size).toBe(0);
     });
 });
 
 // ── expireSessionDataAllByKey: apply a subject's auth change now ────────────
 
 describe('LambderSessionManager expireSessionDataAllByKey', () => {
-    const nowSec = () => Math.floor(Date.now() / 1000);
-    const baseOptions = {
-        tableName: 'test-sessions',
-        tableRegion: 'us-east-1',
-        partitionKey: 'pk',
-        sortKey: 'sk',
-        sessionSalt: 'test-salt-12345',
-    };
-    // The partition key is sha256(sessionKey + salt).
-    const pkOf = (sessionKey: string) => hashTok(`${sessionKey}${baseOptions.sessionSalt}`);
-    const makeManager = () => new LambderSessionManager({
-        ...baseOptions,
-        dataRefresh: { ttlSeconds: 600, refresh: async (session) => session.data },
-    });
+    let store: LambderMemorySessionStore;
+    beforeEach(() => { store = new LambderMemorySessionStore(); });
+    const makeManager = () => new LambderSessionManager({ store, sessionSalt: SALT, dataRefresh: { ttlSeconds: 600, refresh: async (session) => session.data } });
 
-    beforeEach(() => { ddbMock.reset(); });
+    it('stamps dataExpiresAt to now on every session of the key and no other', async () => {
+        const manager = makeManager();
+        await manager.createSession('user-123', {});
+        await manager.createSession('user-123', {});
+        const other = await manager.createSession('user-999', {});
 
-    it('stamps dataExpiresAt to now on every session of the key, only if the record still exists', async () => {
-        ddbMock.on(QueryCommand).resolves({ Items: [{ sk: 'sk-1' }, { sk: 'sk-2' }] });
-        ddbMock.on(UpdateCommand).resolves({});
+        await expect(manager.expireSessionDataAllByKey('user-123')).resolves.toBe(true);
 
-        await expect(makeManager().expireSessionDataAllByKey('user-123')).resolves.toBe(true);
-
-        const query = ddbMock.commandCalls(QueryCommand)[0]!.args[0].input;
-        expect(query.ExpressionAttributeValues?.[':pv']).toBe(pkOf('user-123'));
-        const updates = ddbMock.commandCalls(UpdateCommand).map((call) => call.args[0].input);
-        expect(updates.map((update) => update.Key?.sk)).toEqual(['sk-1', 'sk-2']);
-        for (const update of updates) {
-            expect(update.Key?.pk).toBe(pkOf('user-123'));
-            expect(update.UpdateExpression).toBe('SET #dataExpiresAt = :now');
-            expect(update.ConditionExpression).toBe('attribute_exists(#sk)');
-            expect(update.ExpressionAttributeNames).toEqual({ '#dataExpiresAt': 'dataExpiresAt', '#sk': 'sk' });
-            expect(update.ExpressionAttributeValues?.[':now']).toBeGreaterThanOrEqual(nowSec() - 1);
-            expect(update.ExpressionAttributeValues?.[':now']).toBeLessThanOrEqual(nowSec());
+        for(const record of store.list()){
+            if(record.sessionKey === 'user-123') expect(record.dataExpiresAt).toBeLessThanOrEqual(nowSec());
+            else expect(record.dataExpiresAt).toBe(other.session.dataExpiresAt);
         }
     });
 
-    it('skips a session deleted between the query and the update; other failures propagate', async () => {
-        ddbMock.on(QueryCommand).resolves({ Items: [{ sk: 'sk-1' }] });
-        ddbMock.on(UpdateCommand).rejects(Object.assign(new Error('gone'), { name: 'ConditionalCheckFailedException' }));
-        await expect(makeManager().expireSessionDataAllByKey('user-123')).resolves.toBe(true);
+    it('skips a session deleted between the listing and the stamp; other failures propagate', async () => {
+        const manager = makeManager();
+        await manager.createSession('user-123', {});
+        const listed = store.listSecretHashes.bind(store);
+        vi.spyOn(store, 'listSecretHashes').mockImplementation(async (hash) => { const hashes = await listed(hash); store.reset(); return hashes; });
+        await expect(manager.expireSessionDataAllByKey('user-123')).resolves.toBe(true);
 
-        ddbMock.on(UpdateCommand).rejects(new Error('ddb down'));
-        await expect(makeManager().expireSessionDataAllByKey('user-123')).rejects.toThrow('ddb down');
+        vi.spyOn(store, 'markDataExpired').mockRejectedValue(new Error('store down'));
+        vi.spyOn(store, 'listSecretHashes').mockResolvedValue(['x']);
+        await expect(manager.expireSessionDataAllByKey('user-123')).rejects.toThrow('store down');
     });
 
     it('requires dataRefresh to be configured', async () => {
-        await expect(new LambderSessionManager(baseOptions).expireSessionDataAllByKey('user-123'))
+        await expect(new LambderSessionManager({ store, sessionSalt: SALT }).expireSessionDataAllByKey('user-123'))
             .rejects.toThrow(/dataRefresh is not configured/);
-        expect(ddbMock.commandCalls(QueryCommand).length).toBe(0);
     });
 
     it('a stamped session renews its data on the next read', async () => {
-        // The stamp is dataExpiresAt = now, and getSession renews once dataExpiresAt <= now.
         const refresh = vi.fn(async () => ({ role: 'admin' }));
-        ddbMock.on(GetCommand).resolves({ Item: {
-            pk: 'hashed-key',
-            sk: hashTok('sort-key'),
-            csrfTokenHash: hashTok('csrf-token'),
-            sessionKey: 'user-123',
-            data: { role: 'user' },
-            createdAt: nowSec() - 1000,
-            expiresAt: nowSec() + 3600,
-            lastAccessedAt: nowSec(),
-            ttlInSeconds: 3600,
-            dataExpiresAt: nowSec(),
-        } });
-        ddbMock.on(PutCommand).resolves({});
+        const manager = new LambderSessionManager({ store, sessionSalt: SALT, dataRefresh: { ttlSeconds: 600, refresh } });
+        const { sessionToken } = await manager.createSession('user-123', { role: 'user' });
+        await manager.expireSessionDataAllByKey('user-123');
 
-        const session = await new LambderSessionManager({ ...baseOptions, dataRefresh: { ttlSeconds: 600, refresh } })
-            .getSession('hashed-key:sort-key');
-
+        const session = await readSession(manager, sessionToken);
         expect(refresh).toHaveBeenCalledOnce();
         expect(session?.data).toEqual({ role: 'admin' });
-    });
-
-    it('is exposed on the session controller without a fetched session', async () => {
-        ddbMock.on(QueryCommand).resolves({ Items: [{ sk: 'sk-1' }] });
-        ddbMock.on(UpdateCommand).resolves({});
-        const controller = new LambderSessionController({
-            lambderSessionManager: makeManager(),
-            sessionTokenCookieKey: 'sessionToken',
-            sessionCsrfCookieKey: 'csrfToken',
-            ctx: { cookie: {}, session: null, _otherInternal: { isApiCall: true } } as any,
-        });
-
-        await controller.expireSessionDataAllByKey('user-123');
-
-        expect(ddbMock.commandCalls(UpdateCommand).length).toBe(1);
     });
 });

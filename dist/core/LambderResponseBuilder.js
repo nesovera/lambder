@@ -1,5 +1,6 @@
-import { serializeCookie, serializeClearCookie } from "./LambderCookie.js";
+import { serializeCookie, serializeClearCookie } from "../shared/wire/LambderCookie.js";
 import { LambderResponse } from "./LambderResponse.js";
+import { buildApiEnvelope } from "../api/LambderApiEnvelope.js";
 export default class LambderResponseBuilder {
     files;
     apiVersion;
@@ -29,21 +30,21 @@ export default class LambderResponseBuilder {
     /** The instance's file reader, which res.file and res.templateFile need. */
     requireFiles(method) {
         if (!this.files)
-            throw new Error(`${method} requires the files option at creation (e.g. files: new LambderLocalFileSource({ root }))`);
+            throw new Error(`Lambder: ${method} requires the files option at creation (e.g. files: new LambderLocalFileSource({ root }))`);
         return this.files;
     }
+    /** Appends a response header; applied onto the response once the handler has one, in call order. */
     addHeader(key, value) {
         if (!this.ctx)
-            throw new Error(".addHeader function is not available within this hook");
-        this.ctx._otherInternal.addHeaderFnAccumulator.push({ key, value });
+            throw new Error("Lambder: res.addHeader needs the request context, and this response builder was created without one.");
+        this.ctx.responseHeaders.add(key, value);
     }
     ;
+    /** Replaces a response header; applied onto the response once the handler has one, in call order. */
     setHeader(key, value) {
         if (!this.ctx)
-            throw new Error(".setHeader function is not available within this hook");
-        this.ctx._otherInternal.addHeaderFnAccumulator = this.ctx._otherInternal.addHeaderFnAccumulator
-            .filter((header) => header.key !== key);
-        this.ctx._otherInternal.setHeaderFnAccumulator.push({ key, value });
+            throw new Error("Lambder: res.setHeader needs the request context, and this response builder was created without one.");
+        this.ctx.responseHeaders.set(key, value);
     }
     ;
     /**
@@ -53,7 +54,7 @@ export default class LambderResponseBuilder {
      */
     setCookie(name, value, options) {
         if (!this.ctx)
-            throw new Error(".setCookie function is not available within this hook");
+            throw new Error("Lambder: res.setCookie needs the request context, and this response builder was created without one.");
         this.addHeader("Set-Cookie", serializeCookie(name, value, options, this.ctx.host));
     }
     ;
@@ -65,14 +66,14 @@ export default class LambderResponseBuilder {
      */
     clearCookie(name, options) {
         if (!this.ctx)
-            throw new Error(".clearCookie function is not available within this hook");
+            throw new Error("Lambder: res.clearCookie needs the request context, and this response builder was created without one.");
         this.addHeader("Set-Cookie", serializeClearCookie(name, options, this.ctx.host));
     }
     ;
     logToApiResponse(input) {
         if (!this.ctx)
-            throw new Error(".logToApiResponse function is not available within this hook");
-        this.ctx._otherInternal.logToApiResponseAccumulator.push(input);
+            throw new Error("Lambder: res.logToApiResponse needs the request context, and this response builder was created without one.");
+        this.ctx.logList.push(input);
     }
     ;
     raw(init) {
@@ -157,19 +158,12 @@ export default class LambderResponseBuilder {
         return this.buildResponse(200, "text/html; charset=utf-8", template.render(data), options);
     }
     ;
-    api(payload, { versionExpired, sessionExpired, notAuthorized, message, errorMessage, logList, crash, } = {}, options) {
-        const finalLogList = logList || this.ctx?._otherInternal?.logToApiResponseAccumulator;
-        return this.json({
-            apiVersion: this.apiVersion,
-            payload,
-            ...(versionExpired ? { versionExpired } : {}),
-            ...(sessionExpired ? { sessionExpired } : {}),
-            ...(notAuthorized ? { notAuthorized } : {}),
-            ...(message ? { message } : {}),
-            ...(errorMessage ? { errorMessage } : {}),
-            ...(crash ? { crash } : {}),
-            ...(finalLogList?.length ? { logList: finalLogList } : {}),
-        }, options);
+    api(payload, config = {}, options) {
+        // The envelope is the core's (one writer for both the server and the
+        // mock runtime); the logList channel is what this request accumulated
+        // unless the config names its own.
+        const envelope = buildApiEnvelope(this.apiVersion, payload, { ...config, logList: config.logList || this.ctx?.logList });
+        return this.json(envelope, options);
     }
     ;
     apiBinary(payload, config = {}, options) {

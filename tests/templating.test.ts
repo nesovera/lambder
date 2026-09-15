@@ -4,10 +4,9 @@
 
 import { describe, it, expect } from 'vitest';
 import Lambder from '../src/core/Lambder.js';
-import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
 import { html, xml, raw } from '../src/shared/LambderHtml.js';
 import { LambderTemplatingEngine } from '../src/core/LambderTemplatingEngine.js';
-import { decodeBody, createMockEvent, createMockContext } from './helpers.js';
+import { decodeBody, createMockEvent, createMockContext, testPublicFiles } from './helpers.js';
 describe('Type-safe templating (html/xml tagged templates)', () => {
     it('escapes interpolated values by default', () => {
         const userInput = '<script>alert("xss")</script>';
@@ -37,7 +36,7 @@ describe('Type-safe templating (html/xml tagged templates)', () => {
         const sitemap = xml`<?xml version="1.0" encoding="UTF-8"?>
 <urlset>${urls.map((loc) => xml`<url><loc>${loc}</loc></url>`)}</urlset>`;
 
-        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }) })
+        const lambder = new Lambder({ files: testPublicFiles() })
             .addRoute('/sitemap', (ctx, res) => res.xml(sitemap));
 
         const result = await lambder.render(createMockEvent('/sitemap'), createMockContext());
@@ -55,6 +54,30 @@ describe('LambderTemplatingEngine', () => {
         );
         expect(template.render({ title: 'Hello' })).toBe('<h1>Hello</h1><p>Sub</p>');
         expect(template.slotNames).toEqual(['title', 'sub']);
+    });
+
+    /**
+     * The docs used to say `null`, `undefined` and `false` all keep the
+     * default, so an app writing `{ title: page.seoTitle }` with a seoTitle
+     * that came back null from the database expected the shell's own title
+     * and shipped an empty one. Only `undefined`, or a key the data does not
+     * carry, keeps the default.
+     */
+    it('keeps a slot default only for undefined, and renders null, false and the empty string empty', () => {
+        const template = new LambderTemplatingEngine('<title><!--slot:title-->Default<!--/slot:title--></title>');
+
+        expect(template.render({})).toBe('<title>Default</title>');
+        expect(template.render({ title: undefined })).toBe('<title>Default</title>');
+        expect(template.render({ title: null })).toBe('<title></title>');
+        expect(template.render({ title: false })).toBe('<title></title>');
+        expect(template.render({ title: '' })).toBe('<title></title>');
+    });
+
+    it('reads a condition named for an Object.prototype member as data, not as true', () => {
+        const template = new LambderTemplatingEngine('<!--if:toString-->shown<!--else-->hidden<!--/if:toString-->');
+
+        expect(template.render({})).toBe('hidden');
+        expect(template.render({ toString: true })).toBe('shown');
     });
 
     it('escapes slot values unless marked safe', () => {
