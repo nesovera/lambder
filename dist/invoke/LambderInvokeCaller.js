@@ -20,234 +20,22 @@
  * LambderInvokeCaller.localTransport runs a callee's handler in-process for
  * tests.
  */
-import { resolveApiOutcome } from "../shared/LambderApiOutcome.js";
-import { mergeGuardInputs, } from "../shared/LambderCallOptions.js";
-import { errorFromCrashDetail } from "../shared/LambderCrashDetail.js";
-import { resolveCompressionOption } from "../shared/LambderCompressionOption.js";
-import { compressText, restoreBytes } from "../shared/LambderCompressionCodec.js";
-import { COMPRESSED_PAYLOAD_BR_FIELD, DEFAULT_MAX_RESTORED_PAYLOAD_BYTES, compressPayloadWith, } from "../shared/LambderRequestPayload.js";
-/** Marks a synthesized request as an invoke, for guards and hooks that want to tell. Not an authorization. */
-export const LAMBDER_INVOKE_HEADER = "x-lambder-invoke";
-/** The invoking function's name, when the caller runs in Lambda; for the callee's logs. */
-export const LAMBDER_INVOKED_BY_HEADER = "x-lambder-invoked-by";
-/** The value of the marker header; a future incompatible event shape would bump it. */
-export const LAMBDER_INVOKE_PROTOCOL = "1";
+import { classifyDeliveryFailure, describeFailure, errorFromFunctionError, LambderInvokeError, parseFunctionError, } from "./LambderInvokeOutcome.js";
+import { DEFAULT_SESSION_TOKEN_COOKIE_KEY } from "../shared/wire/LambderSessionCookieNames.js";
+import { resolveApiOutcome } from "../shared/wire/LambderApiOutcome.js";
+import { mergeGuardInputs, } from "../shared/wire/LambderCallOptions.js";
+import { createCallAbort, stopWaitingWhenAborted } from "../shared/util/LambderCallAbort.js";
+import { coerceToError, errorFromCrashDetail } from "../shared/wire/LambderCrashDetail.js";
+import { assertPositiveInteger } from "../shared/util/LambderOptionChecks.js";
+import { resolveCompressionOption } from "../shared/wire/LambderCompressionOption.js";
+import { DEFAULT_INVOKE_REQUEST_COMPRESSION_SETTINGS, DEFAULT_MAX_RESTORED_PAYLOAD_BYTES, compressPayloadBrotli, resolveRequestCompressionMinBytes, } from "../shared/wire/LambderRequestPayload.js";
+import { buildEnvelopeJson, decodeLambdaHttpResult, localLambdaContext, sessionCookies, synthesizeLambdaHttpEvent, } from "./LambderLambdaEvent.js";
 /**
  * Lambda caps a synchronous invoke's request and its response at about 6MB;
  * the same guard threshold finalizeResponse applies to an answer, applied
  * here to the event before it is sent.
  */
 export const LAMBDER_INVOKE_MAX_EVENT_BYTES = 5_500_000;
-/** Request Brotli when `requestCompression: true`: the HTTP request threshold, at the quality every other Lambder site uses. */
-export const DEFAULT_INVOKE_REQUEST_COMPRESSION_SETTINGS = { minBytes: 4096, quality: 5 };
-const DEFAULT_SESSION_TOKEN_COOKIE_KEY = "LMDRSESSIONTKID";
-/**
- * What api() throws. Its message names the function, the API and the reason,
- * so an error reporter that fingerprints on the message groups one broken
- * API into one row; its cause is the callee's own error rebuilt from the
- * crash detail (or Lambda's FunctionError, or the SDK's rejection), so a
- * reporter that walks causes stores the callee's stack.
- */
-export class LambderInvokeError extends Error {
-    /** Brand for detection across duplicate lambder installs, like LambderApiError. */
-    isLambderInvokeError = true;
-    reason;
-    apiName;
-    functionName;
-    status;
-    errorMessage;
-    crash;
-    functionError;
-    logList;
-    zodError;
-    retryAfterSeconds;
-    bytes;
-    /** The full failure outcome; it carries this error and this error carries it. */
-    outcome;
-    constructor(init) {
-        super(init.message, init.cause !== undefined ? { cause: init.cause } : undefined);
-        this.name = "LambderInvokeError";
-        this.reason = init.reason;
-        this.apiName = init.apiName;
-        this.functionName = init.functionName;
-        this.status = init.status;
-        this.errorMessage = init.errorMessage;
-        this.crash = init.crash;
-        this.functionError = init.functionError;
-        this.logList = init.logList;
-        this.zodError = init.zodError;
-        this.retryAfterSeconds = init.retryAfterSeconds;
-        this.bytes = init.bytes;
-    }
-}
-/** Brand-based type guard (see LambderInvokeError.isLambderInvokeError). */
-export const isLambderInvokeError = (err) => err instanceof Error && err.isLambderInvokeError === true;
-const randomRequestId = () => {
-    const webCrypto = globalThis.crypto;
-    if (webCrypto?.randomUUID)
-        return webCrypto.randomUUID();
-    return `${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 10)}`;
-};
-/** The payload-format-2.0 event API Gateway would deliver for this request. */
-const synthesizeHttpEvent = (request) => {
-    const headers = {
-        host: request.host,
-        "accept-encoding": "br, gzip",
-        [LAMBDER_INVOKE_HEADER]: LAMBDER_INVOKE_PROTOCOL,
-    };
-    const invokedBy = typeof process !== "undefined" ? process.env?.AWS_LAMBDA_FUNCTION_NAME : undefined;
-    if (invokedBy)
-        headers[LAMBDER_INVOKED_BY_HEADER] = invokedBy;
-    if (request.clientIp)
-        headers["x-forwarded-for"] = request.clientIp;
-    for (const [key, value] of Object.entries(request.headers ?? {}))
-        headers[key.toLowerCase()] = value;
-    const isBinary = Buffer.isBuffer(request.body);
-    if (request.body !== undefined && !headers["content-type"]) {
-        headers["content-type"] = isBinary ? "application/octet-stream" : "application/json";
-    }
-    const now = Date.now();
-    return {
-        version: "2.0",
-        routeKey: "$default",
-        rawPath: request.path,
-        rawQueryString: new URLSearchParams(request.query ?? {}).toString(),
-        headers,
-        ...(request.cookies?.length ? { cookies: request.cookies } : {}),
-        requestContext: {
-            accountId: "",
-            apiId: "lambder-invoke",
-            domainName: request.host,
-            domainPrefix: "",
-            http: {
-                method: request.method,
-                path: request.path,
-                protocol: "HTTP/1.1",
-                sourceIp: request.clientIp ?? "",
-                userAgent: "lambder-invoke",
-            },
-            requestId: randomRequestId(),
-            routeKey: "$default",
-            stage: "$default",
-            time: new Date(now).toISOString(),
-            timeEpoch: now,
-        },
-        ...(request.body !== undefined
-            ? { body: isBinary ? request.body.toString("base64") : request.body }
-            : {}),
-        isBase64Encoded: isBinary,
-    };
-};
-/**
- * The body envelope LambderCaller sends, minus the fields only a browser has
- * a value for, as JSON. A plain payload arrives already serialized (the
- * compression decision needed its JSON) and is spliced in rather than
- * parsed and stringified a second time; a compressed one rides as its two
- * fields.
- */
-const buildEnvelopeJson = (fields) => {
-    const withoutPayload = JSON.stringify({
-        apiName: fields.apiName,
-        version: fields.version,
-        token: fields.csrf ?? "",
-        siteHost: fields.siteHost,
-        ...(fields.compressed ?? {}),
-        ...(fields.guardInputs !== undefined ? { guardInputs: fields.guardInputs } : {}),
-        ...(fields.idempotencyKey !== undefined ? { idempotencyKey: fields.idempotencyKey } : {}),
-    });
-    if (fields.payloadJson === undefined)
-        return withoutPayload;
-    return `${withoutPayload.slice(0, -1)},"payload":${fields.payloadJson}}`;
-};
-const sessionCookies = (session, tokenCookieKey) => session ? [`${tokenCookieKey}=${session.token}`] : undefined;
-/**
- * Brotli one payload's JSON for sending, or null when the plain JSON should
- * go instead: the browser's compressPayloadGzip with Brotli, because both
- * ends are Node. The threshold and the only-when-smaller rule are
- * compressPayloadWith's, shared with the gzip side.
- */
-export const compressPayloadBrotli = (json, minBytes, quality) => compressPayloadWith(json, minBytes, COMPRESSED_PAYLOAD_BR_FIELD, (bytes) => compressText(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength), "br", quality));
-/** A timeout controller chained to an external signal, so either source aborts the invoke. */
-const abortAfter = (timeoutMs, external) => {
-    let timedOut = false;
-    let signal = external;
-    let timeoutId;
-    // The forwarding listener is detached in clear(), not left to `once`: an
-    // external signal usually outlives the call (a request-scoped one passed
-    // to several invokes, an app-lifetime one), so a listener per call would
-    // accumulate on it for as long as it lives.
-    let detach;
-    if (timeoutMs !== undefined) {
-        const controller = new AbortController();
-        if (external) {
-            if (external.aborted) {
-                controller.abort(external.reason);
-            }
-            else {
-                const forward = () => controller.abort(external.reason);
-                external.addEventListener("abort", forward, { once: true });
-                detach = () => external.removeEventListener("abort", forward);
-            }
-        }
-        timeoutId = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
-        signal = controller.signal;
-    }
-    return {
-        signal,
-        timedOut: () => timedOut,
-        clear: () => { if (timeoutId !== undefined)
-            clearTimeout(timeoutId); detach?.(); },
-    };
-};
-const errorFromFunctionError = (functionError) => {
-    const error = new Error(functionError.errorMessage ?? "the function failed");
-    error.name = functionError.errorType ?? "FunctionError";
-    if (functionError.trace?.length)
-        error.stack = functionError.trace.join("\n");
-    return error;
-};
-const parseFunctionError = (result) => {
-    if (result && typeof result === "object") {
-        const { errorType, errorMessage, trace } = result;
-        return {
-            ...(typeof errorType === "string" ? { errorType } : {}),
-            ...(typeof errorMessage === "string" ? { errorMessage } : {}),
-            ...(Array.isArray(trace) ? { trace: trace.map(String) } : {}),
-        };
-    }
-    return { errorMessage: typeof result === "string" ? result : undefined };
-};
-/** The one-line detail a failure's message ends with. */
-const describeFailure = (init) => {
-    if (init.crash)
-        return init.crash.message;
-    if (init.functionError)
-        return `${init.functionError.errorType ?? "FunctionError"}: ${init.functionError.errorMessage ?? "the function failed"}`;
-    if (init.errorMessage !== undefined) {
-        const content = init.errorMessage?.content;
-        if (typeof content === "string")
-            return content;
-        if (typeof init.errorMessage === "string")
-            return init.errorMessage;
-        try {
-            return JSON.stringify(init.errorMessage);
-        }
-        catch {
-            return String(init.errorMessage);
-        }
-    }
-    if (init.reason === 'validation')
-        return "the callee rejected the input";
-    if (init.reason === 'versionExpired')
-        return "the callee answered versionExpired";
-    if (init.reason === 'sessionExpired')
-        return "the callee answered sessionExpired";
-    if (init.reason === 'notAuthorized')
-        return "the callee answered notAuthorized";
-    if (init.cause instanceof Error)
-        return init.cause.message;
-    return init.status !== undefined ? `HTTP ${init.status}` : "no answer";
-};
 /**
  * @typeParam TContract - The callee's API contract (`typeof lambder.ApiContract`, imported type-only), for typed names, payloads, results and guard inputs.
  * @typeParam TProvidedGuards - Guard names guardInputsProvider covers; those APIs' options argument becomes optional.
@@ -280,10 +68,7 @@ export default class LambderInvokeCaller {
         this.host = host ?? functionName;
         // `?? false`: like the browser caller, off unless asked for.
         this.requestCompression = resolveCompressionOption(requestCompression ?? false, DEFAULT_INVOKE_REQUEST_COMPRESSION_SETTINGS);
-        this.maxResponsePayloadBytes = maxResponsePayloadBytes ?? DEFAULT_MAX_RESTORED_PAYLOAD_BYTES;
-        if (!Number.isSafeInteger(this.maxResponsePayloadBytes) || this.maxResponsePayloadBytes <= 0) {
-            throw new Error("LambderInvokeCaller: maxResponsePayloadBytes must be a positive integer");
-        }
+        this.maxResponsePayloadBytes = assertPositiveInteger(maxResponsePayloadBytes ?? DEFAULT_MAX_RESTORED_PAYLOAD_BYTES, "LambderInvokeCaller maxResponsePayloadBytes");
         this.timeoutMs = timeoutMs;
         this.onLogList = onLogList;
         this.onFailure = onFailure;
@@ -298,7 +83,7 @@ export default class LambderInvokeCaller {
     static createEvent(init) {
         const host = init.host ?? "lambder-invoke";
         const tokenCookieKey = init.sessionTokenCookieKey ?? DEFAULT_SESSION_TOKEN_COOKIE_KEY;
-        return synthesizeHttpEvent({
+        return synthesizeLambdaHttpEvent({
             method: "POST",
             path: init.apiPath ?? "/api",
             host,
@@ -314,35 +99,34 @@ export default class LambderInvokeCaller {
                 guardInputs: init.guardInputs,
                 idempotencyKey: init.idempotencyKey,
             }),
-        });
+        }, { invoke: true });
     }
     /**
      * A transport that runs a callee's handler in this process, the way
      * Lambda would: a thrown error becomes a FunctionError payload. For
      * tests that want the real handlers behind the real envelope.
+     *
+     * It honours the signal the way lambderHandlerTransport does, by ending
+     * the wait: a function call in this process cannot be cancelled, so the
+     * handler runs to completion regardless and what a timeout buys is the
+     * caller's answer. Ignoring it made timeoutMs a no-op here.
      */
     static localTransport(handler, context = {}) {
-        return async (event, { functionName }) => {
-            const lambdaContext = {
-                callbackWaitsForEmptyEventLoop: false,
-                functionName,
-                functionVersion: "$LATEST",
-                invokedFunctionArn: `arn:aws:lambda:local:000000000000:function:${functionName}`,
-                memoryLimitInMB: "128",
-                awsRequestId: randomRequestId(),
-                logGroupName: `/aws/lambda/${functionName}`,
-                logStreamName: "local",
-                getRemainingTimeInMillis: () => 30_000,
-                done: () => { },
-                fail: () => { },
-                succeed: () => { },
-                ...context,
-            };
+        return async (event, { functionName, signal }) => {
+            signal?.throwIfAborted();
             try {
-                return { functionError: null, result: await handler(event, lambdaContext) };
+                return {
+                    functionError: null,
+                    result: await stopWaitingWhenAborted(handler(event, localLambdaContext(functionName, context)), signal),
+                };
             }
             catch (err) {
-                const error = err instanceof Error ? err : new Error(String(err));
+                // An abort is the caller giving up, not the callee failing:
+                // reporting it as a FunctionError would turn a timeout into a
+                // crash outcome with an invented error payload.
+                if (signal?.aborted && err === signal.reason)
+                    throw err;
+                const error = coerceToError(err, "the handler failed");
                 return {
                     functionError: "Unhandled",
                     result: { errorType: error.name, errorMessage: error.message, trace: (error.stack ?? "").split("\n") },
@@ -360,8 +144,11 @@ export default class LambderInvokeCaller {
     }
     async invokeThroughSdk(eventJson, signal) {
         const { LambdaClient, InvokeCommand } = await this.loadSdk();
+        // One call is one delivery attempt, which is what LambderApiTransport
+        // promises: the SDK's own default of 3 would re-invoke a callee that
+        // already ran when only the response was lost.
         if (!this.client)
-            this.client = new LambdaClient(this.clientConfig ?? {});
+            this.client = new LambdaClient({ maxAttempts: 1, ...this.clientConfig });
         const output = await this.client.send(new InvokeCommand({
             FunctionName: this.functionName,
             InvocationType: "RequestResponse",
@@ -379,55 +166,51 @@ export default class LambderInvokeCaller {
         }
         return { functionError: output.FunctionError ?? null, result };
     }
-    /** Delivers one event, serialized exactly once; a rejected transport is a network or timeout failure. */
-    async deliver(event, eventJson, options) {
-        const abort = abortAfter(options.timeoutMs ?? this.timeoutMs, options.signal);
+    /** Delivers one event, serialized exactly once; an event over the invoke cap, a rejected transport, or one that answered after the call was given up on, is a failure. */
+    async deliverEvent(event, eventJson, options) {
+        // Measured here rather than on the API path alone, because every
+        // caller of this one sends the same bytes. A path that skips the cap
+        // gets the SDK's RequestEntityTooLargeException back instead, which
+        // classifies as `protocol` and names neither the size nor the cap.
+        const bytes = Buffer.byteLength(eventJson, "utf8");
+        if (bytes > LAMBDER_INVOKE_MAX_EVENT_BYTES) {
+            return { failed: {
+                    reason: 'payloadTooLarge', bytes,
+                    detail: `the event is ${bytes} bytes, over the ${LAMBDER_INVOKE_MAX_EVENT_BYTES} byte invoke cap`,
+                } };
+        }
+        // The same wiring the browser caller uses, so the two cannot drift on
+        // what a late or abandoned call means.
+        const abort = createCallAbort({ timeoutMs: options.timeoutMs ?? this.timeoutMs, signal: options.signal });
         try {
+            // A call the site has already given up on does not reach the
+            // transport: honouring the signal is the transport's obligation
+            // and not every transport does.
+            const refused = abort.abortFailure("beforeSending");
+            if (refused)
+                return { failed: { reason: refused.reason, cause: refused.error, detail: refused.error.message } };
             const sent = await this.transport(event, { functionName: this.functionName, eventJson, signal: abort.signal });
+            // An answer that arrives after the abort is not a success: a
+            // transport that ignores the signal resolves late, and believing
+            // it would report ok on a 20ms timeoutMs at 300ms, handing the
+            // call site data it had already abandoned.
+            const late = abort.abortFailure("afterAnswering");
+            if (late)
+                return { failed: { reason: late.reason, cause: late.error, detail: late.error.message } };
             return { sent };
         }
         catch (err) {
-            const cause = err instanceof Error ? err : new Error(String(err));
-            return { failed: { reason: abort.timedOut() ? 'timeout' : 'network', cause } };
+            const cause = coerceToError(err, "the invoke failed");
+            // The caller's own timeout wins, since only it knows about that;
+            // otherwise the rejection says what it was.
+            return { failed: { reason: abort.timedOut() ? 'timeout' : classifyDeliveryFailure(cause), cause } };
         }
         finally {
-            abort.clear();
+            abort.detach();
         }
-    }
-    /** The function's answer as an HTTP result; throws when it is not one, or its compressed body cannot be restored. */
-    async decodeHttpResult(result) {
-        if (!result || typeof result !== "object" || typeof result.statusCode !== "number") {
-            throw new Error("the function did not answer with an HTTP response object; is it a Lambder app?");
-        }
-        const raw = result;
-        const headers = {};
-        for (const [key, value] of Object.entries(raw.headers ?? {}))
-            headers[key.toLowerCase()] = value;
-        for (const [key, values] of Object.entries(raw.multiValueHeaders ?? {}))
-            headers[key.toLowerCase()] = values.join(", ");
-        let body = raw.body ? Buffer.from(raw.body, raw.isBase64Encoded ? "base64" : "utf8") : Buffer.alloc(0);
-        const encoding = headers["content-encoding"]?.trim().toLowerCase();
-        if (encoding === "br" || encoding === "gzip") {
-            // restoreBytes, not restoreText: a route may answer compressed
-            // binary (a wasm module, anything it forced compression on), and
-            // decoding that as UTF-8 first would replace every byte that is
-            // not valid UTF-8 and hand back a silently different body.
-            body = await restoreBytes(body, encoding, { maxBytes: this.maxResponsePayloadBytes });
-        }
-        else if (encoding) {
-            throw new Error(`the answer carries an unsupported Content-Encoding "${encoding}"`);
-        }
-        return {
-            statusCode: raw.statusCode,
-            headers,
-            cookies: raw.cookies ?? [],
-            body,
-            text: () => body.toString("utf8"),
-            json: () => JSON.parse(body.toString("utf8")),
-        };
     }
     /** Builds the failure and its error, reports it once, and hands it back. */
-    async fail(apiName, init) {
+    async failureOutcome(apiName, init) {
         const logList = init.logList ?? [];
         const cause = init.crash ? errorFromCrashDetail(init.crash)
             : init.functionError ? errorFromFunctionError(init.functionError)
@@ -448,11 +231,16 @@ export default class LambderInvokeCaller {
             bytes: init.bytes,
             cause,
         });
+        // FailureInit's arms mirror the outcome's, so each reason's evidence
+        // was already demanded at the site that chose the reason; the
+        // assembly is one object either way, and this is where it is named as
+        // the arm it is rather than written out five times.
         const failure = {
             ok: false,
             reason: init.reason,
             error,
             logList,
+            cookies: init.cookies ?? [],
             ...(init.status !== undefined ? { status: init.status } : {}),
             ...(init.errorMessage !== undefined ? { errorMessage: init.errorMessage } : {}),
             ...(init.retryAfterSeconds !== undefined ? { retryAfterSeconds: init.retryAfterSeconds } : {}),
@@ -460,9 +248,8 @@ export default class LambderInvokeCaller {
             ...(init.crash !== undefined ? { crash: init.crash } : {}),
             ...(init.functionError !== undefined ? { functionError: init.functionError } : {}),
             ...(init.bytes !== undefined ? { bytes: init.bytes } : {}),
+            ...(init.response !== undefined ? { response: init.response } : {}),
         };
-        if (init.response !== undefined)
-            failure.response = init.response;
         error.outcome = failure;
         if (this.onFailure) {
             // A reporting hook that breaks must not turn apiOutcome() into a
@@ -502,7 +289,6 @@ export default class LambderInvokeCaller {
         // reported. So a throw here is an 'unknown' failure like any other.
         let event;
         let eventJson;
-        let bytes;
         try {
             // Provider values underneath, per-call values on top.
             const provided = this.guardInputsProvider
@@ -514,13 +300,11 @@ export default class LambderInvokeCaller {
             // into the envelope. Compressed when enabled and the JSON reaches
             // the threshold; `compressRequest` overrides both ways.
             const payloadJson = payload !== undefined ? JSON.stringify(payload) : undefined;
-            const compressionMinBytes = options.compressRequest === true ? 0
-                : options.compressRequest === false ? null
-                    : this.requestCompression?.minBytes ?? null;
+            const compressionMinBytes = resolveRequestCompressionMinBytes(options.compressRequest, this.requestCompression);
             const compressed = compressionMinBytes !== null && payloadJson !== undefined
                 ? await compressPayloadBrotli(payloadJson, compressionMinBytes, this.requestCompression?.quality ?? DEFAULT_INVOKE_REQUEST_COMPRESSION_SETTINGS.quality)
                 : null;
-            event = synthesizeHttpEvent({
+            event = synthesizeLambdaHttpEvent({
                 method: "POST",
                 path: this.apiPath,
                 host: this.host,
@@ -537,33 +321,26 @@ export default class LambderInvokeCaller {
                     guardInputs,
                     idempotencyKey: options.idempotencyKey,
                 }),
-            });
+            }, { invoke: true });
             // Serialized once here; the size guard and the SDK transport both use it.
             eventJson = JSON.stringify(event);
-            bytes = Buffer.byteLength(eventJson, "utf8");
         }
         catch (err) {
-            return await this.fail(apiName, { reason: 'unknown', cause: err instanceof Error ? err : new Error(String(err)) });
+            return await this.failureOutcome(apiName, { reason: 'unknown', cause: coerceToError(err, "the call could not be built") });
         }
-        if (bytes > LAMBDER_INVOKE_MAX_EVENT_BYTES) {
-            return await this.fail(apiName, {
-                reason: 'payloadTooLarge', bytes,
-                detail: `the event is ${bytes} bytes, over the ${LAMBDER_INVOKE_MAX_EVENT_BYTES} byte invoke cap`,
-            });
-        }
-        const delivery = await this.deliver(event, eventJson, options);
+        const delivery = await this.deliverEvent(event, eventJson, options);
         if ("failed" in delivery)
-            return await this.fail(apiName, delivery.failed);
+            return await this.failureOutcome(apiName, delivery.failed);
         if (delivery.sent.functionError) {
-            return await this.fail(apiName, { reason: 'crash', functionError: parseFunctionError(delivery.sent.result) });
+            return await this.failureOutcome(apiName, { reason: 'crash', functionError: parseFunctionError(delivery.sent.result) });
         }
         let http;
         try {
-            http = await this.decodeHttpResult(delivery.sent.result);
+            http = await decodeLambdaHttpResult(delivery.sent.result, this.maxResponsePayloadBytes);
         }
         catch (err) {
-            const cause = err instanceof Error ? err : new Error(String(err));
-            return await this.fail(apiName, { reason: 'protocol', cause, detail: cause.message });
+            const cause = coerceToError(err, "the answer could not be decoded");
+            return await this.failureOutcome(apiName, { reason: 'protocol', cause, detail: cause.message });
         }
         const outcome = await resolveApiOutcome({
             status: http.statusCode,
@@ -571,37 +348,64 @@ export default class LambderInvokeCaller {
             json: async () => http.json(),
             text: async () => http.text(),
         });
-        const logList = outcome.response?.logList ?? [];
+        // Every answer's logs, from the one field the mapping puts them on:
+        // an envelope's, a 500 body's, and a rejected input's, which the
+        // callee writes onto the validation body as it does onto a success.
+        const logList = outcome.logList ?? [];
         await this.surfaceLogs(apiName, logList);
+        // The answer's Set-Cookie values, so a session the callee rotated or
+        // cleared is visible to whoever is carrying it.
+        const cookies = http.cookies;
         // The declared output, by the callee's own typing: res.api(null) compiles
         // only for an output that allows null or beside a reason (an errorMessage
         // is a failure below; a message-only null is the callee's contract to keep).
         if (outcome.ok)
-            return { ok: true, payload: (outcome.payload ?? null), response: outcome.response, logList };
-        // A 404 text page is what a callee answers when apiPath does not
-        // match: the one misconfiguration every first integration hits.
-        const detail = http.statusCode === 404 && outcome.reason === 'server'
-            ? `no API at ${this.apiPath} on ${this.functionName} (HTTP 404): does apiPath match the callee's?`
-            : undefined;
-        return await this.fail(apiName, {
+            return { ok: true, payload: (outcome.payload ?? null), response: outcome.response, logList, cookies };
+        const shared = { status: outcome.status, retryAfterSeconds: outcome.retryAfterSeconds, logList, cookies };
+        // Each failure reason carries different evidence, and the outcome
+        // union says which: a rejected input has its issues and no envelope,
+        // an envelope refusal has the envelope and no Error.
+        if (outcome.reason === 'validation') {
+            return await this.failureOutcome(apiName, { ...shared, reason: 'validation', zodError: outcome.zodError });
+        }
+        if (outcome.reason === 'server') {
+            // A 404 text page is what a callee answers when apiPath does not
+            // match: the one misconfiguration every first integration hits.
+            const detail = http.statusCode === 404
+                ? `no API at ${this.apiPath} on ${this.functionName} (HTTP 404): does apiPath match the callee's?`
+                : undefined;
+            return await this.failureOutcome(apiName, {
+                ...shared,
+                reason: 'server',
+                errorMessage: outcome.errorMessage,
+                response: outcome.response,
+                crash: outcome.response?.crash,
+                cause: outcome.error,
+                detail,
+            });
+        }
+        return await this.failureOutcome(apiName, {
+            ...shared,
             reason: outcome.reason,
-            status: outcome.status,
             errorMessage: outcome.errorMessage,
-            retryAfterSeconds: outcome.retryAfterSeconds,
-            zodError: outcome.zodError,
             response: outcome.response,
-            crash: outcome.response?.crash,
-            logList,
-            cause: outcome.error,
-            detail,
+            crash: outcome.response.crash,
         });
     }
     /**
      * Full-fidelity call: resolves to a discriminated LambderInvokeOutcome
      * instead of throwing. Never throws; for sites that degrade gracefully.
+     *
+     * The output is computed from the contract in the return type rather than
+     * taken as a type parameter, so a call site cannot replace it by
+     * annotating what it assigns to.
      */
-    async apiOutcome(apiName, payload, ...rest) {
-        return await this.dispatch(apiName, payload, rest[0]);
+    async apiOutcome(apiName, ...rest) {
+        // The tuple is a conditional type on an unresolved TApiName, so its
+        // elements read as unknown from inside; the contract shaped them on
+        // the way in, which is where the guarantee belongs.
+        const [payload, options] = rest;
+        return await this.dispatch(apiName, payload, options);
     }
     /**
      * The declared output, or a thrown LambderInvokeError carrying the
@@ -612,8 +416,9 @@ export default class LambderInvokeCaller {
      * reason (LambderApiAnswer), so a nullable output is the one place null
      * arrives.
      */
-    async api(apiName, payload, ...rest) {
-        const outcome = await this.dispatch(apiName, payload, rest[0]);
+    async api(apiName, ...rest) {
+        const [payload, options] = rest;
+        const outcome = await this.dispatch(apiName, payload, options);
         if (!outcome.ok)
             throw outcome.error;
         return outcome.payload;
@@ -627,7 +432,7 @@ export default class LambderInvokeCaller {
     async request(init) {
         const method = (init.method ?? "GET").toUpperCase();
         const name = `${method} ${init.path}`;
-        const event = synthesizeHttpEvent({
+        const event = synthesizeLambdaHttpEvent({
             method,
             path: init.path,
             query: init.query,
@@ -636,19 +441,19 @@ export default class LambderInvokeCaller {
             clientIp: init.clientIp,
             cookies: init.cookies,
             body: init.body,
-        });
-        const delivery = await this.deliver(event, JSON.stringify(event), init);
+        }, { invoke: true });
+        const delivery = await this.deliverEvent(event, JSON.stringify(event), init);
         if ("failed" in delivery)
-            throw (await this.fail(name, delivery.failed)).error;
+            throw (await this.failureOutcome(name, delivery.failed)).error;
         if (delivery.sent.functionError) {
-            throw (await this.fail(name, { reason: 'crash', functionError: parseFunctionError(delivery.sent.result) })).error;
+            throw (await this.failureOutcome(name, { reason: 'crash', functionError: parseFunctionError(delivery.sent.result) })).error;
         }
         try {
-            return await this.decodeHttpResult(delivery.sent.result);
+            return await decodeLambdaHttpResult(delivery.sent.result, this.maxResponsePayloadBytes);
         }
         catch (err) {
-            const cause = err instanceof Error ? err : new Error(String(err));
-            throw (await this.fail(name, { reason: 'protocol', cause, detail: cause.message })).error;
+            const cause = coerceToError(err, "the answer could not be decoded");
+            throw (await this.failureOutcome(name, { reason: 'protocol', cause, detail: cause.message })).error;
         }
     }
 }

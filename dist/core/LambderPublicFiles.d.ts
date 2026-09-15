@@ -3,6 +3,8 @@ import type { LambderFiles } from "./LambderFiles.js";
 import { LambderResponse } from "./LambderResponse.js";
 /** Per-registration policy of servePublicFiles: how a request maps to a file and how the response is cached. */
 export type LambderPublicFilesOptions = {
+    /** Methods that reach the public-file layer. Default: ["GET", "HEAD"], the same gate and the same default its serveIndexHtml sibling has. */
+    methods?: string[];
     /**
      * Map the request to a file path (app-owned logic, e.g. per-tenant
      * roots: (ctx) => `${brand(ctx.host)}${ctx.path}`). Return
@@ -24,14 +26,15 @@ export type LambderPublicFilesOptions = {
 /**
  * Terminal public-file handler registered via lambder.servePublicFiles().
  * Runs only when no route matched, so it can never shadow routes registered
- * after it. Serves files through the instance's reader (traversal-safe,
+ * after it. Serves files through the instance's reader (one path rule,
  * mime-typed, memory-cached) with the immutable-cache heuristic for
  * content-hashed assets, and falls through to the route fallback when the
- * source has no such file.
+ * method is not configured or the source has no such file.
  */
 export declare class LambderPublicFilesHandler {
     private files;
     private options;
+    private methods;
     constructor(files: LambderFiles, options: LambderPublicFilesOptions);
     /** Serve the mapped file, or return null to fall through. */
     handle(ctx: LambderRenderContext): Promise<LambderResponse | null>;

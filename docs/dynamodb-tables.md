@@ -9,7 +9,7 @@ shape: a string hash key `pk`, a string range key `sk`, and TTL on an
 | Sessions | (its own table) | `addSessionApi`, `addSessionRoute`, the session controller |
 | [`LambderDdbCache`](./ddb-cache.md) | `CACHE#` | Cached values |
 | [`LambderDdbRateLimiter`](./ddb-rate-limiter.md) | `RL#` | Rate-limit counters |
-| [`LambderDdbIdempotency`](./ddb-idempotency.md) | `IDEM#` | Idempotency claims and replays |
+| [`LambderDdbIdempotencyStore`](./ddb-idempotency.md) | `IDEM#` | Idempotency claims and replays |
 
 ## How many tables
 
@@ -21,6 +21,19 @@ for the cache.
 **Keep sessions in their own table.** Not because of key collisions, but so
 IAM can be scoped to it separately: the session table is the one whose contents
 identify users, and a cache or rate-limit role should not be able to read it.
+
+## Which region
+
+Every one of them takes an optional `region`, and leaving it out means the AWS
+SDK's own default chain: `AWS_REGION` (which Lambda sets to the function's
+region), then the shared config file, then the rest of the chain. That is
+usually what you want, since the table is normally in the region the function
+runs in.
+
+All four agree on this. The cache used to default to `us-east-1` instead, so an
+app deployed elsewhere that left the option out got a cache in Virginia while
+its sibling stores followed the deployment; if you relied on that default, name
+the region explicitly.
 
 ## Table creation
 
@@ -77,7 +90,7 @@ Grant only what the systems on that table actually use.
 | Sessions | `GetItem`, `PutItem`, `DeleteItem`, `Query`, `UpdateItem` |
 | `LambderDdbCache` | `GetItem`, `PutItem`, `DeleteItem`, `Query`, `BatchWriteItem` |
 | `LambderDdbRateLimiter` | `UpdateItem` |
-| `LambderDdbIdempotency` | `GetItem`, `PutItem`, `DeleteItem` |
+| `LambderDdbIdempotencyStore` | `GetItem`, `PutItem`, `DeleteItem` |
 
 A session-table policy, for example:
 
@@ -126,13 +139,16 @@ The bearer secrets are stored only as hashes; see
 sha256 is the right construction here.
 
 Session data is Brotli-compressed by default, `dataBr` beside its JSON byte
-length `dataBytes`; with `session.compression` off, or below its `minBytes`,
-the data is a plain `data` map attribute instead. Records written under either
-setting read back, so the setting can be switched on or off on a live table.
-Sessions configured with `dataRefresh` also carry `dataExpiresAt`.
+length `dataBytes`; with the store's `compression` off, or below its
+`minBytes`, the data is a plain `data` map attribute instead. Records written
+under either setting read back, so the setting can be switched on or off on a
+live table. Sessions configured with `dataRefresh` also carry `dataExpiresAt`.
 
-The key attribute names are configurable with the session's `partitionKey` and
-`sortKey` options if your table already uses different ones.
+The key attribute names are configurable through `LambderDdbSessionStore`'s
+`partitionKey` and `sortKey` options if your table already uses different
+ones, along with `tableName`, `region` and `compression`. These belong to the
+store rather than to the `session` option, which holds only what is true of
+every store.
 
 ## Capacity
 

@@ -4,87 +4,21 @@
  * session-keyed policies on public APIs, options without their enable call).
  */
 
-import {
-    DynamoDBClient,
-    UpdateItemCommand,
-    PutItemCommand,
-    GetItemCommand,
-    DeleteItemCommand,
-    type AttributeValue,
-} from "@aws-sdk/client-dynamodb";
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import nodeCrypto from 'crypto';
 import { z } from 'zod';
 import Lambder, { initLambder } from '../src/core/Lambder.js';
-import { LambderLocalFileSource } from '../src/core/LambderFiles.js';
-import { LambderApiError, LAMBDER_REFUSAL_CODES } from '../src/shared/LambderApiError.js';
+import { LambderMemorySessionStore } from '../src/stores/LambderMemorySessionStore.js';
+import { LambderApiRefusal, LAMBDER_REFUSAL_CODES } from '../src/shared/wire/LambderApiRefusal.js';
 import { LambderDdbRateLimiter } from '../src/stores/LambderDdbRateLimiter.js';
-import { LambderDdbIdempotency } from '../src/stores/LambderDdbIdempotency.js';
-import { lambderGuard } from '../src/policies/LambderApiGuards.js';
-import { lambderRateLimitKey } from '../src/policies/LambderApiRateLimits.js';
-import { createApiEvent as createEnvelopeEvent, createMockContext } from './helpers.js';
+import { LambderDdbIdempotencyStore } from '../src/stores/LambderDdbIdempotencyStore.js';
+import { LambderMemoryIdempotencyStore } from '../src/stores/LambderMemoryIdempotencyStore.js';
+import { LambderMemoryRateLimiter } from '../src/stores/LambderMemoryRateLimiter.js';
+import type { LambderRateLimiter, LambderRateLimitPolicy } from '../src/shared/contracts/LambderRateLimiter.js';
+import { lambderGuard, lambderRateLimitKey } from '../src/core/LambderPolicyBuilders.js';
+import { LambderResponse } from '../src/core/LambderResponse.js';
+import { createApiEvent as createEnvelopeEvent, createMockContext, MemoryDdb, testPublicFiles } from './helpers.js';
 import type { APIGatewayProxyEvent } from 'aws-lambda';
-
-type Item = Record<string, AttributeValue>;
-
-const conditionalFailure = (): Error =>
-    Object.assign(new Error("conditional request failed"), { name: "ConditionalCheckFailedException" });
-
-/** In-memory DynamoDB covering the limiter's ADD counters and the idempotency put/get/delete. */
-class MemoryDdb extends DynamoDBClient {
-    readonly items = new Map<string, Item>();
-    failAll = false;
-
-    constructor(){
-        super({ region: "us-east-1", credentials: { accessKeyId: "test", secretAccessKey: "test" } });
-    }
-
-    async send(command: any): Promise<any> {
-        if(this.failAll) throw new Error("ddb down");
-        const input = command.input;
-        const keyOf = (key: any) => `${key.pk.S}|${key.sk.S}`;
-
-        if(command instanceof UpdateItemCommand){
-            const k = keyOf(input.Key);
-            const existing = this.items.get(k);
-            const count = existing ? Number(existing.count?.N ?? 0) : 0;
-            const limit = Number(input.ExpressionAttributeValues[":limit"].N);
-            if(existing && count >= limit) throw conditionalFailure();
-            this.items.set(k, {
-                pk: input.Key.pk, sk: input.Key.sk,
-                count: { N: String(count + 1) },
-                expiresAt: existing?.expiresAt ?? input.ExpressionAttributeValues[":expiresAt"],
-            });
-            return {};
-        }
-        if(command instanceof PutItemCommand){
-            const k = keyOf(input.Item);
-            const existing = this.items.get(k);
-            if(input.ConditionExpression?.includes("attribute_not_exists(pk)") && existing){
-                const now = Number(input.ExpressionAttributeValues?.[":now"]?.N ?? Math.floor(Date.now() / 1000));
-                const notExpired = Number(existing.expiresAt?.N ?? 0) > now;
-                if(notExpired) throw conditionalFailure();
-            }
-            if(input.ConditionExpression === "ownerToken = :owner"){
-                if(existing?.ownerToken?.S !== input.ExpressionAttributeValues?.[":owner"]?.S) throw conditionalFailure();
-            }
-            this.items.set(k, input.Item);
-            return {};
-        }
-        if(command instanceof GetItemCommand){
-            return { Item: this.items.get(keyOf(input.Key)) };
-        }
-        if(command instanceof DeleteItemCommand){
-            if(input.ConditionExpression === "ownerToken = :owner"){
-                const existing = this.items.get(keyOf(input.Key));
-                if(existing?.ownerToken?.S !== input.ExpressionAttributeValues?.[":owner"]?.S) throw conditionalFailure();
-            }
-            this.items.delete(keyOf(input.Key));
-            return {};
-        }
-        throw new Error("MemoryDdb: unhandled command " + command?.constructor?.name);
-    }
-}
 
 const createApiEvent = (apiName: string, payload?: any, extra: Record<string, any> = {}): APIGatewayProxyEvent =>
     createEnvelopeEvent({ apiName, payload, ...extra });
@@ -94,61 +28,292 @@ const testSchema = {
     output: z.object({ result: z.string() }),
 };
 
-const makeLimiter = (client: MemoryDdb, failOpen = false) =>
-    new LambderDdbRateLimiter({ tableName: "test-table", client, failOpen });
+const makeLimiter = (client: MemoryDdb) =>
+    new LambderDdbRateLimiter({ tableName: "test-table", client });
 const makeStore = (client: MemoryDdb) =>
-    new LambderDdbIdempotency({ tableName: "test-table", client });
+    new LambderDdbIdempotencyStore({ tableName: "test-table", client });
 
 describe('API policies - registration assertions', () => {
     it('throws on duplicate API names', () => {
-        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api' })
+        const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
             .addApi('dup', testSchema, async (ctx, res) => res.api({ result: 'ok' }));
         expect(() => lambder.addApi('dup', testSchema as any, async (ctx, res) => res.api(null)))
             .toThrow(/duplicate API name "dup"/);
     });
 
     it('throws when options are declared with no policy configuration', () => {
-        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api' });
+        const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' });
         expect(() => lambder.addApi('x', { ...testSchema, rateLimit: 'nope' } as any, async (ctx, res) => res.api(null)))
             .toThrow(/was configured at creation/);
     });
 
+    it('rejects an option key the type does not have, so a typo cannot disable a flag in silence', () => {
+        // create() infers `const TOptions` from the literal, which switches
+        // excess-property checking off for the whole object. Without the
+        // surplus-key mapping these compile and are dropped: the app then runs
+        // with requireSessionApiGuards OFF, which is the one flag whose whole
+        // job is to make a missing authorization declaration a compile error.
+        initLambder().create({
+            files: testPublicFiles(),
+            apiPath: '/api',
+            // @ts-expect-error requireSessionApiGuard is not an option; the flag has a trailing "s"
+            requireSessionApiGuard: true,
+        });
+        initLambder().create({
+            files: testPublicFiles(),
+            apiPath: '/api',
+            // @ts-expect-error maxResponseByte is not an option; the option is maxResponseBytes
+            maxResponseByte: 100,
+        });
+        // The correct spellings still compile, and still narrow the instance.
+        expect(() => initLambder().create({
+            files: testPublicFiles(),
+            apiPath: '/api',
+            guards: { sessionOnly: { handler: async () => {} } },
+            requireSessionApiGuards: true,
+            maxResponseBytes: 100,
+        })).not.toThrow();
+    });
+
     it('throws on unknown rate-limit policy and unknown guard names', () => {
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', rateLimits: { limiter: makeLimiter(new MemoryDdb()), policies: { real: { perMin: 5, per: 'ip', budget: 'perApi' } } }, guards: { realGuard: { handler: async () => {} } } });
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: { limiter: makeLimiter(new MemoryDdb()), policies: { real: { perMin: 5, per: 'ip', budget: 'perApi' } } }, guards: { realGuard: { handler: async () => {} } } });
         expect(() => lambder.addApi('a', { ...testSchema, rateLimit: 'fake' } as any, async (ctx, res) => res.api(null)))
             .toThrow(/unknown rate-limit policy "fake"/);
         expect(() => lambder.addApi('b', { ...testSchema, guards: 'fakeGuard' } as any, async (ctx, res) => res.api(null)))
             .toThrow(/unknown guard "fakeGuard"/);
     });
 
+    it('rejects an empty rateLimit option, the way it rejects an empty guards option', () => {
+        // Declaring the option is declaring a limit. These three forms used to
+        // register an API that announces a rate limit and enforces none, which
+        // is the one shape that quietly turns a mandatory declaration back into
+        // an optional one.
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: { limiter: makeLimiter(new MemoryDdb()), policies: { real: { perMin: 5, per: 'ip', budget: 'perApi' } } } });
+        for(const [index, rateLimit] of [{}, [], { real: undefined }].entries()){
+            expect(() => lambder.addApi(`empty.${index}`, { ...testSchema, rateLimit } as any, async (ctx, res) => res.api(null)))
+                .toThrow(/declares an empty rateLimit option/);
+        }
+        // The failed registrations above did not burn their names either.
+        expect(() => lambder.addApi('empty.0', { ...testSchema, rateLimit: 'real' } as any, async (ctx, res) => res.api({ result: 'ok' })))
+            .not.toThrow();
+    });
+
+    it('rejects an override that takes away the policy last enforced window', () => {
+        // A policy must declare a window; an override may not undo that. Zero
+        // is a legal window value (it leaves that one unenforced), so zeroing
+        // the only one passed every check and disabled the policy in silence.
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: { limiter: makeLimiter(new MemoryDdb()), policies: { real: { perMin: 5, per: 'ip', budget: 'perApi' } } } });
+        expect(() => lambder.addApi('zeroed', { ...testSchema, rateLimit: { real: { perMin: 0 } } } as any, async (ctx, res) => res.api(null)))
+            .toThrow(/down to no enforced window/);
+    });
+
+    it('rejects a replay window a store cannot act on', () => {
+        // NaN was the one that mattered: it survives every comparison an
+        // expiry test makes, so an in-memory record with a NaN expiry outlives
+        // every sweep, while DynamoDB rejects the same number outright.
+        const create = (defaultTtlSeconds: number) => initLambder().create({
+            files: testPublicFiles(), apiPath: '/api',
+            idempotency: { store: new LambderDdbIdempotencyStore({ tableName: 't', region: 'us-east-1' }), defaultTtlSeconds },
+        });
+        for(const bad of [NaN, 0, -5, 1.5, Infinity]){
+            expect(() => create(bad)).toThrow(/replay window in whole seconds\) must be a positive integer/);
+        }
+
+        const lambder = create(60);
+        expect(() => lambder.addApi('bad.ttl', { ...testSchema, idempotency: { ttlSeconds: NaN } } as any, async (ctx, res) => res.api(null)))
+            .toThrow(/replay window in whole seconds\) must be a positive integer/);
+    });
+
+    it('lets an API opt out of idempotency without a store configured', () => {
+        // `idempotency: false` asks for nothing, so it needs nothing behind it.
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api' });
+        expect(() => lambder.addApi('opted.out', { ...testSchema, idempotency: false } as any, async (ctx, res) => res.api({ result: 'ok' })))
+            .not.toThrow();
+    });
+
+    it('keeps a completed answer when the store cannot record it, rather than 500ing the caller', async () => {
+        // Settling happens AFTER the handler ran, so failing closed there
+        // cannot prevent anything: it turned a completed operation into a 500
+        // and handed the retry a released claim, which is exactly the double
+        // execution idempotency exists to prevent.
+        const store = new LambderMemoryIdempotencyStore();
+        store.complete = async () => { throw new Error('store unavailable'); };
+        let runs = 0;
+        const lambder = initLambder().create({
+            files: testPublicFiles(), apiPath: '/api',
+            idempotency: { store, failOpen: false },
+        }).addApi('charge', { ...testSchema, idempotency: true } as any, async (ctx, res) => {
+            runs += 1;
+            return res.api({ result: 'charged' });
+        });
+
+        const call = () => lambder.render(createApiEvent('charge', { value: 'v' }, { idempotencyKey: 'key-abcdefabcdefabcd' }), {} as any);
+        const first = await call();
+
+        expect(runs).toBe(1);
+        expect(first.statusCode).toBe(200);
+        expect(String(first.body)).toContain('charged');
+    });
+
+    it('scopes a public API replay by callerIdentity, so a key is not a bearer token for its answer', async () => {
+        // The replay is served BEFORE guards run, so on a public API whose
+        // authorization is a guard, a second caller presenting a known key
+        // used to get the first caller's response body without the guard
+        // being consulted at all.
+        const store = new LambderMemoryIdempotencyStore();
+        const lambder = initLambder().create({
+            files: testPublicFiles(), apiPath: '/api',
+            idempotency: {
+                store,
+                callerIdentity: (_ctx, request) => (request.guardInputs as any)?.device?.token ?? null,
+            },
+        }).addApi('report', { ...testSchema, idempotency: true } as any, async (ctx, res) => res.api({ result: `for-${(ctx.api?.guardInputs as any)?.device?.token}` }));
+
+        const call = (token: string) => lambder.render(
+            createApiEvent('report', { value: 'v' }, { idempotencyKey: 'key-abcdefabcdefabcd', guardInputs: { device: { token } } }),
+            createMockContext(),
+        );
+
+        const first = await call('device-one');
+        expect(String(first.body)).toContain('for-device-one');
+
+        // Same key, different caller: its own scope, so its own execution.
+        const other = await call('device-two');
+        expect(String(other.body)).toContain('for-device-two');
+
+        // Same key, same caller: the stored answer.
+        const replay = await call('device-one');
+        expect(String(replay.body)).toContain('for-device-one');
+    });
+
     it('rejects session-keyed policies on public APIs', () => {
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', rateLimits: { limiter: makeLimiter(new MemoryDdb()), policies: { perUser: { perMin: 5, per: 'session', budget: 'perApi' } } } });
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: { limiter: makeLimiter(new MemoryDdb()), policies: { perUser: { perMin: 5, per: 'session', budget: 'perApi' } } } });
         expect(() => lambder.addApi('x', { ...testSchema, rateLimit: 'perUser' } as any, async (ctx, res) => res.api(null)))
             .toThrow(/requires addSessionApi/);
     });
 
+    it('keeps counters apart when a name or key carries the separator itself', async () => {
+        // The tracker key joins api|<apiName>|<policyName>|<key> with a pipe,
+        // and any of those three can contain one. Varying only the LAST field
+        // proves nothing, because a trailing field cannot absorb a boundary:
+        // the collision needs two fields to shift across it, which is what
+        // this pair does. Unescaped, both of these build the identical string
+        // "api|op|x|byKey|k" and share one counter, so the second API's very
+        // first call would be refused by the first API's.
+        const limiter = makeLimiter(new MemoryDdb());
+        const keyFromPayload = lambderRateLimitKey({ handler: (ctx) => String((ctx.post as any).payload.value) });
+        const lambder = initLambder().create({
+            files: testPublicFiles(), apiPath: '/api',
+            rateLimits: { limiter, policies: {
+                byKey: { perMin: 1, budget: 'perApi', per: keyFromPayload },
+                'x|byKey': { perMin: 1, budget: 'perApi', per: keyFromPayload },
+            } },
+        })
+            .addApi('op|x', { ...testSchema, rateLimit: 'byKey' } as any, async (ctx, res) => res.api(null))
+            .addApi('op', { ...testSchema, rateLimit: 'x|byKey' } as any, async (ctx, res) => res.api(null));
+
+        const call = (apiName: string, value: string) => lambder.render(createApiEvent(apiName, { value }), createMockContext());
+
+        expect((await call('op|x', 'k')).statusCode).toBe(200);
+        expect((await call('op', 'k')).statusCode).toBe(200);
+        // Each still holds its own limit of one.
+        expect((await call('op|x', 'k')).statusCode).toBe(429);
+        expect((await call('op', 'k')).statusCode).toBe(429);
+        // And a key carrying the separator stays its own counter too.
+        expect((await call('op', 'a|b')).statusCode).toBe(200);
+        expect((await call('op', 'a')).statusCode).toBe(200);
+    });
+
+    it('does not mistake an inherited object property for a registered guard or policy', () => {
+        // The registration check exists to catch a typo in a name. A plain
+        // object answers for "toString" through its prototype, so a name like
+        // that would pass the check and then crash on every request.
+        const lambder = initLambder().create({
+            files: testPublicFiles(), apiPath: '/api',
+            guards: { real: { handler: async () => {} } },
+            rateLimits: { limiter: makeLimiter(new MemoryDdb()), policies: { real: { perMin: 5, per: 'ip' } } },
+        });
+
+        expect(() => lambder.addApi('a', { ...testSchema, guards: 'toString' } as any, async (ctx, res) => res.api(null)))
+            .toThrow(/unknown guard "toString"/);
+        expect(() => lambder.addApi('b', { ...testSchema, rateLimit: 'constructor' } as any, async (ctx, res) => res.api(null)))
+            .toThrow(/unknown rate-limit policy "constructor"/);
+    });
+
+    it('lets a guard be named after an inherited object property', () => {
+        // The other half: the duplicate check must not reject a name only
+        // because Object.prototype happens to carry it.
+        const lambder = initLambder().create({
+            files: testPublicFiles(), apiPath: '/api',
+            guards: { toString: { handler: async () => {} } },
+        });
+
+        expect(() => lambder.addApi('a', { ...testSchema, guards: 'toString' } as any, async (ctx, res) => res.api(null)))
+            .not.toThrow();
+    });
+
+    it('hands a guard named after an inherited property nothing when the client sent nothing', async () => {
+        // guardInputs is client data, so a guard may be named for anything
+        // Object.prototype carries. Read with a plain property access, a guard
+        // named "toString" received the INHERITED FUNCTION where the client
+        // sent no value at all, so a check for "no token was presented" saw a
+        // truthy value and never fired. The name is the client's to choose, so
+        // this is the read's problem rather than the name's.
+        const seen: unknown[] = [];
+        const lambder = initLambder().create({
+            files: testPublicFiles(), apiPath: '/api',
+            guards: {
+                toString: {
+                    guardInput: z.string().optional(),
+                    handler: async (_ctx: unknown, presented: unknown) => { seen.push(presented); },
+                },
+            },
+        }).addApi('needsToken', { ...testSchema, guards: 'toString' } as any, async (ctx, res) => res.api(null));
+
+        // No guardInputs at all, then a map that names other guards only.
+        await lambder.render(createApiEvent('needsToken', { value: 'v' }), createMockContext());
+        await lambder.render(createApiEvent('needsToken', { value: 'v' }, { guardInputs: { somethingElse: 'x' } }), createMockContext());
+
+        expect(seen).toEqual([undefined, undefined]);
+        expect(seen.some((value) => typeof value === 'function')).toBe(false);
+    });
+
+    it('rejects a window limit a limiter could not act on, at creation and on an override', () => {
+        const build = (policies: any) => () => initLambder().create({
+            files: testPublicFiles(), apiPath: '/api',
+            rateLimits: { limiter: makeLimiter(new MemoryDdb()), policies },
+        });
+        expect(build({ bad: { perMin: -1, per: 'ip' } })).toThrow(/caps perMin at -1/);
+        expect(build({ bad: { perMin: 1.5, per: 'ip' } })).toThrow(/caps perMin at 1.5/);
+        expect(build({ ok: { perMin: 0, perHour: 5, per: 'ip' } })).not.toThrow();
+
+        const lambder = build({ tight: { perMin: 5, per: 'ip' } })();
+        expect(() => lambder.addApi('x', { ...testSchema, rateLimit: { tight: { perMin: -3 } } } as any, async (ctx, res) => res.api(null)))
+            .toThrow(/caps perMin at -3/);
+    });
+
     it('rejects the idempotency option when no idempotency store was configured', () => {
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', guards: { g: { handler: async () => {} } } });
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', guards: { g: { handler: async () => {} } } });
         expect(() => lambder.addApi('x', { ...testSchema, idempotency: true } as any, async (ctx, res) => res.api(null)))
             .toThrow(/no idempotency store was configured/);
     });
 
     it('rejects policies with no window or no per', () => {
         const client = new MemoryDdb();
-        expect(() => initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', rateLimits: { limiter: makeLimiter(client), policies: { bad: { per: 'ip' } as any } } }))
+        expect(() => initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: { limiter: makeLimiter(client), policies: { bad: { per: 'ip' } as any } } }))
             .toThrow(/declares no window/);
-        expect(() => initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', rateLimits: { limiter: makeLimiter(client), policies: { bad: { perMin: 1 } as any } } }))
+        expect(() => initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: { limiter: makeLimiter(client), policies: { bad: { perMin: 1 } as any } } }))
             .toThrow(/needs per/);
     });
 
     it('rejects an unknown budget value', () => {
         const client = new MemoryDdb();
-        expect(() => initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', rateLimits: { limiter: makeLimiter(client), policies: { bad: { perMin: 1, per: 'ip', budget: 'global' } as any } } }))
+        expect(() => initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: { limiter: makeLimiter(client), policies: { bad: { perMin: 1, per: 'ip', budget: 'global' } as any } } }))
             .toThrow(/has budget "global"; use "perApi" \(default/);
     });
 
     it('rejects window overrides on a perPolicy policy (one shared counter has one set of limits)', () => {
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', rateLimits: {
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: {
             limiter: makeLimiter(new MemoryDdb()),
             policies: { shared: { perMin: 5, per: 'ip', budget: 'perPolicy' } },
         } });
@@ -160,7 +325,7 @@ describe('API policies - registration assertions', () => {
 describe('API policies - rate limiting', () => {
     it('refuses with a 429 envelope after the limit and stops calling the handler', async () => {
         let handlerRuns = 0;
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', rateLimits: {
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: {
                 limiter: makeLimiter(new MemoryDdb()),
                 policies: { tight: { perMin: 2, per: 'ip', budget: 'perApi' } },
             } })
@@ -185,7 +350,7 @@ describe('API policies - rate limiting', () => {
     });
 
     it('keys counters by a custom per function (e.g. per email)', async () => {
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', rateLimits: {
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: {
                 limiter: makeLimiter(new MemoryDdb()),
                 policies: {
                     perEmail: {
@@ -209,8 +374,53 @@ describe('API policies - rate limiting', () => {
         expect(JSON.parse(blocked.body || '{}').errorMessage).toEqual({ type: 'warning', code: LAMBDER_REFUSAL_CODES.rateLimited, content: 'Too many attempts for this address.' });
     });
 
+    it('bounds an over-long custom key, so a store with a key limit still meters it', async () => {
+        // A store refuses a key it cannot take by throwing, and a throw is
+        // what failOpen swallows: a 3,000-character payload field used to turn
+        // the whole policy off in silence, every window of it, with the
+        // request going through unmetered. The bound folds the variable half
+        // into its own digest instead, so the counters stay distinct.
+        const trackerKeys: string[] = [];
+        const counters = new LambderMemoryRateLimiter();
+        const recording: LambderRateLimiter = {
+            isRateLimited: async (trackerKey: string, policy: LambderRateLimitPolicy) => {
+                trackerKeys.push(trackerKey);
+                return await counters.isRateLimited(trackerKey, policy);
+            },
+        };
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: {
+                limiter: recording,
+                policies: {
+                    perEmail: {
+                        perMin: 1, budget: 'perApi',
+                        per: lambderRateLimitKey({ apiInput: z.object({ email: z.string() }), handler: (_ctx, { email }) => email }),
+                    },
+                },
+            } })
+            .addApi('code', { input: z.object({ value: z.string(), email: z.string() }), output: testSchema.output, rateLimit: 'perEmail' }, async (ctx, res) => res.api({ result: 'ok' }));
+
+        const call = (email: string) => lambder.render(createApiEvent('code', { value: 'x', email }), createMockContext());
+        const longA = `${'a'.repeat(3000)}@x.com`;
+        const longB = `${'b'.repeat(3000)}@x.com`;
+
+        expect((await call(longA)).statusCode).toBe(200);
+        // Counted, not swallowed: the second attempt is refused.
+        expect((await call(longA)).statusCode).toBe(429);
+        // And the other long key has its own counter, not the first one's.
+        expect((await call(longB)).statusCode).toBe(200);
+        expect((await call('short@x.com')).statusCode).toBe(200);
+
+        // The api and policy names stay readable around the folded half, the
+        // two long keys stay distinct, and a key that fits is untouched.
+        expect(trackerKeys[0]).toMatch(/^api\|code\|perEmail\|custom:h:[0-9a-f]{64}$/);
+        expect(trackerKeys[0]).toBe(trackerKeys[1]);
+        expect(trackerKeys[2]).not.toBe(trackerKeys[0]);
+        expect(trackerKeys[3]).toBe('api|code|perEmail|custom:short@x.com');
+        expect(Math.max(...trackerKeys.map((key) => key.length))).toBeLessThan(1024);
+    });
+
     it('a policy message with its own code keeps it (fill, not override)', async () => {
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', rateLimits: {
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: {
                 limiter: makeLimiter(new MemoryDdb()),
                 policies: { coded: { perMin: 1, per: 'ip', errorMessage: { type: 'warning', code: 'EMAIL_CODE_RATE_LIMITED', content: 'Slow down.' } } },
             } })
@@ -222,7 +432,7 @@ describe('API policies - rate limiting', () => {
     });
 
     it('stacked policies are checked in order and any of them can refuse', async () => {
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', rateLimits: {
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: {
                 limiter: makeLimiter(new MemoryDdb()),
                 policies: {
                     loose: { perMin: 100, per: 'ip', budget: 'perApi' },
@@ -238,19 +448,48 @@ describe('API policies - rate limiting', () => {
         expect(JSON.parse(second.body || '{}').errorMessage).toEqual({ type: 'error', code: 'lambder/rate-limited', content: 'strict says no' });
     });
 
-    it('fails open when the limiter instance says so and DynamoDB is down', async () => {
+    it('fails open by default when the limiter is down, says so once, and never prints the tracker key', async () => {
+        // Fail-open is the engine's decision, not an implementation's: a
+        // custom limiter used to have none at all, and two limiters could
+        // answer one outage differently. Silence was the other half of the
+        // defect: a missing IAM action is permanent, and an app can run for
+        // months unmetered with nothing in its logs.
         const client = new MemoryDdb();
         client.failAll = true;
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', rateLimits: { limiter: makeLimiter(client, true), policies: { p: { perMin: 1, per: 'ip', budget: 'perApi' } } } })
-            .addApi('open', { ...testSchema, rateLimit: 'p' }, async (ctx, res) => res.api({ result: 'through' }));
+        const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+        try {
+            const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: { limiter: makeLimiter(client), policies: { p: { perMin: 1, per: 'ip', budget: 'perApi' } } } })
+                .addApi('open', { ...testSchema, rateLimit: 'p' }, async (ctx, res) => res.api({ result: 'through' }));
 
-        const result = await lambder.render(createApiEvent('open', { value: 'x' }), createMockContext());
-        expect(result.statusCode).toBe(200);
-        expect(JSON.parse(result.body || '{}').payload.result).toBe('through');
+            const result = await lambder.render(createApiEvent('open', { value: 'x' }), createMockContext());
+            expect(result.statusCode).toBe(200);
+            expect(JSON.parse(result.body || '{}').payload.result).toBe('through');
+
+            expect(errors).toHaveBeenCalledTimes(1);
+            const logged = String(errors.mock.calls[0]?.[0]);
+            expect(logged).toContain('policy "p"');
+            expect(logged).toContain('perMin: 1');
+            // The key carries whatever the policy tracks, an email in the
+            // docs' own example, so it stays out of the log.
+            expect(logged).not.toContain('ip:');
+        } finally {
+            errors.mockRestore();
+        }
+    });
+
+    it('failOpen: false refuses instead, and the limiter error reaches the crash path', async () => {
+        const client = new MemoryDdb();
+        client.failAll = true;
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: { limiter: makeLimiter(client), failOpen: false, policies: { p: { perMin: 1, per: 'ip', budget: 'perApi' } } } })
+            .addApi('closed', { ...testSchema, rateLimit: 'p' }, async (ctx, res) => res.api({ result: 'through' }));
+
+        const result = await lambder.render(createApiEvent('closed', { value: 'x' }), createMockContext());
+        expect(result.statusCode).toBe(500);
+        expect(String(result.body)).not.toContain('through');
     });
 
     it('budget "perApi" (the default) gives each API its own counter', async () => {
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', rateLimits: {
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: {
                 limiter: makeLimiter(new MemoryDdb()),
                 policies: { one: { perMin: 1, per: 'ip' } },
             } })
@@ -264,7 +503,7 @@ describe('API policies - rate limiting', () => {
     });
 
     it('budget "perPolicy" shares one counter across every API referencing the policy', async () => {
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', rateLimits: {
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: {
                 limiter: makeLimiter(new MemoryDdb()),
                 policies: { shared: { perMin: 1, per: 'ip', budget: 'perPolicy' } },
             } })
@@ -277,7 +516,7 @@ describe('API policies - rate limiting', () => {
     });
 
     it('the map form tunes a perApi policy per API: overrides merge over the policy windows and never touch other APIs', async () => {
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', rateLimits: {
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: {
                 limiter: makeLimiter(new MemoryDdb()),
                 policies: { lookup: { perMin: 1, perHour: 2, per: 'ip' } },   // budget defaults to perApi, so it is tunable
             } })
@@ -297,7 +536,7 @@ describe('API policies - rate limiting', () => {
     });
 
     it('the map form may override errorMessage on a perPolicy policy (text is per API, the counter is not)', async () => {
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', rateLimits: {
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: {
                 limiter: makeLimiter(new MemoryDdb()),
                 policies: { shared: { perMin: 1, per: 'ip', budget: 'perPolicy' } },
             } })
@@ -312,7 +551,7 @@ describe('API policies - rate limiting', () => {
 
     it('stacked policies charge every counter checked before the refusing one (attempts count)', async () => {
         const client = new MemoryDdb();
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', rateLimits: {
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: {
                 limiter: makeLimiter(client),
                 policies: {
                     ipWide: { perMin: 100, per: 'ip', budget: 'perApi' },
@@ -334,12 +573,12 @@ describe('API policies - requireSessionApiGuards', () => {
     const guards = {
         orgPermission: lambderGuard({
             session: true,
-            handler: (_ctx, _payload, _res, permission: string) => ({ permission }),
+            handler: (_ctx, _payload, permission: string) => ({ permission }),
         }),
         // The named opt-out: the session itself is the whole authorization.
         sessionOnly: lambderGuard({ session: true, handler: () => {} }),
     };
-    const strict = () => initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', guards, requireSessionApiGuards: true });
+    const strict = () => initLambder().create({ files: testPublicFiles(), apiPath: '/api', session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' }, guards, requireSessionApiGuards: true });
 
     it('refuses a session API that declares no guards, at registration', () => {
         expect(() => strict().addSessionApi('secure.forgot', { ...testSchema } as any, async (ctx, res) => res.api(null)))
@@ -358,12 +597,12 @@ describe('API policies - requireSessionApiGuards', () => {
     });
 
     it('needs a guards map to declare from', () => {
-        expect(() => initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', requireSessionApiGuards: true }))
+        expect(() => initLambder().create({ files: testPublicFiles(), apiPath: '/api', requireSessionApiGuards: true }))
             .toThrow(/needs a guards map/);
     });
 
     it('is off by default: a session API without guards still registers', () => {
-        const relaxed = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', guards });
+        const relaxed = initLambder().create({ files: testPublicFiles(), apiPath: '/api', session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' }, guards });
         expect(() => relaxed.addSessionApi('secure.free', { ...testSchema }, async (ctx, res) => res.api({ result: 'ok' }))).not.toThrow();
     });
 
@@ -388,11 +627,11 @@ describe('API policies - requirePublicApiGuards', () => {
             handler: (_ctx, { value }) => ({ deviceId: value }),
         }),
         // Anyone may call, and the param records why.
-        open: lambderGuard({ handler: (_ctx, _payload, _res, _reason: string) => {} }),
+        open: lambderGuard({ handler: (_ctx, _payload, _reason: string) => {} }),
         // The endpoint establishes identity; the handler proves what it needs.
         credentialFlow: lambderGuard({ handler: () => {} }),
     };
-    const strict = () => initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', guards, requirePublicApiGuards: true });
+    const strict = () => initLambder().create({ files: testPublicFiles(), apiPath: '/api', session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' }, guards, requirePublicApiGuards: true });
 
     it('refuses a public API that declares no guards, at registration', () => {
         expect(() => strict().addApi('public.forgot', { ...testSchema } as any, async (ctx, res) => res.api(null)))
@@ -414,12 +653,12 @@ describe('API policies - requirePublicApiGuards', () => {
     });
 
     it('is off by default: a public API without guards still registers', () => {
-        const relaxed = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', guards });
+        const relaxed = initLambder().create({ files: testPublicFiles(), apiPath: '/api', session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' }, guards });
         expect(() => relaxed.addApi('public.free', { ...testSchema }, async (ctx, res) => res.api({ result: 'ok' }))).not.toThrow();
     });
 
     it('needs a guards map to declare from', () => {
-        expect(() => initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', requirePublicApiGuards: true }))
+        expect(() => initLambder().create({ files: testPublicFiles(), apiPath: '/api', requirePublicApiGuards: true }))
             .toThrow(/needs a guards map/);
     });
 
@@ -437,7 +676,8 @@ describe('API policies - requirePublicApiGuards', () => {
 
     it('holds both requirements at once when both flags are on', () => {
         const both = initLambder().create({
-            files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api',
+            files: testPublicFiles(), apiPath: '/api',
+            session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
             guards: { ...guards, sessionOnly: lambderGuard({ session: true, handler: () => {} }) },
             requireSessionApiGuards: true, requirePublicApiGuards: true,
         });
@@ -453,12 +693,13 @@ describe('API policies - an empty guards option declares nothing', () => {
     // an optional one: the option is present, so the required-field check
     // passes, and it normalizes to zero entries, so no guard runs.
     const guards = {
-        orgPermission: lambderGuard({ session: true, handler: (_ctx, _p, _r, permission: string) => ({ permission }) }),
+        orgPermission: lambderGuard({ session: true, handler: (_ctx, _p, permission: string) => ({ permission }) }),
         sessionOnly: lambderGuard({ session: true, handler: () => {} }),
-        open: lambderGuard({ handler: (_ctx, _payload, _res, _reason: string) => {} }),
+        open: lambderGuard({ handler: (_ctx, _payload, _reason: string) => {} }),
     };
     const strict = () => initLambder().create({
-        files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', guards,
+        files: testPublicFiles(), apiPath: '/api', guards,
+        session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
         requireSessionApiGuards: true, requirePublicApiGuards: true,
     });
 
@@ -475,7 +716,7 @@ describe('API policies - an empty guards option declares nothing', () => {
     it('refuses an empty option even where guards are not required', () => {
         // Not just a hole in the require* flags: an empty declaration reads as
         // an authorization decision and is not one, whoever writes it.
-        const relaxed = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', guards });
+        const relaxed = initLambder().create({ files: testPublicFiles(), apiPath: '/api', session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' }, guards });
         expect(() => relaxed.addApi('public.emptyToo', { ...testSchema, guards: {} } as any, async (ctx, res) => res.api(null)))
             .toThrow(/declares an empty guards option/);
     });
@@ -503,6 +744,28 @@ describe('API policies - an empty guards option declares nothing', () => {
             .not.toThrow();
     });
 
+    it('rejects a guard that answers instead of authorizing, at build and at runtime', async () => {
+        // A guard that hands back a response denies nothing: the value would
+        // become ctx.guardData[name] and the call would carry on. This was the
+        // shape that survived removing the resolver argument, so both halves
+        // are pinned here.
+        // @ts-expect-error a guard authorizes, it does not answer
+        const answering = lambderGuard({ handler: () => new LambderResponse({ statusCode: 403, body: 'denied' }) });
+
+        const lambder = initLambder().create({
+            files: testPublicFiles(),
+            apiPath: '/api',
+            // The cast is the plain-JS route past the type above; the engine
+            // has to catch it on its own.
+            guards: { answering: answering as any },
+        });
+        lambder.addApi('guarded.answering', { ...testSchema, guards: 'answering' } as any, async (ctx, res) => res.api({ result: 'reached' }));
+
+        const response = await lambder.render(createApiEvent('guarded.answering', { value: 'v' }), {} as any);
+        expect(response.statusCode).toBe(500);
+        expect(String(response.body)).not.toContain('reached');
+    });
+
     it('still accepts every non-empty form', () => {
         expect(() => strict()
             .addSessionApi('secure.one', { ...testSchema, guards: 'sessionOnly' }, async (ctx, res) => res.api({ result: 'ok' }))
@@ -517,10 +780,10 @@ describe('API policies - an empty guards option declares nothing', () => {
 describe('API policies - guards', () => {
     it('a refusing guard blocks before validation and before the handler', async () => {
         let handlerRan = false;
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', guards: {
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', guards: {
                 deny: {
                     handler: async () => {
-                        throw new LambderApiError('Guard says no', { errorMessage: { type: 'error', content: 'Blocked.' } });
+                        throw new LambderApiRefusal('Guard says no', { errorMessage: { type: 'error', content: 'Blocked.' } });
                     },
                 },
             } })
@@ -542,7 +805,7 @@ describe('API policies - guards', () => {
             input: z.object({ value: z.string(), token: z.string().min(3) }),
             output: z.object({ result: z.string() }),
         };
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', guards: {
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', guards: {
                 token: lambderGuard({
                     apiInput: z.object({ token: z.string().min(3) }),
                     handler: async (_ctx, { token }) => { sawToken = token; },
@@ -566,7 +829,7 @@ describe('API policies - guards', () => {
 
     it('guardInput guards read their value from the separate guardInputs envelope', async () => {
         let sawToken: string | null = null;
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', guards: {
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', guards: {
                 captcha: lambderGuard({
                     guardInput: z.object({ token: z.string().min(3) }),
                     handler: async (_ctx, { token }) => { sawToken = token; },
@@ -590,7 +853,7 @@ describe('API policies - guards', () => {
     });
 
     it('validates a custom rate-limit key slice and answers 422 when it is missing', async () => {
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', rateLimits: {
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: {
                 limiter: makeLimiter(new MemoryDdb()),
                 policies: {
                     perEmail: {
@@ -599,7 +862,11 @@ describe('API policies - guards', () => {
                     },
                 },
             } })
-            .addApi('keyed', { ...testSchema, rateLimit: 'perEmail' }, async (ctx, res) => res.api({ result: 'ok' }));
+            // The key's fields are part of the API's own schema, which is
+            // what makes the policy referable here at all. The slice is still
+            // validated first, so a missing email is the key's 422, not the
+            // schema's.
+            .addApi('keyed', { input: z.object({ value: z.string(), email: z.string() }), output: testSchema.output, rateLimit: 'perEmail' }, async (ctx, res) => res.api({ result: 'ok' }));
 
         const missing = await lambder.render(createApiEvent('keyed', { value: 'x' }), createMockContext());
         expect(missing.statusCode).toBe(422);
@@ -609,7 +876,7 @@ describe('API policies - guards', () => {
 
     it('preflight slices (rate-limit keys, guard inputs) answer through setApiInputValidationErrorHandler like the API schema', async () => {
         const seen: string[] = [];
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api',
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api',
                 rateLimits: {
                     limiter: makeLimiter(new MemoryDdb()),
                     policies: {
@@ -624,7 +891,7 @@ describe('API policies - guards', () => {
                 seen.push(zodError.issues[0]?.path.join('.') ?? '');
                 return res.api(null, { errorMessage: { type: 'error', content: 'bad input' } }, { statusCode: 400 });
             })
-            .addApi('keyed', { ...testSchema, rateLimit: 'perEmail' }, async (ctx, res) => res.api({ result: 'ok' }))
+            .addApi('keyed', { input: z.object({ value: z.string(), email: z.string() }), output: testSchema.output, rateLimit: 'perEmail' }, async (ctx, res) => res.api({ result: 'ok' }))
             .addApi('guarded', { ...testSchema, guards: 'captcha' }, async (ctx, res) => res.api({ result: 'ok' }))
             .addApi('plain', testSchema, async (ctx, res) => res.api({ result: 'ok' }));
 
@@ -642,7 +909,7 @@ describe('API policies - guards', () => {
 
     it('guards run in declared order and passing guards let the handler run', async () => {
         const order: string[] = [];
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', guards: {
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', guards: {
                 first: { handler: async () => { order.push('first'); } },
                 second: { handler: async () => { order.push('second'); } },
             } })
@@ -654,7 +921,7 @@ describe('API policies - guards', () => {
     });
 
     it("a guard's return value lands typed on ctx.guardData under its name", async () => {
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', guards: {
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', guards: {
                 deviceAuth: lambderGuard({
                     apiInput: z.object({ token: z.string() }),
                     handler: async (_ctx, { token }) => ({ deviceId: `dev-${token}` }),
@@ -673,9 +940,9 @@ describe('API policies - guards', () => {
     it('the object form passes params, runs in insertion order, and keeps void guards out of guardData', async () => {
         const order: string[] = [];
         let seenGuardData: Record<string, unknown> = {};
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', guards: {
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', guards: {
                 perm: lambderGuard({
-                    handler: (_ctx, _payload, _res, permission: string) => {
+                    handler: (_ctx, _payload, permission: string) => {
                         order.push(`perm:${permission}`);
                         return { granted: permission };
                     },
@@ -701,10 +968,10 @@ describe('API policies - guards', () => {
 
     it('a refusal from a parameterized guard blocks the handler', async () => {
         let handlerRan = false;
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', guards: {
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', guards: {
                 perm: lambderGuard({
-                    handler: (_ctx, _payload, _res, permission: string) => {
-                        throw new LambderApiError(`Denied: ${permission}`, { notAuthorized: true });
+                    handler: (_ctx, _payload, permission: string) => {
+                        throw new LambderApiRefusal(`Denied: ${permission}`, { notAuthorized: true });
                     },
                 }),
             } })
@@ -719,7 +986,7 @@ describe('API policies - guards', () => {
     });
 
     it('session guards are rejected on public APIs at registration', () => {
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', guards: {
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', guards: {
                 orgPermission: lambderGuard({
                     session: true,
                     handler: (ctx) => ({ orgId: ctx.session.sessionKey }),
@@ -741,7 +1008,7 @@ describe('API policies - idempotency', () => {
     const KEY_OLD = 'k-old-abcdefabcdefabcdef';
 
     const build = (client: MemoryDdb, onRun?: () => void) =>
-        initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', idempotency: { store: makeStore(client) } })
+        initLambder().create({ files: testPublicFiles(), apiPath: '/api', idempotency: { store: makeStore(client) } })
             .addApi('op', { ...testSchema, idempotency: true }, async (ctx, res) => {
                 onRun?.();
                 return res.api({ result: `ran:${ctx.apiPayload.value}` });
@@ -768,11 +1035,13 @@ describe('API policies - idempotency', () => {
         expect(JSON.parse(second.body || '{}').payload.result).toBe('ran:a');
     });
 
-    it('a replay answers before rate limits, so a retry does not burn quota', async () => {
+    it('a replay answers before the session-keyed limits, so a retry does not burn that quota', async () => {
         let runs = 0;
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', rateLimits: {
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: {
                 limiter: makeLimiter(new MemoryDdb()),
-                policies: { tight: { perMin: 1, per: 'ip', budget: 'perApi' } },
+                // A custom key: checked after the session read, which is where
+                // the replay fast path answers from.
+                policies: { tight: { perMin: 1, budget: 'perApi', per: lambderRateLimitKey({ handler: () => 'one-bucket' }) } },
             }, idempotency: { store: makeStore(new MemoryDdb()) } })
             .addApi('op', { ...testSchema, rateLimit: 'tight', idempotency: true }, async (ctx, res) => {
                 runs += 1;
@@ -790,10 +1059,62 @@ describe('API policies - idempotency', () => {
         expect((await call(KEY_2)).statusCode).toBe(429);
     });
 
+    it('an ip-keyed limit is charged even to a replay: it protects the stores, not the handler', async () => {
+        // `per: "ip"` runs before the session read and before the replay
+        // lookup, because those are the reads it exists to bound. A retry
+        // therefore counts against the ip budget while still not
+        // re-executing anything.
+        let runs = 0;
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: {
+                limiter: makeLimiter(new MemoryDdb()),
+                policies: { perIp: { perMin: 1, per: 'ip', budget: 'perApi' } },
+            }, idempotency: { store: makeStore(new MemoryDdb()) } })
+            .addApi('op', { ...testSchema, rateLimit: 'perIp', idempotency: true }, async (ctx, res) => {
+                runs += 1;
+                return res.api({ result: 'ok' });
+            });
+
+        const call = () => lambder.render(createApiEvent('op', { value: 'a' }, { idempotencyKey: KEY_1 }), createMockContext());
+        expect((await call()).statusCode).toBe(200);
+        const retry = await call();
+        expect(retry.statusCode).toBe(429);
+        expect(runs).toBe(1);
+    });
+
+    it('scopes a session API replay per session, so one key in two sessions does not cross', async () => {
+        // The line that makes "even a leaked key cannot cross users" true.
+        // Replacing the scope's session branch with the public, key-only form
+        // left every other test in the suite green.
+        const ran: string[] = [];
+        const lambder = initLambder<{ role: string }>().create({
+            files: testPublicFiles(), apiPath: '/api',
+            session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
+            idempotency: { store: makeStore(new MemoryDdb()) },
+        }).addSessionApi('secure.op', { ...testSchema, idempotency: true }, async (ctx, res) => {
+            ran.push(ctx.session.sessionKey);
+            return res.api({ result: `ran:${ctx.session.sessionKey}` });
+        });
+
+        const manager = lambder.getSessionManager();
+        const a = await manager.createSession('A1', { role: 'user' });
+        const b = await manager.createSession('B1', { role: 'user' });
+        const call = (session: { sessionToken: string, csrfToken: string }) => lambder.render(createEnvelopeEvent(
+            { apiName: 'secure.op', payload: { value: 'x' }, token: session.csrfToken, idempotencyKey: KEY_1 },
+            { headers: { Host: 'localhost', Cookie: `LMDRSESSIONTKID=${session.sessionToken}; LMDRSESSIONCSTK=${session.csrfToken}` } },
+        ), createMockContext());
+
+        expect(JSON.parse((await call(a)).body || '{}').payload.result).toBe('ran:A1');
+        // B posts the SAME key: its own scope, its own run, and none of A's answer.
+        expect(JSON.parse((await call(b)).body || '{}').payload.result).toBe('ran:B1');
+        // A retries: A's own answer, replayed, with no third run.
+        expect(JSON.parse((await call(a)).body || '{}').payload.result).toBe('ran:A1');
+        expect(ran).toEqual(['A1', 'B1']);
+    });
+
     it('a response delivered by throwing (res.die.api) is stored and replayed', async () => {
         let runs = 0;
         const client = new MemoryDdb();
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', idempotency: { store: makeStore(client) } })
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', idempotency: { store: makeStore(client) } })
             .addApi('thrower', { ...testSchema, idempotency: true }, async (ctx, res) => {
                 runs += 1;
                 return res.die.api({ result: 'thrown' });
@@ -809,7 +1130,7 @@ describe('API policies - idempotency', () => {
 
     it('stores response headers, including ones set via res.setHeader, and replays them', async () => {
         let runs = 0;
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', idempotency: { store: makeStore(new MemoryDdb()) } })
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', idempotency: { store: makeStore(new MemoryDdb()) } })
             .addApi('headed', { ...testSchema, idempotency: true }, async (ctx, res) => {
                 runs += 1;
                 res.setHeader('X-Custom', 'stored-value');
@@ -827,7 +1148,7 @@ describe('API policies - idempotency', () => {
 
     it('never stores a response that sets cookies: the retry re-executes', async () => {
         let runs = 0;
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', idempotency: { store: makeStore(new MemoryDdb()) } })
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', idempotency: { store: makeStore(new MemoryDdb()) } })
             .addApi('cookied', { ...testSchema, idempotency: true }, async (ctx, res) => {
                 runs += 1;
                 res.addHeader('Set-Cookie', `run=${runs}`);
@@ -843,11 +1164,39 @@ describe('API policies - idempotency', () => {
         expect(second.multiValueHeaders?.['Set-Cookie']).toEqual(['run=2']);
     });
 
+    it('a cookie written before the handler does not disable idempotency, and is not stored with the answer', async () => {
+        // The real instance of this is the session read evicting a stale
+        // cookie: it writes a Set-Cookie into the call before the handler
+        // runs. Charging that to the handler's answer would make the answer
+        // uncacheable and silently turn an idempotent operation into one that
+        // re-executes on every retry.
+        let runs = 0;
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', idempotency: { store: makeStore(new MemoryDdb()) } })
+            .addApi('charge', { ...testSchema, idempotency: true }, async (ctx, res) => {
+                runs += 1;
+                return res.api({ result: 'charged' });
+            })
+            .addHook('beforeRender', (ctx, res) => { res.addHeader('Set-Cookie', 'stale=; Max-Age=0'); return ctx; });
+
+        const call = () => lambder.render(createApiEvent('charge', { value: 'a' }, { idempotencyKey: KEY_1 }), createMockContext());
+        const first = await call();
+        const second = await call();
+
+        // The retry replayed: the operation ran once.
+        expect(runs).toBe(1);
+        expect(JSON.parse(second.body || '{}').payload.result).toBe('charged');
+        // Both calls still send their own eviction cookie to the client.
+        expect(first.multiValueHeaders?.['Set-Cookie']).toEqual(['stale=; Max-Age=0']);
+        // Exactly one: the replay carries this call's cookie, not also a copy
+        // stored from the first call's.
+        expect(second.multiValueHeaders?.['Set-Cookie']).toEqual(['stale=; Max-Age=0']);
+    });
+
     it('compression lets large compressible bodies replay (450KB raw is far over a raw cap)', async () => {
         let runs = 0;
         // 150k euro signs: ~450KB UTF-8, but Brotli shrinks it to almost nothing.
         const bigValue = '€'.repeat(150_000);
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', idempotency: { store: makeStore(new MemoryDdb()) } })
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', idempotency: { store: makeStore(new MemoryDdb()) } })
             .addApi('big', { ...testSchema, idempotency: true }, async (ctx, res) => {
                 runs += 1;
                 return res.api({ result: bigValue });
@@ -864,7 +1213,7 @@ describe('API policies - idempotency', () => {
         let runs = 0;
         // Random base64 barely compresses: ~533KB stays well over the 350KB item budget.
         const incompressible = nodeCrypto.randomBytes(400_000).toString('base64');
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', idempotency: { store: makeStore(new MemoryDdb()) } })
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', idempotency: { store: makeStore(new MemoryDdb()) } })
             .addApi('huge', { ...testSchema, idempotency: true }, async (ctx, res) => {
                 runs += 1;
                 return res.api({ result: incompressible });
@@ -903,27 +1252,27 @@ describe('API policies - idempotency', () => {
 
     it('compression: false stores every body plain, { minBytes } moves the threshold, and either shape reads back', async () => {
         const big = JSON.stringify({ payload: { rows: Array.from({ length: 200 }, (_, i) => ({ i, name: `row-${i}` })) } });
-        const settle = async (store: LambderDdbIdempotency, scope: string, body: string) => {
+        const settle = async (store: LambderDdbIdempotencyStore, scope: string, body: string) => {
             const claim = await store.begin(scope, { pendingTtlSeconds: 300 });
             if(claim.state !== 'new') throw new Error('expected fresh claim');
             expect(await store.complete(scope, claim.ownerToken, { statusCode: 200, headers: {}, body, ttlSeconds: 60 })).toBe('stored');
         };
 
         const offClient = new MemoryDdb();
-        await settle(new LambderDdbIdempotency({ tableName: 'test-table', client: offClient, compression: false }), 'scope-off', big);
+        await settle(new LambderDdbIdempotencyStore({ tableName: 'test-table', client: offClient, compression: false }), 'scope-off', big);
         expect(offClient.items.get('IDEM#scope-off|idem')?.body?.S).toBe(big);
         expect(offClient.items.get('IDEM#scope-off|idem')?.bodyBr).toBe(undefined);
         // Switched back on: the plain record still reads.
         expect((await makeStore(offClient).peek('scope-off'))?.body).toBe(big);
 
         const alwaysClient = new MemoryDdb();
-        await settle(new LambderDdbIdempotency({ tableName: 'test-table', client: alwaysClient, compression: { minBytes: 0 } }), 'scope-always', 'tiny');
+        await settle(new LambderDdbIdempotencyStore({ tableName: 'test-table', client: alwaysClient, compression: { minBytes: 0 } }), 'scope-always', 'tiny');
         expect(alwaysClient.items.get('IDEM#scope-always|idem')?.bodyBr?.B).toBeDefined();
         // Switched off: the compressed record still reads.
-        const offReader = new LambderDdbIdempotency({ tableName: 'test-table', client: alwaysClient, compression: false });
+        const offReader = new LambderDdbIdempotencyStore({ tableName: 'test-table', client: alwaysClient, compression: false });
         expect((await offReader.peek('scope-always'))?.body).toBe('tiny');
 
-        expect(() => new LambderDdbIdempotency({ tableName: 'test-table', client: offClient, compression: { quality: 12 } })).toThrow();
+        expect(() => new LambderDdbIdempotencyStore({ tableName: 'test-table', client: offClient, compression: { quality: 12 } })).toThrow();
     });
 
     it('stores bodies of 1KB+ Brotli-compressed and replays them verbatim; small bodies stay plain', async () => {
@@ -970,7 +1319,7 @@ describe('API policies - idempotency', () => {
     it('releases the claim when the handler crashes, so a retry re-executes', async () => {
         let runs = 0;
         const client = new MemoryDdb();
-        const lambder = initLambder().create({ files: new LambderLocalFileSource({ root: './public' }), apiPath: '/api', idempotency: { store: makeStore(client) } })
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', idempotency: { store: makeStore(client) } })
             .addApi('crashy', { ...testSchema, idempotency: true }, async (ctx, res) => {
                 runs += 1;
                 if(runs === 1) throw new Error('boom');

@@ -1,5 +1,6 @@
+import type { LambderApiNullAnswerConfig } from "../shared/wire/LambderApiContract.js";
 import LambderResponseBuilder, {
-    type LambderApiAnswer,
+    type LambderResolverApiMethod,
     type LambderApiResponseConfig,
     type LambderResponseOptions,
 } from "./LambderResponseBuilder.js";
@@ -8,7 +9,8 @@ import type { LambderResponse } from "./LambderResponse.js";
 type SyncDie<T extends (...args: any[]) => LambderResponse> = (...args: Parameters<T>) => never;
 type AsyncDie<T extends (...args: any[]) => Promise<LambderResponse>> = (...args: Parameters<T>) => Promise<never>;
 
-export interface DieResolverMethods<TOutput> {
+/** The `res.die.*` surface: every builder method, throwing what it built. Internal to the resolver, which is the only thing that has one. */
+interface DieResolverMethods<TOutput> {
     raw: SyncDie<LambderResponseBuilder["raw"]>;
     json: SyncDie<LambderResponseBuilder["json"]>;
     text: SyncDie<LambderResponseBuilder["text"]>;
@@ -19,8 +21,8 @@ export interface DieResolverMethods<TOutput> {
     redirect: SyncDie<LambderResponseBuilder["redirect"]>;
     versionExpired: SyncDie<LambderResponseBuilder["versionExpired"]>;
     fileBase64: SyncDie<LambderResponseBuilder["fileBase64"]>;
-    api: LambderApiAnswer<TOutput, never>;
-    apiBinary: LambderApiAnswer<TOutput, never>;
+    api: LambderResolverApiMethod<TOutput, never>;
+    apiBinary: LambderResolverApiMethod<TOutput, never>;
     file: AsyncDie<LambderResponseBuilder["file"]>;
     templateFile: AsyncDie<LambderResponseBuilder["templateFile"]>;
 }
@@ -53,10 +55,10 @@ export default class LambderResolver<TOutput = any> extends LambderResponseBuild
             // Overloaded on the payload (see LambderApiAnswer); the implementation takes both shapes.
             api: ((payload: TOutput | null, config?: LambderApiResponseConfig, options?: LambderResponseOptions) => {
                 throw this.api(payload as TOutput, config, options);
-            }) as LambderApiAnswer<TOutput, never>,
+            }) as LambderResolverApiMethod<TOutput, never>,
             apiBinary: ((payload: TOutput | null, config?: LambderApiResponseConfig, options?: LambderResponseOptions) => {
                 throw this.apiBinary(payload as TOutput, config, options);
-            }) as LambderApiAnswer<TOutput, never>,
+            }) as LambderResolverApiMethod<TOutput, never>,
             file: async (...a) => { throw await this.file(...a); },
             templateFile: async (...a) => { throw await this.templateFile(...a); },
         };
@@ -65,13 +67,13 @@ export default class LambderResolver<TOutput = any> extends LambderResponseBuild
     // Restated with the resolver's output type: the answer is the declared
     // output, or null beside a reason (see LambderApiAnswer).
     api(payload: TOutput, config?: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
-    api(payload: null, config: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
+    api(payload: null, config: LambderApiNullAnswerConfig, options?: LambderResponseOptions): LambderResponse;
     api(payload: TOutput | null, config?: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse {
         return super.api(payload as TOutput, config, options);
     }
 
     apiBinary(payload: TOutput, config?: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
-    apiBinary(payload: null, config: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
+    apiBinary(payload: null, config: LambderApiNullAnswerConfig, options?: LambderResponseOptions): LambderResponse;
     apiBinary(payload: TOutput | null, config?: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse {
         return super.apiBinary(payload as TOutput, config, options);
     }

@@ -1,3 +1,17 @@
+/**
+ * The DynamoDB cache against an in-memory table: the manifest-and-chunks
+ * layout, the in-memory layer in front of it, the fill lease, and the escaped
+ * sort keys that let one partition hold a group of entries.
+ *
+ * The rules worth stating twice are about what a read does with what it finds.
+ * An entry this read can prove wrong (chunks that do not add up, bytes that
+ * fail the checksum) is dropped so the next reader refills it; a table that
+ * answers badly is not, because deleting a healthy entry over one throttle
+ * orphans its chunks and sends every later reader to the origin. Expiry is
+ * driven through the store's own injected clock rather than the world's, so a
+ * TTL boundary is crossed without moving system time.
+ */
+
 import {
     BatchWriteItemCommand,
     DeleteItemCommand,
@@ -23,6 +37,7 @@ class MemoryDynamoClient extends DynamoDBClient {
     readonly commands: any[] = [];
     failNextBatch = false;
     failNextGet = false;
+    failNextQuery = false;
     unprocessBatchAttempts = 0;
     queryPageSize = Number.POSITIVE_INFINITY;
 
@@ -94,6 +109,12 @@ class MemoryDynamoClient extends DynamoDBClient {
         }
 
         if (command instanceof QueryCommand) {
+            if (this.failNextQuery) {
+                this.failNextQuery = false;
+                // What a throttle, a partition split or a socket timeout looks
+                // like from here: not an answer about the entry at all.
+                throw new Error("simulated query failure");
+            }
             const pk = command.input.ExpressionAttributeValues?.[":pk"]?.S;
             const prefix = command.input.ExpressionAttributeValues?.[":prefix"]?.S;
             const matching = [...this.items.values()]
@@ -144,7 +165,7 @@ class MemoryDynamoClient extends DynamoDBClient {
 const createCache = (
     client: MemoryDynamoClient,
     chunkBytes = 512,
-    extra: Pick<ConstructorParameters<typeof LambderDdbCache>[0], "compression"> = {},
+    extra: Pick<ConstructorParameters<typeof LambderDdbCache>[0], "compression" | "now"> = {},
 ): LambderDdbCache =>
     new LambderDdbCache({
         tableName: "test-cache",
@@ -362,13 +383,12 @@ describe("LambderDdbCache", () => {
     });
 
     it("rejects expired values even while DynamoDB TTL has not deleted them", async () => {
-        vi.useFakeTimers();
-        vi.setSystemTime(new Date("2026-08-02T12:00:00Z"));
+        let clockMillis = Date.UTC(2026, 7, 2, 12, 0, 0);
         const client = new MemoryDynamoClient();
-        const cache = createCache(client);
+        const cache = createCache(client, 512, { now: () => clockMillis });
 
         await cache.set("short", { value: 1 }, { ttlSeconds: 2 });
-        vi.advanceTimersByTime(3_000);
+        clockMillis += 3_000;
 
         await expect(cache.get("short")).resolves.toBeUndefined();
         await expect(cache.has("short")).resolves.toBe(false);
@@ -384,6 +404,24 @@ describe("LambderDdbCache", () => {
         await expect(createCache(client).get("corrupt")).resolves.toBeUndefined();
         expect([...client.items.values()].some((item) => item.sk?.S === "meta")).toBe(false);
         expect(warning).toHaveBeenCalledOnce();
+    });
+
+    it("keeps the manifest when the chunk read fails in transit, since a throttle is not corruption", async () => {
+        // The read used to treat everything thrown while fetching chunks as a
+        // corrupt entry: one throttled Query deleted a healthy manifest, left
+        // its chunks orphaned until their TTL, and sent every later reader to
+        // the origin. Only what this read can prove wrong is dropped.
+        const client = new MemoryDynamoClient();
+        const value = largePayload();
+        await createCache(client).set("busy", value);
+        client.failNextQuery = true;
+
+        const reader = createCache(client);
+        await expect(reader.get("busy")).rejects.toThrow("simulated query failure");
+
+        expect([...client.items.values()].some((item) => item.sk?.S === "meta")).toBe(true);
+        // And once DynamoDB answers again, the entry is still the entry.
+        await expect(reader.get<typeof value>("busy")).resolves.toEqual(value);
     });
 
     it("does not publish a manifest when chunk persistence fails", async () => {
@@ -749,8 +787,9 @@ describe("LambderDdbCache - grouped keys", () => {
     });
 
     it("lists live sort keys, filtered by raw prefix and limit", async () => {
+        let clockMillis = Date.now();
         const client = new MemoryDynamoClient();
-        const cache = createCache(client);
+        const cache = createCache(client, 512, { now: () => clockMillis });
 
         await cache.set({ pk: "division:ist-34", sk: "1700:1800" }, { heroes: 1 });
         await cache.set({ pk: "division:ist-34", sk: "1700:1900" }, { heroes: 2 });
@@ -764,7 +803,7 @@ describe("LambderDdbCache - grouped keys", () => {
         await expect(cache.listSortKeys("division:ist-35")).resolves.toEqual([]);
 
         // Expired entries drop out even before DynamoDB's TTL sweep removes them.
-        vi.setSystemTime(Date.now() + 120_000);
+        clockMillis += 120_000;
         await expect(cache.listSortKeys("division:ist-34")).resolves.toEqual(["1700:1800", "1700:1900"]);
     });
 

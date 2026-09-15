@@ -1,7 +1,8 @@
 import { match as pathToRegexpMatch } from "path-to-regexp";
 import type { LambderRenderContext } from "./LambderContext.js";
 
-type Path = `/${string}`;
+/** A route path as an app writes it: absolute, so a matcher and the index-HTML layer agree on the shape. */
+export type LambderRoutePath = `/${string}`;
 
 // ---------------------------------------------------------------------------
 // Typed path params: infer `:param` names from string patterns.
@@ -14,7 +15,7 @@ type PathParamNames<T extends string> =
     T extends `${string}:${infer Rest}`
         ? (ParamNameFrom<Rest> extends "" ? never : ParamNameFrom<Rest>) | PathParamNames<Rest>
         : never;
-export type PathParamsOf<T extends string> =
+export type LambderPathParamsOf<T extends string> =
     string extends T ? Record<string, string>
     : T extends `${string}(${string}` ? Record<string, string>
     : [PathParamNames<T>] extends [never] ? Record<string, string>
@@ -23,23 +24,23 @@ export type PathParamsOf<T extends string> =
 // ---------------------------------------------------------------------------
 // Route conditions
 // ---------------------------------------------------------------------------
-export type ConditionFunction = (ctx: LambderRenderContext) => boolean;
+export type LambderRouteConditionFn = (ctx: LambderRenderContext) => boolean;
 
 /** Structured route matcher: all provided fields must match. */
 export type LambderRouteMatcher = {
-    path?: Path | RegExp;
+    path?: LambderRoutePath | RegExp;
     host?: string | RegExp;
     /** One or more HTTP methods; HEAD requests also match GET routes. */
     method?: string | string[];
-    condition?: ConditionFunction;
+    condition?: LambderRouteConditionFn;
 };
 
-export type RouteCondition = Path | RegExp | ConditionFunction | LambderRouteMatcher;
+export type LambderRouteCondition = LambderRoutePath | RegExp | LambderRouteConditionFn | LambderRouteMatcher;
 
 /** Returns matched path params, or false when the route doesn't match. */
 export type CompiledMatcher = (ctx: LambderRenderContext) => false | Record<string, string>;
 
-const compilePathMatcher = (path: Path | RegExp): (requestPath: string) => false | Record<string, string> => {
+const compilePathMatcher = (path: LambderRoutePath | RegExp): (requestPath: string) => false | Record<string, string> => {
     if(typeof path === "string"){
         const matchFn = pathToRegexpMatch(path, { decode: decodeURIComponent });
         return (requestPath: string) => {
@@ -64,8 +65,23 @@ const compilePathMatcher = (path: Path | RegExp): (requestPath: string) => false
     };
 };
 
+/**
+ * Whether a request method is one the slot accepts, with HEAD folded into GET
+ * unless the list names HEAD itself: a HEAD is a GET whose body finalization
+ * strips, so an app that narrowed a slot to ["GET"] did not mean to 404 it.
+ *
+ * The three places that gate on a method (a route matcher's `method`,
+ * servePublicFiles and serveIndexHtml) share this one rule, so neighbouring
+ * slots cannot disagree about what a method means.
+ */
+export const allowsRequestMethod = (methods: ReadonlySet<string>, requestMethod: string): boolean => {
+    const method = requestMethod.toUpperCase();
+    if(methods.has(method)) return true;
+    return method === "HEAD" && methods.has("GET");
+};
+
 /** Compile a route condition once at registration time. */
-export const compileRouteMatcher = (condition: RouteCondition): CompiledMatcher => {
+export const compileRouteMatcher = (condition: LambderRouteCondition): CompiledMatcher => {
     if(typeof condition === "string" || condition instanceof RegExp){
         const pathMatcher = compilePathMatcher(condition);
         return (ctx) => pathMatcher(ctx.path);
@@ -80,11 +96,7 @@ export const compileRouteMatcher = (condition: RouteCondition): CompiledMatcher 
         ? new Set((Array.isArray(matcher.method) ? matcher.method : [matcher.method]).map((m) => m.toUpperCase()))
         : null;
     return (ctx) => {
-        if(methods){
-            let requestMethod = ctx.method.toUpperCase();
-            if(requestMethod === "HEAD" && !methods.has("HEAD")) requestMethod = "GET";
-            if(!methods.has(requestMethod)) return false;
-        }
+        if(methods && !allowsRequestMethod(methods, ctx.method)) return false;
         if(matcher.host !== undefined){
             if(typeof matcher.host === "string"){
                 if(ctx.host.toLowerCase() !== matcher.host.toLowerCase()) return false;

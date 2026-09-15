@@ -21,11 +21,22 @@ method, `read(relativePath)`, returning `{ body, mimeType? }` or `null`.
 
 The instance owns one reader over it, `lambder.files`, and `servePublicFiles`,
 `serveIndexHtml`, `res.file` and `res.templateFile` all go through that reader,
-which does everything else for every source: traversal check, in-memory file
-cache for warm invocations (default 32MB, 2MB per file), compiled-template
+which does everything else for every source: the path rule, an in-memory file
+cache for warm invocations (default 32MB, 2MB per file), a compiled-template
 cache, mime fallback from the extension. Cache-Control (immutable for
 content-hashed names), ETag and compression are applied by the serving slot and
 the response pipeline.
+
+The path rule is what a source is allowed to be asked for, and the reader
+applies it before every read. A source receives a plain relative path: every
+leading slash is stripped, and a path is refused outright (the request falls
+through) when what is left is empty, ends in a slash, or has a segment that is
+empty, `.`, `..`, or contains a backslash. That is the whole rule, so a source
+implementing `read` never has to parse the request path itself. A source that
+resolves the value against a base it must not leave should still check the
+result, as the bundled ones do: `LambderLocalFileSource` re-checks that the
+resolved file is under `root`, and `LambderHttpFileSource` that the resolved
+URL is still under `baseUrl`.
 
 ```typescript
 // A folder, typically the build output bundled with the deployment.
@@ -92,13 +103,15 @@ cap applies here too.
 
 A terminal slot that serves real files from the `files` source. It runs only
 when no route or API matched, so unlike a `"/(.*)"` catch-all route it can
-never shadow routes registered after it. Traversal-safe, mime-typed,
-memory-cached for warm invocations, immutable Cache-Control for content-hashed
-assets (`app-4f8a1b2c.js`), automatic ETag and compression. When the file does
-not exist, the request **falls through**.
+never shadow routes registered after it. Gated by method (`GET`/`HEAD` by
+default), mime-typed, memory-cached for warm invocations, immutable
+Cache-Control for content-hashed assets (`app-4f8a1b2c.js`), automatic ETag and
+compression. When the method is not configured or the file does not exist, the
+request **falls through**.
 
 | Option | Default | Description |
 | --- | --- | --- |
+| `methods` | `["GET", "HEAD"]` | Methods that reach the slot, the same gate `serveIndexHtml` has. A write method against an asset path falls through to the route fallback instead |
 | `path` | `(ctx) => ctx.path` | Map the request to a file path (app-owned logic, per-tenant roots). Return null or undefined to skip |
 | `cacheControl` | `"public, max-age=3600"` | A string, or `(ctx, relativePath) => string` |
 | `immutablePattern` | content-hash heuristic | Filenames matching this get `immutableCacheControl`. `false` disables it |
@@ -119,7 +132,7 @@ it serves `index.html` from the files source via `res.templateFile` with
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `methods` | `["GET", "HEAD"]` | Methods that reach the slot |
+| `methods` | `["GET", "HEAD"]` | Methods that reach the slot. A list naming `GET` without `HEAD` accepts `HEAD` too, as a route matcher's `method` does |
 | `skipFilePaths` | `false` | Opt back into 404ing paths whose last segment contains a dot. Cheaper responses for missing assets and bot probes, at the cost of breaking dotted routes |
 | `redirectTrailingSlash` | `false` | 301 `/about/` to `/about` |
 | `indexFile` | `"index.html"` | The shell the default handler serves; a string or `(ctx) => string` |

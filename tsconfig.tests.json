@@ -1,11 +1,13 @@
 {
-  // Type checks the test files together with the source they exercise. The
-  // tests carry type-level assertions (@ts-expect-error, expectTypeOf) that
-  // vitest alone never evaluates; `npm test` runs this before vitest so a
-  // typing regression (the use() plugin generics in 4.7.1) fails the suite.
+  // Type checks the test files, and the examples, together with the source
+  // they exercise. The tests carry type-level assertions (@ts-expect-error,
+  // expectTypeOf) that vitest alone never evaluates; `npm test` runs this
+  // before vitest so a typing regression (the use() plugin generics in 4.7.1)
+  // fails the suite. The examples are here because they are documentation
+  // that compiles: shipping one that does not is shipping a wrong answer.
   "extends": "./tsconfig.json",
   // tests/ sits outside the build's rootDir. Nothing is emitted here, so the
   // root only has to be wide enough to cover both trees.
   "compilerOptions": { "noEmit": true, "rootDir": "." },
-  "include": ["src/**/*", "tests/**/*"]
+  "include": ["src/**/*", "tests/**/*", "examples/**/*"]
 }

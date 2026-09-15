@@ -1,6 +1,9 @@
-import { getCrypto } from "../shared/node-polyfills.js";
-import { compressText } from "../shared/LambderCompressionCodec.js";
-export const normalizeHeaders = (headers) => Object.fromEntries(Object.entries(headers ?? {}).map(([k, v]) => [k, Array.isArray(v) ? [...v] : [v]]));
+import { LAMBDER_RESPONSE_BRAND } from "../shared/util/LambderResponseBrand.js";
+import { bytesToBase64 } from "../shared/util/LambderBase64.js";
+import { getCrypto } from "../shared/util/LambderNodeModules.js";
+import { compressText } from "../shared/wire/LambderCompressionCodec.js";
+import { getAnswerHeader, setAnswerHeader, addAnswerHeader } from "../shared/wire/LambderAnswerHeaders.js";
+const normalizeHeaders = (headers) => Object.fromEntries(Object.entries(headers ?? {}).map(([k, v]) => [k, Array.isArray(v) ? [...v] : [v]]));
 /**
  * Intermediate response object returned by all response builder methods and by
  * route/api handlers. Bodies stay uncompressed and un-encoded so hooks can
@@ -11,6 +14,7 @@ export const normalizeHeaders = (headers) => Object.fromEntries(Object.entries(h
  * the request: the thrown response becomes the response.
  */
 export class LambderResponse {
+    [LAMBDER_RESPONSE_BRAND] = true;
     statusCode;
     headers;
     body;
@@ -25,36 +29,63 @@ export class LambderResponse {
         this.compress = init.compress ?? "auto";
         this.etag = init.etag ?? "auto";
     }
+    // The three header methods are the core's own header helpers over this
+    // response's map: the case-insensitive lookup, the replace-under-any-casing
+    // and the append-under-the-existing-casing rules are one implementation,
+    // not a copy per class, so an answer and a response can never disagree
+    // about what setting a header means.
     getHeader(key) {
-        const lower = key.toLowerCase();
-        for (const [k, v] of Object.entries(this.headers)) {
-            if (k.toLowerCase() === lower)
-                return v;
-        }
-        return undefined;
+        return getAnswerHeader(this.headers, key);
     }
     setHeader(key, value) {
-        const lower = key.toLowerCase();
-        for (const k of Object.keys(this.headers)) {
-            if (k.toLowerCase() === lower)
-                delete this.headers[k];
-        }
-        this.headers[key] = Array.isArray(value) ? [...value] : [value];
+        setAnswerHeader(this.headers, key, value);
         return this;
     }
     addHeader(key, value) {
-        const lower = key.toLowerCase();
-        const existingKey = Object.keys(this.headers).find((k) => k.toLowerCase() === lower);
-        if (existingKey) {
-            this.headers[existingKey].push(value);
-        }
-        else {
-            this.headers[key] = [value];
-        }
+        addAnswerHeader(this.headers, key, value);
         return this;
     }
 }
-export const isCompressibleContentType = (contentType) => {
+/**
+ * A handler's response as a core answer: what the API pipeline stores,
+ * replays and hands back. A Buffer body travels base64-encoded and marked
+ * as such, so the idempotency engine never caches it and finalization
+ * passes it through untouched; the compress and etag flags ride along so
+ * nothing a handler asked for is lost on the way through the core.
+ */
+export const answerFromResponse = (response) => {
+    const binary = Buffer.isBuffer(response.body);
+    return {
+        statusCode: response.statusCode,
+        headers: normalizeHeaders(response.headers),
+        body: response.body === null ? "" : binary ? bytesToBase64(response.body) : String(response.body),
+        isBodyBase64: response.isBodyBase64 || binary,
+        compress: response.compress,
+        etag: response.etag,
+    };
+};
+/**
+ * An answer's status as the response model spells statuses.
+ *
+ * LambderHttpStatusCode is an authoring surface: it exists so `res.status(...)`
+ * offers the codes an app writes and catches the typo'd one. An answer is
+ * plain data that already left that surface (a replay the idempotency store
+ * persisted, a mock's answer, a third adapter's), so its status is a number
+ * and a code outside the union is not a reason to refuse a request the app
+ * has already answered. Stated once here rather than as a bare cast at the
+ * call site, so the widening is a decision a reader can see.
+ */
+const httpStatusOfAnswer = (statusCode) => statusCode;
+/** A core answer as the response hooks, CORS and finalization work on. */
+export const responseFromAnswer = (answer) => new LambderResponse({
+    statusCode: httpStatusOfAnswer(answer.statusCode),
+    headers: answer.headers,
+    body: answer.body,
+    isBodyBase64: answer.isBodyBase64 ?? false,
+    compress: answer.compress ?? "auto",
+    etag: answer.etag ?? "auto",
+});
+const isCompressibleContentType = (contentType) => {
     if (!contentType)
         return false;
     const mime = (contentType.split(";")[0] ?? "").trim().toLowerCase();
@@ -72,7 +103,7 @@ export const isCompressibleContentType = (contentType) => {
         "application/lambder-json-stream",
     ].includes(mime);
 };
-export const acceptsEncoding = (acceptEncoding, encoding) => {
+const acceptsEncoding = (acceptEncoding, encoding) => {
     if (!acceptEncoding)
         return false;
     return acceptEncoding.split(",").some((part) => {
@@ -102,18 +133,25 @@ export const DEFAULT_FINALIZE_OPTIONS = {
     etag: true,
     maxResponseBytes: 5_500_000,
 };
-const getRequestHeader = (ctx, name) => {
-    if (!ctx?.headers)
-        return undefined;
-    const lower = name.toLowerCase();
-    for (const [k, v] of Object.entries(ctx.headers)) {
-        if (k.toLowerCase() === lower)
-            return v ?? undefined;
-    }
-    return undefined;
-};
-/** Emit the format-specific Lambda response shape. */
-const emitResponse = (format, statusCode, headers, body, isBase64Encoded) => {
+/**
+ * The headers a 304 leaves behind: they describe a body, and a 304 carries
+ * none. Everything else goes with it.
+ *
+ * A keep-list of cache headers instead of this drop-list would quietly make a
+ * revalidation the one exit of the request where the call's headers do not
+ * belong to the call: a cacheable GET that also slides a session cookie would
+ * stop refreshing it the moment the browser held the ETag, and a cross-origin
+ * revalidation would lose Access-Control-Allow-Origin, so the browser would
+ * refuse the 304 it had asked for.
+ */
+const HEADERS_DROPPED_ON_NOT_MODIFIED = ["content-type", "content-length", "content-encoding"];
+/**
+ * Emit the format-specific Lambda response shape. Exported because the
+ * last-resort crash path has to emit without finalizing (finalization may be
+ * what failed) and must still get the shape right; hand-writing it there left
+ * the v1/v2 split in four places.
+ */
+export const emitResponse = (format, statusCode, headers, body, isBase64Encoded) => {
     if (format === "v2") {
         // Payload v2 has no multiValueHeaders: multi-values are comma-joined,
         // except Set-Cookie which uses the dedicated cookies array.
@@ -135,7 +173,11 @@ const emitResponse = (format, statusCode, headers, body, isBase64Encoded) => {
  * encoding, HEAD body stripping, and Lambda payload size guard. Emits the v1
  * (REST API) or v2 (HTTP API / Function URL) response shape.
  */
-export const finalizeResponse = async (ctx, response, options, format = "v1") => {
+export const finalizeResponse = async (
+// ctx.header rather than ctx.headers: the context already carries the
+// case-insensitive lookup, and taking the raw map meant a second
+// implementation of it lived here for the two headers this reads.
+ctx, response, options, format = "v1") => {
     const method = (ctx?.method ?? "GET").toUpperCase();
     if (response.body === null) {
         return emitResponse(format, response.statusCode, response.headers, "", false);
@@ -164,7 +206,7 @@ export const finalizeResponse = async (ctx, response, options, format = "v1") =>
             // compress: true forces compression even with it globally off, so
             // the settings fall back to the defaults rather than being absent.
             const settings = options.compression ?? DEFAULT_RESPONSE_COMPRESSION_SETTINGS;
-            const acceptEncoding = getRequestHeader(ctx, "accept-encoding");
+            const acceptEncoding = ctx?.header("accept-encoding");
             const encoding = settings.encodings.find((candidate) => acceptsEncoding(acceptEncoding, candidate));
             if (encoding) {
                 // The same codec, quality and TEXT mode a stored record gets.
@@ -173,7 +215,7 @@ export const finalizeResponse = async (ctx, response, options, format = "v1") =>
             }
         }
         if (Buffer.isBuffer(response.body) || response.getHeader("Content-Encoding")) {
-            outBody = bodyBuffer.toString("base64");
+            outBody = bytesToBase64(bodyBuffer);
             isBase64 = true;
         }
         else {
@@ -189,23 +231,28 @@ export const finalizeResponse = async (ctx, response, options, format = "v1") =>
         if (crypto) {
             const etagValue = `"${crypto.createHash("sha256").update(outBody).digest("hex").slice(0, 32)}"`;
             response.setHeader("ETag", etagValue);
-            const ifNoneMatch = getRequestHeader(ctx, "if-none-match");
+            const ifNoneMatch = ctx?.header("if-none-match");
             if (ifNoneMatch && ifNoneMatch.split(",").map((s) => s.trim()).includes(etagValue)) {
-                const preservedHeaders = {};
-                for (const key of ["ETag", "Cache-Control", "Vary", "Expires", "Last-Modified"]) {
-                    const value = response.getHeader(key);
-                    if (value)
-                        preservedHeaders[key] = value;
+                const notModifiedHeaders = {};
+                for (const [key, values] of Object.entries(response.headers)) {
+                    if (!HEADERS_DROPPED_ON_NOT_MODIFIED.includes(key.toLowerCase()))
+                        notModifiedHeaders[key] = values;
                 }
-                return emitResponse(format, 304, preservedHeaders, "", false);
+                return emitResponse(format, 304, notModifiedHeaders, "", false);
             }
         }
     }
     if (method === "HEAD") {
         return emitResponse(format, response.statusCode, response.headers, "", false);
     }
-    if (outBody.length > options.maxResponseBytes) {
-        throw new Error(`Lambder: final response body is ${outBody.length} bytes which exceeds the configured ` +
+    // What Lambda weighs is bytes. A base64 body is ASCII, so its length is
+    // its byte count; a plain UTF-8 one is not, and counting its UTF-16 code
+    // units under-reported a non-ASCII response by up to 3x, which is the one
+    // way this guard could pass a body Lambda then refuses with an opaque
+    // payload-size error and no envelope.
+    const outBytes = isBase64 ? outBody.length : Buffer.byteLength(outBody, "utf8");
+    if (outBytes > options.maxResponseBytes) {
+        throw new Error(`Lambder: final response body is ${outBytes} bytes which exceeds the configured ` +
             `maxResponseBytes (${options.maxResponseBytes}). Lambda caps proxy responses at ~6MB. ` +
             `Consider pagination or enabling compression.`);
     }

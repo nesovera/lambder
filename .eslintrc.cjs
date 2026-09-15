@@ -40,7 +40,9 @@ module.exports = {
     },
     overrides: [
         {
-            // Illustrative files that do not typecheck against a real app.
+            // The examples are in the typecheck (tsconfig.tests.json), but they
+            // stand in for an application that is not in this repository, so a
+            // ts-directive comment is allowed where one is genuinely needed.
             files: ["examples/**/*.ts"],
             rules: { "@typescript-eslint/ban-ts-comment": "off" },
         },

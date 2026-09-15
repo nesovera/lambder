@@ -1,5 +1,5 @@
 /**
- * LambderI18n — standalone, framework-free, isomorphic typed translation module.
+ * LambderI18n: standalone, framework-free, isomorphic typed translation module.
  *
  * Zero dependencies, no Node/DOM requirements (browser detection is feature-gated),
  * safe to import in both lambda backends and frontend bundles.

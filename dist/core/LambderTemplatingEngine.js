@@ -1,4 +1,4 @@
-import { getFS } from "../shared/node-polyfills.js";
+import { getFS } from "../shared/util/LambderNodeModules.js";
 import { renderHtmlValue } from "../shared/LambderHtml.js";
 const TOKEN_PATTERN = /<!--\s*(?:(slot:([\w-]+)\s*\/)|(slot:([\w-]+))|(\/slot:([\w-]+))|(if:(!?)([\w-]+))|(else)|(\/if:(!?)([\w-]+)))\s*-->/g;
 /**
@@ -92,7 +92,11 @@ const renderNodes = (nodes, data) => {
             out += value === undefined ? renderNodes(node.defaultNodes, data) : renderHtmlValue(value);
         }
         else {
-            const condition = !!data[node.name] !== node.negated;
+            // Own properties only, the same lookup the slot branch uses:
+            // through the prototype, <!--if:toString--> was unconditionally
+            // true on every render.
+            const value = Object.prototype.hasOwnProperty.call(data, node.name) ? data[node.name] : undefined;
+            const condition = !!value !== node.negated;
             out += renderNodes(condition ? node.thenNodes : node.elseNodes, data);
         }
     }
@@ -130,7 +134,7 @@ export class LambderTemplatingEngine {
     static async fromFile(filePath, options = {}) {
         const fs = await getFS();
         if (!fs)
-            throw new Error("LambderTemplatingEngine.fromFile requires a Node.js environment.");
+            throw new Error("Lambder: LambderTemplatingEngine.fromFile requires a Node.js environment.");
         const source = await fs.promises.readFile(filePath, "utf8");
         return new LambderTemplatingEngine(source, options);
     }

@@ -1,9 +1,9 @@
 # Frontend client (LambderCaller)
 
-`LambderCaller` is the frontend companion for a Lambder backend, about 2KB
-compressed. Import it from the `lambder/client` entry: everything reachable
-from there is browser-safe by construction (no AWS SDK, no Node built-ins, no
-server pipeline), so your bundle can never pick up server code.
+`LambderCaller` is the frontend companion for a Lambder backend. Import it
+from the `lambder/client` entry: everything reachable from there is
+browser-safe by construction (no AWS SDK, no Node built-ins, no server
+pipeline), so your bundle can never pick up server code.
 
 Its server-side counterpart is
 [`LambderInvokeCaller`](./invoke.md), which calls a Lambder app running in
@@ -44,6 +44,7 @@ const user = await caller.api("getCompanyPage", { companyName: "Acme" });
 | `sessionCookieDomain` | none | Must mirror the server's session cookie `Domain`, otherwise expired cookies cannot be cleared |
 | `requestCompression` | `false` | Gzip large payloads. `true` is `{ minBytes: 4096 }` |
 | `guardInputsProvider` | none | Supply guardInput-mode guard values for every call from one place |
+| `transport` | fetch | How a call reaches the server; see [Transports](#transports) |
 | `versionExpiredHandler` | none | The server rejected `apiVersion` |
 | `sessionExpiredHandler` | none | The session is missing or expired |
 | `messageHandler` | none | The envelope carried a `message` |
@@ -51,10 +52,13 @@ const user = await caller.api("getCompanyPage", { companyName: "Acme" });
 | `notAuthorizedHandler` | none | The envelope carried `notAuthorized` |
 | `errorHandler` | none | Network, timeout, server or unknown failure |
 | `apiInputValidationErrorHandler` | none | The server rejected the input (422), with the Zod issues |
+| `logListHandler` | `console.log` | Receives each answer's `logList`, with the API name; the browser twin of `LambderInvokeCaller`'s `onLogList` |
 | `fetchStartedHandler` / `fetchEndedHandler` | none | Call lifecycle, for global loading state |
 
 `setSessionCookieKey(tokenKey, csrfKey)` mirrors non-default server cookie
-names. `caller.isLoading` and `caller.fetchTrackerList` expose in-flight state.
+names. `caller.fetchTrackerList` is the calls currently in flight, in the order
+they started, and `caller.isLoading` is derived from it, so neither holds
+anything about a call that has already settled.
 
 ## Per-call options
 
@@ -68,13 +72,15 @@ Every constructor handler can be overridden in the options of a single
 | `signal` | External `AbortSignal`, combined with the timeout when both are set |
 | `compressRequest` | `false` sends the payload plainly, `true` compresses regardless of the threshold |
 | `guardInputs` | Values for the API's guardInput-mode guards, keyed by guard name |
-| `idempotencyKey` | Replay-protection key for APIs declared idempotent on the server |
+| `idempotencyKey` | Replay-protection key for APIs declared idempotent on the server. The typed contract makes it mandatory for those APIs, as it does `guardInputs` |
 
 ## Failure semantics
 
-`api()` collapses every failure to `null`, which is indistinguishable from a
-legitimately-null payload. When the call site needs to know why, use
-`apiOutcome()`; it never throws and resolves to a discriminated union:
+`api()` collapses every failure to `undefined`, which is indistinguishable
+from a legitimately-undefined payload (a structured refusal is the one
+exception: it hands back whatever payload the envelope carried, usually
+`null`). When the call site needs to know why, use `apiOutcome()`; it never
+throws and resolves to a discriminated union:
 
 ```typescript
 const outcome = await caller.apiOutcome("getCompanyPage", { companyName: "Acme" });
@@ -95,7 +101,7 @@ if (outcome.ok) {
 | --- | --- |
 | `network` | The request never completed |
 | `timeout` | `timeoutMs` elapsed and the fetch was aborted |
-| `server` | 5xx, or a body that is not a Lambder envelope |
+| `server` | 5xx, a body that is not a Lambder envelope, or a transport failure naming `protocol` |
 | `validation` | 422; `zodError` carries the issue detail |
 | `versionExpired` | The server rejected `apiVersion` |
 | `sessionExpired` | No valid session |
@@ -104,12 +110,41 @@ if (outcome.ok) {
 | `unknown` | Anything else |
 
 Failure outcomes also carry `retryAfterSeconds` (from a 429's `Retry-After`),
-`error` for network/timeout/server/unknown failures, and `response` with the
-parsed envelope when one was received.
+and the rest by reason, because the failure side is a discriminated union
+rather than one arm of optional fields: `network`, `timeout`, `server` and
+`unknown` always carry `error`; `validation` always carries `zodError`; and
+`versionExpired`, `sessionExpired`, `notAuthorized` and `errorMessage` always
+carry `response`, the parsed envelope (a `server` failure carries it too when
+the server answered with Lambder's own 500 body, which is how `crash` and
+`logList` arrive). So narrowing on `reason` narrows to what that reason
+actually has, with no optional reads and no `!`.
 
 Every configured handler still fires on the matching failure, so global UX
 (toasts, re-login prompts) lives in the constructor while individual call sites
-branch on the outcome.
+branch on the outcome. An answer's `logList` reaches `logListHandler` whatever
+the outcome, a 5xx and a 422 included, which is where a crashed call's log
+trail arrives.
+
+`errorMessage` is `LambderAppRefusalMessage | string`, because
+`refuse("Denied.")` and `new LambderApiRefusal("Denied.")` both put the plain
+message there, while `refuse("Denied.", { code })` and
+`res.api(null, { errorMessage: { type, code, content } })` put the object.
+Narrow before reading a refusal's fields:
+
+```typescript
+const showRefusal = (message: LambderAppRefusalMessage | string) => {
+    if (typeof message === "string") return showToast(message);
+    if (message.code === LAMBDER_REFUSAL_CODES.rateLimited) return showRetryLater(message.content);
+    showToast(message.content, { type: message.type, title: message.title });
+};
+
+const caller = new LambderCaller<ApiContractType>({ ..., errorMessageHandler: showRefusal });
+```
+
+A client with its own code vocabulary annotates the object half as
+`LambderRefusalMessage<"app/not-verified" | "app/over-quota">` and gets a
+`switch (message.code)` the compiler checks, `default: never` included; see
+[Responses](./responses.md).
 
 ## Guard inputs
 
@@ -224,8 +259,94 @@ Compression moves the ceiling rather than removing it. Past roughly 25-40MB of
 JSON the answer is a presigned S3 upload plus a job reference, or chunking, not
 a better codec.
 
-## Testing against the contract
+## Transports
 
-`lambder/testing` ships `LambderMSW`, which serves the same contract from MSW
-handlers so frontend tests and local development need no backend. See
-[Testing](./testing.md).
+Every call is one transport call: the envelope in, the answer out in the
+accessor form `resolveApiOutcome()` reads. The default is
+`lambderFetchTransport`, one POST to `apiPath` over fetch with the CORS
+behaviour `isCorsEnabled` selects. Pass `transport` at construction, or
+`setTransport()` later, to route calls elsewhere:
+
+| Transport | Use |
+| --- | --- |
+| `mockApp.transport()` | The [mock runtime](./mock.md), in development and in tests |
+| `lambderHandlerTransport(handler)` | A real Lambder handler in this process, for integration tests with no HTTP and no AWS (root entry) |
+| `lambderCookieJarTransport(inner, { jar })` | Any transport carrying a `LambderCookieJar`, so a session survives between calls where there is no browser |
+
+```typescript
+const caller = new LambderCaller<ApiContractType>({ apiPath: "/api", isCorsEnabled: false, transport: mockApp.transport() });
+```
+
+What a transport owes the caller, whether it ships here or you write one:
+
+- **Any HTTP status is an answer.** A 4xx or 5xx resolves, status and body
+  included, because reading what a status means is `resolveApiOutcome()`'s job
+  alone. A transport that rejects on a status throws away the envelope a
+  refusal, a validation failure or a crash arrived in.
+- **A rejection is a transport failure**, reported as `network`. A transport
+  that knows better throws a `LambderTransportFailure`: `protocol` says
+  something came back and was not an answer, or the callee threw instead of
+  answering, which the caller reports as `server` rather than as flaky
+  connectivity. Its `cause` is what actually went wrong, and it reaches the
+  call site as `outcome.error`.
+- **`request.signal` must be honoured**, by rejecting as soon as it aborts. It
+  is what makes `timeoutMs` and a per-call `signal` mean anything. The caller
+  does not take a late answer on trust either: an answer that arrives after its
+  own abort fired is reported as `timeout` (or `network`), never as a success.
+- **Timeouts and retries belong to the caller**, so one call is one delivery
+  attempt and an idempotency key means what it says.
+
+A jar over `lambderFetchTransport` works outside a browser: the transport
+sends the jar's cookies as one `Cookie` header, which undici does send. In a
+page it has no effect, because `Cookie` is a forbidden header name there and
+the browser attaches its own cookie store instead, which is the right answer.
+Per-call `headers` go onto the request first and the two the transport owns
+(`Content-Type` and that `Cookie`) after them, so a call adding a header of
+its own cannot displace the session the jar just built.
+
+The caller itself runs anywhere `fetch` exists: in a page, a worker, Node or an
+edge runtime, since it reads the site host from `globalThis.location` when
+there is one and the CSRF cookie through js-cookie where there is a document.
+One thing does not travel: a relative `apiPath` is resolved against the page,
+and outside a page there is none, so give the caller an absolute `apiPath`
+(`https://api.example.com/api`) there. `lambderFetchTransport` says as much
+rather than letting it read as a dead network, and `lambderHandlerTransport`
+routes an absolute `apiPath` by its path.
+
+A `LambderCookieJar` holds cookies the way a browser does, with the matching
+itself delegated to [tough-cookie](https://github.com/salesforce/tough-cookie):
+domain and path matching, default-path, Max-Age against Expires, Secure,
+HttpOnly, and the `__Host-`/`__Secure-` prefixes, against the public suffix
+list. `cookiePairs()` hands them over in RFC 6265 send order, longest `Path`
+first and then oldest first, which is the order a server reading the first of
+a repeated name actually sees. A target that says it speaks plain http (an
+absolute `http://` apiPath) neither accepts a `Secure` cookie nor sends one,
+so the jar never holds a session it could not use. That list is what lets it refuse `Domain=co.uk` as well as `Domain=com`;
+a rule that only counts labels can catch the second and never the first.
+
+The jar is scoped by the host it is told about, which is how it
+declines to send one host's session to another. The decorator learns that host
+from an absolute `apiPath` first, then from its own `host` option, then from
+the page's host in a browser: an `apiPath` that names its own host is a fact
+about where this call goes, so it outranks both, and a cross-origin API's host
+outranks the page that happens to be calling it, because the cookies belong to
+the API's host. `host` is the fallback for a relative path, which names no
+host at all.
+
+```typescript
+const jar = new LambderCookieJar();
+caller.setTransport(lambderCookieJarTransport(mockApp.transport({ cookies: false }), { jar, host: "app.example.com" }));
+```
+
+Given none of the three (an in-process or mock transport posting to a relative
+path outside a browser), the jar is a single host's: every cookie it holds
+travels on every call it makes, and a `Set-Cookie` carrying a `Domain` is
+refused outright, since there is no sending host to check that `Domain`
+against and believing it is how a jar hands one host a cookie set for another.
+`new LambderCookieJar({ host })` scopes such a jar in one place instead.
+
+## Mocking the contract
+
+`lambder/mock` serves the same contract from typed mock handlers over the
+real API pipeline, so frontend development and tests need no backend. See
+[The mock runtime](./mock.md).

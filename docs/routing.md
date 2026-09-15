@@ -99,9 +99,13 @@ lambder
     // A Zod input rejection, from an API's own schema or from a guard or
     // rate-limit key slice. One failure, one shape, whichever schema rejected it.
     .setApiInputValidationErrorHandler((ctx, res, zodError) => {
-        return res.api(null, { errorMessage: zodError.issues });
+        // Never echo the issues wholesale: a public API validates before any
+        // guard runs, and one strictObject issue carries every key the
+        // client posted, so the answer would be larger than the request.
+        const where = zodError.issues[0]?.path.join(".") || "the payload";
+        return res.api(null, { errorMessage: { type: "warning", content: `Invalid input at ${where}.` } });
     })
-    // Anything that throws and is not a response or a LambderApiError
+    // Anything that throws and is not a response or a LambderApiRefusal
     .setGlobalErrorHandler((err, ctx, res) => {
         console.error("Error:", err);
         return res.raw({ statusCode: 500, body: "Internal Server Error" });
@@ -113,11 +117,11 @@ fails), the last-resort 500 is a JSON envelope
 (`{ payload: null, errorMessage: "Internal server error." }`); routes get a
 plain-text 500.
 
-The handler's fourth argument is the `logList` the request had accumulated, and
-`describeCrash(err, ctx)` packs the error itself (name, message, stack, cause
-chain, request id) into the envelope's `crash` field for a caller entitled to
-see it. Browsers should not be; another lambda invoking this one is the case it
-exists for. See
+The `logList` the request had accumulated is on `ctx.logList` (`ctx` is null
+when the context itself could not be built), and `describeCrash(err, ctx)`
+packs the error itself (name, message, stack, cause chain, request id) into the
+envelope's `crash` field for a caller entitled to see it. Browsers should not
+be; another lambda invoking this one is the case it exists for. See
 [Calling a Lambder app from another lambda](./invoke.md#errors-and-logs).
 
 ## Hooks
@@ -130,7 +134,15 @@ priority (lower runs first, default 0).
 | `created` | `(lambder) => void` | Runs once, lazily, at the first render. One-time setup that needs the instance |
 | `beforeRender` | `(ctx, res) => ctx \| response \| Error` | Inspect or modify the context; return a response to short-circuit, or throw |
 | `afterRender` | `(ctx, res, response) => response` | Inspect or modify the finished response |
-| `fallback` | `(ctx, res) => void` | Runs when nothing matched. Logging and cleanup; it cannot answer |
+| `fallback` | `(ctx, res) => void` | Runs when nothing matched, after `beforeRender`. Logging and cleanup; it cannot answer |
+
+`beforeRender` runs on every request, not only on the ones a route or an API
+matched: a `servePublicFiles` asset and a `serveIndexHtml` shell go through it
+too, before the fallback chain is walked, so a hook that writes a security
+header, blocks an address or turns on maintenance mode covers the frontend as
+well as the APIs. For a matched route, `ctx.pathParams` is already populated
+when the hook runs. The CORS preflight is the one request that skips it: it is
+answered by the CORS layer before anything else sees it.
 
 ```typescript
 lambder

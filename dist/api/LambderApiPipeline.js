@@ -1,0 +1,221 @@
+import { restoreCompressedPayload } from "./LambderApiRequest.js";
+import { apiNotFoundAnswer, invalidPayloadAnswer, refusalAnswer, sessionExpiredAnswer, validationAnswer, versionExpiredAnswer, } from "./LambderApiEnvelope.js";
+import { LambderApiValidationRefusal, isLambderApiValidationRefusal } from "./LambderApiValidationRefusal.js";
+import { isLambderApiRefusal } from "../shared/wire/LambderApiRefusal.js";
+import { DEFAULT_MAX_RESTORED_PAYLOAD_BYTES } from "../shared/wire/LambderRequestPayload.js";
+import { assertPositiveInteger } from "../shared/util/LambderOptionChecks.js";
+import { LambderApiPolicyEngine } from "./LambderApiPolicyEngine.js";
+import LambderSessionController, { assertSessionCookiePrefixes, } from "../session/LambderSessionController.js";
+import { DEFAULT_SESSION_CSRF_COOKIE_KEY, DEFAULT_SESSION_TOKEN_COOKIE_KEY } from "../shared/wire/LambderSessionCookieNames.js";
+/**
+ * The API pipeline: one API call from a parsed request to a plain answer,
+ * in the order the protocol defines. The Lambda server and the mock runtime
+ * are adapters over this class; neither reimplements a step of it.
+ *
+ * ```
+ * version gate → restore payload → rate limits that need no session
+ * → session (session mode) → idempotency replay → the remaining rate limits
+ * → guards → input validation → exec, inside the idempotency claim
+ * → drain response headers → answer
+ * ```
+ *
+ * Steps whose subsystem is not configured are skipped. A LambderApiRefusal
+ * thrown by any step, guard or handler is rendered here, in one place: a
+ * validation error through onInvalidInput, any other refusal as the refusal
+ * envelope. Anything else propagates, because only the adapter knows what a
+ * crash means (a global error handler, a mock event).
+ *
+ * `run` never sees a name it has no definition for; resolving a name to a
+ * definition is the one thing the adapters legitimately do differently (an
+ * action list versus a registry), and answerUnknownApi is what they answer
+ * with.
+ */
+export class LambderApiPipeline {
+    apiVersion;
+    policies = new LambderApiPolicyEngine();
+    maxRequestPayloadBytes;
+    onInvalidInput;
+    sessions;
+    constructor(options = {}) {
+        this.apiVersion = options.apiVersion ?? null;
+        this.maxRequestPayloadBytes = assertPositiveInteger(options.maxRequestPayloadBytes ?? DEFAULT_MAX_RESTORED_PAYLOAD_BYTES, "maxRequestPayloadBytes");
+        this.onInvalidInput = options.onInvalidInput ?? null;
+        this.sessions = options.sessions
+            ? {
+                manager: options.sessions.manager,
+                tokenCookieKey: options.sessions.tokenCookieKey ?? DEFAULT_SESSION_TOKEN_COOKIE_KEY,
+                csrfCookieKey: options.sessions.csrfCookieKey ?? DEFAULT_SESSION_CSRF_COOKIE_KEY,
+                cookieOptions: options.sessions.cookieOptions ?? {},
+            }
+            : null;
+        if (this.sessions)
+            assertSessionCookiePrefixes(this.sessions);
+        if (options.rateLimits)
+            this.policies.configureRateLimits(options.rateLimits);
+        if (options.guards)
+            this.policies.configureGuards(options.guards);
+        if (options.idempotency)
+            this.policies.configureIdempotency(options.idempotency);
+    }
+    /** True when a session manager was configured. */
+    get hasSessions() { return this.sessions !== null; }
+    /** The session manager, for adapters that hand it out; throws when sessions are not configured. */
+    get sessionManager() {
+        if (!this.sessions)
+            throw new Error("Session is not enabled. Configure the session option at creation.");
+        return this.sessions.manager;
+    }
+    /**
+     * A session controller for one request: what handlers use to create,
+     * rotate, refresh and end sessions. The request info is the API request's
+     * (its cookies and posted CSRF token) or a route's (cookies and no CSRF).
+     */
+    sessionController(ctx, request) {
+        if (!this.sessions)
+            throw new Error("Session is not enabled. Configure the session option at creation.");
+        return new LambderSessionController({
+            manager: this.sessions.manager,
+            tokenCookieKey: this.sessions.tokenCookieKey,
+            csrfCookieKey: this.sessions.csrfCookieKey,
+            cookieOptions: this.sessions.cookieOptions,
+            ctx,
+            request,
+        });
+    }
+    /** The session request info of an API request: its cookies, and the CSRF token it posted. */
+    static sessionInfoOf(request) {
+        return { host: request.host, cookies: request.cookies, csrfToken: request.token };
+    }
+    /** Registration-time checks of one definition's declarative options; the same messages on the server and in the mock. */
+    assertRegistration(definition) {
+        this.policies.assertRegistration(definition);
+    }
+    /** True when the gate is on and the request names a different version. */
+    isVersionStale(request) {
+        return !!this.apiVersion && !!request.version && request.version !== this.apiVersion;
+    }
+    /**
+     * The answer for a request naming no registered API: the apiNotFound
+     * refusal, carrying whatever the call already wrote (a CORS header, a
+     * cookie eviction). No version gate here: both adapters run prepare() on
+     * the way in, before a name is resolved, so a stale client has already
+     * been answered by the time anything asks for an unknown name.
+     */
+    answerUnknownApi(request, ctx) {
+        const answer = apiNotFoundAnswer(this.apiVersion, ctx?.logList);
+        ctx?.responseHeaders.applyInto(answer.headers);
+        return answer;
+    }
+    /**
+     * The steps that come before anything may read the request: the version
+     * gate, then the compressed-payload restore that every later reader (a
+     * rate-limit key slice, a guard, the input schema) depends on having
+     * happened.
+     *
+     * Public and named because the server runs them earlier than run() does,
+     * on the way in, so that its hooks see a plain payload and a stale client
+     * is answered before any of them, whether or not the name it asked for
+     * exists. run() calls it too, so an adapter that has no such step still
+     * gets the whole protocol. Calling it twice is safe by construction: the
+     * gate is a pure comparison and the restore has already removed the wire
+     * fields it reads.
+     *
+     * Returns the answer that ends the call, or null when the request is
+     * ready to dispatch.
+     */
+    async prepare(request) {
+        if (this.isVersionStale(request))
+            return versionExpiredAnswer(this.apiVersion);
+        const restored = await restoreCompressedPayload(request, this.maxRequestPayloadBytes);
+        if (!restored.ok)
+            return invalidPayloadAnswer(this.apiVersion, restored.message);
+        return null;
+    }
+    /**
+     * One call, one answer. Refusals are rendered; crashes propagate.
+     *
+     * An adapter that wants to report what the call did even when it crashed
+     * passes its own trace object: the pipeline writes into that one, so a
+     * handler that threw still leaves the guards it ran behind for the
+     * adapter's catch. Without it the trace was created here and lost with
+     * the throw, and the mock's call log showed no guards on exactly the
+     * calls a developer opens the log for.
+     */
+    async run(request, ctx, definition, exec, trace = { guardsRun: [], replayed: false }) {
+        let answer;
+        try {
+            answer = await this.execute(request, ctx, definition, exec, trace);
+        }
+        catch (err) {
+            if (isLambderApiValidationRefusal(err)) {
+                answer = await this.refuseInput(err, ctx, request);
+            }
+            else if (isLambderApiRefusal(err)) {
+                answer = refusalAnswer(err, this.apiVersion, ctx.logList);
+            }
+            else {
+                throw err;
+            }
+        }
+        // Every header written during the call belongs on the answer, whichever
+        // way it was produced: a cookie eviction from the session read, a
+        // handler's setHeader before it refused, the handler's own headers
+        // (already on it, so re-applying them here changes nothing).
+        ctx.responseHeaders.applyInto(answer.headers);
+        return { answer, ...trace };
+    }
+    async execute(request, ctx, definition, exec, trace) {
+        const unprepared = await this.prepare(request);
+        if (unprepared)
+            return unprepared;
+        // The limits whose key is known from the request alone, before the
+        // session store is asked anything: a request carrying bogus session
+        // cookies costs up to four store reads, and answering it
+        // sessionExpired without the limiter having run let one address spend
+        // the session store's read budget freely. A replay costs the same
+        // reads, so an ip-limited replay counts against that budget too: the
+        // limit protects the stores, not the handler.
+        await this.policies.runSessionlessRateLimits(request, ctx, definition);
+        if (definition.mode === "session") {
+            if (!this.sessions)
+                throw new Error(`Lambder: API "${definition.name}" is a session API, but no session store was configured at creation.`);
+            const session = await this.sessionController(ctx, LambderApiPipeline.sessionInfoOf(request)).fetchSessionIfExists();
+            if (!session)
+                return sessionExpiredAnswer(this.apiVersion, ctx.logList);
+        }
+        // Replay fast path: a completed idempotent request answers its stored
+        // answer without burning the remaining rate-limit quota or re-running
+        // guards. After the session read, because the replay scope is keyed
+        // per session.
+        const replay = await this.policies.findReplay(request, ctx, definition, trace);
+        if (replay)
+            return replay;
+        await this.policies.runPreflight(request, ctx, definition, trace);
+        if (definition.input) {
+            const parsed = definition.input.safeParse(request.payload);
+            if (!parsed.success)
+                throw new LambderApiValidationRefusal(parsed.error);
+            request.payload = parsed.data;
+        }
+        // The handler's own answer, and only that: what it wrote into
+        // responseHeaders during the call is on it before the idempotency
+        // engine judges and stores it, while a header written EARLIER in the
+        // call is not. That line matters, because the engine refuses to store
+        // an answer carrying a Set-Cookie: charge it with the stale-session
+        // cookie the session read evicted and an otherwise idempotent
+        // operation would silently stop being idempotent and re-execute on
+        // every retry. The call's earlier headers still reach the client;
+        // run() applies them to the answer on the way out.
+        const runHandler = async () => {
+            const handlerFirstHeader = ctx.responseHeaders.size;
+            const produced = await exec(ctx);
+            ctx.responseHeaders.applyInto(produced.headers, handlerFirstHeader);
+            return produced;
+        };
+        return await this.policies.withIdempotency(request, ctx, definition, trace, runHandler);
+    }
+    async refuseInput(err, ctx, request) {
+        const custom = this.onInvalidInput ? await this.onInvalidInput(err.zodError, ctx, request) : null;
+        return custom ?? validationAnswer(err.zodError, ctx.logList);
+    }
+}
