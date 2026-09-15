@@ -1,6 +1,6 @@
 {
   "name": "lambder",
-  "version": "7.0.1",
+  "version": "7.1.4",
   "sideEffects": false,
   "description": "Opinionated serverless web framework for TypeScript on AWS Lambda: type-safe APIs from Zod schemas, DynamoDB sessions, and declarative rate limits, authorization guards and idempotency.",
   "keywords": [

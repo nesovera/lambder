@@ -4,6 +4,7 @@ import type { LambderApiAnswer } from "./LambderApiAnswer.js";
 import type { LambderApiCallContext } from "./LambderApiCallContext.js";
 import type { LambderApiCallTrace } from "./LambderApiCallContext.js";
 import type { LambderApiDefinition } from "./LambderApiDefinition.js";
+import type { LambderApiSignatureSource } from "./LambderApiSignature.js";
 import type { LambderApiGuard } from "./LambderApiGuards.js";
 import type { LambderApiRateLimitPolicyConfig, LambderApiRateLimitsConfig } from "./LambderApiRateLimits.js";
 import type { LambderApiIdempotencyConfig } from "./LambderApiIdempotency.js";
@@ -28,8 +29,15 @@ export type LambderApiSessionsConfig<TSessionData> = {
     cookieOptions?: LambderSessionCookieOptions;
 };
 export type LambderApiPipelineOptions<TCtx extends LambderApiCallContext<TSessionData>, TSessionData = any> = {
-    /** Enables the version gate: a request naming another version answers versionExpired. */
+    /** Stamped on every answer's envelope as apiVersion, so a client can tell which build answered; null when the app set none. */
     apiVersion?: string | null;
+    /**
+     * Enables the signature gate: a request carrying a signature that is not
+     * the one this source expects for its endpoint answers versionExpired.
+     * Without a source every signature passes, which is what the mock runtime
+     * does unless it is given the generated map.
+     */
+    signatures?: LambderApiSignatureSource;
     /** Ceiling on what a compressed request payload may restore to. Default: 20,000,000. */
     maxRequestPayloadBytes?: number;
     onInvalidInput?: LambderApiInputRefusal<TCtx>;
@@ -52,7 +60,7 @@ export type LambderApiExec<TCtx> = (ctx: TCtx) => Promise<LambderApiAnswer>;
  * are adapters over this class; neither reimplements a step of it.
  *
  * ```
- * version gate → restore payload → rate limits that need no session
+ * signature gate → restore payload → rate limits that need no session
  * → session (session mode) → idempotency replay → the remaining rate limits
  * → guards → input validation → exec, inside the idempotency claim
  * → drain response headers → answer
@@ -75,6 +83,7 @@ export declare class LambderApiPipeline<TCtx extends LambderApiCallContext<TSess
     private readonly maxRequestPayloadBytes;
     private readonly onInvalidInput;
     private readonly sessions;
+    private readonly signatures;
     constructor(options?: LambderApiPipelineOptions<TCtx, TSessionData>);
     /** True when a session manager was configured. */
     get hasSessions(): boolean;
@@ -90,34 +99,41 @@ export declare class LambderApiPipeline<TCtx extends LambderApiCallContext<TSess
     static sessionInfoOf(request: LambderApiRequest): LambderSessionRequestInfo;
     /** Registration-time checks of one definition's declarative options; the same messages on the server and in the mock. */
     assertRegistration(definition: LambderApiDefinition): void;
-    /** True when the gate is on and the request names a different version. */
-    isVersionStale(request: LambderApiRequest): boolean;
     /**
      * The answer for a request naming no registered API: the apiNotFound
      * refusal, carrying whatever the call already wrote (a CORS header, a
-     * cookie eviction). No version gate here: both adapters run prepare() on
-     * the way in, before a name is resolved, so a stale client has already
-     * been answered by the time anything asks for an unknown name.
+     * cookie eviction). No signature gate here: both adapters run prepare()
+     * on the way in, with the definition the name resolved to or null, so a
+     * signed request for an unknown name (a client built against a contract
+     * that had it) has already been answered versionExpired by the time
+     * anything asks for an unknown name.
      */
     answerUnknownApi(request: LambderApiRequest, ctx?: TCtx): LambderApiAnswer;
     /**
-     * The steps that come before anything may read the request: the version
-     * gate, then the compressed-payload restore that every later reader (a
-     * rate-limit key slice, a guard, the input schema) depends on having
-     * happened.
+     * The steps that come before anything may read the request: the
+     * signature gate, then the compressed-payload restore that every later
+     * reader (a rate-limit key slice, a guard, the input schema) depends on
+     * having happened.
+     *
+     * The gate compares the signature the request carries with the one the
+     * source expects for the endpoint the name resolved to (`definition`,
+     * null for a name the adapter does not know). A match runs; anything
+     * else is a client built against another shape of this endpoint, or
+     * against an endpoint that no longer exists, and is answered
+     * versionExpired. A request carrying no signature is never gated.
      *
      * Public and named because the server runs them earlier than run() does,
      * on the way in, so that its hooks see a plain payload and a stale client
      * is answered before any of them, whether or not the name it asked for
      * exists. run() calls it too, so an adapter that has no such step still
      * gets the whole protocol. Calling it twice is safe by construction: the
-     * gate is a pure comparison and the restore has already removed the wire
-     * fields it reads.
+     * gate compares against a memoized digest and the restore has already
+     * removed the wire fields it reads.
      *
      * Returns the answer that ends the call, or null when the request is
      * ready to dispatch.
      */
-    prepare(request: LambderApiRequest): Promise<LambderApiAnswer | null>;
+    prepare(request: LambderApiRequest, definition: LambderApiDefinition | null): Promise<LambderApiAnswer | null>;
     /**
      * One call, one answer. Refusals are rendered; crashes propagate.
      *

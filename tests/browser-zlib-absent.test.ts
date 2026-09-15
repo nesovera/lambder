@@ -63,7 +63,7 @@ describe('A runtime whose zlib is a bundler stub', () => {
         expect(envelope).not.toBeNull();
 
         const request: LambderApiRequest = {
-            apiName: 'thing.do', version: null, token: '', siteHost: 'localhost',
+            apiName: 'thing.do', version: null, signature: null, token: '', siteHost: 'localhost',
             payload: undefined, compressedPayload: {
                 gzip: envelope!.payloadGz,
                 brotli: undefined,

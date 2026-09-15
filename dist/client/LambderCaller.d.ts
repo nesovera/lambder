@@ -4,6 +4,7 @@ import type { LambderApiContractShape } from '../shared/wire/LambderApiContract.
 import { type LambderApiOutcome, type LambderValidationError } from '../shared/wire/LambderApiOutcome.js';
 import { type LambderCallArgs, type LambderContractOutputOf, type LambderGuardInputsProviderOption, type LambderSharedCallOptions } from '../shared/wire/LambderCallOptions.js';
 import { type LambderApiTransport } from '../shared/transport/LambderApiTransport.js';
+import { type LambderApiSignatureMap } from '../shared/wire/LambderApiSignature.js';
 export type { LambderApiOutcome, LambderApiFailureReason, LambderValidationError } from '../shared/wire/LambderApiOutcome.js';
 export type { LambderProvidedGuardInputs, LambderGuardInputsProvider } from '../shared/wire/LambderCallOptions.js';
 /** A handler told that something happened, with nothing to hand it. */
@@ -56,7 +57,16 @@ export type LambderCallOptions = LambderSharedCallOptions & {
 };
 type LambderCallerBaseOptions = {
     apiPath: string;
+    /** Sent with every call as `version`, informational: the server stamps its own on every answer. */
     apiVersion?: string;
+    /**
+     * The server's signature map, generated from its instance
+     * (Lambder.apiSignatures()) and shipped with this build. Sent per call as
+     * `signature`, so the server answers versionExpired to a call built
+     * against another shape of the endpoint and runs every other call. Leave
+     * it out and no call is gated.
+     */
+    apiSignatures?: LambderApiSignatureMap;
     isCorsEnabled: boolean;
     /** Default per-request timeout in ms (none unless set; API Gateway caps around 29s, so ~30000 is a sensible value). Overridable per call. */
     timeoutMs?: number;
@@ -101,7 +111,10 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
     private isCorsEnabled;
     private apiPath;
     private apiVersion?;
+    private apiSignatures?;
     private timeoutMs?;
+    /** What keeps a stale bundle from reloading itself forever; see the class. */
+    private readonly reloadLoopBreaker;
     /** The calls currently in flight, in the order they started. */
     fetchTrackerList: FetchTracker[];
     /** Whether any call is in flight. Derived, so it cannot drift from the list the way a separate flag did. */

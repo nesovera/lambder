@@ -214,8 +214,8 @@ type GuardInputsEntries<TGuards, TOpt> = {
 export type LambderGuardInputsOf<TGuards, TOpt> =
     keyof GuardInputsEntries<TGuards, TOpt> extends never ? never : GuardInputsEntries<TGuards, TOpt>;
 
-/** Normalize the three guards-option forms into ordered { name, param } entries. Internal to the engine: nothing outside it reads a guards option. */
-const toGuardEntries = (value?: LambderGuardsOptionValue): { name: string, param: unknown }[] => {
+/** Normalize the three guards-option forms into ordered { name, param } entries. Read by the engine, and by the signature digest for the names alone. */
+export const toGuardEntries = (value?: LambderGuardsOptionValue): { name: string, param: unknown }[] => {
     if(value === undefined) return [];
     if(typeof value === "string") return [{ name: value, param: undefined }];
     if(Array.isArray(value)) return value.map((name) => ({ name: String(name), param: undefined }));

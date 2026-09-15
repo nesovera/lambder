@@ -6,7 +6,7 @@ imitation of the server: `LambderMockApp` runs the same `LambderApiPipeline`
 the Lambda server runs (see [The API core](./api-core.md)), over in-memory
 stores, with mock handlers where the server has app handlers and mock guards
 where it has app guards. The envelope, the refusals, sessions and their
-cookies, guards, rate limits, idempotency and the version gate are therefore
+cookies, guards, rate limits, idempotency and the signature gate are therefore
 the real thing, and "the mock behaves like the server" is a consequence of the
 code's shape rather than a claim a test suite defends.
 
@@ -23,7 +23,8 @@ import { z } from "zod";
 const mock = initLambderMock<ApiContractType, SessionData>();
 
 export const mockApp = mock.create({
-    apiVersion: "1.4.0",                        // enables the version gate
+    apiVersion: "1.4.0",                        // stamped on every answer, as on the server
+    apiSignatures,                              // optional: the generated map, so a stale signature is refused as on the server
     latency: { min: 20, max: 90 },              // optional
     sessions: true,                             // the real session model over a memory store
     rateLimits: { policies: { authPerIp: { perMin: 5, per: "ip" } } },   // memory limiter
@@ -60,7 +61,8 @@ cannot run, so the mock would answer 200 where the server answers
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `apiVersion` | none | Enables the version gate: a call naming another version answers `versionExpired` |
+| `apiVersion` | none | Stamped on every answer's envelope, as the server's option is |
+| `apiSignatures` | none | The generated signature map the caller carries. With it, a call whose signature is not the map's entry for its endpoint answers `versionExpired` as on the server; without it every signature passes, since the runtime holds no server schema to digest |
 | `latency` | `0` | Milliseconds, a `{ min, max }` range, or `(apiName) => number` |
 | `sessions` | off | `true`, or `{ store?, sessionSalt?, ttlSeconds?, crypto?, dataRefresh?, enableSlidingExpiration?, slidingWriteIntervalSeconds?, tokenCookieKey?, csrfCookieKey?, cookieOptions? }` |
 | `rateLimits` | off | `{ policies, limiter?, failOpen? }`: the same policies the server declares, over `LambderMemoryRateLimiter` unless a limiter is given. `failOpen: false` refuses a call whose limiter threw instead of letting it through |
@@ -117,7 +119,7 @@ it declares guards, a rate limit or idempotency: the bare handler is the form
 that carries no restatement at all, so it is unavailable exactly where one is
 owed. `notMocked` and `sessionNotMocked` register an endpoint
 deliberately left without a mock: the call runs the protocol steps that precede
-dispatch (the version gate, the compressed-payload restore, and for
+dispatch (the signature gate, the compressed-payload restore, and for
 `sessionNotMocked` the session read) and then answers a refusal coded
 `lambder/not-mocked` carrying the reason, so the client can say "not mocked
 yet" rather than "unknown error", and a stale client still hears
@@ -155,7 +157,8 @@ call or in a later one, throws the way a duplicate name does.
 
 The one thing it cannot do is the session read. Its answer is processed as a
 public endpoint: the steps before dispatch still run, so a stale client still
-hears `versionExpired` and a compressed payload still reaches the events, but
+hears `versionExpired` (given the signature map) and a compressed payload
+still reaches the events, but
 nothing reads the session, because the mode of a name nothing registered is
 not knowable at runtime. That is the same reason `notMocked` and
 `sessionNotMocked` are two builders, arriving where there is no builder to

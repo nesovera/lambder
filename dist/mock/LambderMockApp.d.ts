@@ -16,7 +16,7 @@ import type { LambderMockCallContext, LambderMockCallRecord, LambderMockEntry, L
  * Lambda server runs) over memory stores, with a registry of typed mock
  * handlers where the server has app handlers, and mock guards where it has
  * app guards. Everything the protocol does (envelope, refusals, sessions
- * and their cookies, guards, rate limits, idempotency, the version gate)
+ * and their cookies, guards, rate limits, idempotency, the signature gate)
  * happens in the core; this class only resolves a name to an entry, wraps
  * the handler's return into the envelope, and adds what a mock needs on
  * top: failure injection, latency, a subscription, a call log, reset.
@@ -176,7 +176,7 @@ export declare class LambderMockApp<C extends LambderApiContractShape, S = any, 
      *
      * Public because the mode of an unregistered name cannot be recovered at
      * runtime, the contract being a type. Everything that precedes dispatch
-     * still runs (the version gate, the payload restore); the session read is
+     * still runs (the signature gate, the payload restore); the session read is
      * the one step this answer cannot have, which is the fidelity limit
      * restNotMocked documents.
      */

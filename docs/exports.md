@@ -226,6 +226,8 @@ See [Responses](./responses.md#compression) and
 | --- | --- | --- |
 | `LambderCaller` | yes | The typed API caller |
 | `resolveApiOutcome` | yes | The one mapping from an HTTP answer to an outcome, shared by every caller |
+| `apiNameKeyOf`, `lookupApiSignature`, `readApiSignature`, `API_SIGNATURE_HEX_LENGTH` | yes | The generated signature map's keys, and how a caller reads its entry for an endpoint |
+| `RELOAD_LOOP_WINDOW_MS` | yes | How long a repeated stale-signature refusal for the same endpoint and signature counts as a reload loop |
 | `lambderFetchTransport` | yes | The default transport: one POST over fetch |
 | `lambderCookieJarTransport` | yes | Any transport carrying a `LambderCookieJar` the way a browser carries cookies |
 | `LambderCookieJar`, `parseSetCookie` | yes | A browser's cookie storage for transports that have no browser, and the reader for one `Set-Cookie` header |
@@ -251,6 +253,7 @@ See [Frontend client](./client.md) and [The API core](./api-core.md#transports).
 | --- | --- | --- |
 | `LambderApiPipeline` | | The one pipeline the server and the mock runtime run |
 | `readApiEnvelope` | | Read a posted envelope into a `LambderApiRequest` |
+| `apiSignatureOf`, `LambderApiSignatureDigests` | | An endpoint's signature digested from its definition, and the server's memoized source of them; `lambder.apiSignatures()` is the map a client ships with |
 | `restoreCompressedPayload` | | Restore a `payloadGz` or `payloadBr` pair onto the request |
 | `buildApiEnvelope`, `envelopeAnswer`, `refusalAnswer`, `validationAnswer`, `apiNotFoundAnswer`, `sessionExpiredAnswer`, `versionExpiredAnswer`, `invalidPayloadAnswer`, `crashAnswer` | | The one place the envelope is written and every outcome rendered |
 | `LambderAnswerHeaders`, `getAnswerHeader`, `setAnswerHeader`, `addAnswerHeader`, `toHttpAnswer` | | The answer's headers, and the accessor view a caller reads |
@@ -263,7 +266,8 @@ See [Frontend client](./client.md) and [The API core](./api-core.md#transports).
 Types: `LambderApiRequest`, `LambderApiRequestInfo`, `LambderCompressedPayloadFields`,
 `LambderRestorePayloadResult`, `LambderApiAnswer`, `LambderResolverApiMethod`,
 `LambderApiCallContext`, `LambderApiCallTrace`,
-`LambderApiDefinition`, `LambderApiIdempotencyOption`, `LambderApiPipelineOptions`,
+`LambderApiDefinition`, `LambderApiSignatureSource`, `LambderApiSignatureMap` (client too),
+`LambderApiIdempotencyOption`, `LambderApiPipelineOptions`,
 `LambderApiSessionsConfig`, `LambderApiInputRefusal`, `LambderApiRunResult`,
 `LambderApiExec`, `LambderApiEnvelopeConfig`, `LambderValidationAnswerBody`,
 `LambderSynthesizedRequest`, `LambderLambdaHttpResult`, and the two contract

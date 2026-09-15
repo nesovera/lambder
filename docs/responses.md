@@ -46,7 +46,7 @@ All accept an options object: `{ statusCode?, headers?, cacheControl?, compress?
 | `res.status(code, body?, options?)` | Response with any status code |
 | `res.redirect(url, statusCode?, options?)` | Redirect, default 302 |
 | `res.status404(data, options?)` | 404 Not Found |
-| `res.versionExpired(options?)` | The version-gate refusal envelope: `res.api(null, { versionExpired: true })` |
+| `res.versionExpired(options?)` | The stale-client refusal envelope, the one the signature gate answers: `res.api(null, { versionExpired: true })` |
 | `res.fileBase64(base64, mimeType, options?)` | File from base64 content |
 | `await res.file(path, options?)` | Serve a file from the `files` source (404 when missing) |
 | `await res.templateFile(path, data?, options?)` | Render an HTML file via `LambderTemplatingEngine` (cached; throws when missing) |

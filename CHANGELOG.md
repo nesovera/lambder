@@ -9,6 +9,66 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [7.1.1] - 2026-09-15
+
+The version gate is replaced by a signature gate: whether a client is stale is
+decided per endpoint, by a signature of the endpoint's client-facing shape that
+the client carries and the server digests from its own registrations. A deploy
+now forces a reload only on the clients that call an endpoint whose shape
+changed; a tab whose endpoints are unchanged keeps working. The wire format
+gains one optional request field, `signature`; answers are unchanged, and a
+caller that sends no signature is treated as before, minus the version check.
+
+### Changed
+
+- **`apiVersion` no longer gates.** A request naming another version is not
+  refused any more; the string is stamped on every answer's envelope and does
+  nothing else. `LambderApiPipeline.isVersionStale` is gone, and `create()`
+  no longer refuses `apiVersion: ""`, since there is no gate for it to turn
+  off. An app that relied on the equality gate hands its callers
+  `apiSignatures` instead (below).
+- **`LambderApiPipeline.prepare(request, definition)`** takes the definition
+  the request's name resolved to, or null, because the signature gate needs
+  it. Both adapters resolve the name before the pre-pass now, which is also
+  why a signed request for an unknown name answers `versionExpired` rather
+  than `apiNotFound`: the client was built against a contract that had it.
+- **`LambderApiRequest` carries `signature: string | null`**, so a request
+  literal built by hand needs the field. `LambderApiDefinition` gains an
+  optional `output` schema, which `addApi`/`addSessionApi` record.
+
+### Added
+
+- **`lambder.apiSignatures()`**: every registered endpoint's signature keyed
+  by its hashed name, a `LambderApiSignatureMap`. A generator imports the
+  finished instance, awaits this, and writes the object to a file the
+  frontend ships with its build. The signature covers the name, the mode, the
+  input and output schemas as JSON Schema, each declared guard's schema, and
+  whether the endpoint takes an idempotency key; rate limits, guard
+  parameters and the handler are left out, so changing them never forces a
+  reload. Keys are hashed so the file lists no endpoint names. See
+  docs/apis.md, "Signatures: when a client must update".
+- **`apiSignatures` on `LambderCaller` and `LambderInvokeCaller`**: the
+  generated map. Each call sends its endpoint's signature; a name the map
+  lacks fails the call before it is sent, as an `unknown` outcome whose error
+  says to regenerate. Optional: a caller without the map is never gated.
+- **`apiSignatures` on the mock runtime**: given the same map, the runtime
+  refuses a stale signature exactly as the server would; without it every
+  signature passes, since it holds no server schema to digest. The request
+  event carries `signature`.
+- **Reload-loop protection in `LambderCaller`.** A `versionExpired` for the
+  same endpoint and signature within five minutes of the last one means the
+  reload brought the same bundle back (a frontend shipped with a stale map, a
+  cached bundle, a server deploy that failed behind it). The handler is not
+  called again; the failure goes to `errorHandler` and the outcome still says
+  `versionExpired`. Once confirmed, every `versionExpired` inside the window
+  counts, and after it a reload is allowed again. Kept per tab in
+  `sessionStorage`, in memory where there is none. `RELOAD_LOOP_WINDOW_MS` is
+  exported.
+- `apiNameKeyOf`, `lookupApiSignature`, `readApiSignature`,
+  `API_SIGNATURE_HEX_LENGTH` and the `LambderApiSignatureMap` type from both
+  entries; `apiSignatureOf`, `LambderApiSignatureDigests` and the
+  `LambderApiSignatureSource` type from the root.
+
 ## [7.0.0] - 2026-09-15
 
 A major. The API pipeline moved out of the Lambda server into an isomorphic

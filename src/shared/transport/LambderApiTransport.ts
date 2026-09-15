@@ -11,6 +11,8 @@ export type LambderApiTransportRequest = {
     apiPath: string;
     apiName: string;
     version?: string;
+    /** The caller's signature for this endpoint, out of its LambderApiSignatureMap; absent when it carries no map. */
+    signature?: string;
     /** The CSRF token the caller read from its cookie; "" when it holds none. */
     token: string;
     /**
@@ -111,6 +113,7 @@ export type LambderApiTransport = (request: LambderApiTransportRequest) => Promi
 export const buildEnvelopeFields = (fields: {
     apiName: string;
     version?: string;
+    signature?: string;
     /** The CSRF token, as the envelope names it. */
     token: string;
     siteHost: string;
@@ -126,6 +129,7 @@ export const buildEnvelopeFields = (fields: {
 }): Record<string, unknown> => ({
     apiName: fields.apiName,
     version: fields.version,
+    ...(fields.signature !== undefined ? { signature: fields.signature } : {}),
     token: fields.token,
     siteHost: fields.siteHost,
     ...(fields.compressed ?? fields.payloadSlot ?? {}),
@@ -141,6 +145,7 @@ export const buildEnvelopeFields = (fields: {
 export const buildTransportEnvelope = (request: LambderApiTransportRequest): Record<string, unknown> => buildEnvelopeFields({
     apiName: request.apiName,
     version: request.version,
+    signature: request.signature,
     token: request.token,
     siteHost: request.siteHost,
     payloadSlot: { payload: request.payload },

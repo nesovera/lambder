@@ -57,6 +57,7 @@ export declare const synthesizeLambdaHttpEvent: (request: LambderSynthesizedRequ
 export declare const buildEnvelopeJson: (fields: {
     apiName: string;
     version?: string;
+    signature?: string;
     csrf?: string;
     siteHost: string;
     /** The payload's own JSON, when it goes plainly. */

@@ -54,7 +54,7 @@ export declare const validationAnswer: (zodError: z.ZodError, logList?: unknown[
 export declare const apiNotFoundAnswer: (apiVersion: string | null | undefined, logList?: unknown[]) => LambderApiAnswer;
 /** A session API called without a live session: the protocol's sessionExpired flag, which the caller clears its cookies on. */
 export declare const sessionExpiredAnswer: (apiVersion: string | null | undefined, logList?: unknown[]) => LambderApiAnswer;
-/** The caller's version is behind the server's: the protocol's versionExpired flag, which the caller reloads on. */
+/** The caller was built against another shape of the endpoint (the signature gate), or the app judged it stale: the protocol's versionExpired flag, which the caller reloads on. */
 export declare const versionExpiredAnswer: (apiVersion: string | null | undefined) => LambderApiAnswer;
 /** A compressed request payload that could not be restored: a 400 with the reason, never a crash. */
 export declare const invalidPayloadAnswer: (apiVersion: string | null | undefined, message: string) => LambderApiAnswer;

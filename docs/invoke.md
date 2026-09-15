@@ -169,7 +169,8 @@ would bump).
 | `client` | none | A ready `LambdaClient`, e.g. one shared with the rest of the app. It keeps whatever `maxAttempts` it was built with (the SDK's own **3** unless the app said otherwise): `clientConfig` is not consulted for a client this caller did not create. See the note below |
 | `clientConfig` | `{ maxAttempts: 1 }` | Otherwise the client is built from this on the first call (region, credentials, `maxAttempts`). See the note below on why retries default to one attempt |
 | `apiPath` | `"/api"` | Must match the callee's `apiPath` |
-| `apiVersion` | none | Sent as the envelope's `version`; a callee that has one of its own answers `versionExpired` on a mismatch |
+| `apiVersion` | none | Sent as the envelope's `version`; informational, the callee stamps its own on every answer |
+| `apiSignatures` | none | The callee's generated signature map (`callee.apiSignatures()`), so each call carries its endpoint's signature and the callee answers `versionExpired` to a stale one. See [APIs](./apis.md#signatures-when-a-client-must-update) |
 | `host` | `functionName` | The Host the callee sees as `ctx.host` |
 | `requestCompression` | `false` | Brotli the request payload. `true` is `{ minBytes: 4096, quality: 5 }` |
 | `maxResponsePayloadBytes` | `20_000_000` | Ceiling on what a compressed answer may restore to, the counterpart of the callee's `maxRequestPayloadBytes` |
@@ -300,7 +301,7 @@ The first nine are the same reasons, in the same order of precedence, that
 | `timeout` | `timeoutMs` elapsed and the invoke was given up on. An answer that arrives after that is reported here too, never as a success |
 | `server` | The callee answered 5xx, or with a body that is not a Lambder envelope. `response` carries the envelope when it sent one, which is how `crash` and `logList` arrive |
 | `validation` | 422: the callee rejected the input. `zodError` carries the issues |
-| `versionExpired` | The callee rejected `apiVersion` |
+| `versionExpired` | The callee answered `versionExpired`: this caller's signature for the endpoint is not the callee's |
 | `sessionExpired` | The carried session is missing or expired |
 | `notAuthorized` | The envelope's `notAuthorized` flag |
 | `errorMessage` | A structured refusal (`refuse()`, `LambderApiRefusal`); `errorMessage` carries it |
@@ -604,7 +605,7 @@ const event = LambderInvokeCaller.createEvent({ apiPath: "/api", apiName: "boot-
 ```
 
 It accepts the same fields a call does (`payload`, `host`, `apiVersion`,
-`guardInputs`, `idempotencyKey`, `clientIp`, `headers`, `session`,
+`signature`, `guardInputs`, `idempotencyKey`, `clientIp`, `headers`, `session`,
 `sessionTokenCookieKey`), defaulting `apiPath` to `"/api"` and `host` to
 `"lambder-invoke"`.
 

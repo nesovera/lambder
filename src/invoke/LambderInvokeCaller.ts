@@ -34,6 +34,7 @@ import {
     type LambderInvokeOutcome,
 } from "./LambderInvokeOutcome.js";
 import { DEFAULT_SESSION_TOKEN_COOKIE_KEY } from "../shared/wire/LambderSessionCookieNames.js";
+import { readApiSignature, type LambderApiSignatureMap } from "../shared/wire/LambderApiSignature.js";
 import type { LambdaClient, LambdaClientConfig } from "@aws-sdk/client-lambda";
 import type { LambderApiContractShape, LambderApiEnvelopeBody } from "../shared/wire/LambderApiContract.js";
 import { resolveApiOutcome, type LambderValidationError } from "../shared/wire/LambderApiOutcome.js";
@@ -130,8 +131,15 @@ type LambderInvokeCallerBaseOptions = {
     clientConfig?: LambdaClientConfig;
     /** Must match the callee's apiPath. Default: "/api". */
     apiPath?: string;
-    /** Sent as `version`; the callee answers versionExpired on a mismatch when it has one too. Default: none. */
+    /** Sent as `version`, informational: the callee stamps its own on every answer. Default: none. */
     apiVersion?: string;
+    /**
+     * The callee's signature map, generated from its instance
+     * (Lambder.apiSignatures()) when this caller was built. Sent per call as
+     * `signature`, so the callee answers versionExpired to a call built
+     * against another shape of the endpoint. Default: none, and no gate.
+     */
+    apiSignatures?: LambderApiSignatureMap;
     /** The Host the callee sees (ctx.host). Default: functionName. */
     host?: string;
     /**
@@ -188,6 +196,8 @@ export type LambderInvokeEventInit = {
     /** Default: "lambder-invoke". */
     host?: string;
     apiVersion?: string;
+    /** The caller's signature for the endpoint, out of the callee's map. */
+    signature?: string;
     guardInputs?: Record<string, unknown>;
     idempotencyKey?: string;
     clientIp?: string;
@@ -235,6 +245,7 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
     private readonly functionName: string;
     private readonly apiPath: string;
     private readonly apiVersion?: string;
+    private readonly apiSignatures?: LambderApiSignatureMap;
     private readonly host: string;
     private readonly requestCompression: LambderCompressionSettings | null;
     private readonly maxResponsePayloadBytes: number;
@@ -250,7 +261,7 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
 
     constructor(options: LambderInvokeCallerOptions<TContract, TProvidedGuards>){
         const {
-            functionName, client, clientConfig, apiPath, apiVersion, host,
+            functionName, client, clientConfig, apiPath, apiVersion, apiSignatures, host,
             requestCompression, maxResponsePayloadBytes, timeoutMs,
             onLogList, onFailure, sessionTokenCookieKey, transport, guardInputsProvider,
         } = options as LambderInvokeCallerBaseOptions & { guardInputsProvider?: (apiName: string) => unknown };
@@ -260,6 +271,7 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
         this.clientConfig = clientConfig;
         this.apiPath = apiPath ?? "/api";
         this.apiVersion = apiVersion;
+        this.apiSignatures = apiSignatures;
         this.host = host ?? functionName;
         // `?? false`: like the browser caller, off unless asked for.
         this.requestCompression = resolveCompressionOption(requestCompression ?? false, DEFAULT_INVOKE_REQUEST_COMPRESSION_SETTINGS);
@@ -292,6 +304,7 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
             body: buildEnvelopeJson({
                 apiName: init.apiName,
                 version: init.apiVersion,
+                signature: init.signature,
                 csrf: init.session?.csrf,
                 siteHost: host,
                 payloadJson: init.payload !== undefined ? JSON.stringify(init.payload) : undefined,
@@ -487,6 +500,10 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
         let event: APIGatewayProxyEventV2;
         let eventJson: string;
         try {
+            // The callee's signature for this endpoint, when this caller was
+            // built with the callee's map. A name the map lacks fails here,
+            // as a provider that threw would: the map predates the endpoint.
+            const signature = this.apiSignatures ? await readApiSignature(this.apiSignatures, apiName) : undefined;
             // Provider values underneath, per-call values on top.
             const provided = this.guardInputsProvider
                 ? await this.guardInputsProvider(apiName) as Record<string, unknown> | undefined
@@ -513,6 +530,7 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
                 body: buildEnvelopeJson({
                     apiName,
                     version: this.apiVersion,
+                    signature,
                     csrf: options.session?.csrf,
                     siteHost: this.host,
                     payloadJson: compressed ? undefined : payloadJson,

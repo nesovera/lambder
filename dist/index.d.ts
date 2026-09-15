@@ -25,6 +25,11 @@ export { LambderAnswerHeaders, getAnswerHeader, setAnswerHeader, addAnswerHeader
 export { createApiCallContext } from "./api/LambderApiCallContext.js";
 export type { LambderApiCallContext, LambderApiCallTrace } from "./api/LambderApiCallContext.js";
 export type { LambderApiDefinition } from "./api/LambderApiDefinition.js";
+export { apiSignatureOf, LambderApiSignatureDigests } from "./api/LambderApiSignature.js";
+export type { LambderApiSignatureSource } from "./api/LambderApiSignature.js";
+export { apiNameKeyOf, lookupApiSignature, readApiSignature, API_SIGNATURE_HEX_LENGTH } from "./shared/wire/LambderApiSignature.js";
+export type { LambderApiSignatureMap } from "./shared/wire/LambderApiSignature.js";
+export { RELOAD_LOOP_WINDOW_MS } from "./client/LambderReloadLoopBreaker.js";
 export { buildApiEnvelope, envelopeAnswer, refusalAnswer, validationAnswer, apiNotFoundAnswer, sessionExpiredAnswer, versionExpiredAnswer, invalidPayloadAnswer, crashAnswer, API_ANSWER_CONTENT_TYPE, } from "./api/LambderApiEnvelope.js";
 export type { LambderApiEnvelopeConfig, LambderValidationAnswerBody } from "./api/LambderApiEnvelope.js";
 export { LambderApiValidationRefusal, isLambderApiValidationRefusal } from "./api/LambderApiValidationRefusal.js";

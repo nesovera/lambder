@@ -192,8 +192,8 @@ describe('create(): option values checked at construction', () => {
         expect(() => new Lambder({ apiPath: '/api' })).not.toThrow();
     });
 
-    it('refuses an empty apiVersion', () => {
-        expect(() => new Lambder({ apiVersion: '' })).toThrow(/Lambder: apiVersion must not be empty/);
+    it('takes any apiVersion string as the envelope stamp, since it gates nothing', () => {
+        expect(() => new Lambder({ apiVersion: '' })).not.toThrow();
         expect(() => new Lambder({ apiVersion: '2' })).not.toThrow();
         expect(() => new Lambder({})).not.toThrow();
     });

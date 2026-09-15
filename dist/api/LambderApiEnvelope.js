@@ -165,7 +165,7 @@ export const apiNotFoundAnswer = (apiVersion, logList) => envelopeAnswer(buildAp
 }));
 /** A session API called without a live session: the protocol's sessionExpired flag, which the caller clears its cookies on. */
 export const sessionExpiredAnswer = (apiVersion, logList) => envelopeAnswer(buildApiEnvelope(apiVersion, null, { sessionExpired: true, logList }));
-/** The caller's version is behind the server's: the protocol's versionExpired flag, which the caller reloads on. */
+/** The caller was built against another shape of the endpoint (the signature gate), or the app judged it stale: the protocol's versionExpired flag, which the caller reloads on. */
 export const versionExpiredAnswer = (apiVersion) => envelopeAnswer(buildApiEnvelope(apiVersion, null, { versionExpired: true }));
 /** A compressed request payload that could not be restored: a 400 with the reason, never a crash. */
 export const invalidPayloadAnswer = (apiVersion, message) => envelopeAnswer(buildApiEnvelope(apiVersion, null, {

@@ -213,7 +213,7 @@ export const apiNotFoundAnswer = (apiVersion: string | null | undefined, logList
 export const sessionExpiredAnswer = (apiVersion: string | null | undefined, logList?: unknown[]): LambderApiAnswer =>
     envelopeAnswer(buildApiEnvelope(apiVersion, null, { sessionExpired: true, logList }));
 
-/** The caller's version is behind the server's: the protocol's versionExpired flag, which the caller reloads on. */
+/** The caller was built against another shape of the endpoint (the signature gate), or the app judged it stale: the protocol's versionExpired flag, which the caller reloads on. */
 export const versionExpiredAnswer = (apiVersion: string | null | undefined): LambderApiAnswer =>
     envelopeAnswer(buildApiEnvelope(apiVersion, null, { versionExpired: true }));
 

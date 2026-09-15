@@ -22,7 +22,7 @@ policy types; the curried creator is the canonical entry.
 | Option | Default | Description |
 | --- | --- | --- |
 | `apiPath` | `"/api"` | Path API calls are posted to; must start with `/` |
-| `apiVersion` | none | Version string clients must match; a mismatch answers `versionExpired`. Leave it out to run without the gate; `""` is refused |
+| `apiVersion` | none | Stamped on every API answer's envelope as `apiVersion`, so a client can tell which build answered. Informational: staleness is judged per endpoint by signatures, see [APIs](./apis.md#signatures-when-a-client-must-update) |
 | `files` | none | Where the app's files come from, for `servePublicFiles`, `serveIndexHtml`, `res.file` and `res.templateFile`. See [Frontend hosting](./frontend-hosting.md) |
 | `compression` | `true` | Automatic response compression. `true` is `{ minBytes: 860, encodings: ["br", "gzip"], quality: 5 }`; `false` disables it. See [Responses](./responses.md#compression) |
 | `etag` | `true` | Automatic ETag and `If-None-Match` 304 handling on GET/HEAD 200 responses |

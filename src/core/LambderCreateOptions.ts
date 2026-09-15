@@ -147,6 +147,12 @@ export type LambderCreateOptions<TSessionData = any> = {
      */
     files?: LambderFilesOption;
     apiPath?: string;
+    /**
+     * Stamped on every API answer's envelope as `apiVersion`, so a client can
+     * tell which build answered. Informational: whether a client is stale is
+     * decided per endpoint by the signature it sends (see
+     * Lambder.apiSignatures()), not by this string.
+     */
     apiVersion?: string;
     /**
      * Automatic compression for compressible responses. `true` (the default)
@@ -360,11 +366,6 @@ export const assertCreateOptions = (options: LambderCreateOptions<any>): void =>
     // apiPath: "api" made every API call a 404 and nothing said why.
     if(options.apiPath !== undefined && (options.apiPath === "" || !options.apiPath.startsWith("/"))){
         throw new Error(`Lambder: apiPath must be a path starting with "/", got ${JSON.stringify(options.apiPath)}.`);
-    }
-    // "" is the one string that turns the version gate off while looking like
-    // it was set; say so rather than accepting every version a client names.
-    if(options.apiVersion === ""){
-        throw new Error("Lambder: apiVersion must not be empty. Leave it out to run without the version gate.");
     }
     // 0 or a negative ceiling turned every response into the size guard's own 500.
     if(options.maxResponseBytes !== undefined) assertPositiveInteger(options.maxResponseBytes, "maxResponseBytes");
