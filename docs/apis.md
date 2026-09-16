@@ -181,6 +181,19 @@ writeFileSync("shared/generated/apiSignatures.generated.ts",   // importable by 
     + `export const apiSignatures: LambderApiSignatureMap = ${JSON.stringify(signatures, null, 4)};\n`);
 ```
 
+`lambder.apiSignatureEntries()` is the same signatures with the endpoint name
+each one came from, sorted the same way. The map carries no names on purpose,
+so a generator holding only the map can report that four signatures changed
+but not which endpoints; reading the entries, it can name them. It is a
+build-time view by construction, coming off the server instance that a
+generator imports and a client never does:
+
+```typescript
+for(const { name, signature } of await lambder.apiSignatureEntries()){
+    if(previous[await apiNameKeyOf(name)] !== signature) console.log(`  changed: ${name}`);
+}
+```
+
 The frontend passes the map to `LambderCaller` as `apiSignatures`, the server
 passes the same map to `create()` as `apiSignatures`, and every call then
 carries the signature of the endpoint it names. The server compares it with

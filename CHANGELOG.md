@@ -9,6 +9,19 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [7.2.1] - 2026-09-15
+
+### Added
+
+- **`lambder.apiSignatureEntries()`**: the same signatures `apiSignatures()`
+  returns, each with the endpoint name it was digested from, sorted by key as
+  the map is. The map carries no names, so a generator holding only the map
+  could report that four signatures changed but not which endpoints; reading
+  the entries it can name them. A build-time view by construction: it comes
+  off the server instance, which a generator imports and a client never does.
+  `apiSignatures()` is now this with the names dropped, so there is still one
+  computation. The `LambderApiSignatureEntry` type is exported from the root.
+
 ## [7.1.5] - 2026-09-15
 
 ### Added
@@ -24,7 +37,6 @@ one, so versions are not cross-linked to tag comparisons here.
   warning, so a mistaken floor cannot refuse the build's own clients.
   `compareDottedVersions` and `isDottedVersion` are exported from both
   entries.
-
 ### Changed
 
 - **`apiNameKeyOf` memoizes nothing.** It hashed each name it was asked about

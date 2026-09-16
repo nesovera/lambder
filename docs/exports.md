@@ -227,6 +227,7 @@ See [Responses](./responses.md#compression) and
 | `LambderCaller` | yes | The typed API caller |
 | `resolveApiOutcome` | yes | The one mapping from an HTTP answer to an outcome, shared by every caller |
 | `apiNameKeyOf`, `lookupApiSignature`, `readApiSignature`, `API_SIGNATURE_HEX_LENGTH` | yes | The generated signature map's keys, and how a caller reads its entry for an endpoint |
+| `LambderApiSignatureEntry` | no | One endpoint as `lambder.apiSignatureEntries()` reports it: name, key, signature |
 | `RELOAD_LOOP_WINDOW_MS` | yes | How long a repeated stale-signature refusal for the same endpoint and signature counts as a reload loop |
 | `compareDottedVersions`, `isDottedVersion` | yes | Dotted version strings compared as numbers, the way the server's version floor reads a caller's version |
 | `lambderFetchTransport` | yes | The default transport: one POST over fetch |
