@@ -9,6 +9,7 @@ import type LambderSessionController from "../session/LambderSessionController.j
 import { type LambderPublicFilesOptions } from "./LambderPublicFiles.js";
 import { type LambderIndexHtmlOptions } from "./LambderIndexHtml.js";
 import { LambderFiles } from "./LambderFiles.js";
+import { type LambderApiSignatureEntry } from "../api/LambderApiSignature.js";
 import { type LambderApiSignatureMap } from "../shared/wire/LambderApiSignature.js";
 import type { LambderApiIdempotencyOption } from "../shared/wire/LambderApiOptionValues.js";
 import type { LambderApiGuard, LambderGuardMetaMap, LambderGuardsOption, LambderGuardDataOf, LambderGuardInputsOf } from "../api/LambderApiGuards.js";
@@ -181,6 +182,18 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
      * itself. Keys are sorted, so the generated file diffs by endpoint.
      */
     apiSignatures(): Promise<LambderApiSignatureMap>;
+    /**
+     * The same signatures with the endpoint name each one was digested from,
+     * sorted by key as the map is. What apiSignatures() leaves out on purpose:
+     * the map a client ships lists no names, so a generator that only had the
+     * map could report that four signatures changed but not which endpoints.
+     * Reading this instead, it can name them.
+     *
+     * A build-time view by construction. It comes off the server instance,
+     * which a generator imports and a client never does, so nothing here
+     * reaches a bundle unless the generator writes it there.
+     */
+    apiSignatureEntries(): Promise<LambderApiSignatureEntry[]>;
     getResponseBuilder(ctx?: LambderRenderContext): LambderResponseBuilder<any>;
     private getResolver;
     getHandler(): LambderHandler;

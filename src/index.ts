@@ -40,6 +40,7 @@ export type { LambderApiCallContext, LambderApiCallTrace } from "./api/LambderAp
 export type { LambderApiDefinition } from "./api/LambderApiDefinition.js";
 // Per-endpoint signatures: what a client build ships with, digested from the server's own registrations.
 export { apiSignatureOf } from "./api/LambderApiSignature.js";
+export type { LambderApiSignatureEntry } from "./api/LambderApiSignature.js";
 export { apiNameKeyOf, lookupApiSignature, readApiSignature, API_SIGNATURE_HEX_LENGTH } from "./shared/wire/LambderApiSignature.js";
 export type { LambderApiSignatureMap } from "./shared/wire/LambderApiSignature.js";
 export { RELOAD_LOOP_WINDOW_MS } from "./client/LambderReloadLoopBreaker.js";

@@ -148,6 +148,19 @@ describe('The server and its map', () => {
         expect(JSON.stringify(map)).not.toContain('user.get');
     });
 
+    it('lists the same signatures with the name behind each key, so a generator can diff by endpoint', async () => {
+        const server = createServer();
+        const map = await server.apiSignatures();
+        const entries = await server.apiSignatureEntries();
+
+        // The names the map does not carry, which is the whole point of this.
+        expect(entries.map((entry) => entry.name).sort()).toEqual(['me', 'org.get', 'user.get']);
+        // Same data, same order: the map is these entries with the names dropped.
+        expect(Object.fromEntries(entries.map(({ key, signature }) => [key, signature]))).toEqual(map);
+        expect(entries.map((entry) => entry.key)).toEqual(Object.keys(map));
+        for(const entry of entries) expect(entry.key).toBe(await apiNameKeyOf(entry.name));
+    });
+
     it('runs a matching signature, refuses a stale one and an unknown signed name, and gates nothing that carries none', async () => {
         const map = await createServer().apiSignatures();
         const server = createServer(map);

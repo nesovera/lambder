@@ -25,7 +25,7 @@ import { LambderFiles } from "./LambderFiles.js";
 import { isLambderApiRefusal, type LambderApiRefusal } from "../shared/wire/LambderApiRefusal.js";
 import { LambderApiPipeline } from "../api/LambderApiPipeline.js";
 import type { LambderApiDefinition } from "../api/LambderApiDefinition.js";
-import { apiSignatureOf } from "../api/LambderApiSignature.js";
+import { apiSignatureOf, type LambderApiSignatureEntry } from "../api/LambderApiSignature.js";
 import { apiNameKeyOf, type LambderApiSignatureMap } from "../shared/wire/LambderApiSignature.js";
 import type { LambderApiMode } from "../shared/wire/LambderApiContract.js";
 import type {
@@ -508,10 +508,28 @@ export default class Lambder<
      * itself. Keys are sorted, so the generated file diffs by endpoint.
      */
     async apiSignatures(): Promise<LambderApiSignatureMap> {
-        const entries = await Promise.all([...this.apiDefinitions.values()].map(async (definition): Promise<[string, string]> =>
-            [await apiNameKeyOf(definition.name), await apiSignatureOf(definition, this.guards)]));
-        entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-        return Object.fromEntries(entries);
+        return Object.fromEntries((await this.apiSignatureEntries()).map(({ key, signature }) => [key, signature]));
+    }
+
+    /**
+     * The same signatures with the endpoint name each one was digested from,
+     * sorted by key as the map is. What apiSignatures() leaves out on purpose:
+     * the map a client ships lists no names, so a generator that only had the
+     * map could report that four signatures changed but not which endpoints.
+     * Reading this instead, it can name them.
+     *
+     * A build-time view by construction. It comes off the server instance,
+     * which a generator imports and a client never does, so nothing here
+     * reaches a bundle unless the generator writes it there.
+     */
+    async apiSignatureEntries(): Promise<LambderApiSignatureEntry[]> {
+        const entries = await Promise.all([...this.apiDefinitions.values()].map(async (definition): Promise<LambderApiSignatureEntry> => ({
+            name: definition.name,
+            key: await apiNameKeyOf(definition.name),
+            signature: await apiSignatureOf(definition, this.guards),
+        })));
+        entries.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+        return entries;
     }
 
     getResponseBuilder(ctx?: LambderRenderContext){

@@ -65,6 +65,20 @@ const ownGuard = (guards: Record<string, LambderApiGuard<any, any, any>> | undef
     guards !== undefined && Object.prototype.hasOwnProperty.call(guards, name) ? guards[name] : undefined;
 
 /**
+ * One endpoint as the generator sees it: the key its signature is stored
+ * under, the signature, and the name both were computed from. The name is
+ * what the shipped map deliberately does not carry, so this is the build-time
+ * view of the same data, and the only place a generated map can be diffed by
+ * endpoint rather than by opaque key.
+ */
+export type LambderApiSignatureEntry = {
+    name: string;
+    /** The map key: apiNameKeyOf(name). */
+    key: string;
+    signature: string;
+};
+
+/**
  * The digest of an endpoint's client-facing shape: its name and mode, its
  * input and output schemas as JSON Schema, every guard it declares with the
  * schema that guard validates (the guardInput the client sends separately,
