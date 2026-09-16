@@ -18,6 +18,7 @@ import { readApiEnvelope, restoreCompressedPayload, type LambderApiRequest } fro
 import { createApiCallContext, type LambderApiCallContext } from '../src/api/LambderApiCallContext.js';
 import { LambderApiPipeline } from '../src/api/LambderApiPipeline.js';
 import type { LambderApiDefinition } from '../src/api/LambderApiDefinition.js';
+import { apiNameKeyOf } from '../src/shared/wire/LambderApiSignature.js';
 import { LambderApiPolicyEngine } from '../src/api/LambderApiPolicyEngine.js';
 import { LambderApiValidationRefusal, isLambderApiValidationRefusal } from '../src/api/LambderApiValidationRefusal.js';
 import { LambderApiRefusal, refuse, LAMBDER_REFUSAL_CODES } from '../src/shared/wire/LambderApiRefusal.js';
@@ -242,22 +243,55 @@ describe('LambderApiPipeline', () => {
         expect(guardsRun).toEqual([]);
     });
 
+    it('refuses a version below the floor whatever the signature says, judges nothing that names no version, and refuses a floor it cannot honour', async () => {
+        const pipeline = new LambderApiPipeline({ apiVersion: '1.2.32', minApiVersion: '1.2.10', apiSignatures: { [await apiNameKeyOf('thing.do')]: 'sig' } });
+        const definition: LambderApiDefinition = { name: 'thing.do', mode: 'public' };
+        const below = await pipeline.run(request({ version: '1.2.9', signature: 'sig' }), createApiCallContext(), definition, okExec);
+        expect(JSON.parse(below.answer.body)).toEqual({ apiVersion: '1.2.32', payload: null, versionExpired: true });
+        // Numbers, not strings: "1.2.10" is above "1.2.9", and a fourth
+        // segment is above the same three.
+        for(const version of ['1.2.10', '1.2.32', '1.3.0', '1.2.10.1']){
+            const above = await pipeline.run(request({ version, signature: 'sig' }), createApiCallContext(), definition, okExec);
+            expect(JSON.parse(above.answer.body).payload).toEqual({ ran: true });
+        }
+        expect(await pipeline.prepare(request({ version: null, signature: 'sig' }))).toBeNull();
+        // The floor stands on its own, signature or not, and ahead of the name.
+        expect(JSON.parse((await pipeline.prepare(request({ version: '1.2.9' })))!.body).versionExpired).toBe(true);
+        expect(JSON.parse((await pipeline.prepare(request({ apiName: 'nope', version: '1.2.9' })))!.body).versionExpired).toBe(true);
+        expect(() => new LambderApiPipeline({ minApiVersion: 'v1' })).toThrow(/minApiVersion must be a dotted version/);
+        // A floor above the build's own version is taken as that version,
+        // said once: 1.1.0 reloads, 1.2.0 is served, whatever the floor said.
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        try {
+            const clamped = new LambderApiPipeline({ apiVersion: '1.2.0', minApiVersion: '1.5.0' });
+            expect(clamped.minApiVersion).toBe('1.2.0');
+            expect(warn).toHaveBeenCalledWith(expect.stringMatching(/minApiVersion 1\.5\.0 is above apiVersion 1\.2\.0; the floor is taken as 1\.2\.0/));
+            expect(JSON.parse((await clamped.prepare(request({ version: '1.1.0' })))!.body).versionExpired).toBe(true);
+            expect(await clamped.prepare(request({ version: '1.2.0' }))).toBeNull();
+        } finally {
+            warn.mockRestore();
+        }
+        // A stamp the floor cannot read would count as 0 and refuse every
+        // client of this build, so it is refused at creation instead.
+        expect(() => new LambderApiPipeline({ apiVersion: 'dev', minApiVersion: '1.2.10' })).toThrow(/apiVersion must be a dotted version/);
+        expect(() => new LambderApiPipeline({ apiVersion: 'dev' })).toThrow(/apiVersion must be a dotted version/);
+    });
+
     it('gates the signature first, then restores the payload, and refuses an unknown name with the call\'s own headers', async () => {
-        // A source that knows one signature per known endpoint, as the
-        // server's digests or the mock's map would.
-        const signatures = { expectedSignatureOf: async (apiName: string, definition: LambderApiDefinition | null) => definition ? `sig-of-${apiName}` : null };
-        const pipeline = new LambderApiPipeline({ apiVersion: '2', signatures });
+        // A map that knows one endpoint, as the generated file both sides
+        // carry would.
+        const pipeline = new LambderApiPipeline({ apiVersion: '2', apiSignatures: { [await apiNameKeyOf('thing.do')]: 'sig-of-thing.do' } });
         const definition: LambderApiDefinition = { name: 'thing.do', mode: 'public' };
         const stale = await pipeline.run(request({ signature: 'sig-of-an-older-shape' }), createApiCallContext(), definition, okExec);
         expect(JSON.parse(stale.answer.body)).toEqual({ apiVersion: '2', payload: null, versionExpired: true });
         const current = await pipeline.run(request({ signature: 'sig-of-thing.do' }), createApiCallContext(), definition, okExec);
         expect(JSON.parse(current.answer.body).payload).toEqual({ ran: true });
         // A request carrying no signature is never gated, and a signed request
-        // for a name the adapter does not know is a stale client, not a typo.
-        expect(await pipeline.prepare(request(), null)).toBeNull();
-        expect(JSON.parse((await pipeline.prepare(request({ signature: 'anything' }), null))!.body).versionExpired).toBe(true);
-        // Without a source every signature passes.
-        expect(await new LambderApiPipeline().prepare(request({ signature: 'anything' }), null)).toBeNull();
+        // for a name the map does not hold is a stale client, not a typo.
+        expect(await pipeline.prepare(request())).toBeNull();
+        expect(JSON.parse((await pipeline.prepare(request({ apiName: 'nope', signature: 'anything' })))!.body).versionExpired).toBe(true);
+        // Without a map every signature passes.
+        expect(await new LambderApiPipeline().prepare(request({ signature: 'anything' }))).toBeNull();
         expect(JSON.parse(pipeline.answerUnknownApi(request()).body).errorMessage.code).toBe(LAMBDER_REFUSAL_CODES.apiNotFound);
         // Both adapters run prepare() with the definition the name resolved
         // to, or null, so a signed stale client has already been answered by

@@ -22,7 +22,9 @@ policy types; the curried creator is the canonical entry.
 | Option | Default | Description |
 | --- | --- | --- |
 | `apiPath` | `"/api"` | Path API calls are posted to; must start with `/` |
-| `apiVersion` | none | Stamped on every API answer's envelope as `apiVersion`, so a client can tell which build answered. Informational: staleness is judged per endpoint by signatures, see [APIs](./apis.md#signatures-when-a-client-must-update) |
+| `apiVersion` | none | Stamped on every API answer's envelope as `apiVersion`, so a client can tell which build answered. Dotted numbers (`"1.2.10"`), since `minApiVersion` compares against it. Staleness itself is judged per endpoint by signatures, see [APIs](./apis.md#signatures-when-a-client-must-update) |
+| `minApiVersion` | none | The oldest client build still served: a call naming a lower `version` answers `versionExpired` whatever its signature says. Dotted numbers compared segment by segment; a floor above `apiVersion` is taken as `apiVersion` |
+| `apiSignatures` | none | The generated signature map (`lambder.apiSignatures()`), the same file the frontend ships with; enables the signature gate. See [APIs](./apis.md#signatures-when-a-client-must-update) |
 | `files` | none | Where the app's files come from, for `servePublicFiles`, `serveIndexHtml`, `res.file` and `res.templateFile`. See [Frontend hosting](./frontend-hosting.md) |
 | `compression` | `true` | Automatic response compression. `true` is `{ minBytes: 860, encodings: ["br", "gzip"], quality: 5 }`; `false` disables it. See [Responses](./responses.md#compression) |
 | `etag` | `true` | Automatic ETag and `If-None-Match` 304 handling on GET/HEAD 200 responses |

@@ -25,7 +25,7 @@ import { LambderFiles } from "./LambderFiles.js";
 import { isLambderApiRefusal, type LambderApiRefusal } from "../shared/wire/LambderApiRefusal.js";
 import { LambderApiPipeline } from "../api/LambderApiPipeline.js";
 import type { LambderApiDefinition } from "../api/LambderApiDefinition.js";
-import { LambderApiSignatureDigests } from "../api/LambderApiSignature.js";
+import { apiSignatureOf } from "../api/LambderApiSignature.js";
 import { apiNameKeyOf, type LambderApiSignatureMap } from "../shared/wire/LambderApiSignature.js";
 import type { LambderApiMode } from "../shared/wire/LambderApiContract.js";
 import type {
@@ -151,10 +151,10 @@ export default class Lambder<
     private actionList: ActionObject[] = [];
     /** The API core: the pipeline every API call runs through, shared in shape with the mock runtime. */
     private readonly pipeline: LambderApiPipeline<LambderRenderContext, TSessionData>;
-    /** Every registered API by name: what resolves a request's name to its definition ahead of the pipeline, and what apiSignatures() digests. */
+    /** Every registered API by name: the duplicate-name check, and what apiSignatures() digests. */
     private readonly apiDefinitions = new Map<string, LambderApiDefinition>();
-    /** The signature of each endpoint as this server serves it, digested once per endpoint on first use. */
-    private readonly signatureDigests: LambderApiSignatureDigests;
+    /** The guards map given at creation, kept for apiSignatures(): a guard's schema is part of the signature of every endpoint declaring it. */
+    private readonly guards: LambderCreateOptions<TSessionData>["guards"];
     private hookList: {
         "beforeRender": { priority: number, hookFn: LambderBeforeRenderHook }[],
         "afterRender": { priority: number, hookFn: LambderAfterRenderHook }[],
@@ -195,10 +195,11 @@ export default class Lambder<
         }
 
         const session = options.session;
-        this.signatureDigests = new LambderApiSignatureDigests(options.guards);
+        this.guards = options.guards;
         this.pipeline = new LambderApiPipeline<LambderRenderContext, TSessionData>({
             apiVersion: this.apiVersion,
-            signatures: this.signatureDigests,
+            minApiVersion: options.minApiVersion,
+            apiSignatures: options.apiSignatures,
             maxRequestPayloadBytes: options.maxRequestPayloadBytes,
             // The app's own validation handler is read at call time, since
             // setApiInputValidationErrorHandler runs after creation.
@@ -498,15 +499,17 @@ export default class Lambder<
 
     /**
      * Every registered endpoint's signature, keyed by its hashed name: the
-     * LambderApiSignatureMap a client build ships with. A generator imports
-     * the finished instance, awaits this, and writes the result to a file the
-     * frontend passes to LambderCaller as apiSignatures; at request time the
-     * server compares each call's signature against these same digests. Keys
-     * are sorted, so the generated file diffs by endpoint.
+     * LambderApiSignatureMap both sides ship with. A generator imports the
+     * finished instance, awaits this, and writes the result to a file the
+     * frontend passes to LambderCaller as apiSignatures and the server passes
+     * to create() as apiSignatures; at request time the pipeline compares a
+     * call's signature with the server's copy of the same map. This is the
+     * one place a digest is computed, so it has nothing to agree with but
+     * itself. Keys are sorted, so the generated file diffs by endpoint.
      */
     async apiSignatures(): Promise<LambderApiSignatureMap> {
         const entries = await Promise.all([...this.apiDefinitions.values()].map(async (definition): Promise<[string, string]> =>
-            [await apiNameKeyOf(definition.name), await this.signatureDigests.signatureOf(definition)]));
+            [await apiNameKeyOf(definition.name), await apiSignatureOf(definition, this.guards)]));
         entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
         return Object.fromEntries(entries);
     }
@@ -633,9 +636,8 @@ export default class Lambder<
             // The protocol's own pre-pass, run here rather than left to the
             // pipeline so that hooks and route matching see a plain payload,
             // and so a stale client is answered before any of them, whether or
-            // not the name it asked for exists: the gate is handed the
-            // definition the name resolves to, or null.
-            const prepared = await this.pipeline.prepare(ctx.api, this.apiDefinitions.get(ctx.api.apiName) ?? null);
+            // not the name it asked for exists.
+            const prepared = await this.pipeline.prepare(ctx.api);
             if(prepared) return responseFromAnswer(prepared);
             // ctx.post is the raw body view; it shows the restored payload and
             // none of the wire fields, so nothing reading it sees the format.

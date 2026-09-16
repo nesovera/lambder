@@ -27,21 +27,22 @@ export const API_SIGNATURE_HEX_LENGTH = 16;
 /** Domain-separated, so a name's key can never equal a signature computed over a description that happens to read the same. */
 const API_NAME_KEY_PREFIX = "lambder-api-name:";
 
-/** Memoized per name: a caller hashes each endpoint it calls once per process. */
-const nameKeys = new Map<string, Promise<string>>();
-
-/** The key an endpoint's signature is stored under: SHA-256 over the prefixed name, cut to API_SIGNATURE_HEX_LENGTH hex characters. */
-export const apiNameKeyOf = (apiName: string): Promise<string> => {
-    let pending = nameKeys.get(apiName);
-    if(!pending){
-        pending = sha256HexOf(API_NAME_KEY_PREFIX + apiName).then((hex) => hex.slice(0, API_SIGNATURE_HEX_LENGTH));
-        nameKeys.set(apiName, pending);
-        // A failed digest (no WebCrypto) is not kept, so a later call in a
-        // context that has it succeeds instead of replaying the rejection.
-        pending.catch(() => nameKeys.delete(apiName));
-    }
-    return pending;
-};
+/**
+ * The key an endpoint's signature is stored under: SHA-256 over the prefixed
+ * name, cut to API_SIGNATURE_HEX_LENGTH hex characters. Async because
+ * WebCrypto's digest is, and it is the only SHA-256 a browser has.
+ *
+ * Computed on the spot, every time, and nothing is kept. The digest that
+ * actually describes an endpoint is the generator's, computed once at build
+ * time; what is left here is one hash of a short name against a map already
+ * in memory, which is nothing beside the request it belongs to. A cache of
+ * it would have to be keyed by name, and on the server the name comes off
+ * the wire before anything has checked that it is an endpoint at all, so it
+ * would grow by an entry for every name a request cared to invent and never
+ * shrink.
+ */
+export const apiNameKeyOf = async (apiName: string): Promise<string> =>
+    (await sha256HexOf(API_NAME_KEY_PREFIX + apiName)).slice(0, API_SIGNATURE_HEX_LENGTH);
 
 /** The map's signature for one endpoint, or null when the map holds none for it. */
 export const lookupApiSignature = async (signatures: LambderApiSignatureMap, apiName: string): Promise<string | null> => {

@@ -19,7 +19,7 @@ const lambder = initLambder<SessionData>().create({
 ## Request flow
 
 ```
-signature gate → payload restore
+version floor → signature gate → payload restore
   → rate limits keyed on the request alone (per: "ip")
   → session (session APIs)
   → idempotency replay lookup

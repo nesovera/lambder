@@ -62,7 +62,8 @@ cannot run, so the mock would answer 200 where the server answers
 | Option | Default | Description |
 | --- | --- | --- |
 | `apiVersion` | none | Stamped on every answer's envelope, as the server's option is |
-| `apiSignatures` | none | The generated signature map the caller carries. With it, a call whose signature is not the map's entry for its endpoint answers `versionExpired` as on the server; without it every signature passes, since the runtime holds no server schema to digest |
+| `minApiVersion` | none | The version floor, as on the server: a call naming a lower `version` answers `versionExpired` whatever its signature says |
+| `apiSignatures` | none | The generated signature map, as the server's option is: a call whose signature is not the map's entry for its endpoint answers `versionExpired`; without it every signature passes |
 | `latency` | `0` | Milliseconds, a `{ min, max }` range, or `(apiName) => number` |
 | `sessions` | off | `true`, or `{ store?, sessionSalt?, ttlSeconds?, crypto?, dataRefresh?, enableSlidingExpiration?, slidingWriteIntervalSeconds?, tokenCookieKey?, csrfCookieKey?, cookieOptions? }` |
 | `rateLimits` | off | `{ policies, limiter?, failOpen? }`: the same policies the server declares, over `LambderMemoryRateLimiter` unless a limiter is given. `failOpen: false` refuses a call whose limiter threw instead of letting it through |

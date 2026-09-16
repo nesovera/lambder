@@ -1,6 +1,5 @@
 import type { z } from "zod";
 import type { LambderApiContractShape, LambderApiMode } from "../shared/wire/LambderApiContract.js";
-import { lookupApiSignature } from "../shared/wire/LambderApiSignature.js";
 import { LambderApiPipeline } from "../api/LambderApiPipeline.js";
 import { readApiEnvelope, type LambderApiRequest, type LambderApiRequestInfo, cookieValuesByName, lowercaseHeaderNames } from "../api/LambderApiRequest.js";
 import { createApiCallContext, type LambderApiCallTrace } from "../api/LambderApiCallContext.js";
@@ -170,13 +169,10 @@ export class LambderMockApp<
         const memoryIdempotency = idempotencyOptions && !idempotencyOptions.store ? new LambderMemoryIdempotencyStore() : null;
         this.idempotencyStore = memoryIdempotency;
 
-        // The generated map stands in for the server's schemas: the runtime
-        // cannot digest what it does not hold, so it answers with the map's
-        // entry for the name and the pipeline compares, as on the server.
-        const apiSignatures = options.apiSignatures;
         this.pipeline = new LambderApiPipeline<LambderMockCallContext<S>, S>({
             apiVersion: this.apiVersion,
-            signatures: apiSignatures ? { expectedSignatureOf: (apiName) => lookupApiSignature(apiSignatures, apiName) } : undefined,
+            minApiVersion: options.minApiVersion,
+            apiSignatures: options.apiSignatures,
             maxRequestPayloadBytes: options.maxRequestPayloadBytes,
             sessions: sessionOptions
                 ? {
@@ -696,18 +692,16 @@ export class LambderMockApp<
         let outcome: LambderMockOutcome | undefined;
         let error: Error | undefined;
         try {
-            // The protocol's pre-pass, run ahead of dispatch with the
-            // definition the name resolved to (null for a name nothing
-            // registered), which is where the server runs it. Two things
-            // depended on it: an unknown name reached the notFound refusal
-            // without the signature gate or the payload restore, so a stale
-            // client or a malformed compressed payload was answered
-            // differently here than on the server; and the request event
-            // carried the wire fields instead of the payload, so a dev panel
-            // watching calls in flight showed nothing for exactly the
-            // compressed calls someone opens a panel for. run() calls prepare
-            // again, which is safe by construction.
-            const prepared = await this.pipeline.prepare(request, registered?.definition ?? null);
+            // The protocol's pre-pass, run before the name is resolved, which
+            // is where the server runs it. Two things depended on it: an
+            // unknown name reached the notFound refusal without the signature
+            // gate or the payload restore, so a stale client or a malformed
+            // compressed payload was answered differently here than on the
+            // server; and the request event carried the wire fields instead of
+            // the payload, so a dev panel watching calls in flight showed
+            // nothing for exactly the compressed calls someone opens a panel
+            // for. run() calls prepare again, which is safe by construction.
+            const prepared = await this.pipeline.prepare(request);
             this.emit(this.requestEvent(id, request, mode, startedAt));
 
             await this.failures.wait(this.failures.latencyFor(request.apiName), request.signal);

@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import type { LambderApiSignatureMap } from "../shared/wire/LambderApiSignature.js";
 
 import type { Context, APIGatewayProxyHandler, APIGatewayProxyHandlerV2 } from "aws-lambda";
 import type LambderResolver from "./LambderResolver.js";
@@ -149,11 +150,33 @@ export type LambderCreateOptions<TSessionData = any> = {
     apiPath?: string;
     /**
      * Stamped on every API answer's envelope as `apiVersion`, so a client can
-     * tell which build answered. Informational: whether a client is stale is
-     * decided per endpoint by the signature it sends (see
-     * Lambder.apiSignatures()), not by this string.
+     * tell which build answered. Whether a client is stale is decided per
+     * endpoint by the signature it sends (see Lambder.apiSignatures()), not
+     * by this string; `minApiVersion` is the one thing that reads it. Dotted
+     * numbers ("1.2.10"), since that is how the floor compares it, so a
+     * commit sha or a build date is refused rather than read as zero.
      */
     apiVersion?: string;
+    /**
+     * The oldest client build still served: a call naming a `version` below
+     * it answers `versionExpired` whatever its signature says. The lever for
+     * a change the signatures cannot see (a security fix, a field whose
+     * meaning changed under the same shape). Dotted numbers ("1.2.10"),
+     * compared segment by segment; a call naming no version is not judged.
+     * A floor above `apiVersion` is taken as `apiVersion`, with a warning,
+     * so a mistaken floor cannot refuse this build's own clients. Default:
+     * none.
+     */
+    minApiVersion?: string;
+    /**
+     * The generated signature map (Lambder.apiSignatures()), the same file
+     * the frontend ships with. Enables the signature gate: a call carrying a
+     * signature that is not this map's entry for its endpoint answers
+     * `versionExpired`. Generated once, at build time, and handed to both
+     * sides, so nothing is digested at request time and the two sides cannot
+     * disagree on a digest. Default: none, and no gate.
+     */
+    apiSignatures?: LambderApiSignatureMap;
     /**
      * Automatic compression for compressible responses. `true` (the default)
      * is `{ minBytes: 860, encodings: ["br", "gzip"], quality: 5 }`; `false`

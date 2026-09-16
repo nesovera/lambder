@@ -9,6 +9,58 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [7.1.5] - 2026-09-15
+
+### Added
+
+- **`minApiVersion`**, on `create()` and on the mock runtime: a floor under
+  the signature gate. A call naming a `version` below it answers
+  `versionExpired` whatever its signature says, which is the lever for a
+  change the digest cannot see (a security fix, a field whose meaning changed
+  under the same shape). Versions compare as dotted numbers, so `1.2.10` is
+  above `1.2.9`; a call naming no version is not judged, as one carrying no
+  signature is not gated. Creation refuses a floor that is not a dotted
+  version; a floor above `apiVersion` is taken as `apiVersion`, with a
+  warning, so a mistaken floor cannot refuse the build's own clients.
+  `compareDottedVersions` and `isDottedVersion` are exported from both
+  entries.
+
+### Changed
+
+- **`apiNameKeyOf` memoizes nothing.** It hashed each name it was asked about
+  into a module-level map, kept for the life of the process. On the server
+  that name comes off the wire, in the pre-pass that runs before anything has
+  checked that it is an endpoint at all and before any rate limit, so a
+  request naming anything grew the map by an entry, and one naming a
+  megabyte's worth grew it by a megabyte. Nothing is kept now: the digest the
+  gate rests on is the generator's, computed once at build time, and what is
+  left per call is one hash of a short name against a map already in memory.
+- **`apiVersion` must be a dotted version** (`"1.2.10"`), on `create()` and on
+  the mock runtime, where any string was taken before. `minApiVersion` reads
+  it as numbers, and a stamp the comparison cannot read (`"dev"`, a commit
+  sha, a build date) counted as zero, so setting a floor answered
+  `versionExpired` to every client of the build that set it. The clamp that
+  exists to stop exactly that could not see the case. Creation refuses it
+  instead, whether or not a floor is set today.
+- **The server reads the generated map too.** `create()` takes
+  `apiSignatures`, the same file the frontend ships with, and the pipeline
+  compares a call's signature with the map's entry; nothing is digested at
+  request time any more. The one computation is the generator's, so a schema
+  digested differently on two builds costs its clients one reload per deploy
+  and can no longer leave an endpoint refused for every caller.
+  `LambderApiSignatureDigests` and the `LambderApiSignatureSource` type are
+  gone, and `LambderApiPipeline.prepare(request)` takes no definition. A
+  server given no map gates nothing, as the mock runtime does.
+- **The signature digest hashes shape, not values.** The `default` keyword
+  zod emits is dropped before hashing: a default's value is server
+  behaviour, and for a function default (`.default(() => new Date())`,
+  `.prefault`, `.catch`) zod wrote whatever the function returned at
+  conversion, so the endpoint digested differently on every computation and
+  the generated map could never match the server. Whether the field may be
+  omitted still counts, through `required`, which is now sorted as well so
+  that reordering fields changes nothing. Endpoints with a defaulted field
+  get a new signature once.
+
 ## [7.1.1] - 2026-09-15
 
 The version gate is replaced by a signature gate: whether a client is stale is

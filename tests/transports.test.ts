@@ -7,12 +7,12 @@
  */
 
 import { testPublicFiles } from './helpers.js';
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeAll } from 'vitest';
 import { z } from 'zod';
 import { initLambder } from '../src/core/Lambder.js';
 import LambderCaller from '../src/client/LambderCaller.js';
 import LambderInvokeCaller from '../src/invoke/LambderInvokeCaller.js';
-import { apiNameKeyOf } from '../src/shared/wire/LambderApiSignature.js';
+import { apiNameKeyOf, type LambderApiSignatureMap } from '../src/shared/wire/LambderApiSignature.js';
 import { lambderHandlerTransport } from '../src/invoke/lambderHandlerTransport.js';
 import { lambderFetchTransport } from '../src/client/lambderFetchTransport.js';
 import type { LambderApiTransport, LambderApiTransportRequest } from '../src/shared/transport/LambderApiTransport.js';
@@ -25,11 +25,16 @@ import { lambderMockMswHandler } from '../src/mock/lambderMockMswHandler.js';
 
 type SessionData = { userId: string };
 
+/** The server's own map, generated once and handed to every instance, as a build hands its file to the deployed server. */
+const serverSignatures: LambderApiSignatureMap = {};
+beforeAll(async () => { Object.assign(serverSignatures, await createServer().apiSignatures()); });
+
 const createServer = () => {
     const app = initLambder<SessionData>().create({
         files: testPublicFiles(),
         apiPath: '/api',
         apiVersion: '1',
+        apiSignatures: serverSignatures,
         session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
     })
         .addApi('echo', { input: z.object({ text: z.string() }), output: z.object({ text: z.string(), ip: z.string(), host: z.string() }) },

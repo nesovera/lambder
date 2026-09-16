@@ -69,10 +69,10 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
     private actionList;
     /** The API core: the pipeline every API call runs through, shared in shape with the mock runtime. */
     private readonly pipeline;
-    /** Every registered API by name: what resolves a request's name to its definition ahead of the pipeline, and what apiSignatures() digests. */
+    /** Every registered API by name: the duplicate-name check, and what apiSignatures() digests. */
     private readonly apiDefinitions;
-    /** The signature of each endpoint as this server serves it, digested once per endpoint on first use. */
-    private readonly signatureDigests;
+    /** The guards map given at creation, kept for apiSignatures(): a guard's schema is part of the signature of every endpoint declaring it. */
+    private readonly guards;
     private hookList;
     private createdHooks;
     private initPromise;
@@ -172,11 +172,13 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
     getSessionManager(): LambderSessionManager<TSessionData>;
     /**
      * Every registered endpoint's signature, keyed by its hashed name: the
-     * LambderApiSignatureMap a client build ships with. A generator imports
-     * the finished instance, awaits this, and writes the result to a file the
-     * frontend passes to LambderCaller as apiSignatures; at request time the
-     * server compares each call's signature against these same digests. Keys
-     * are sorted, so the generated file diffs by endpoint.
+     * LambderApiSignatureMap both sides ship with. A generator imports the
+     * finished instance, awaits this, and writes the result to a file the
+     * frontend passes to LambderCaller as apiSignatures and the server passes
+     * to create() as apiSignatures; at request time the pipeline compares a
+     * call's signature with the server's copy of the same map. This is the
+     * one place a digest is computed, so it has nothing to agree with but
+     * itself. Keys are sorted, so the generated file diffs by endpoint.
      */
     apiSignatures(): Promise<LambderApiSignatureMap>;
     getResponseBuilder(ctx?: LambderRenderContext): LambderResponseBuilder<any>;

@@ -4,7 +4,7 @@ import type { LambderApiAnswer } from "./LambderApiAnswer.js";
 import type { LambderApiCallContext } from "./LambderApiCallContext.js";
 import type { LambderApiCallTrace } from "./LambderApiCallContext.js";
 import type { LambderApiDefinition } from "./LambderApiDefinition.js";
-import type { LambderApiSignatureSource } from "./LambderApiSignature.js";
+import { type LambderApiSignatureMap } from "../shared/wire/LambderApiSignature.js";
 import type { LambderApiGuard } from "./LambderApiGuards.js";
 import type { LambderApiRateLimitPolicyConfig, LambderApiRateLimitsConfig } from "./LambderApiRateLimits.js";
 import type { LambderApiIdempotencyConfig } from "./LambderApiIdempotency.js";
@@ -32,12 +32,21 @@ export type LambderApiPipelineOptions<TCtx extends LambderApiCallContext<TSessio
     /** Stamped on every answer's envelope as apiVersion, so a client can tell which build answered; null when the app set none. */
     apiVersion?: string | null;
     /**
-     * Enables the signature gate: a request carrying a signature that is not
-     * the one this source expects for its endpoint answers versionExpired.
-     * Without a source every signature passes, which is what the mock runtime
-     * does unless it is given the generated map.
+     * The floor under the signature gate: a request naming a `version` below
+     * it answers versionExpired whatever its signature says. Dotted numbers
+     * ("1.2.10"), compared segment by segment. A floor above apiVersion is
+     * taken as apiVersion, so a mistaken floor cannot refuse the build's own
+     * clients.
      */
-    signatures?: LambderApiSignatureSource;
+    minApiVersion?: string | null;
+    /**
+     * Enables the signature gate: the generated map (Lambder.apiSignatures(),
+     * the same file the client ships with). A request carrying a signature
+     * that is not the map's entry for its endpoint answers versionExpired,
+     * and so does one for an endpoint the map does not hold: that client was
+     * built against another contract. Without a map every signature passes.
+     */
+    apiSignatures?: LambderApiSignatureMap;
     /** Ceiling on what a compressed request payload may restore to. Default: 20,000,000. */
     maxRequestPayloadBytes?: number;
     onInvalidInput?: LambderApiInputRefusal<TCtx>;
@@ -60,7 +69,7 @@ export type LambderApiExec<TCtx> = (ctx: TCtx) => Promise<LambderApiAnswer>;
  * are adapters over this class; neither reimplements a step of it.
  *
  * ```
- * signature gate → restore payload → rate limits that need no session
+ * version floor → signature gate → restore payload → rate limits that need no session
  * → session (session mode) → idempotency replay → the remaining rate limits
  * → guards → input validation → exec, inside the idempotency claim
  * → drain response headers → answer
@@ -79,11 +88,12 @@ export type LambderApiExec<TCtx> = (ctx: TCtx) => Promise<LambderApiAnswer>;
  */
 export declare class LambderApiPipeline<TCtx extends LambderApiCallContext<TSessionData>, TSessionData = any> {
     readonly apiVersion: string | null;
+    readonly minApiVersion: string | null;
     private readonly policies;
     private readonly maxRequestPayloadBytes;
     private readonly onInvalidInput;
     private readonly sessions;
-    private readonly signatures;
+    private readonly apiSignatures;
     constructor(options?: LambderApiPipelineOptions<TCtx, TSessionData>);
     /** True when a session manager was configured. */
     get hasSessions(): boolean;
@@ -103,23 +113,27 @@ export declare class LambderApiPipeline<TCtx extends LambderApiCallContext<TSess
      * The answer for a request naming no registered API: the apiNotFound
      * refusal, carrying whatever the call already wrote (a CORS header, a
      * cookie eviction). No signature gate here: both adapters run prepare()
-     * on the way in, with the definition the name resolved to or null, so a
-     * signed request for an unknown name (a client built against a contract
-     * that had it) has already been answered versionExpired by the time
-     * anything asks for an unknown name.
+     * on the way in, so a signed request for a name the map does not hold (a
+     * client built against a contract that had it) has already been answered
+     * versionExpired by the time anything asks for an unknown name.
      */
     answerUnknownApi(request: LambderApiRequest, ctx?: TCtx): LambderApiAnswer;
     /**
-     * The steps that come before anything may read the request: the
-     * signature gate, then the compressed-payload restore that every later
-     * reader (a rate-limit key slice, a guard, the input schema) depends on
-     * having happened.
+     * The steps that come before anything may read the request: the version
+     * floor, the signature gate, then the compressed-payload restore that
+     * every later reader (a rate-limit key slice, a guard, the input schema)
+     * depends on having happened.
      *
-     * The gate compares the signature the request carries with the one the
-     * source expects for the endpoint the name resolved to (`definition`,
-     * null for a name the adapter does not know). A match runs; anything
-     * else is a client built against another shape of this endpoint, or
-     * against an endpoint that no longer exists, and is answered
+     * The floor answers versionExpired to a request naming a version below
+     * minApiVersion whatever its signature says: the lever for a change the
+     * digest cannot see (a security fix, a field whose meaning changed under
+     * the same shape). A request naming no version is not judged by it, as
+     * one carrying no signature is not gated.
+     *
+     * The gate compares the signature the request carries with the map's
+     * entry for the endpoint it names. A match runs; anything else, another
+     * entry or none, is a client built against another shape of this
+     * endpoint or against an endpoint that no longer exists, and is answered
      * versionExpired. A request carrying no signature is never gated.
      *
      * Public and named because the server runs them earlier than run() does,
@@ -127,13 +141,13 @@ export declare class LambderApiPipeline<TCtx extends LambderApiCallContext<TSess
      * is answered before any of them, whether or not the name it asked for
      * exists. run() calls it too, so an adapter that has no such step still
      * gets the whole protocol. Calling it twice is safe by construction: the
-     * gate compares against a memoized digest and the restore has already
-     * removed the wire fields it reads.
+     * gates are comparisons and the restore has already removed the wire
+     * fields it reads.
      *
      * Returns the answer that ends the call, or null when the request is
      * ready to dispatch.
      */
-    prepare(request: LambderApiRequest, definition: LambderApiDefinition | null): Promise<LambderApiAnswer | null>;
+    prepare(request: LambderApiRequest): Promise<LambderApiAnswer | null>;
     /**
      * One call, one answer. Refusals are rendered; crashes propagate.
      *

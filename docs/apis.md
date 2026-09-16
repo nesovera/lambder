@@ -119,7 +119,7 @@ by hand; see
 ## Request flow per API
 
 ```
-signature gate → payload restore
+version floor → signature gate → payload restore
   → rate limits keyed on the request alone (per: "ip")
   → session (session APIs)
   → idempotency replay lookup
@@ -148,14 +148,26 @@ declares with the schema that guard validates (a `guardInput` the client
 sends, or an `apiInput` slice of the payload), and whether the endpoint takes
 an idempotency key. Rate limits, guard parameters and the handler are not
 part of it, because changing them changes nothing for a client. The schemas
-are digested exactly as zod emits them, descriptions included; what JSON
-Schema cannot express (a transform's output, a custom check) digests as `{}`.
+are digested as zod emits them, descriptions included, with two edits: the
+`default` keyword is dropped, because a default's value is server behaviour
+rather than shape and a function default would write a fresh clock reading or
+random value on every conversion (whether the field may be omitted stays,
+through `required`); and `required` lists are sorted, so reordering fields
+changes nothing. What JSON Schema cannot express (a transform's output, a
+custom check) digests as `{}`.
+
+One rule follows for the schemas themselves: build them from static values. A
+schema that reads the clock, a random source or the environment when it is
+constructed (`z.number().max(Date.now())`, an enum from a directory listing)
+digests differently on every build, so that endpoint's clients reload on every
+deploy whether or not it changed. Running the generator twice, in two
+processes, and comparing the files catches that before a deploy.
 
 `lambder.apiSignatures()` returns every registered endpoint's signature,
 keyed by the endpoint's hashed name, as a `LambderApiSignatureMap`. A
 generator imports the finished instance, awaits it, and writes the object to
-a file the frontend ships with its build. Run it before every frontend build,
-not by hand:
+a file that both the frontend and the server ship with. Run it before every
+build, not by hand:
 
 ```typescript
 // tools/generate-api-signatures.ts
@@ -163,25 +175,45 @@ import { writeFileSync } from "node:fs";
 import { lambder } from "../backend/index.js";   // the instance with every API registered
 
 const signatures = await lambder.apiSignatures();
-writeFileSync("frontend/src/generated/apiSignatures.generated.ts",
+writeFileSync("shared/generated/apiSignatures.generated.ts",   // importable by the frontend and the server
     "// Generated from the server's registrations by tools/generate-api-signatures.ts. Do not edit.\n"
     + "import type { LambderApiSignatureMap } from \"lambder/client\";\n"
     + `export const apiSignatures: LambderApiSignatureMap = ${JSON.stringify(signatures, null, 4)};\n`);
 ```
 
-The frontend passes the map to `LambderCaller` as `apiSignatures`, and every
-call then carries the signature of the endpoint it names. The server compares
-it with the digest of what it serves now. A match runs. A mismatch answers the
-`versionExpired` envelope, which reaches the caller's `versionExpiredHandler`
-(usually a reload). A signed call for a name the server no longer has answers
+The frontend passes the map to `LambderCaller` as `apiSignatures`, the server
+passes the same map to `create()` as `apiSignatures`, and every call then
+carries the signature of the endpoint it names. The server compares it with
+its own copy of the map. A match runs. A mismatch answers the `versionExpired`
+envelope, which reaches the caller's `versionExpiredHandler` (usually a
+reload). A signed call for a name the map does not hold answers
 `versionExpired` as well, since the client was built against a contract that
 had it. A call carrying no signature is never gated, so a script, a test or a
 client built without the map behaves as before.
 
+Both sides read the one file on purpose. Nothing is digested at request time,
+so the two sides cannot disagree on a digest: the only computation is the
+generator's, and a schema it happens to digest differently on two builds costs
+its clients a reload, never a refused endpoint.
+
 What this buys is that a deploy forces a reload only on the clients that call
 an endpoint whose shape actually changed; an open tab whose endpoints are
-unchanged keeps working. `apiVersion` gates nothing any more: it is stamped on
-every answer's envelope so a client can tell which build answered.
+unchanged keeps working. `apiVersion` gates nothing on its own any more: it is
+stamped on every answer's envelope so a client can tell which build answered.
+
+The one version check left is `minApiVersion`, a floor under the gate: a
+client naming a version below it is answered `versionExpired` whatever its
+signatures say. That is the lever for a change the digest cannot see, a
+security fix or a field whose meaning changed under the same shape. Set it to
+the oldest build you are still willing to serve. Versions compare as dotted
+numbers, so `1.2.10` is above `1.2.9`, and both `apiVersion` and
+`minApiVersion` have to be written that way: a stamp the comparison cannot
+read (`"dev"`, a commit sha) would count as zero and answer `versionExpired`
+to every client of the build that set it, so it is refused at creation
+instead. A floor above `apiVersion` is taken as `apiVersion`, with a warning,
+so a mistaken floor cannot refuse the build's own clients either: with
+`apiVersion: "1.2.0"` and `minApiVersion: "1.5.0"`, a client at `1.1.0`
+reloads and one at `1.2.0` is served.
 
 A frontend shipped with a stale map would answer `versionExpired` on a changed
 endpoint, reload, and get the same bundle back. `LambderCaller` breaks that
