@@ -102,13 +102,9 @@ type LambderMockGuardShapes<S, G> = {
 export type LambderMockAppOptions<C, S, G, P extends LambderMockRateLimitPolicies<S> = LambderMockRateLimitPolicies<S>, I extends boolean | LambderMockIdempotencyOptions<S> = boolean | LambderMockIdempotencyOptions<S>> = LambderMockGuardsOption<C, S, G> & {
     /** Stamped on every answer's envelope as apiVersion, as the server's option is. */
     apiVersion?: string;
-    /**
-     * The generated signature map the caller carries, so the runtime refuses a
-     * stale signature exactly as the server would: a call whose signature is
-     * not the map's entry for its endpoint answers versionExpired. Without it
-     * every signature passes, since the runtime holds no server schema to
-     * digest.
-     */
+    /** The version floor, as on the server: a call naming a lower `version` answers versionExpired whatever its signature says. */
+    minApiVersion?: string;
+    /** The generated signature map, as the server's option is: a call whose signature is not the map's entry for its endpoint answers versionExpired. Without it every signature passes. */
     apiSignatures?: LambderApiSignatureMap;
     /** Artificial latency per call; off by default. */
     latency?: LambderMockLatency;

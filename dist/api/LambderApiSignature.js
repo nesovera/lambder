@@ -2,6 +2,13 @@ import { z } from "zod";
 import { toGuardEntries } from "./LambderApiGuards.js";
 import { API_SIGNATURE_HEX_LENGTH } from "../shared/wire/LambderApiSignature.js";
 import { sha256HexOf } from "../shared/util/LambderTextDigest.js";
+/*
+ * The digest of an endpoint's client-facing shape, computed once, by the
+ * generator, through Lambder.apiSignatures(). Nothing digests at request
+ * time: the server and the client both carry the generated map and the
+ * pipeline compares entries, so the one computation has nothing to agree
+ * with but itself. See LambderApiSignatureMap.
+ */
 /**
  * JSON with object keys sorted at every level, so two descriptions of the
  * same shape hash the same whatever order they were built in. Arrays keep
@@ -23,12 +30,33 @@ const sortKeys = (value) => {
     return sorted;
 };
 /**
- * A schema as JSON Schema, exactly as zod emits it. A type JSON Schema
- * cannot express (a transform's output, a custom check) becomes `{}` rather
- * than throwing, because a digest has to exist for every endpoint; what the
- * digest cannot see is documented with it.
+ * Two edits to every node zod emits, before it is hashed.
+ *
+ * The `default` keyword goes. Its value is server behaviour, not shape: a
+ * client never sends it, and its compiled types do not carry it. And for a
+ * function default (`.default(() => new Date())`, `.prefault`, `.catch`)
+ * zod writes whatever the function returned at conversion time, a clock
+ * reading or a random value, which would give the endpoint a different
+ * digest on every computation and a generated map that never matches the
+ * server. Nothing distinguishes such a default from a constant one once zod
+ * has evaluated it, so every default goes, and the one thing about a default
+ * a client can see, that the field may be omitted, stays through `required`.
+ *
+ * `required` is sorted. It is a set, and the order fields are declared in is
+ * not shape either; left as emitted, reordering two fields forced a reload.
  */
-const jsonSchemaOf = (schema, io) => schema ? z.toJSONSchema(schema, { io, unrepresentable: "any" }) : null;
+const keepShapeOnly = (node) => {
+    delete node.default;
+    if (Array.isArray(node.required))
+        node.required.sort();
+};
+/**
+ * A schema as JSON Schema, as zod emits it minus what keepShapeOnly removes.
+ * A type JSON Schema cannot express (a transform's output, a custom check)
+ * becomes `{}` rather than throwing, because a digest has to exist for every
+ * endpoint; what the digest cannot see is documented with it.
+ */
+const jsonSchemaOf = (schema, io) => schema ? z.toJSONSchema(schema, { io, unrepresentable: "any", override: ({ jsonSchema }) => keepShapeOnly(jsonSchema) }) : null;
 const ownGuard = (guards, name) => guards !== undefined && Object.prototype.hasOwnProperty.call(guards, name) ? guards[name] : undefined;
 /**
  * The digest of an endpoint's client-facing shape: its name and mode, its
@@ -41,7 +69,10 @@ const ownGuard = (guards, name) => guards !== undefined && Object.prototype.hasO
  *
  * The description is hashed as built, descriptions and titles included: a
  * schema is what the server says it is, and a client built against a
- * different one reloads once.
+ * different one reloads once. What must hold for the digest to mean anything
+ * is that a schema is built from static values: one that reads the clock, a
+ * random source or the environment at construction digests differently in
+ * the generator's process and on the server.
  */
 export const apiSignatureOf = async (definition, guards) => {
     const guardShapes = toGuardEntries(definition.guards).map(({ name }) => {
@@ -63,29 +94,3 @@ export const apiSignatureOf = async (definition, guards) => {
     const hex = await sha256HexOf(canonicalJson(description));
     return hex.slice(0, API_SIGNATURE_HEX_LENGTH);
 };
-/**
- * The server's signature source: every registered endpoint digested from
- * its own schemas, once per endpoint per container, on first use. What
- * Lambder.apiSignatures() reads to build the client's map, and what the
- * pipeline compares a request's signature against.
- */
-export class LambderApiSignatureDigests {
-    guards;
-    digests = new Map();
-    constructor(guards) {
-        this.guards = guards;
-    }
-    /** The endpoint's signature, computed on the first ask and kept. A digest that failed is not kept, so the next call tries again rather than failing forever. */
-    signatureOf(definition) {
-        let pending = this.digests.get(definition.name);
-        if (!pending) {
-            pending = apiSignatureOf(definition, this.guards);
-            this.digests.set(definition.name, pending);
-            pending.catch(() => this.digests.delete(definition.name));
-        }
-        return pending;
-    }
-    async expectedSignatureOf(apiName, definition) {
-        return definition ? await this.signatureOf(definition) : null;
-    }
-}

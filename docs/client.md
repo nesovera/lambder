@@ -64,11 +64,12 @@ anything about a call that has already settled.
 ## The signature map
 
 Pass the map `lambder.apiSignatures()` generated for this build (see
-[APIs](./apis.md#signatures-when-a-client-must-update)) and every call carries
-the signature of the endpoint it names:
+[APIs](./apis.md#signatures-when-a-client-must-update)), the same file the
+server is given at `create()`, and every call carries the signature of the
+endpoint it names:
 
 ```typescript
-import { apiSignatures } from "./generated/apiSignatures.generated.js";
+import { apiSignatures } from "../shared/generated/apiSignatures.generated.js";
 
 const caller = new LambderCaller<ApiContractType>({
     apiPath: "/api",
@@ -142,7 +143,7 @@ if (outcome.ok) {
 | `timeout` | `timeoutMs` elapsed and the fetch was aborted |
 | `server` | 5xx, a body that is not a Lambder envelope, or a transport failure naming `protocol` |
 | `validation` | 422; `zodError` carries the issue detail |
-| `versionExpired` | This build's signature for the endpoint is not the server's, or the app answered `res.versionExpired` |
+| `versionExpired` | This build's signature for the endpoint is not the server's, its version is below the server's `minApiVersion`, or the app answered `res.versionExpired` |
 | `sessionExpired` | No valid session |
 | `notAuthorized` | The envelope's `notAuthorized` flag |
 | `errorMessage` | A structured refusal; `errorMessage` carries it |

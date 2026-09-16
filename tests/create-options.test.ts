@@ -13,7 +13,7 @@
  */
 
 import { testPublicFiles } from './helpers.js';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { z } from 'zod';
 import Lambder, { initLambder } from '../src/core/Lambder.js';
 import type { LambderCreateOptions } from '../src/core/LambderCreateOptions.js';
@@ -192,10 +192,25 @@ describe('create(): option values checked at construction', () => {
         expect(() => new Lambder({ apiPath: '/api' })).not.toThrow();
     });
 
-    it('takes any apiVersion string as the envelope stamp, since it gates nothing', () => {
-        expect(() => new Lambder({ apiVersion: '' })).not.toThrow();
+    it('takes a dotted apiVersion as the envelope stamp, and a dotted minApiVersion at or below it', () => {
+        expect(() => new Lambder({ apiVersion: '' })).toThrow(/Lambder: apiVersion must be a dotted version/);
+        expect(() => new Lambder({ apiVersion: 'dev' })).toThrow(/Lambder: apiVersion must be a dotted version/);
+        expect(() => new Lambder({ apiVersion: '2026-09-15' })).toThrow(/Lambder: apiVersion must be a dotted version/);
         expect(() => new Lambder({ apiVersion: '2' })).not.toThrow();
+        expect(() => new Lambder({ apiVersion: '1.2.2' })).not.toThrow();
         expect(() => new Lambder({})).not.toThrow();
+        expect(() => new Lambder({ apiVersion: '1.2.32', minApiVersion: '1.2.10' })).not.toThrow();
+        expect(() => new Lambder({ apiVersion: '1.2.32', minApiVersion: '1.2.32' })).not.toThrow();
+        expect(() => new Lambder({ minApiVersion: '1.2.10' })).not.toThrow();
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        try {
+            expect(() => new Lambder({ apiVersion: '1.2.5', minApiVersion: '1.2.10' })).not.toThrow();
+            expect(warn).toHaveBeenCalledOnce();
+        } finally {
+            warn.mockRestore();
+        }
+        expect(() => new Lambder({ minApiVersion: '' })).toThrow(/Lambder: minApiVersion must be a dotted version/);
+        expect(() => new Lambder({ minApiVersion: '1.2.' })).toThrow(/Lambder: minApiVersion must be a dotted version/);
     });
 
     it('refuses a maxResponseBytes that is not a positive integer', () => {

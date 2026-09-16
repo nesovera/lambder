@@ -5,7 +5,7 @@ import type { LambderApiAnswer } from "./LambderApiAnswer.js";
 import type { LambderApiCallContext } from "./LambderApiCallContext.js";
 import type { LambderApiCallTrace } from "./LambderApiCallContext.js";
 import type { LambderApiDefinition } from "./LambderApiDefinition.js";
-import type { LambderApiSignatureSource } from "./LambderApiSignature.js";
+import { lookupApiSignature, type LambderApiSignatureMap } from "../shared/wire/LambderApiSignature.js";
 import {
     apiNotFoundAnswer,
     invalidPayloadAnswer,
@@ -18,6 +18,7 @@ import { LambderApiValidationRefusal, isLambderApiValidationRefusal } from "./La
 import { isLambderApiRefusal } from "../shared/wire/LambderApiRefusal.js";
 import { DEFAULT_MAX_RESTORED_PAYLOAD_BYTES } from "../shared/wire/LambderRequestPayload.js";
 import { assertPositiveInteger } from "../shared/util/LambderOptionChecks.js";
+import { compareDottedVersions, isDottedVersion } from "../shared/wire/LambderVersionOrder.js";
 import { LambderApiPolicyEngine } from "./LambderApiPolicyEngine.js";
 import type { LambderApiGuard } from "./LambderApiGuards.js";
 import type { LambderApiRateLimitPolicyConfig, LambderApiRateLimitsConfig } from "./LambderApiRateLimits.js";
@@ -54,12 +55,21 @@ export type LambderApiPipelineOptions<TCtx extends LambderApiCallContext<TSessio
     /** Stamped on every answer's envelope as apiVersion, so a client can tell which build answered; null when the app set none. */
     apiVersion?: string | null;
     /**
-     * Enables the signature gate: a request carrying a signature that is not
-     * the one this source expects for its endpoint answers versionExpired.
-     * Without a source every signature passes, which is what the mock runtime
-     * does unless it is given the generated map.
+     * The floor under the signature gate: a request naming a `version` below
+     * it answers versionExpired whatever its signature says. Dotted numbers
+     * ("1.2.10"), compared segment by segment. A floor above apiVersion is
+     * taken as apiVersion, so a mistaken floor cannot refuse the build's own
+     * clients.
      */
-    signatures?: LambderApiSignatureSource;
+    minApiVersion?: string | null;
+    /**
+     * Enables the signature gate: the generated map (Lambder.apiSignatures(),
+     * the same file the client ships with). A request carrying a signature
+     * that is not the map's entry for its endpoint answers versionExpired,
+     * and so does one for an endpoint the map does not hold: that client was
+     * built against another contract. Without a map every signature passes.
+     */
+    apiSignatures?: LambderApiSignatureMap;
     /** Ceiling on what a compressed request payload may restore to. Default: 20,000,000. */
     maxRequestPayloadBytes?: number;
     onInvalidInput?: LambderApiInputRefusal<TCtx>;
@@ -93,7 +103,7 @@ export type LambderApiExec<TCtx> = (ctx: TCtx) => Promise<LambderApiAnswer>;
  * are adapters over this class; neither reimplements a step of it.
  *
  * ```
- * signature gate → restore payload → rate limits that need no session
+ * version floor → signature gate → restore payload → rate limits that need no session
  * → session (session mode) → idempotency replay → the remaining rate limits
  * → guards → input validation → exec, inside the idempotency claim
  * → drain response headers → answer
@@ -112,15 +122,38 @@ export type LambderApiExec<TCtx> = (ctx: TCtx) => Promise<LambderApiAnswer>;
  */
 export class LambderApiPipeline<TCtx extends LambderApiCallContext<TSessionData>, TSessionData = any> {
     readonly apiVersion: string | null;
+    readonly minApiVersion: string | null;
     private readonly policies = new LambderApiPolicyEngine();
     private readonly maxRequestPayloadBytes: number;
     private readonly onInvalidInput: LambderApiInputRefusal<TCtx> | null;
     private readonly sessions: Required<LambderApiSessionsConfig<TSessionData>> | null;
-    private readonly signatures: LambderApiSignatureSource | null;
+    private readonly apiSignatures: LambderApiSignatureMap | null;
 
     constructor(options: LambderApiPipelineOptions<TCtx, TSessionData> = {}){
         this.apiVersion = options.apiVersion ?? null;
-        this.signatures = options.signatures ?? null;
+        // Dotted, always, whether or not a floor is set today: the floor reads
+        // this string as numbers, and a stamp the comparison cannot read
+        // ("dev", a commit sha) counts as 0, so setting minApiVersion later
+        // would answer versionExpired to every client of this very build.
+        if(this.apiVersion !== null && !isDottedVersion(this.apiVersion)){
+            throw new Error(`Lambder: apiVersion must be a dotted version such as "1.2.10", got ${JSON.stringify(this.apiVersion)}.`);
+        }
+        this.minApiVersion = options.minApiVersion ?? null;
+        if(this.minApiVersion !== null){
+            if(!isDottedVersion(this.minApiVersion)){
+                throw new Error(`Lambder: minApiVersion must be a dotted version such as "1.2.10", got ${JSON.stringify(this.minApiVersion)}.`);
+            }
+            // A floor above the version this server stamps on its answers
+            // would refuse the very clients this build serves, and the first
+            // symptom would be every tab reloading. The lower of the two is
+            // the most a floor can mean here, so that is what it becomes, and
+            // the mistake is said once at creation.
+            if(this.apiVersion !== null && compareDottedVersions(this.minApiVersion, this.apiVersion) > 0){
+                console.warn(`Lambder: minApiVersion ${this.minApiVersion} is above apiVersion ${this.apiVersion}; the floor is taken as ${this.apiVersion}.`);
+                this.minApiVersion = this.apiVersion;
+            }
+        }
+        this.apiSignatures = options.apiSignatures ?? null;
         this.maxRequestPayloadBytes = assertPositiveInteger(options.maxRequestPayloadBytes ?? DEFAULT_MAX_RESTORED_PAYLOAD_BYTES, "maxRequestPayloadBytes");
         this.onInvalidInput = options.onInvalidInput ?? null;
         this.sessions = options.sessions
@@ -177,10 +210,9 @@ export class LambderApiPipeline<TCtx extends LambderApiCallContext<TSessionData>
      * The answer for a request naming no registered API: the apiNotFound
      * refusal, carrying whatever the call already wrote (a CORS header, a
      * cookie eviction). No signature gate here: both adapters run prepare()
-     * on the way in, with the definition the name resolved to or null, so a
-     * signed request for an unknown name (a client built against a contract
-     * that had it) has already been answered versionExpired by the time
-     * anything asks for an unknown name.
+     * on the way in, so a signed request for a name the map does not hold (a
+     * client built against a contract that had it) has already been answered
+     * versionExpired by the time anything asks for an unknown name.
      */
     answerUnknownApi(request: LambderApiRequest, ctx?: TCtx): LambderApiAnswer {
         const answer = apiNotFoundAnswer(this.apiVersion, ctx?.logList);
@@ -189,16 +221,21 @@ export class LambderApiPipeline<TCtx extends LambderApiCallContext<TSessionData>
     }
 
     /**
-     * The steps that come before anything may read the request: the
-     * signature gate, then the compressed-payload restore that every later
-     * reader (a rate-limit key slice, a guard, the input schema) depends on
-     * having happened.
+     * The steps that come before anything may read the request: the version
+     * floor, the signature gate, then the compressed-payload restore that
+     * every later reader (a rate-limit key slice, a guard, the input schema)
+     * depends on having happened.
      *
-     * The gate compares the signature the request carries with the one the
-     * source expects for the endpoint the name resolved to (`definition`,
-     * null for a name the adapter does not know). A match runs; anything
-     * else is a client built against another shape of this endpoint, or
-     * against an endpoint that no longer exists, and is answered
+     * The floor answers versionExpired to a request naming a version below
+     * minApiVersion whatever its signature says: the lever for a change the
+     * digest cannot see (a security fix, a field whose meaning changed under
+     * the same shape). A request naming no version is not judged by it, as
+     * one carrying no signature is not gated.
+     *
+     * The gate compares the signature the request carries with the map's
+     * entry for the endpoint it names. A match runs; anything else, another
+     * entry or none, is a client built against another shape of this
+     * endpoint or against an endpoint that no longer exists, and is answered
      * versionExpired. A request carrying no signature is never gated.
      *
      * Public and named because the server runs them earlier than run() does,
@@ -206,15 +243,18 @@ export class LambderApiPipeline<TCtx extends LambderApiCallContext<TSessionData>
      * is answered before any of them, whether or not the name it asked for
      * exists. run() calls it too, so an adapter that has no such step still
      * gets the whole protocol. Calling it twice is safe by construction: the
-     * gate compares against a memoized digest and the restore has already
-     * removed the wire fields it reads.
+     * gates are comparisons and the restore has already removed the wire
+     * fields it reads.
      *
      * Returns the answer that ends the call, or null when the request is
      * ready to dispatch.
      */
-    async prepare(request: LambderApiRequest, definition: LambderApiDefinition | null): Promise<LambderApiAnswer | null> {
-        if(request.signature !== null && this.signatures){
-            const expected = await this.signatures.expectedSignatureOf(request.apiName, definition);
+    async prepare(request: LambderApiRequest): Promise<LambderApiAnswer | null> {
+        if(this.minApiVersion !== null && request.version !== null && compareDottedVersions(request.version, this.minApiVersion) < 0){
+            return versionExpiredAnswer(this.apiVersion);
+        }
+        if(request.signature !== null && this.apiSignatures){
+            const expected = await lookupApiSignature(this.apiSignatures, request.apiName);
             if(expected !== request.signature) return versionExpiredAnswer(this.apiVersion);
         }
         const restored = await restoreCompressedPayload(request, this.maxRequestPayloadBytes);
@@ -260,7 +300,7 @@ export class LambderApiPipeline<TCtx extends LambderApiCallContext<TSessionData>
         exec: LambderApiExec<TCtx>,
         trace: LambderApiCallTrace,
     ): Promise<LambderApiAnswer> {
-        const unprepared = await this.prepare(request, definition);
+        const unprepared = await this.prepare(request);
         if(unprepared) return unprepared;
 
         // The limits whose key is known from the request alone, before the

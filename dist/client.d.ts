@@ -18,6 +18,7 @@ export { resolveApiOutcome } from "./shared/wire/LambderApiOutcome.js";
 export { apiNameKeyOf, lookupApiSignature, readApiSignature, API_SIGNATURE_HEX_LENGTH } from "./shared/wire/LambderApiSignature.js";
 export type { LambderApiSignatureMap } from "./shared/wire/LambderApiSignature.js";
 export { RELOAD_LOOP_WINDOW_MS } from "./client/LambderReloadLoopBreaker.js";
+export { compareDottedVersions, isDottedVersion } from "./shared/wire/LambderVersionOrder.js";
 export type { LambderApiAnswerOutcome, LambderApiSuccessOutcome, LambderApiCallFailure, LambderApiValidationFailure, LambderApiEnvelopeFailure, LambderApiHttpAnswer, } from "./shared/wire/LambderApiOutcome.js";
 export type { LambderApiOutcome, LambderApiFailureReason, LambderValidationError, LambderCallOptions, LambderCallerOptions, LambderGuardInputsProvider, LambderProvidedGuardInputs, LambderIdempotencyKeyScope, LambderLogListHandler, } from "./client/LambderCaller.js";
 export { LambderApiRefusal, isLambderApiRefusal, refuse, LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";

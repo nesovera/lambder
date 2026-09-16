@@ -21,6 +21,7 @@ export { resolveApiOutcome } from "./shared/wire/LambderApiOutcome.js";
 export { apiNameKeyOf, lookupApiSignature, readApiSignature, API_SIGNATURE_HEX_LENGTH } from "./shared/wire/LambderApiSignature.js";
 export type { LambderApiSignatureMap } from "./shared/wire/LambderApiSignature.js";
 export { RELOAD_LOOP_WINDOW_MS } from "./client/LambderReloadLoopBreaker.js";
+export { compareDottedVersions, isDottedVersion } from "./shared/wire/LambderVersionOrder.js";
 // resolveApiOutcome's own return type and the arms of the outcome union, so a
 // consumer reading an answer or narrowing a failure can name what it holds.
 export type {

@@ -68,6 +68,9 @@ describe('The response envelope', () => {
         files: testPublicFiles(),
         apiPath: '/api',
         apiVersion: '3',
+        // A map that holds nothing, so every signed call is refused: what the
+        // versionExpired case below exercises.
+        apiSignatures: {},
         session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
     });
     const schema = { input: z.object({ value: z.string() }), output: z.any() };

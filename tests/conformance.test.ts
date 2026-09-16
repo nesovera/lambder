@@ -54,6 +54,7 @@ const createServer = (gate: ReturnType<typeof makeGate>) => {
         files: testPublicFiles(),
         apiPath: '/api',
         apiVersion: '1',
+        apiSignatures: serverSignatures,
         session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
         guards: serverGuards,
         rateLimits: { limiter: new LambderMemoryRateLimiter(), policies: { tight: { perMin: 1, per: 'ip' }, perCaller: { perMin: 1, per: 'session' } } },
@@ -273,6 +274,23 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
         expect(seen.envelope).toEqual({ apiVersion: '1', payload: null, versionExpired: true });
         const current = await same(createSides({ apiSignatures: serverSignatures }), 'ok', { n: 21 });
         expect(current.seen.envelope).toEqual({ apiVersion: '1', payload: { doubled: 42 } });
+    });
+
+    it('a version below minApiVersion: versionExpired on both sides, whatever the signature says', async () => {
+        const server = initLambder().create({ files: testPublicFiles(), apiPath: '/api', apiVersion: '1.2.32', minApiVersion: '1.2.10' })
+            .addApi('ok', { input: z.object({ n: z.number() }), output: z.object({ doubled: z.number() }) }, async (ctx, res) => res.api({ doubled: ctx.apiPayload.n * 2 }));
+        type FloorContract = typeof server.ApiContract;
+        const floorMock = initLambderMock<FloorContract>().create({ apiVersion: '1.2.32', minApiVersion: '1.2.10', apiSignatures: await server.apiSignatures() });
+        floorMock.register(floorMock.apiSlice(floorMock.publicApi('ok', async ({ payload }) => ({ doubled: payload.n * 2 }))));
+        const signatures = await server.apiSignatures();
+        const bothSides = async (version: string) => {
+            const onServer = await new LambderCaller<FloorContract>({ apiPath: '/api', isCorsEnabled: false, apiVersion: version, apiSignatures: signatures, transport: lambderHandlerTransport(server.getHandler()) }).apiOutcome('ok', { n: 2 });
+            const onMock = await new LambderCaller<FloorContract>({ apiPath: '/api', isCorsEnabled: false, apiVersion: version, apiSignatures: signatures, transport: floorMock.transport() }).apiOutcome('ok', { n: 2 });
+            return [onServer, onMock].map((outcome) => outcome.ok ? 'ok' : outcome.reason);
+        };
+        expect(await bothSides('1.2.9')).toEqual(['versionExpired', 'versionExpired']);
+        expect(await bothSides('1.2.10')).toEqual(['ok', 'ok']);
+        expect(await bothSides('1.3.0')).toEqual(['ok', 'ok']);
     });
 
     it('rate limited: the same 429 envelope with a Retry-After', async () => {

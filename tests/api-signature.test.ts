@@ -14,9 +14,10 @@ import LambderCaller from '../src/client/LambderCaller.js';
 import LambderInvokeCaller from '../src/invoke/LambderInvokeCaller.js';
 import { lambderHandlerTransport } from '../src/invoke/lambderHandlerTransport.js';
 import { LambderMemorySessionStore } from '../src/stores/LambderMemorySessionStore.js';
-import { apiSignatureOf, LambderApiSignatureDigests } from '../src/api/LambderApiSignature.js';
-import { apiNameKeyOf, lookupApiSignature, readApiSignature, API_SIGNATURE_HEX_LENGTH } from '../src/shared/wire/LambderApiSignature.js';
+import { apiSignatureOf } from '../src/api/LambderApiSignature.js';
+import { apiNameKeyOf, lookupApiSignature, readApiSignature, API_SIGNATURE_HEX_LENGTH, type LambderApiSignatureMap } from '../src/shared/wire/LambderApiSignature.js';
 import { LambderReloadLoopBreaker, RELOAD_LOOP_WINDOW_MS } from '../src/client/LambderReloadLoopBreaker.js';
+import { compareDottedVersions, isDottedVersion } from '../src/shared/wire/LambderVersionOrder.js';
 import type { LambderApiDefinition } from '../src/api/LambderApiDefinition.js';
 import type { LambderApiTransport } from '../src/shared/transport/LambderApiTransport.js';
 
@@ -72,12 +73,24 @@ describe('The signature digest', () => {
         expect(await apiSignatureOf(definition({ guards: { org: 'READ' } }), guards)).toBe(await apiSignatureOf(definition({ guards: { org: 'WRITE' } }), guards));
     });
 
-    it('digests each definition once and answers null for an unknown endpoint', async () => {
-        const digests = new LambderApiSignatureDigests(guards);
-        const def = definition();
-        expect(digests.signatureOf(def)).toBe(digests.signatureOf(def));
-        expect(await digests.expectedSignatureOf('user.get', def)).toBe(await apiSignatureOf(def, guards));
-        expect(await digests.expectedSignatureOf('nope', null)).toBeNull();
+    it('hashes shape, not values: a default\'s value and the order of fields change nothing, and a function default is stable', async () => {
+        // zod writes what a function default returned at conversion under
+        // `default`; left in, the same endpoint digested differently on every
+        // computation and the generated map never matched the server.
+        const fromTheClock = () => z.object({ at: z.number().default(() => Date.now()), n: z.number().prefault(() => Math.random()), c: z.number().catch(() => Math.random()) });
+        const first = await apiSignatureOf(definition({ input: fromTheClock() }), guards);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        expect(await apiSignatureOf(definition({ input: fromTheClock() }), guards)).toBe(first);
+        expect(await apiSignatureOf(definition({ input: z.object({ page: z.number().default(1) }) }), guards))
+            .toBe(await apiSignatureOf(definition({ input: z.object({ page: z.number().default(2) }) }), guards));
+        // That the field may be omitted is shape, and stays.
+        expect(await apiSignatureOf(definition({ input: z.object({ page: z.number().default(1) }) }), guards))
+            .not.toBe(await apiSignatureOf(definition({ input: z.object({ page: z.number() }) }), guards));
+        expect(await apiSignatureOf(definition({ input: z.object({ a: z.string(), b: z.string() }) }), guards))
+            .toBe(await apiSignatureOf(definition({ input: z.object({ b: z.string(), a: z.string() }) }), guards));
+        // A field that happens to be called "default" is a field.
+        expect(await apiSignatureOf(definition({ input: z.object({ default: z.string() }) }), guards))
+            .not.toBe(await apiSignatureOf(definition({ input: z.object({ other: z.string() }) }), guards));
     });
 
     it('reads a map by the hashed name, and says what is missing', async () => {
@@ -87,13 +100,33 @@ describe('The signature digest', () => {
         expect(await readApiSignature(map, 'user.get')).toBe('abc');
         await expect(readApiSignature(map, 'user.list')).rejects.toThrow(/no signature for API "user.list"/);
     });
+
+    it('resolves a name on the spot every time, keeping nothing between calls', async () => {
+        // Nothing is memoized by name, and this is the assertion that says so:
+        // on the server the name comes off the wire before anything has
+        // checked that it is an endpoint, so a cache keyed by it would grow by
+        // an entry for every name a request cared to invent. The digest the
+        // gate actually rests on is the generator's, computed at build time.
+        const map = { [await apiNameKeyOf('user.get')]: 'abc' };
+        const digest = vi.spyOn(globalThis.crypto.subtle, 'digest');
+        try {
+            expect(await lookupApiSignature(map, 'user.get')).toBe('abc');
+            expect(await lookupApiSignature(map, 'user.get')).toBe('abc');
+            expect(await lookupApiSignature(map, 'invented-by-a-request')).toBeNull();
+            expect(digest).toHaveBeenCalledTimes(3);
+        } finally {
+            digest.mockRestore();
+        }
+    });
 });
 
-const createServer = () => {
+/** The server, given the map a previous instance generated, as a deployed server is given the file its own build generated. */
+const createServer = (apiSignatures?: LambderApiSignatureMap) => {
     const app = initLambder<{ userId: string }>().create({
         files: testPublicFiles(),
         apiPath: '/api',
         apiVersion: '7',
+        apiSignatures,
         session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
         guards,
     });
@@ -105,8 +138,7 @@ const createServer = () => {
 
 describe('The server and its map', () => {
     it('apiSignatures() lists every registered endpoint under its hashed name, sorted, with the digest the gate compares against', async () => {
-        const server = createServer();
-        const map = await server.apiSignatures();
+        const map = await createServer().apiSignatures();
         const keys = await Promise.all(['user.get', 'org.get', 'me'].map(apiNameKeyOf));
         expect(Object.keys(map).sort()).toEqual([...keys].sort());
         expect(Object.keys(map)).toEqual([...Object.keys(map)].sort());
@@ -117,8 +149,8 @@ describe('The server and its map', () => {
     });
 
     it('runs a matching signature, refuses a stale one and an unknown signed name, and gates nothing that carries none', async () => {
-        const server = createServer();
-        const map = await server.apiSignatures();
+        const map = await createServer().apiSignatures();
+        const server = createServer(map);
         const bodyOf = async (body: Record<string, unknown>) => JSON.parse(decodeBody(await server.render(createApiEvent(body), createMockContext())));
         const signature = await readApiSignature(map, 'user.get');
 
@@ -153,8 +185,8 @@ const withFreshSessionStorage = async (run: (store: Map<string, string>) => Prom
 
 describe('LambderCaller with a signature map', () => {
     it('sends the endpoint\'s signature with every call, and nothing when it has no map', async () => {
-        const server = createServer();
-        const map = await server.apiSignatures();
+        const map = await createServer().apiSignatures();
+        const server = createServer(map);
         const seen: unknown[] = [];
         const observing = (inner: LambderApiTransport): LambderApiTransport => async (request) => { seen.push(request.signature); return await inner(request); };
 
@@ -206,6 +238,22 @@ describe('LambderCaller with a signature map', () => {
         expect(versionExpiredHandler).toHaveBeenCalledOnce();
         expect(errors.length).toBe(2);
     }));
+});
+
+describe('compareDottedVersions', () => {
+    it('compares segment by segment as numbers, pads a missing segment with zero, and reads an unreadable one as zero', () => {
+        expect(compareDottedVersions('1.2.10', '1.2.9')).toBe(1);
+        expect(compareDottedVersions('1.2.9', '1.2.10')).toBe(-1);
+        expect(compareDottedVersions('1.2', '1.2.0')).toBe(0);
+        expect(compareDottedVersions('1.10', '1.9')).toBe(1);
+        expect(compareDottedVersions('2', '1.99.99')).toBe(1);
+        expect(compareDottedVersions('dev', '0.0.1')).toBe(-1);
+        expect(isDottedVersion('7')).toBe(true);
+        expect(isDottedVersion('1.2.10')).toBe(true);
+        expect(isDottedVersion('1.2.')).toBe(false);
+        expect(isDottedVersion('v1.2')).toBe(false);
+        expect(isDottedVersion('')).toBe(false);
+    });
 });
 
 describe('LambderReloadLoopBreaker', () => {

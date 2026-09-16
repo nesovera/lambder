@@ -39,11 +39,11 @@ export { createApiCallContext } from "./api/LambderApiCallContext.js";
 export type { LambderApiCallContext, LambderApiCallTrace } from "./api/LambderApiCallContext.js";
 export type { LambderApiDefinition } from "./api/LambderApiDefinition.js";
 // Per-endpoint signatures: what a client build ships with, digested from the server's own registrations.
-export { apiSignatureOf, LambderApiSignatureDigests } from "./api/LambderApiSignature.js";
-export type { LambderApiSignatureSource } from "./api/LambderApiSignature.js";
+export { apiSignatureOf } from "./api/LambderApiSignature.js";
 export { apiNameKeyOf, lookupApiSignature, readApiSignature, API_SIGNATURE_HEX_LENGTH } from "./shared/wire/LambderApiSignature.js";
 export type { LambderApiSignatureMap } from "./shared/wire/LambderApiSignature.js";
 export { RELOAD_LOOP_WINDOW_MS } from "./client/LambderReloadLoopBreaker.js";
+export { compareDottedVersions, isDottedVersion } from "./shared/wire/LambderVersionOrder.js";
 export {
     buildApiEnvelope, envelopeAnswer, refusalAnswer, validationAnswer, apiNotFoundAnswer,
     sessionExpiredAnswer, versionExpiredAnswer, invalidPayloadAnswer, crashAnswer, API_ANSWER_CONTENT_TYPE,
