@@ -9,6 +9,34 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [7.2.2] - 2026-09-18
+
+### Added
+
+- **Languages loaded on demand in `createLambderI18n`.** Any language block
+  except the default one, in `base`, `extend` and `extendPartial`, can be a
+  loader instead of the dictionary: a function resolving to the dictionary or
+  to a module whose default export is one, so `tr: () => import("./tr")` is
+  the whole thing and a bundler gives each language its own file. Until now
+  every declared language had to be written inline, so every visitor
+  downloaded every language. A loader is checked against the same contract as
+  an inline block, and a missing key is a compile error that names it. The
+  default block stays inline: it is the contract and the fallback every
+  lookup ends in, and creation refuses a loader there.
+- **`i18n.loadLanguage(code?)`** runs a language's loaders (the active
+  language by default) across every instance sharing the root, and resolves
+  once their dictionaries are merged. Until then `t` falls back per key to
+  the default language, as it does for any missing translation. Concurrent
+  calls share each load, and change listeners fire once per load. A loader
+  that answered never runs again; one that rejected rejects the call and runs
+  again on the next. Creating an extension loads nothing, so one created
+  after its language was loaded awaits its own `loadLanguage()`, which runs
+  only what is still missing. `setLanguage` and `resetLanguage` start the
+  loaders of the language they switch to, and listeners fire again when they
+  land; loading first switches without a flash of the default language.
+  Configs without loaders behave exactly as before. The
+  `LambderI18nDictionaryLoader` type is exported from both entries.
+
 ## [7.2.1] - 2026-09-15
 
 ### Added

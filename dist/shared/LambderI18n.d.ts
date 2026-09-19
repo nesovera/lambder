@@ -25,6 +25,21 @@ export type LambderI18nExtractParams<S extends string> = S extends `${string}{${
  * `{tokens}`, a params object with exactly those tokens is required.
  */
 export type LambderI18nTranslator<TContract extends Record<string, string>> = <K extends keyof TContract & string>(...args: LambderI18nExtractParams<TContract[K]> extends never ? [key: K] : [key: K, params: Record<LambderI18nExtractParams<TContract[K]>, string | number>]) => string;
+/**
+ * A language block fetched on demand instead of bundled: a function that
+ * resolves to the dictionary, or to a module whose default export is the
+ * dictionary, so `() => import("./tr")` is a loader. It runs when
+ * `loadLanguage` asks for its language, never before.
+ */
+export type LambderI18nDictionaryLoader<TDict> = () => Promise<TDict | {
+    default: TDict;
+}>;
+/**
+ * What a non-default language block is checked against: a loader when one was
+ * given, the dictionary otherwise. Checking against the matching side alone,
+ * rather than the union, is what lets a compile error name the missing key.
+ */
+type LanguageBlockFor<TBlocks, L, TDict> = L extends keyof TBlocks ? TBlocks[L] extends (...args: never[]) => unknown ? LambderI18nDictionaryLoader<TDict> : TDict : TDict;
 export interface LambderI18nConfig<TLanguages extends Record<string, LambderLanguageMeta>, TDefault extends keyof TLanguages & string, TEnforced extends readonly (keyof TLanguages & string)[], TBase extends Record<TDefault, Record<string, string>>> {
     /** Master registry of every supported language and its metadata. */
     languages: TLanguages;
@@ -38,9 +53,12 @@ export interface LambderI18nConfig<TLanguages extends Record<string, LambderLang
     /**
      * App-wide base dictionary. Strict: every language in `languages` must
      * provide every key (the `defaultLanguage` block is the typed contract).
+     * Any language but the default may be a loader instead
+     * (`tr: () => import("./tr")`), fetched by `loadLanguage`. The default
+     * block stays inline, because every lookup falls back to it.
      */
     base: TBase & {
-        [L in keyof TLanguages]: Record<keyof TBase[TDefault], string>;
+        [L in keyof TLanguages]: L extends TDefault ? Record<keyof TBase[TDefault], string> : LanguageBlockFor<TBase, L, Record<keyof TBase[TDefault], string>>;
     };
     /**
      * Optional language detector, tried before browser detection. Return a
@@ -61,12 +79,13 @@ export interface LambderI18nInstance<TLanguages extends Record<string, LambderLa
     /**
      * Strict extension: every language must provide every new key. Keys must
      * be new: redeclaring a parent key is a compile-time and runtime error.
+     * Any language but the default may be a loader, as in `base`.
      * Returns a new instance whose key space = parent keys + new keys.
      */
     extend<const TExt extends {
         [D in TDefault]: Record<string, string>;
     }>(dict: {
-        [L in keyof TLanguages]: Record<keyof TExt[TDefault], string>;
+        [L in keyof TLanguages]: L extends TDefault ? Record<keyof TExt[TDefault], string> : LanguageBlockFor<TExt, L, Record<keyof TExt[TDefault], string>>;
     } & {
         [D in TDefault]: Partial<Record<keyof TContract, never>>;
     } & TExt): LambderI18nInstance<TLanguages, TDefault, TEnforced, TContract & TExt[TDefault]>;
@@ -75,19 +94,39 @@ export interface LambderI18nInstance<TLanguages extends Record<string, LambderLa
      * languages are optional (and may provide a subset of keys), and missing
      * translations fall back to the default language. Keys must be new:
      * redeclaring a parent key is a compile-time and runtime error.
+     * Any language but the default may be a loader, as in `base`.
      */
     extendPartial<const TExt extends {
         [D in TDefault]: Record<string, string>;
     }>(dict: {
-        [E in TEnforced[number]]: Record<keyof TExt[TDefault], string>;
+        [E in TEnforced[number]]: E extends TDefault ? Record<keyof TExt[TDefault], string> : LanguageBlockFor<TExt, E, Record<keyof TExt[TDefault], string>>;
     } & {
-        [L in Exclude<keyof TLanguages & string, TEnforced[number]>]?: Partial<Record<keyof TExt[TDefault], string>>;
+        [L in Exclude<keyof TLanguages & string, TEnforced[number]>]?: LanguageBlockFor<TExt, L, Partial<Record<keyof TExt[TDefault], string>>>;
     } & {
         [D in TDefault]: Partial<Record<keyof TContract, never>>;
     } & TExt): LambderI18nInstance<TLanguages, TDefault, TEnforced, TContract & TExt[TDefault]>;
+    /**
+     * Run the loaders a language has in this instance and in every instance
+     * sharing its root, and resolve once their dictionaries are merged.
+     * Defaults to the active language; resolves at once when nothing is left
+     * to load. Until then `t` falls back per key to the default language, so
+     * await it before the first render, and before `setLanguage` to switch
+     * without a flash of the default language. Change listeners fire once
+     * per load, however many calls share it. A loader that answered never
+     * runs again; one that rejected rejects this call and runs again on the
+     * next. Creating an extension loads nothing: one created after its
+     * language was loaded awaits its own `loadLanguage()`, which runs only
+     * what is still missing.
+     */
+    loadLanguage(code?: keyof TLanguages & string): Promise<void>;
     /** Merge additional translations at runtime (e.g. fetched from an API). Notifies change listeners. */
     registerDictionary(code: keyof TLanguages & string, dict: Record<string, string>): void;
-    /** Override the active language (shared with all extended instances). */
+    /**
+     * Override the active language (shared with all extended instances), and
+     * start its loaders; change listeners fire again when they land. Await
+     * `loadLanguage(code)` first to switch without a flash of the default
+     * language.
+     */
     setLanguage(code: keyof TLanguages & string): void;
     /** Clear the override and re-run detection. */
     resetLanguage(): void;
@@ -136,3 +175,4 @@ export type LambderI18nTranslatorFor<T extends {
     t: unknown;
 }> = T["t"];
 export declare const createLambderI18n: <const TLanguages extends Record<string, LambderLanguageMeta>, const TDefault extends keyof TLanguages & string, const TEnforced extends readonly (keyof TLanguages & string)[], const TBase extends Record<TDefault, Record<string, string>>>(config: LambderI18nConfig<TLanguages, TDefault, TEnforced, TBase>) => LambderI18nInstance<TLanguages, TDefault, TEnforced, TBase[TDefault]>;
+export {};

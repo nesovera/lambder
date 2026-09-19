@@ -18,6 +18,8 @@ const makeI18n = () => createLambderI18n({
 
 afterEach(() => {
     vi.unstubAllGlobals();
+    // A console spy left behind by a failing test would hide later output.
+    vi.restoreAllMocks();
 });
 
 describe("LambderI18n: base translation", () => {
@@ -206,6 +208,277 @@ describe("LambderI18n: runtime dictionaries", () => {
         child.registerDictionary("en", { save: "Store" });
         expect(child.forLanguage("en")("save")).toBe("Store");
         expect(i18n.forLanguage("en")("save")).toBe("Save");
+    });
+});
+
+/** English inline, Turkish and Arabic behind loaders that count their runs. */
+const makeLazyI18n = () => {
+    const runs = { tr: 0, ar: 0 };
+    const i18n = createLambderI18n({
+        languages: {
+            en: { name: "English" },
+            tr: { name: "Türkçe" },
+            ar: { name: "العربية", dir: "rtl" },
+        },
+        defaultLanguage: "en",
+        enforced: ["en"],
+        base: {
+            en: { save: "Save", greet: "Hello {name}" },
+            tr: async () => { runs.tr += 1; return { save: "Kaydet", greet: "Merhaba {name}" }; },
+            ar: async () => { runs.ar += 1; return { save: "حفظ", greet: "مرحبا {name}" }; },
+        },
+    });
+    return { i18n, runs };
+};
+
+describe("LambderI18n: loaders", () => {
+    it("falls back to the default language until the language is loaded", async () => {
+        const { i18n, runs } = makeLazyI18n();
+        const tr = i18n.forLanguage("tr");
+        expect(tr("save")).toBe("Save");
+        expect(runs.tr).toBe(0); // nothing runs before it is asked for
+        await i18n.loadLanguage("tr");
+        expect(tr("save")).toBe("Kaydet");
+        expect(tr("greet", { name: "Ada" })).toBe("Merhaba Ada");
+        expect(runs.ar).toBe(0); // only the language asked for
+    });
+
+    it("loads the active language by default", async () => {
+        const i18n = createLambderI18n({
+            languages: { en: { name: "English" }, tr: { name: "Türkçe" } },
+            defaultLanguage: "en",
+            enforced: ["en"],
+            base: { en: { save: "Save" }, tr: async () => ({ save: "Kaydet" }) },
+            detectLanguage: () => "tr",
+        });
+        await i18n.loadLanguage();
+        expect(i18n.t("save")).toBe("Kaydet");
+    });
+
+    it("loads a named language without switching to it", async () => {
+        const { i18n } = makeLazyI18n();
+        await i18n.loadLanguage("ar");
+        expect(i18n.currentLanguage).toBe("en");
+        expect(i18n.forLanguage("ar")("save")).toBe("حفظ");
+    });
+
+    it("runs each loader once and notifies once, across repeated and concurrent calls", async () => {
+        const { i18n, runs } = makeLazyI18n();
+        let notified = 0;
+        i18n.onLanguageChange(() => { notified += 1; });
+        await Promise.all([i18n.loadLanguage("tr"), i18n.loadLanguage("tr")]);
+        await i18n.loadLanguage("tr");
+        expect(runs.tr).toBe(1);
+        expect(notified).toBe(1);
+    });
+
+    it("takes a module whose default export is the dictionary", async () => {
+        const i18n = createLambderI18n({
+            languages: { en: { name: "English" }, tr: { name: "Türkçe" } },
+            defaultLanguage: "en",
+            enforced: ["en"],
+            base: {
+                en: { save: "Save", greet: "Hello {name}" },
+                tr: () => import("./fixtures/i18n/turkish-dictionary.js"),
+            },
+        });
+        await i18n.loadLanguage("tr");
+        expect(i18n.forLanguage("tr")("greet", { name: "Ada" })).toBe("Merhaba Ada");
+    });
+
+    it("reads a dictionary with a key named default as a dictionary", async () => {
+        const i18n = createLambderI18n({
+            languages: { en: { name: "English" }, tr: { name: "Türkçe" } },
+            defaultLanguage: "en",
+            enforced: ["en"],
+            base: {
+                en: { default: "Default" },
+                tr: async () => ({ default: "Varsayılan" }),
+            },
+        });
+        await i18n.loadLanguage("tr");
+        expect(i18n.forLanguage("tr")("default")).toBe("Varsayılan");
+    });
+
+    it("mixes inline and loaded languages, and resolves at once when nothing is left to load", async () => {
+        const i18n = createLambderI18n({
+            languages: { en: { name: "English" }, tr: { name: "Türkçe" }, ar: { name: "العربية" } },
+            defaultLanguage: "en",
+            enforced: ["en"],
+            base: {
+                en: { save: "Save" },
+                tr: { save: "Kaydet" },
+                ar: async () => ({ save: "حفظ" }),
+            },
+        });
+        let notified = 0;
+        i18n.onLanguageChange(() => { notified += 1; });
+        expect(i18n.forLanguage("tr")("save")).toBe("Kaydet");
+        await i18n.loadLanguage("tr");
+        await i18n.loadLanguage("en");
+        expect(notified).toBe(0);
+        await i18n.loadLanguage("ar");
+        expect(notified).toBe(1);
+        expect(i18n.forLanguage("ar")("save")).toBe("حفظ");
+    });
+
+    it("notifies change listeners once the dictionary has arrived", async () => {
+        const { i18n } = makeLazyI18n();
+        const seen: string[] = [];
+        i18n.onLanguageChange(() => seen.push(i18n.forLanguage("tr")("save")));
+        await i18n.loadLanguage("tr");
+        expect(seen).toEqual(["Kaydet"]);
+    });
+
+    it("setLanguage starts the language's loaders and notifies again when they land", async () => {
+        const { i18n, runs } = makeLazyI18n();
+        const seen: string[] = [];
+        i18n.onLanguageChange(() => seen.push(i18n.t("save")));
+        i18n.setLanguage("tr");
+        expect(i18n.t("save")).toBe("Save");
+        await vi.waitFor(() => expect(i18n.t("save")).toBe("Kaydet"));
+        expect(seen).toEqual(["Save", "Kaydet"]);
+        expect(runs.tr).toBe(1);
+    });
+
+    it("resetLanguage starts the loaders of the language detection lands on", async () => {
+        vi.stubGlobal("navigator", { languages: ["tr"], language: "tr" });
+        const { i18n } = makeLazyI18n();
+        i18n.setLanguage("en");
+        i18n.resetLanguage();
+        expect(i18n.currentLanguage).toBe("tr");
+        await vi.waitFor(() => expect(i18n.t("save")).toBe("Kaydet"));
+    });
+
+    it("logs, rather than throws, when the load setLanguage started fails", async () => {
+        const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+        const i18n = createLambderI18n({
+            languages: { en: { name: "English" }, tr: { name: "Türkçe" } },
+            defaultLanguage: "en",
+            enforced: ["en"],
+            base: { en: { save: "Save" }, tr: async () => { throw new Error("offline"); } },
+        });
+        expect(() => i18n.setLanguage("tr")).not.toThrow();
+        await vi.waitFor(() => expect(consoleError).toHaveBeenCalled());
+        expect(i18n.t("save")).toBe("Save");
+    });
+
+    it("rejects when a loader fails, keeps the fallback, and runs the loader again next time", async () => {
+        let attempts = 0;
+        const i18n = createLambderI18n({
+            languages: { en: { name: "English" }, tr: { name: "Türkçe" } },
+            defaultLanguage: "en",
+            enforced: ["en"],
+            base: {
+                en: { save: "Save" },
+                tr: async () => {
+                    attempts += 1;
+                    if (attempts === 1) throw new Error("chunk failed to load");
+                    return { save: "Kaydet" };
+                },
+            },
+        });
+        await expect(i18n.loadLanguage("tr")).rejects.toThrow("chunk failed to load");
+        expect(i18n.forLanguage("tr")("save")).toBe("Save");
+        await i18n.loadLanguage("tr");
+        expect(i18n.forLanguage("tr")("save")).toBe("Kaydet");
+        expect(attempts).toBe(2);
+    });
+
+    it("rejects a loader that resolves to something other than a dictionary", async () => {
+        const i18n = createLambderI18n({
+            languages: { en: { name: "English" }, tr: { name: "Türkçe" } },
+            defaultLanguage: "en",
+            enforced: ["en"],
+            base: { en: { save: "Save" }, tr: (async () => "Kaydet") as any },
+        });
+        await expect(i18n.loadLanguage("tr")).rejects.toThrow(/"tr" loader resolved to neither a dictionary/);
+    });
+
+    it("rejects an unsupported language code", async () => {
+        const { i18n } = makeLazyI18n();
+        await expect((i18n.loadLanguage as any)("xx")).rejects.toThrow(/unsupported language code "xx"/);
+    });
+
+    it("keeps translations registered before the loader ran over the ones it brings", async () => {
+        const { i18n } = makeLazyI18n();
+        i18n.registerDictionary("tr", { save: "Sakla" });
+        await i18n.loadLanguage("tr");
+        const t = i18n.forLanguage("tr");
+        expect(t("save")).toBe("Sakla");
+        expect(t("greet", { name: "Ada" })).toBe("Merhaba Ada");
+    });
+
+    it("loads every instance sharing the root, whichever one is asked", async () => {
+        const { i18n } = makeLazyI18n();
+        const child = i18n.extendPartial({
+            en: { upload: "Upload" },
+            tr: async () => ({ upload: "Yükle" }),
+        });
+        await child.loadLanguage("tr");
+        expect(child.forLanguage("tr")("upload")).toBe("Yükle");
+        expect(i18n.forLanguage("tr")("save")).toBe("Kaydet");
+    });
+
+    it("creating an extension loads and notifies nothing; its own loadLanguage runs only what is missing", async () => {
+        const { i18n, runs } = makeLazyI18n();
+        await i18n.loadLanguage("tr");
+        let notified = 0;
+        i18n.onLanguageChange(() => { notified += 1; });
+        const upload = { tr: 0 };
+        const child = i18n.extend({
+            en: { upload: "Upload" },
+            tr: async () => { upload.tr += 1; return { upload: "Yükle" }; },
+            ar: async () => ({ upload: "رفع" }),
+        });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(upload.tr).toBe(0);
+        expect(notified).toBe(0);
+        expect(child.forLanguage("tr")("upload")).toBe("Upload");
+        await child.loadLanguage("tr");
+        expect(child.forLanguage("tr")("upload")).toBe("Yükle");
+        expect(runs.tr).toBe(1); // the root's block was already there
+        expect(notified).toBe(1);
+    });
+
+    it("does not loop when a change listener creates extensions", async () => {
+        const { i18n } = makeLazyI18n();
+        await i18n.loadLanguage("tr");
+        let renders = 0;
+        i18n.onLanguageChange(() => {
+            renders += 1;
+            if (renders > 10) return;
+            i18n.extendPartial({ en: { upload: "Upload" }, tr: async () => ({ upload: "Yükle" }) });
+        });
+        i18n.setLanguage("tr"); // one render for the switch, one when the extension created in it lands
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(renders).toBe(2);
+    });
+
+    it("spends a loader that answered with a block redeclaring a parent key: one rejection, no refetch", async () => {
+        const { i18n } = makeLazyI18n();
+        let runs = 0;
+        const child = i18n.extendPartial({
+            en: { upload: "Upload" },
+            tr: (async () => { runs += 1; return { upload: "Yükle", save: "Gölge" }; }) as any,
+        });
+        await expect(i18n.loadLanguage("tr")).rejects.toThrow(/"tr" loader redeclares existing key "save"/);
+        await i18n.loadLanguage("tr");
+        expect(runs).toBe(1);
+        expect(child.forLanguage("tr")("upload")).toBe("Upload"); // the refused block is dropped
+        expect(child.forLanguage("tr")("save")).toBe("Kaydet");
+    });
+
+    it("refuses a loader for the default language", () => {
+        expect(() => createLambderI18n({
+            languages: { en: { name: "English" } },
+            defaultLanguage: "en",
+            enforced: ["en"],
+            base: { en: (async () => ({ a: "A" })) as any },
+        })).toThrow(/default language "en" inline, not as a loader/);
+        const { i18n } = makeLazyI18n();
+        expect(() => (i18n.extendPartial as any)({ en: async () => ({ a: "A" }) }))
+            .toThrow(/default language "en" inline, not as a loader/);
     });
 });
 
@@ -410,5 +683,48 @@ describe("LambderI18n: compile-time contract", () => {
         void (() => i18n.extendPartial({ en: { save: "Shadow" } }));
 
         expect(child.forLanguage("tr")("withParam", { value: 2 })).toBe("Değer: 2");
+    });
+
+    it("holds loaders to the same contract as inline blocks", () => {
+        const languages = { en: { name: "English" }, tr: { name: "Türkçe" } } as const;
+        const en = { save: "Save", greet: "Hello {name}" } as const;
+
+        // Valid: a loader resolving to the dictionary, or to a module exporting it as default.
+        const i18n = createLambderI18n({
+            languages, defaultLanguage: "en", enforced: ["en"],
+            base: { en, tr: () => import("./fixtures/i18n/turkish-dictionary.js") },
+        });
+        createLambderI18n({
+            languages, defaultLanguage: "en", enforced: ["en"],
+            base: { en, tr: async () => ({ save: "Kaydet", greet: "Merhaba {name}" }) },
+        });
+        // The contract still comes from the inline default block.
+        i18n.t("greet", { name: "X" });
+        // @ts-expect-error - {name} param is required
+        void (() => i18n.t("greet"));
+
+        void (() => createLambderI18n({
+            languages, defaultLanguage: "en", enforced: ["en"],
+            // @ts-expect-error - a loaded dictionary must provide every key
+            base: { en, tr: async () => ({ save: "Kaydet" }) },
+        }));
+        void (() => createLambderI18n({
+            languages, defaultLanguage: "en", enforced: ["en"],
+            // @ts-expect-error - the default language cannot be a loader
+            base: { en: async () => en, tr: { save: "Kaydet", greet: "Merhaba {name}" } },
+        }));
+
+        // Extensions: strict loaders must be complete, partial ones may be a subset.
+        void (() => i18n.extend({
+            en: { upload: "Upload", cancel: "Cancel" },
+            // @ts-expect-error - extend requires every key from a loader too
+            tr: async () => ({ upload: "Yükle" }),
+        }));
+        const child = i18n.extendPartial({
+            en: { upload: "Upload", cancel: "Cancel" },
+            tr: async () => ({ upload: "Yükle" }),
+        });
+        child.t("cancel");
+        expect(child.t("upload")).toBe("Upload");
     });
 });
