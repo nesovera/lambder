@@ -61,6 +61,19 @@ const mockGuards = {
 };
 
 /**
+ * What the contract makes create() require beside the guard map: it has
+ * session, idempotent and rate-limited endpoints. An app built without one on
+ * purpose, to pin the runtime refusal a plain-JS caller still meets, says so
+ * with @ts-expect-error.
+ */
+const requiredOptions = {
+    guards: mockGuards,
+    sessions: true,
+    idempotency: true,
+    rateLimits: { policies: { tight: { perMin: 2, per: 'ip' } } },
+} as const;
+
+/**
  * The generated map the callers under test carry, filled once the names are
  * hashed. Three endpoints are enough to exercise the gate; a caller given
  * this map calls only these.
@@ -151,7 +164,7 @@ describe('LambderMockApp - answers', () => {
         // check left the earlier ones registered. A caller that caught the
         // error, fixed its slices and called again then hit a duplicate-name
         // error from its own first attempt instead of the problem it fixed.
-        const bare = mock.create({ guards: mockGuards });
+        const bare = mock.create({ ...requiredOptions });
         const good = bare.apiSlice(bare.publicApi('echo', async ({ payload }) => ({ count: payload.notes.length })));
         const clashing = bare.apiSlice(bare.publicApi('echo', async ({ payload }) => ({ count: payload.notes.length })));
 
@@ -299,7 +312,7 @@ describe('LambderMockApp - sessions', () => {
         // A jar checks every Domain against the host that sent it and refuses
         // one it cannot check, so cookies planted without naming that host
         // were dropped and the session never carried.
-        const domained = mock.create({ guards: mockGuards, cookieHost: 'app.example.com', sessions: { cookieOptions: { domain: 'example.com' } } });
+        const domained = mock.create({ ...requiredOptions, cookieHost: 'app.example.com', sessions: { cookieOptions: { domain: 'example.com' } } });
         domained.registerPartial(domained.apiSlice(
             domained.sessionApi('me', async ({ session }) => ({ userId: session.data.userId })),
         ));
@@ -318,7 +331,8 @@ describe('LambderMockApp - sessions', () => {
         // names the SERVER's option ("the session option"). The mock's option
         // is `sessions`, and a reader who goes looking for `session` on
         // create() does not find it.
-        const bare = mock.create({ guards: mockGuards });
+        // @ts-expect-error the contract has session endpoints; built without sessions on purpose, as a plain-JS caller could
+        const bare = mock.create({ ...requiredOptions, sessions: false });
 
         await expect(bare.signIn('ada', { userId: 'ada', tenants: [] }))
             .rejects.toThrow('LambderMockApp: signIn() needs the sessions option at creation.');
@@ -341,7 +355,7 @@ describe('LambderMockApp - sessions', () => {
         Object.defineProperty(globalThis, 'crypto', { value: { getRandomValues: undefined }, configurable: true, writable: true });
         let plain: ReturnType<typeof mock.create>;
         try {
-            plain = mock.create({ guards: mockGuards, sessions: { store: new LambderMemorySessionStore<SessionData>() } });
+            plain = mock.create({ ...requiredOptions, sessions: { store: new LambderMemorySessionStore<SessionData>() } });
         } finally {
             if(descriptor) Object.defineProperty(globalThis, 'crypto', descriptor); else delete globals.crypto;
         }
@@ -356,12 +370,13 @@ describe('LambderMockApp - sessions', () => {
     });
 
     it('a session endpoint on a mock without sessions is refused at registration', () => {
-        const bare = mock.create({ guards: mockGuards });
+        // @ts-expect-error the contract has session endpoints; built without sessions on purpose, as a plain-JS caller could
+        const bare = mock.create({ ...requiredOptions, sessions: false });
         expect(() => bare.sessionApi('me', async () => ({ userId: 'x' }))).toThrow(/needs the sessions option at creation/);
     });
 
     it('runs on the plain crypto stand-in where asked to', async () => {
-        const plain = mock.create({ guards: mockGuards, sessions: { crypto: new LambderPlainSessionCrypto() } });
+        const plain = mock.create({ ...requiredOptions, sessions: { crypto: new LambderPlainSessionCrypto() } });
         plain.registerPartial(plain.apiSlice(
             plain.publicApi('login', async ({ payload, sessions }) => { await sessions.createSession(payload.user, { userId: payload.user, tenants: [] }); return { ok: true }; }),
             plain.sessionApi('me', async ({ session }) => ({ userId: session.data.userId })),
@@ -456,7 +471,7 @@ describe('LambderMockApp - guards, rate limits, idempotency, version', () => {
         const failingLimiter = { isRateLimited: async () => { throw new Error('the limiter is down'); } };
         const build = (failOpen?: boolean) => {
             const app = mock.create({
-                guards: mockGuards,
+                ...requiredOptions,
                 rateLimits: { limiter: failingLimiter, failOpen, policies: { tight: { perMin: 2, per: 'ip' } } },
             });
             app.registerPartial(app.apiSlice(app.publicApi('limited', { rateLimit: 'tight', handler: async () => ({ n: 1 }) })));
@@ -482,7 +497,7 @@ describe('LambderMockApp - guards, rate limits, idempotency, version', () => {
         expect((await callerFor(mockApp).apiOutcome('user.get', { userId: '1' })).ok).toBe(true);
         // A runtime given no map passes every signature: it holds no server
         // schema to judge one by.
-        const ungated = mock.create({ guards: mockGuards });
+        const ungated = mock.create({ ...requiredOptions });
         ungated.registerPartial(ungated.apiSlice(ungated.publicApi('user.get', async ({ payload }) => ({ id: payload.userId, name: 'Ada' }))));
         expect((await callerFor(ungated, { apiSignatures: { [await apiNameKeyOf('user.get')]: 'whatever' } }).apiOutcome('user.get', { userId: '1' })).ok).toBe(true);
     });
@@ -646,7 +661,7 @@ describe('LambderMockApp - overrides, reset, observation', () => {
         // reads entry.name, so a hand-written slice where the two disagree
         // registers one endpoint under another's name and leaves a third
         // unanswered. Only apiSlice keys entries for you.
-        const app = mock.create({ guards: mockGuards });
+        const app = mock.create({ ...requiredOptions });
         const entry = app.publicApi('user.get', async ({ payload }) => ({ id: payload.userId, name: 'Ada' }));
         expect(() => app.registerPartial({ echo: entry }))
             .toThrow(/slice key "echo" holds the mock for "user.get"/);
@@ -677,7 +692,7 @@ describe('LambderMockApp - overrides, reset, observation', () => {
 
     it('reset rewinds sessions, counters, replays, overrides, failures and the log, then calls onReset', async () => {
         const onReset = vi.fn();
-        const mockApp = mock.create({ guards: mockGuards, sessions: true, rateLimits: { policies: { tight: { perMin: 1, per: 'ip' } } }, onReset });
+        const mockApp = mock.create({ ...requiredOptions, sessions: true, rateLimits: { policies: { tight: { perMin: 1, per: 'ip' } } }, onReset });
         mockApp.registerPartial(mockApp.apiSlice(
             mockApp.publicApi('limited', { rateLimit: 'tight', handler: async () => ({ n: 1 }) }),
             mockApp.publicApi('login', async ({ payload, sessions }) => { await sessions.createSession(payload.user, { userId: payload.user, tenants: [] }); return { ok: true }; }),
@@ -702,7 +717,7 @@ describe('LambderMockApp - overrides, reset, observation', () => {
         // The contract is a type, so the server's schemas do not exist here.
         // An entry may restate the shape for the endpoints whose rejection
         // path a test needs, and endpoints without one behave as before.
-        const mockApp = mock.create({ guards: mockGuards });
+        const mockApp = mock.create({ ...requiredOptions });
         mockApp.registerPartial(mockApp.apiSlice(
             mockApp.publicApi('user.get', { input: z.object({ userId: z.string() }), handler: async ({ payload }) => ({ id: payload.userId, name: 'Ada' }) }),
             mockApp.publicApi('echo', async ({ payload }) => ({ count: payload.notes.length })),
@@ -719,7 +734,7 @@ describe('LambderMockApp - overrides, reset, observation', () => {
     });
 
     it('carries the envelope message a handler set, beside its payload', async () => {
-        const mockApp = mock.create({ guards: mockGuards });
+        const mockApp = mock.create({ ...requiredOptions });
         mockApp.registerPartial(mockApp.apiSlice(
             mockApp.publicApi('echo', async ({ payload, envelope, logList }) => {
                 envelope.message = 'served from the mock';
@@ -739,7 +754,7 @@ describe('LambderMockApp - overrides, reset, observation', () => {
 
     it('answers a thrown handler with the message it threw, unless asked for the server\'s wording', async () => {
         const build = (revealHandlerErrors?: boolean) => {
-            const mockApp = mock.create(revealHandlerErrors === undefined ? { guards: mockGuards } : { guards: mockGuards, revealHandlerErrors });
+            const mockApp = mock.create(revealHandlerErrors === undefined ? requiredOptions : { ...requiredOptions, revealHandlerErrors });
             mockApp.registerPartial(mockApp.apiSlice(
                 mockApp.publicApi('echo', async () => { throw new Error('Translations not found for "pledge"'); }),
             ));
@@ -756,7 +771,7 @@ describe('LambderMockApp - overrides, reset, observation', () => {
     });
 
     it('reset also puts back the configured latency and restarts the call numbering', async () => {
-        const mockApp = mock.create({ guards: mockGuards, latency: 0, rateLimits: { policies: { tight: { perMin: 2, per: 'ip' } } } });
+        const mockApp = mock.create({ ...requiredOptions, latency: 0, rateLimits: { policies: { tight: { perMin: 2, per: 'ip' } } } });
         mockApp.registerPartial(mockApp.apiSlice(
             mockApp.publicApi('limited', { rateLimit: 'tight', handler: async () => ({ n: 1 }) }),
         ));
@@ -783,7 +798,7 @@ describe('LambderMockApp - overrides, reset, observation', () => {
     });
 
     it('refuses to override an endpoint that was never registered, rather than inventing a public one', () => {
-        const mockApp = mock.create({ guards: mockGuards, sessions: true, rateLimits: { policies: { tight: { perMin: 2, per: 'ip' } } } });
+        const mockApp = mock.create({ ...requiredOptions, sessions: true, rateLimits: { policies: { tight: { perMin: 2, per: 'ip' } } } });
         mockApp.registerPartial(mockApp.apiSlice(
             mockApp.publicApi('limited', { rateLimit: 'tight', handler: async () => ({ n: 1 }) }),
         ));
@@ -864,7 +879,7 @@ describe('LambderMockApp - overrides, reset, observation', () => {
     });
 
     it('the call log is a bounded ring of completed calls', async () => {
-        const mockApp = mock.create({ guards: mockGuards, callLogSize: 2 });
+        const mockApp = mock.create({ ...requiredOptions, callLogSize: 2 });
         mockApp.registerPartial(mockApp.apiSlice(mockApp.publicApi('user.get', async ({ payload }) => ({ id: payload.userId, name: 'Ada' }))));
         const caller = callerFor(mockApp);
         for(const userId of ['1', '2', '3']) await caller.api('user.get', { userId });
@@ -1017,7 +1032,7 @@ describe('LambderMockApp - the MSW adapter and the document mirror', () => {
         // session call answered sessionExpired.
         const page = fakeDocumentCookies();
         await withFakePage(page, async () => {
-            const app = mock.create({ guards: mockGuards, sessions: true, cookieHost: 'api.example.com' });
+            const app = mock.create({ ...requiredOptions, sessions: true, cookieHost: 'api.example.com' });
             app.registerPartial(app.apiSlice(app.sessionApi('me', async ({ session }) => ({ userId: session.data.userId }))));
             const jar = new LambderCookieJar();
             const { msw, post } = fakeMswModule();
@@ -1048,7 +1063,7 @@ describe('LambderMockApp - the MSW adapter and the document mirror', () => {
         // saw its own address through the transport and the loopback through
         // the service worker: two clients where there is one, and a per-IP
         // rate limit counting them apart.
-        const app = mock.create({ guards: mockGuards, defaultClientIp: '10.1.2.3' });
+        const app = mock.create({ ...requiredOptions, defaultClientIp: '10.1.2.3' });
         app.registerPartial(app.apiSlice(
             app.publicApi('user.get', async ({ request }) => ({ id: request.ip, name: 'ip' })),
         ));
@@ -1075,7 +1090,7 @@ describe('LambderMockApp - the rest entry', () => {
         const app = mock.create({
             apiVersion: options.apiVersion,
             apiSignatures: mockSignatures,
-            guards: mockGuards,
+            ...requiredOptions,
             sessions: options.sessionStore ? { store: options.sessionStore } : true,
         });
         app.register(
@@ -1174,7 +1189,7 @@ describe('LambderMockApp - the rest entry', () => {
     });
 
     it('a second rest entry is refused the way a duplicate name is, and leaves the registry as it was', () => {
-        const twice = mock.create({ guards: mockGuards });
+        const twice = mock.create({ ...requiredOptions });
         expect(() => twice.register(
             twice.apiSlice(twice.publicApi('user.get', async ({ payload }) => ({ id: payload.userId, name: 'Ada' }))),
             twice.restNotMocked('not mocked yet'),
@@ -1215,7 +1230,7 @@ describe('LambderMockApp - the invoke transport', () => {
         // requestContext.http.sourceIp, and x-forwarded-for is an ordinary
         // request header any caller can set: trusting it would hand every
         // caller the value a `per: "ip"` limit counts on.
-        const app = mock.create({ guards: mockGuards });
+        const app = mock.create({ ...requiredOptions });
         app.registerPartial(app.apiSlice(
             app.publicApi('user.get', async ({ request }) => ({ id: request.ip, name: 'ip' })),
         ));
@@ -1237,7 +1252,8 @@ describe('LambderMockApp - registration, cookies and the call log', () => {
         // the first call to it answered 500 from inside the pipeline with a
         // message naming the server's option, for a mistake whose fix is one
         // option at create().
-        const bare = mock.create({ guards: mockGuards });
+        // @ts-expect-error the contract has session endpoints; built without sessions on purpose, as a plain-JS caller could
+        const bare = mock.create({ ...requiredOptions, sessions: false });
         expect(() => bare.sessionNotMocked('admin.audit', 'operator endpoint, no client calls it'))
             .toThrow(/session endpoint "admin.audit" needs the sessions option at creation/);
         // The public twin still registers: it is the session read that needs the option.
@@ -1249,7 +1265,7 @@ describe('LambderMockApp - registration, cookies and the call log', () => {
         // caller's siteHost, so on transit.localhost:5173 the jar answered with
         // nothing and every session call came back sessionExpired with a full
         // jar and no explanation.
-        const app = mock.create({ guards: mockGuards, sessions: true, cookieHost: 'transit.localhost:5173' });
+        const app = mock.create({ ...requiredOptions, sessions: true, cookieHost: 'transit.localhost:5173' });
         app.registerPartial(app.apiSlice(app.sessionApi('me', async ({ session }) => ({ userId: session.data.userId }))));
         const jar = new LambderCookieJar();
         await app.signIn('ada', { userId: 'ada', tenants: [] }, { jar });
@@ -1261,7 +1277,7 @@ describe('LambderMockApp - registration, cookies and the call log', () => {
     });
 
     it('still signs in the Node caller, which names no site host at all', async () => {
-        const app = mock.create({ guards: mockGuards, sessions: true });
+        const app = mock.create({ ...requiredOptions, sessions: true });
         app.registerPartial(app.apiSlice(app.sessionApi('me', async ({ session }) => ({ userId: session.data.userId }))));
         const jar = new LambderCookieJar();
         await app.signIn('ada', { userId: 'ada', tenants: [] }, { jar });
@@ -1300,7 +1316,7 @@ describe('LambderMockApp - idempotency carries the server\'s own options', () =>
         // server configured with one replayed where the server misses.
         let runs = 0;
         const app = mock.create({
-            guards: mockGuards,
+            ...requiredOptions,
             idempotency: { callerIdentity: (ctx) => ctx.request.ip },
         });
         app.registerPartial(app.apiSlice(
@@ -1325,8 +1341,8 @@ describe('LambderMockApp - idempotency carries the server\'s own options', () =>
         // The engine refuses a replay window that is not a positive whole
         // number of seconds; the option reaching it is what this pins, since
         // an option the mock drops throws nothing at all.
-        expect(() => mock.create({ guards: mockGuards, idempotency: { defaultPendingTtlSeconds: 0 } }))
+        expect(() => mock.create({ ...requiredOptions, idempotency: { defaultPendingTtlSeconds: 0 } }))
             .toThrow(/defaultPendingTtlSeconds/);
-        expect(() => mock.create({ guards: mockGuards, idempotency: { defaultPendingTtlSeconds: 900 } })).not.toThrow();
+        expect(() => mock.create({ ...requiredOptions, idempotency: { defaultPendingTtlSeconds: 900 } })).not.toThrow();
     });
 });

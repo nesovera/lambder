@@ -117,8 +117,10 @@ export type LambderMockContext<C, K extends keyof C, S, G> = Omit<LambderMockCal
  * The guard map a mock app must declare: one guard per name any endpoint of
  * the contract declares, and for every guard the contract knows in
  * guardInput mode, a `guardInput` schema whose output is what the server
- * inferred. A missing name or a schema that parses to something else fails
- * at the `guards` option.
+ * inferred. A guard a public endpoint names may not require a session, since
+ * an entry naming one cannot be registered. A missing name, a schema that
+ * parses to something else, or a session guard where the contract has a
+ * public endpoint fails at the `guards` option.
  */
 export type LambderMockGuards<C, S = any> =
     // Pinned to the mock call contexts: a guard built with the server's
@@ -126,7 +128,8 @@ export type LambderMockGuards<C, S = any> =
     // mock call context carries, so it belongs in the server's map and is
     // rejected here rather than silently authorizing everything.
     { [N in LambderContractGuardNames<C>]: LambderApiGuard<any, any, any, LambderMockCallContext<S>, LambderMockSessionCallContext<S>> }
-    & { [N in LambderContractGuardInputNames<C>]: { guardInput: z.ZodType<LambderContractGuardInput<C, N>, any> } };
+    & { [N in LambderContractGuardInputNames<C>]: { guardInput: z.ZodType<LambderContractGuardInput<C, N>, any> } }
+    & { [N in LambderContractGuardNames<C, "public">]: { session?: false } };
 
 // ---------------------------------------------------------------------------
 // Entries, slices and the registry

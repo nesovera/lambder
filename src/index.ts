@@ -295,6 +295,7 @@ export type {
     LambderContractGuardInput,
     LambderContractGuardInputNames,
     LambderContractRateLimitOf,
+    LambderContractRateLimitNames,
     LambderContractIdempotencyOf,
 } from "./shared/wire/LambderApiContract.js";
 
