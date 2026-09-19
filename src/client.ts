@@ -17,8 +17,9 @@ export type { LambderApiTransport, LambderApiTransportRequest, LambderTransportF
 export { LambderCookieJar, parseSetCookie } from "./shared/transport/LambderCookieJar.js";
 export type { LambderStoredCookie } from "./shared/transport/LambderCookieJar.js";
 export { resolveApiOutcome } from "./shared/wire/LambderApiOutcome.js";
-// The per-endpoint signature map a build ships with, how a caller reads it, and the reload-loop window.
-export { apiNameKeyOf, lookupApiSignature, readApiSignature, API_SIGNATURE_HEX_LENGTH } from "./shared/wire/LambderApiSignature.js";
+// The per-endpoint signature map a build ships with, how a caller reads it, the
+// mark a shared schema sets on an enum its readers let grow, and the reload-loop window.
+export { apiNameKeyOf, lookupApiSignature, readApiSignature, API_SIGNATURE_HEX_LENGTH, extensibleEnum } from "./shared/wire/LambderApiSignature.js";
 export type { LambderApiSignatureMap } from "./shared/wire/LambderApiSignature.js";
 export { RELOAD_LOOP_WINDOW_MS } from "./client/LambderReloadLoopBreaker.js";
 export { compareDottedVersions, isDottedVersion } from "./shared/wire/LambderVersionOrder.js";

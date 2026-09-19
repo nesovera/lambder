@@ -4,7 +4,7 @@
  * signature a call carries, and how a stale bundle is kept from reloading
  * itself forever.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, expectTypeOf, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { testPublicFiles, createApiEvent, createMockContext, decodeBody } from './helpers.js';
@@ -15,7 +15,7 @@ import LambderInvokeCaller from '../src/invoke/LambderInvokeCaller.js';
 import { lambderHandlerTransport } from '../src/invoke/lambderHandlerTransport.js';
 import { LambderMemorySessionStore } from '../src/stores/LambderMemorySessionStore.js';
 import { apiSignatureOf } from '../src/api/LambderApiSignature.js';
-import { apiNameKeyOf, lookupApiSignature, readApiSignature, API_SIGNATURE_HEX_LENGTH, type LambderApiSignatureMap } from '../src/shared/wire/LambderApiSignature.js';
+import { apiNameKeyOf, lookupApiSignature, readApiSignature, extensibleEnum, API_SIGNATURE_HEX_LENGTH, type LambderApiSignatureMap } from '../src/shared/wire/LambderApiSignature.js';
 import { LambderReloadLoopBreaker, RELOAD_LOOP_WINDOW_MS } from '../src/client/LambderReloadLoopBreaker.js';
 import { compareDottedVersions, isDottedVersion } from '../src/shared/wire/LambderVersionOrder.js';
 import type { LambderApiDefinition } from '../src/api/LambderApiDefinition.js';
@@ -117,6 +117,47 @@ describe('The signature digest', () => {
         } finally {
             digest.mockRestore();
         }
+    });
+});
+
+describe('extensibleEnum', () => {
+    const roles = ['admin', 'member'] as const;
+    const moreRoles = ['admin', 'member', 'guest'] as const;
+    // Nested the way a session nests one: an array, in an object, behind a nullable.
+    const returning = (role: z.ZodType) => apiSignatureOf(definition({ output: z.object({ id: z.string(), user: z.object({ roles: z.array(role) }).nullable() }) }), guards);
+    const accepting = (role: z.ZodType) => apiSignatureOf(definition({ input: z.object({ id: z.string(), role }) }), guards);
+
+    it('leaves its values out of an output, so the list growing or shrinking reloads no reader', async () => {
+        const base = await returning(extensibleEnum(z.enum(roles)));
+        expect(await returning(extensibleEnum(z.enum(moreRoles)))).toBe(base);
+        expect(await returning(extensibleEnum(z.enum(['admin'])))).toBe(base);
+        // Still a string, so a change of type is still a change of shape.
+        expect(await returning(z.number())).not.toBe(base);
+        // Unmarked, the values count as they always have.
+        expect(await returning(z.enum(moreRoles))).not.toBe(await returning(z.enum(roles)));
+    });
+
+    it('keeps its values in an input, where a value dropped from the list is a request the server now refuses', async () => {
+        expect(await accepting(extensibleEnum(z.enum(moreRoles)))).not.toBe(await accepting(extensibleEnum(z.enum(roles))));
+    });
+
+    it('changes no input digest by being marked', async () => {
+        expect(await accepting(extensibleEnum(z.enum(roles)))).toBe(await accepting(z.enum(roles)));
+    });
+
+    it('keeps the mark through a description, which clones the schema', async () => {
+        // A clone keeps its parent's metadata in zod's registry. If that ever
+        // stopped, the enum would quietly count in full again: this is the line
+        // that notices.
+        const described = (values: readonly [string, ...string[]]) => extensibleEnum(z.enum(values)).describe('a role');
+        expect(await returning(described(moreRoles))).toBe(await returning(described(roles)));
+    });
+
+    it('is the same schema otherwise: the same type, the same validation', () => {
+        const role = extensibleEnum(z.enum(roles));
+        expectTypeOf(role).toEqualTypeOf<z.ZodEnum<{ admin: 'admin'; member: 'member' }>>();
+        expect(role.parse('admin')).toBe('admin');
+        expect(role.safeParse('guest').success).toBe(false);
     });
 });
 

@@ -24,9 +24,11 @@ export type LambderApiSignatureEntry = {
  *
  * The description is hashed as built, descriptions and titles included: a
  * schema is what the server says it is, and a client built against a
- * different one reloads once. What must hold for the digest to mean anything
- * is that a schema is built from static values: one that reads the clock, a
- * random source or the environment at construction digests differently in
- * the generator's process and on the server.
+ * different one reloads once, with one exception the schema declares itself:
+ * the values of an extensibleEnum() in an output (see keepShapeOnly). What
+ * must hold for the digest to mean anything is that a schema is built from
+ * static values: one that reads the clock, a random source or the environment
+ * at construction digests differently in the generator's process and on the
+ * server.
  */
 export declare const apiSignatureOf: (definition: LambderApiDefinition, guards: Record<string, LambderApiGuard<any, any, any>> | undefined) => Promise<string>;

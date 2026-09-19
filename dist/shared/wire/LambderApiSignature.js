@@ -43,3 +43,39 @@ export const readApiSignature = async (signatures, apiName) => {
     }
     return signature;
 };
+/**
+ * The metadata key extensibleEnum() sets and the digest reads. Namespaced,
+ * because zod writes metadata into the JSON Schema it emits, so the key shows
+ * up in any schema an app converts for itself, where OpenAPI's own
+ * `x-extensible-enum` means something else (the values, in place of `enum`).
+ */
+export const EXTENSIBLE_ENUM_META_KEY = "x-lambder-extensible-enum";
+/**
+ * Marks an enum whose clients tolerate a value they were not built with, so
+ * its list of values stays out of the signature of every endpoint that
+ * returns it. Adding a role, a status or a locale to a list that rides in a
+ * widely returned payload (a session, a profile) then reloads only the
+ * clients that send the list back, not every client that reads it.
+ *
+ * Where the enum is input its values still count: a value dropped from the
+ * list is a request an older client may still send and the server now
+ * refuses, so that endpoint's clients must reload. Everything else about the
+ * schema is untouched: its type, its validation on both sides, and what it
+ * is everywhere outside the digest.
+ *
+ * The mark is a promise the schema makes for its readers, and nothing checks
+ * it. A client that switches over every value with no fallback, or indexes a
+ * map by one, renders a value it does not know as nothing, or throws. Mark
+ * only a list every reader handles that way on purpose.
+ *
+ * It is zod metadata (`.meta()`), which zod keeps in one registry on
+ * globalThis, so an enum marked in a shared package is read by the digest
+ * even when the server resolves another copy of zod. A schema derived from a
+ * marked enum by rebuilding it (`z.enum(marked.options)`, `.exclude()`)
+ * carries no mark and counts in full, which costs a reload, never a missed
+ * one.
+ *
+ * @example
+ * export const RoleSchema = extensibleEnum(z.enum(["admin", "member"]));
+ */
+export const extensibleEnum = (schema) => schema.meta({ [EXTENSIBLE_ENUM_META_KEY]: true });

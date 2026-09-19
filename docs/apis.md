@@ -156,6 +156,30 @@ through `required`); and `required` lists are sorted, so reordering fields
 changes nothing. What JSON Schema cannot express (a transform's output, a
 custom check) digests as `{}`.
 
+A list that grows with the product (roles, permissions, statuses, locales) is
+the one shape change that usually reaches no client, and the digest cannot
+tell that on its own. Carried in a widely returned payload such as a session,
+one new permission would change the signature of every endpoint returning
+it. Mark such an enum with `extensibleEnum` where the schema is declared, and
+its values leave the digest wherever it is output:
+
+```typescript
+import { extensibleEnum } from "lambder/client";
+
+export const PermissionSchema = extensibleEnum(z.enum(["users.read", "users.manage"]));
+```
+
+The mark is a promise that every reader tolerates a value it was not built
+with (a fallback label, a permission check that ignores what it does not
+know), and nothing checks it: a client that switches over every value with no
+default renders a new one as nothing, or throws. Where the enum is input its
+values still count, because a value removed from the list is a request an
+older client may still send and the server now refuses, so a client that
+sends the list back reloads before it can. The schema's type and its
+validation are unchanged on both sides. The mark is zod metadata, so an enum
+rebuilt from a marked one (`z.enum(marked.options)`) is unmarked and counts in
+full, which costs a reload rather than missing one.
+
 One rule follows for the schemas themselves: build them from static values. A
 schema that reads the clock, a random source or the environment when it is
 constructed (`z.number().max(Date.now())`, an enum from a directory listing)
