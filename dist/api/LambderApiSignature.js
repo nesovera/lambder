@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { toGuardEntries } from "./LambderApiGuards.js";
-import { API_SIGNATURE_HEX_LENGTH } from "../shared/wire/LambderApiSignature.js";
+import { API_SIGNATURE_HEX_LENGTH, EXTENSIBLE_ENUM_META_KEY } from "../shared/wire/LambderApiSignature.js";
 import { sha256HexOf } from "../shared/util/LambderTextDigest.js";
 /*
  * The digest of an endpoint's client-facing shape, computed once, by the
@@ -30,7 +30,7 @@ const sortKeys = (value) => {
     return sorted;
 };
 /**
- * Two edits to every node zod emits, before it is hashed.
+ * Three edits to every node zod emits, before it is hashed.
  *
  * The `default` keyword goes. Its value is server behaviour, not shape: a
  * client never sends it, and its compiled types do not carry it. And for a
@@ -44,11 +44,24 @@ const sortKeys = (value) => {
  *
  * `required` is sorted. It is a set, and the order fields are declared in is
  * not shape either; left as emitted, reordering two fields forced a reload.
+ *
+ * An enum marked with extensibleEnum() loses its values in an output. Its
+ * clients tolerate a value they do not know, so a response carrying one they
+ * were not built with, or no longer carrying one they were, changes nothing
+ * they can see; the node still says it holds a string. In an input the values
+ * stay, since a value dropped from the list is a request an older client may
+ * still send and the server now refuses. The mark itself goes in both, so
+ * marking an enum changes no input's digest.
  */
-const keepShapeOnly = (node) => {
+const keepShapeOnly = (node, io) => {
     delete node.default;
     if (Array.isArray(node.required))
         node.required.sort();
+    if (node[EXTENSIBLE_ENUM_META_KEY] === true) {
+        delete node[EXTENSIBLE_ENUM_META_KEY];
+        if (io === "output")
+            delete node.enum;
+    }
 };
 /**
  * A schema as JSON Schema, as zod emits it minus what keepShapeOnly removes.
@@ -56,7 +69,7 @@ const keepShapeOnly = (node) => {
  * becomes `{}` rather than throwing, because a digest has to exist for every
  * endpoint; what the digest cannot see is documented with it.
  */
-const jsonSchemaOf = (schema, io) => schema ? z.toJSONSchema(schema, { io, unrepresentable: "any", override: ({ jsonSchema }) => keepShapeOnly(jsonSchema) }) : null;
+const jsonSchemaOf = (schema, io) => schema ? z.toJSONSchema(schema, { io, unrepresentable: "any", override: ({ jsonSchema }) => keepShapeOnly(jsonSchema, io) }) : null;
 const ownGuard = (guards, name) => guards !== undefined && Object.prototype.hasOwnProperty.call(guards, name) ? guards[name] : undefined;
 /**
  * The digest of an endpoint's client-facing shape: its name and mode, its
@@ -69,10 +82,12 @@ const ownGuard = (guards, name) => guards !== undefined && Object.prototype.hasO
  *
  * The description is hashed as built, descriptions and titles included: a
  * schema is what the server says it is, and a client built against a
- * different one reloads once. What must hold for the digest to mean anything
- * is that a schema is built from static values: one that reads the clock, a
- * random source or the environment at construction digests differently in
- * the generator's process and on the server.
+ * different one reloads once, with one exception the schema declares itself:
+ * the values of an extensibleEnum() in an output (see keepShapeOnly). What
+ * must hold for the digest to mean anything is that a schema is built from
+ * static values: one that reads the clock, a random source or the environment
+ * at construction digests differently in the generator's process and on the
+ * server.
  */
 export const apiSignatureOf = async (definition, guards) => {
     const guardShapes = toGuardEntries(definition.guards).map(({ name }) => {

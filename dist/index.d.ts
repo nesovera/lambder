@@ -27,7 +27,7 @@ export type { LambderApiCallContext, LambderApiCallTrace } from "./api/LambderAp
 export type { LambderApiDefinition } from "./api/LambderApiDefinition.js";
 export { apiSignatureOf } from "./api/LambderApiSignature.js";
 export type { LambderApiSignatureEntry } from "./api/LambderApiSignature.js";
-export { apiNameKeyOf, lookupApiSignature, readApiSignature, API_SIGNATURE_HEX_LENGTH } from "./shared/wire/LambderApiSignature.js";
+export { apiNameKeyOf, lookupApiSignature, readApiSignature, API_SIGNATURE_HEX_LENGTH, extensibleEnum } from "./shared/wire/LambderApiSignature.js";
 export type { LambderApiSignatureMap } from "./shared/wire/LambderApiSignature.js";
 export { RELOAD_LOOP_WINDOW_MS } from "./client/LambderReloadLoopBreaker.js";
 export { compareDottedVersions, isDottedVersion } from "./shared/wire/LambderVersionOrder.js";

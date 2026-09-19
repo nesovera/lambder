@@ -9,6 +9,22 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [7.2.3] - 2026-09-19
+
+### Added
+
+- **`extensibleEnum(schema)`**, exported from both entries: marks an enum
+  whose readers tolerate values they were not built with, and the signature
+  digest leaves its values out wherever it is output. A list that grows with
+  the product (roles, permissions, statuses) and rides in a widely returned
+  payload changed the signature of every endpoint returning it, so one new
+  permission reloaded every open tab. With the mark, the list growing or
+  shrinking reloads only the clients of endpoints that take it as input,
+  where its values still count because a removed value is a request the
+  server now refuses. The schema's type and validation are unchanged; the
+  mark is zod metadata, read from zod's shared registry. An unmarked enum
+  digests exactly as before, so upgrading changes no signature.
+
 ## [7.2.2] - 2026-09-18
 
 ### Added
