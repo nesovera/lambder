@@ -32,5 +32,5 @@ export { resolveCompressionOption } from "./shared/wire/LambderCompressionOption
 export type { LambderCompressionOption, LambderCompressionSettingsBase } from "./shared/wire/LambderCompressionOption.js";
 export { html, xml, raw, jsonScript, escapeHtml, renderHtmlValue, LambderSafeHtml, type LambderHtmlValue } from "./shared/LambderHtml.js";
 export { createLambderI18n } from "./shared/LambderI18n.js";
-export type { LambderLanguageMeta, LambderI18nConfig, LambderI18nInstance, LambderI18nTranslator, LambderI18nExtractParams, LambderI18nCodes, LambderI18nKeys, LambderI18nTranslatorFor, } from "./shared/LambderI18n.js";
+export type { LambderLanguageMeta, LambderI18nConfig, LambderI18nInstance, LambderI18nTranslator, LambderI18nExtractParams, LambderI18nDictionaryLoader, LambderI18nCodes, LambderI18nKeys, LambderI18nTranslatorFor, } from "./shared/LambderI18n.js";
 export type { LambderHttpStatusCode } from "./shared/wire/LambderHttpStatus.js";

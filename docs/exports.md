@@ -314,7 +314,8 @@ See [Calling a Lambder app from another lambda](./invoke.md).
 | `createLambderI18n` | yes | Create the root translation instance |
 
 Types: `LambderI18nConfig`, `LambderI18nInstance`, `LambderI18nTranslator`,
-`LambderLanguageMeta`, `LambderI18nExtractParams`, and the instance-derived
+`LambderLanguageMeta`, `LambderI18nExtractParams`, `LambderI18nDictionaryLoader`,
+and the instance-derived
 `LambderI18nCodes`, `LambderI18nKeys`, `LambderI18nTranslatorFor`.
 
 See [Translations](./i18n.md).

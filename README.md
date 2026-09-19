@@ -146,7 +146,7 @@ guide that matches what you are building. The full index lives in
 | [Frontend client](./docs/client.md) | `LambderCaller`: typed calls, failure outcomes, timeouts, guard inputs, request compression, transports |
 | [Frontend hosting](./docs/frontend-hosting.md) | File sources, `servePublicFiles`, `serveIndexHtml`, `res.templateFile` |
 | [Templating](./docs/templating.md) | `html`/`xml` tagged templates and `LambderTemplatingEngine` |
-| [Translations](./docs/i18n.md) | `createLambderI18n`: typed keys, extension, detection, runtime dictionaries |
+| [Translations](./docs/i18n.md) | `createLambderI18n`: typed keys, extension, detection, on-demand languages, runtime dictionaries |
 | [The mock runtime](./docs/mock.md) | `LambderMockApp`: the typed contract served from mock handlers over the real pipeline, in the browser and in tests |
 | [DynamoDB tables](./docs/dynamodb-tables.md) | Table shapes, TTL and IAM for sessions, cache, rate limits and idempotency |
 | [Exports reference](./docs/exports.md) | Every name the three entry points export, grouped by purpose |
@@ -159,7 +159,7 @@ framework:
 | Module | Guide | Description |
 | --- | --- | --- |
 | `html` / `xml` tags + `LambderTemplatingEngine` | [Templating](./docs/templating.md) | Type-safe tagged templates and a comment-only HTML template engine (build-pipeline-safe) |
-| `createLambderI18n` | [Translations](./docs/i18n.md) | Typed translations with enforced/optional languages, component-level extension and auto language detection (isomorphic) |
+| `createLambderI18n` | [Translations](./docs/i18n.md) | Typed translations with enforced/optional languages, component-level extension, auto language detection and on-demand language loading (isomorphic) |
 | `LambderDdbCache` | [DynamoDB cache](./docs/ddb-cache.md) | DynamoDB-backed compressed JSON cache with lease-based single-fill and grouped keys (server-only) |
 | `LambderDdbRateLimiter` / `LambderMemoryRateLimiter` | [Rate limiter](./docs/ddb-rate-limiter.md) | Fixed-window rate limiter, atomic per window, in DynamoDB (server-only) or in memory |
 | `LambderDdbIdempotencyStore` / `LambderMemoryIdempotencyStore` | [Idempotency store](./docs/ddb-idempotency.md) | Idempotency records with owner-checked claims, in DynamoDB (compressed replays, server-only) or in memory |

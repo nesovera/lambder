@@ -30,7 +30,7 @@ order the first time.
 | [Frontend client](./client.md) | `LambderCaller`: typed calls, `apiOutcome`, timeouts, guard inputs, idempotency keys, request compression, transports |
 | [Frontend hosting](./frontend-hosting.md) | File sources (local, S3, R2, HTTP), `servePublicFiles`, `serveIndexHtml`, `res.templateFile` |
 | [Templating](./templating.md) | `html`/`xml` tagged templates and the comment-only `LambderTemplatingEngine` |
-| [Translations](./i18n.md) | `createLambderI18n`: typed keys, component extension, language detection, runtime dictionaries |
+| [Translations](./i18n.md) | `createLambderI18n`: typed keys, component extension, language detection, on-demand languages, runtime dictionaries |
 | [The mock runtime](./mock.md) | `LambderMockApp`: your typed contract served from mock handlers over the real pipeline, in the browser and in tests |
 
 ## Infrastructure and stores

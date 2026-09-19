@@ -43,6 +43,23 @@ export type LambderI18nTranslator<TContract extends Record<string, string>> = <
 /** A per-language dictionary set: `{ en: { key: "value" }, tr: {...} }`. */
 type DictSet = Record<string, Record<string, string> | undefined>;
 
+/**
+ * A language block fetched on demand instead of bundled: a function that
+ * resolves to the dictionary, or to a module whose default export is the
+ * dictionary, so `() => import("./tr")` is a loader. It runs when
+ * `loadLanguage` asks for its language, never before.
+ */
+export type LambderI18nDictionaryLoader<TDict> = () => Promise<TDict | { default: TDict }>;
+
+/**
+ * What a non-default language block is checked against: a loader when one was
+ * given, the dictionary otherwise. Checking against the matching side alone,
+ * rather than the union, is what lets a compile error name the missing key.
+ */
+type LanguageBlockFor<TBlocks, L, TDict> = L extends keyof TBlocks
+    ? TBlocks[L] extends (...args: never[]) => unknown ? LambderI18nDictionaryLoader<TDict> : TDict
+    : TDict;
+
 export interface LambderI18nConfig<
     TLanguages extends Record<string, LambderLanguageMeta>,
     TDefault extends keyof TLanguages & string,
@@ -61,8 +78,15 @@ export interface LambderI18nConfig<
     /**
      * App-wide base dictionary. Strict: every language in `languages` must
      * provide every key (the `defaultLanguage` block is the typed contract).
+     * Any language but the default may be a loader instead
+     * (`tr: () => import("./tr")`), fetched by `loadLanguage`. The default
+     * block stays inline, because every lookup falls back to it.
      */
-    base: TBase & { [L in keyof TLanguages]: Record<keyof TBase[TDefault], string> };
+    base: TBase & {
+        [L in keyof TLanguages]: L extends TDefault
+            ? Record<keyof TBase[TDefault], string>
+            : LanguageBlockFor<TBase, L, Record<keyof TBase[TDefault], string>>
+    };
     /**
      * Optional language detector, tried before browser detection. Return a
      * supported code to pick it, or null/undefined to continue the chain:
@@ -88,10 +112,15 @@ export interface LambderI18nInstance<
     /**
      * Strict extension: every language must provide every new key. Keys must
      * be new: redeclaring a parent key is a compile-time and runtime error.
+     * Any language but the default may be a loader, as in `base`.
      * Returns a new instance whose key space = parent keys + new keys.
      */
     extend<const TExt extends { [D in TDefault]: Record<string, string> }>(
-        dict: { [L in keyof TLanguages]: Record<keyof TExt[TDefault], string> }
+        dict: {
+            [L in keyof TLanguages]: L extends TDefault
+                ? Record<keyof TExt[TDefault], string>
+                : LanguageBlockFor<TExt, L, Record<keyof TExt[TDefault], string>>
+        }
             & { [D in TDefault]: Partial<Record<keyof TContract, never>> }
             & TExt
     ): LambderI18nInstance<TLanguages, TDefault, TEnforced, TContract & TExt[TDefault]>;
@@ -100,17 +129,44 @@ export interface LambderI18nInstance<
      * languages are optional (and may provide a subset of keys), and missing
      * translations fall back to the default language. Keys must be new:
      * redeclaring a parent key is a compile-time and runtime error.
+     * Any language but the default may be a loader, as in `base`.
      */
     extendPartial<const TExt extends { [D in TDefault]: Record<string, string> }>(
-        dict: { [E in TEnforced[number]]: Record<keyof TExt[TDefault], string> }
-            & { [L in Exclude<keyof TLanguages & string, TEnforced[number]>]?: Partial<Record<keyof TExt[TDefault], string>> }
+        dict: {
+            [E in TEnforced[number]]: E extends TDefault
+                ? Record<keyof TExt[TDefault], string>
+                : LanguageBlockFor<TExt, E, Record<keyof TExt[TDefault], string>>
+        }
+            & {
+                [L in Exclude<keyof TLanguages & string, TEnforced[number]>]?:
+                    LanguageBlockFor<TExt, L, Partial<Record<keyof TExt[TDefault], string>>>
+            }
             & { [D in TDefault]: Partial<Record<keyof TContract, never>> }
             & TExt
     ): LambderI18nInstance<TLanguages, TDefault, TEnforced, TContract & TExt[TDefault]>;
+    /**
+     * Run the loaders a language has in this instance and in every instance
+     * sharing its root, and resolve once their dictionaries are merged.
+     * Defaults to the active language; resolves at once when nothing is left
+     * to load. Until then `t` falls back per key to the default language, so
+     * await it before the first render, and before `setLanguage` to switch
+     * without a flash of the default language. Change listeners fire once
+     * per load, however many calls share it. A loader that answered never
+     * runs again; one that rejected rejects this call and runs again on the
+     * next. Creating an extension loads nothing: one created after its
+     * language was loaded awaits its own `loadLanguage()`, which runs only
+     * what is still missing.
+     */
+    loadLanguage(code?: keyof TLanguages & string): Promise<void>;
     /** Merge additional translations at runtime (e.g. fetched from an API). Notifies change listeners. */
     registerDictionary(code: keyof TLanguages & string, dict: Record<string, string>): void;
 
-    /** Override the active language (shared with all extended instances). */
+    /**
+     * Override the active language (shared with all extended instances), and
+     * start its loaders; change listeners fire again when they land. Await
+     * `loadLanguage(code)` first to switch without a flash of the default
+     * language.
+     */
     setLanguage(code: keyof TLanguages & string): void;
     /** Clear the override and re-run detection. */
     resetLanguage(): void;
@@ -258,11 +314,22 @@ interface InternalCore {
     enforced: readonly string[];
     state: LanguageState;
     isCode: (value: string) => boolean;
+    /** Layers of this root and its extensions that still hold loaders. */
+    lazyLayers: Set<DictLayer>;
 }
+
+type DictLoader = () => Promise<unknown>;
+
+/** Language blocks as configured: a dictionary, or a loader resolving to one. */
+type DictSourceSet = Record<string, Record<string, string> | DictLoader | undefined>;
 
 /** Layered dictionary node: own translations + parent chain, walked child-first. */
 interface DictLayer {
     dicts: DictSet;
+    /** Loaders whose dictionaries are not merged yet, by language. */
+    loaders: Map<string, DictLoader>;
+    /** Loads under way, shared by concurrent loadLanguage calls. */
+    inFlight: Map<string, Promise<void>>;
     parent: DictLayer | null;
 }
 
@@ -274,6 +341,90 @@ const layerLookup = (layer: DictLayer | null, lang: string, key: string): string
     return undefined;
 };
 
+const assertNoRedeclaredKeys = (parent: DictLayer, defaultLanguage: string, block: Record<string, string>, label: string): void => {
+    for (const key of Object.keys(block)) {
+        if (layerLookup(parent, defaultLanguage, key) !== undefined) {
+            throw new Error(`LambderI18n: ${label} redeclares existing key "${key}".`);
+        }
+    }
+};
+
+/** The default block is what every lookup falls back to, so it cannot wait for a loader. */
+const assertInlineDefaultBlock = (dict: DictSourceSet, defaultLanguage: string, label: string): void => {
+    if (typeof dict[defaultLanguage] === "function") {
+        throw new Error(`LambderI18n: ${label} must give the default language "${defaultLanguage}" inline, not as a loader.`);
+    }
+};
+
+const createLayer = (core: InternalCore, sources: DictSourceSet, parent: DictLayer | null): DictLayer => {
+    const layer: DictLayer = { dicts: {}, loaders: new Map(), inFlight: new Map(), parent };
+    for (const [lang, source] of Object.entries(sources)) {
+        if (typeof source === "function") layer.loaders.set(lang, source);
+        else if (source) layer.dicts[lang] = source;
+    }
+    if (layer.loaders.size > 0) core.lazyLayers.add(layer);
+    return layer;
+};
+
+const isObjectValue = (value: unknown): value is Record<string, unknown> =>
+    typeof value === "object" && value !== null;
+
+/**
+ * A loader resolves to the dictionary itself or to a module whose default
+ * export is the dictionary. The two cannot be confused: a dictionary's values
+ * are strings, so a `default` holding an object can only be a module's.
+ */
+const dictionaryFromLoaded = (loaded: unknown, lang: string): Record<string, string> => {
+    const dict = isObjectValue(loaded) && isObjectValue(loaded.default) ? loaded.default : loaded;
+    if (!isObjectValue(dict)) {
+        throw new Error(`LambderI18n: the "${lang}" loader resolved to neither a dictionary nor a module whose default export is one.`);
+    }
+    return dict as Record<string, string>;
+};
+
+/** Run a layer's loader for a language and merge what it brings, registered as the layer's load under way. */
+const startLayerLoad = (core: InternalCore, layer: DictLayer, lang: string, loader: DictLoader): Promise<void> => {
+    const load = Promise.resolve()
+        .then(loader)
+        .then((loaded) => {
+            // A loader that answered is spent even when its answer is refused:
+            // running it again would fetch the same file and fail the same
+            // way. Only a loader that rejected stays, to be retried.
+            layer.loaders.delete(lang);
+            if (layer.loaders.size === 0) core.lazyLayers.delete(layer);
+            const dict = dictionaryFromLoaded(loaded, lang);
+            if (layer.parent) assertNoRedeclaredKeys(layer.parent, core.defaultLanguage, dict, `the "${lang}" loader`);
+            // Translations registered while the loader ran override what it brought.
+            layer.dicts[lang] = { ...dict, ...layer.dicts[lang] };
+        })
+        .finally(() => { layer.inFlight.delete(lang); });
+    layer.inFlight.set(lang, load);
+    return load;
+};
+
+/**
+ * loadLanguage for a whole root: every layer still holding a loader for the
+ * language. Concurrent calls share each layer's load, and only the call that
+ * started loads announces them, so one load is one change event.
+ */
+const loadLanguageAcrossRoot = async (core: InternalCore, lang: string): Promise<void> => {
+    const started: Promise<void>[] = [];
+    const joined: Promise<void>[] = [];
+    for (const layer of core.lazyLayers) {
+        const loader = layer.loaders.get(lang);
+        if (!loader) continue;
+        const running = layer.inFlight.get(lang);
+        if (running) joined.push(running);
+        else started.push(startLayerLoad(core, layer, lang, loader));
+    }
+    if (started.length === 0 && joined.length === 0) return;
+    const [startedResults, joinedResults] = await Promise.all([Promise.allSettled(started), Promise.allSettled(joined)]);
+    if (startedResults.some((result) => result.status === "fulfilled")) core.state.emitChange();
+    const failure = [...startedResults, ...joinedResults]
+        .find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failure) throw failure.reason;
+};
+
 type InternalTranslator = (key: string, params?: Record<string, string | number>) => string;
 
 /**
@@ -283,8 +434,9 @@ type InternalTranslator = (key: string, params?: Record<string, string | number>
 interface InternalInstance {
     t: InternalTranslator;
     forLanguage(code: string): InternalTranslator;
-    extend(dict: DictSet): InternalInstance;
-    extendPartial(dict: DictSet): InternalInstance;
+    extend(dict: DictSourceSet): InternalInstance;
+    extendPartial(dict: DictSourceSet): InternalInstance;
+    loadLanguage(code?: string): Promise<void>;
     registerDictionary(code: string, dict: Record<string, string>): void;
     setLanguage(code: string): void;
     resetLanguage(): void;
@@ -316,20 +468,26 @@ const buildInstance = (core: InternalCore, layer: DictLayer): InternalInstance =
     // forLanguage sits on the hot path of reactive T() bridges: cache per code.
     const translatorCache = new Map<string, InternalTranslator>();
 
-    const validateExtension = (dict: DictSet, requiredLanguages: readonly string[], label: string): void => {
+    const validateExtension = (dict: DictSourceSet, requiredLanguages: readonly string[], label: string): void => {
         for (const lang of Object.keys(dict)) {
             if (!core.isCode(lang)) throw new Error(`LambderI18n: ${label} contains unsupported language "${lang}".`);
         }
         for (const lang of requiredLanguages) {
             if (!dict[lang]) throw new Error(`LambderI18n: ${label} is missing required language "${lang}".`);
         }
+        assertInlineDefaultBlock(dict, core.defaultLanguage, label);
+        // A loader's keys are checked the same way once it has run.
         for (const block of Object.values(dict)) {
-            for (const key of Object.keys(block ?? {})) {
-                if (layerLookup(layer, core.defaultLanguage, key) !== undefined) {
-                    throw new Error(`LambderI18n: ${label} redeclares existing key "${key}".`);
-                }
-            }
+            if (isObjectValue(block)) assertNoRedeclaredKeys(layer, core.defaultLanguage, block as Record<string, string>, label);
         }
+    };
+
+    // setLanguage and resetLanguage cannot hand a failure back, so it is logged
+    // and the language keeps falling back to the default one.
+    const loadSwitchedLanguage = (lang: string): void => {
+        loadLanguageAcrossRoot(core, lang).catch((err) => {
+            console.error(`LambderI18n: loading "${lang}" after switching to it failed; it falls back to the default language.`, err);
+        });
     };
 
     const instance: InternalInstance = {
@@ -344,19 +502,30 @@ const buildInstance = (core: InternalCore, layer: DictLayer): InternalInstance =
         },
         extend(dict) {
             validateExtension(dict, core.languageList, "extend() dictionary");
-            return buildInstance(core, { dicts: { ...dict }, parent: layer });
+            return buildInstance(core, createLayer(core, dict, layer));
         },
         extendPartial(dict) {
             validateExtension(dict, core.enforced, "extendPartial() dictionary");
-            return buildInstance(core, { dicts: { ...dict }, parent: layer });
+            return buildInstance(core, createLayer(core, dict, layer));
+        },
+        loadLanguage(code) {
+            const lang = code ?? core.state.resolve();
+            if (!core.isCode(lang)) return Promise.reject(new Error(`LambderI18n: unsupported language code "${lang}".`));
+            return loadLanguageAcrossRoot(core, lang);
         },
         registerDictionary(code, dict) {
             if (!core.isCode(code)) throw new Error(`LambderI18n: unsupported language code "${code}".`);
             layer.dicts[code] = { ...layer.dicts[code], ...dict };
             core.state.emitChange();
         },
-        setLanguage(code) { core.state.set(code); },
-        resetLanguage() { core.state.reset(); },
+        setLanguage(code) {
+            core.state.set(code);
+            loadSwitchedLanguage(code);
+        },
+        resetLanguage() {
+            core.state.reset();
+            loadSwitchedLanguage(core.state.resolve());
+        },
         get currentLanguage() { return core.state.resolve(); },
         get currentLanguageMeta() { return core.metaByCode.get(core.state.resolve())!; },
         get currentDir() {
@@ -406,7 +575,7 @@ export const createLambderI18n = <
         throw new Error(`LambderI18n: defaultLanguage "${config.defaultLanguage}" must be listed in enforced.`);
     }
     for (const lang of languageList) {
-        if (!(config.base as DictSet)[lang]) {
+        if (!(config.base as DictSourceSet)[lang]) {
             throw new Error(`LambderI18n: base dictionary is missing language "${lang}".`);
         }
     }
@@ -415,6 +584,7 @@ export const createLambderI18n = <
             throw new Error(`LambderI18n: base dictionary contains unsupported language "${lang}".`);
         }
     }
+    assertInlineDefaultBlock(config.base as DictSourceSet, config.defaultLanguage, "base dictionary");
 
     const customDetect = config.detectLanguage
         ? () => config.detectLanguage!({
@@ -435,8 +605,9 @@ export const createLambderI18n = <
         enforced: config.enforced,
         state: new LanguageState(isCode, config.defaultLanguage, customDetect),
         isCode,
+        lazyLayers: new Set(),
     };
 
-    return buildInstance(core, { dicts: { ...(config.base as DictSet) }, parent: null }) as unknown as
+    return buildInstance(core, createLayer(core, config.base as DictSourceSet, null)) as unknown as
         LambderI18nInstance<TLanguages, TDefault, TEnforced, TBase[TDefault]>;
 };
