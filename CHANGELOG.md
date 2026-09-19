@@ -9,6 +9,35 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [7.2.4] - 2026-09-19
+
+### Changed
+
+- **The mock's options are checked against the contract at compile time.**
+  Only the guard map was before, so a mock whose other options no longer fit
+  the contract compiled and then threw when its registry loaded, which in a
+  dev server is a blank page and an error in the browser console. Now each of
+  these is a type error at `create()`:
+  - `rateLimits.policies` leaving out a policy an endpoint references (a
+    policy added on the server and not to the mock);
+  - `sessions`, `idempotency` or `rateLimits` left out (or switched off)
+    while the contract has an endpoint that needs it, the way `guards`
+    already was;
+  - a guard with `session: true`, or a policy keyed `per: "session"`, where a
+    public endpoint names it;
+  - a `perPolicy` budget on a policy whose windows an endpoint overrides.
+
+  Each of these was already refused at registration, so a mock that compiles
+  now behaves as it did. The runtime checks stay for callers the types do not
+  reach.
+
+### Added
+
+- **`LambderContractRateLimitNames<C, M?>`**, from both entries: every
+  rate-limit policy name the contract references, the twin of
+  `LambderContractGuardNames`. Both now take an optional mode to read only the
+  public or only the session endpoints.
+
 ## [7.2.3] - 2026-09-19
 
 ### Added

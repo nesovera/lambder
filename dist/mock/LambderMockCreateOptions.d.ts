@@ -1,12 +1,12 @@
 import type { LambderApiSignatureMap } from "../shared/wire/LambderApiSignature.js";
-import type { LambderContractGuardNames } from "../shared/wire/LambderApiContract.js";
+import type { LambderContractGuardNames, LambderContractIdempotencyOf, LambderContractKeysWithMode, LambderContractRateLimitNames, LambderContractRateLimitOf } from "../shared/wire/LambderApiContract.js";
 import type { LambderApiGuard } from "../api/LambderApiGuards.js";
 import type { LambderApiRateLimitPolicyConfig } from "../api/LambderApiRateLimits.js";
 import type { LambderApiRequest } from "../api/LambderApiRequest.js";
 import type { LambderApiTransport } from "../shared/transport/LambderApiTransport.js";
 import type { LambderCookieJar } from "../shared/transport/LambderCookieJar.js";
 import type { LambderIdempotencyStore } from "../shared/contracts/LambderIdempotencyStore.js";
-import type { LambderRateLimiter } from "../shared/contracts/LambderRateLimiter.js";
+import type { LambderRateLimiter, LambderRateLimitWindow } from "../shared/contracts/LambderRateLimiter.js";
 import type { LambderSessionStore } from "../shared/contracts/LambderSessionStore.js";
 import type { LambderSessionDataRefreshConfig } from "../session/LambderSessionManager.js";
 import type { LambderSessionCookieOptions } from "../session/LambderSessionController.js";
@@ -60,9 +60,28 @@ export type LambderMockIdempotencyOptions<S = any> = {
      */
     callerIdentity?: (ctx: Omit<LambderMockCallContext<S>, "session">, request: LambderApiRequest) => string | null | Promise<string | null>;
 };
+/** Policy names whose windows some endpoint of the contract overrides, in the map form of its rateLimit option. */
+type LambderContractWindowOverrideNames<C> = {
+    [K in keyof C]: LambderWindowOverrideNamesIn<LambderContractRateLimitOf<C, K>>;
+}[keyof C] & string;
+type LambderWindowOverrideNamesIn<R> = R extends string | readonly string[] ? never : {
+    [N in keyof R]: R[N] extends object ? ([Extract<keyof R[N], LambderRateLimitWindow>] extends [never] ? never : N) : never;
+}[keyof R];
+/** Endpoint names whose idempotency option asks for a store (`false` is an opt-out and asks for none). */
+type LambderContractIdempotentKeys<C> = {
+    [K in keyof C]: [LambderContractIdempotencyOf<C, K>] extends [never] ? never : LambderContractIdempotencyOf<C, K> extends false ? never : K;
+}[keyof C];
 /**
  * The rate limits option: the policies endpoints may restate, the limiter
  * they are counted on, and what happens when that limiter throws.
+ *
+ * The policies are held to what the server's own policies were held to when
+ * it registered the same endpoints, because an entry the mock's copy does not
+ * fit cannot be registered, and this makes that an error at the option rather
+ * than a throw when the registry loads. So the map names every policy the
+ * contract references, a policy a public endpoint names is not keyed per
+ * session, and a policy whose windows an endpoint overrides keeps a per-API
+ * budget. Policies the contract does not reference may be added freely.
  *
  * `failOpen` is the server's own option (see LambderApiRateLimitsConfig) and
  * is here for the reason the idempotency option's twin is: with a limiter of
@@ -70,9 +89,23 @@ export type LambderMockIdempotencyOptions<S = any> = {
  * call through, so it answers 200 where a server configured to refuse answers
  * 429.
  */
-type LambderMockRateLimitsOptions<S, P extends LambderMockRateLimitPolicies<S>> = {
+type LambderMockRateLimitsOptions<C, S, P extends LambderMockRateLimitPolicies<S>> = {
     policies: P & {
         [N in keyof P]: LambderMockSurplusKeys<P[N], LambderApiRateLimitPolicyConfig<LambderMockCallContext<S>>>;
+    } & {
+        [N in LambderContractRateLimitNames<C>]: LambderApiRateLimitPolicyConfig<LambderMockCallContext<S>>;
+    } & {
+        [N in keyof P & LambderContractRateLimitNames<C, "public">]: P[N] extends {
+            per: "session";
+        } ? {
+            per: never;
+        } : unknown;
+    } & {
+        [N in keyof P & LambderContractWindowOverrideNames<C>]: P[N] extends {
+            budget: "perPolicy";
+        } ? {
+            budget: never;
+        } : unknown;
     };
     /** Where attempts are counted. Default: a fresh LambderMemoryRateLimiter. */
     limiter?: LambderRateLimiter;
@@ -95,11 +128,45 @@ type LambderMockGuardsOption<C, S, G> = [
 } : {
     guards: G & LambderMockGuards<C, S> & LambderMockGuardShapes<S, G>;
 };
+/**
+ * The sessions, idempotency and rateLimits options: each required whenever
+ * the contract has an endpoint that needs it, for the guards option's reason.
+ * An entry that needs one the mock was created without cannot be registered,
+ * so leaving it out is an error here rather than a throw when the registry
+ * loads.
+ */
+type LambderMockSessionsOption<C, S> = [
+    LambderContractKeysWithMode<C, "session">
+] extends [never] ? {
+    /** Sessions over the memory store: `true` for the defaults, or the options. Off by default. */
+    sessions?: boolean | LambderMockSessionsOptions<S>;
+} : {
+    /** Sessions over the memory store: `true` for the defaults, or the options. Required: the contract has session endpoints. */
+    sessions: true | LambderMockSessionsOptions<S>;
+};
+type LambderMockIdempotencyOption<C, S, I> = [
+    LambderContractIdempotentKeys<C>
+] extends [never] ? {
+    /** Idempotency over a memory store: `true` for the defaults, or the options. Off by default. */
+    idempotency?: I & LambderMockSurplusKeys<I, LambderMockIdempotencyOptions<S>>;
+} : {
+    /** Idempotency over a memory store: `true` for the defaults, or the options. Required: the contract has idempotent endpoints. */
+    idempotency: I & ([I] extends [false] ? never : unknown) & LambderMockSurplusKeys<I, LambderMockIdempotencyOptions<S>>;
+};
+type LambderMockRateLimitsOption<C, S, P extends LambderMockRateLimitPolicies<S>> = [
+    LambderContractRateLimitNames<C>
+] extends [never] ? {
+    /** The rate-limit policies endpoints may restate, over a memory limiter unless one is given. Off by default. */
+    rateLimits?: LambderMockRateLimitsOptions<C, S, P>;
+} : {
+    /** The rate-limit policies endpoints may restate, over a memory limiter unless one is given. Required: the contract references policies. */
+    rateLimits: LambderMockRateLimitsOptions<C, S, P>;
+};
 /** Each guard checked for surplus keys, so `sesion: true` on an inline guard is an error at the key rather than a guard that silently runs as public. */
 type LambderMockGuardShapes<S, G> = {
     [N in keyof G]: LambderMockSurplusKeys<G[N], LambderApiGuard<any, any, any, LambderMockCallContext<S>, LambderMockSessionCallContext<S>>>;
 };
-export type LambderMockAppOptions<C, S, G, P extends LambderMockRateLimitPolicies<S> = LambderMockRateLimitPolicies<S>, I extends boolean | LambderMockIdempotencyOptions<S> = boolean | LambderMockIdempotencyOptions<S>> = LambderMockGuardsOption<C, S, G> & {
+export type LambderMockAppOptions<C, S, G, P extends LambderMockRateLimitPolicies<S> = LambderMockRateLimitPolicies<S>, I extends boolean | LambderMockIdempotencyOptions<S> = boolean | LambderMockIdempotencyOptions<S>> = LambderMockGuardsOption<C, S, G> & LambderMockSessionsOption<C, S> & LambderMockIdempotencyOption<C, S, I> & LambderMockRateLimitsOption<C, S, P> & {
     /** Stamped on every answer's envelope as apiVersion, as the server's option is. */
     apiVersion?: string;
     /** The version floor, as on the server: a call naming a lower `version` answers versionExpired whatever its signature says. */
@@ -108,12 +175,6 @@ export type LambderMockAppOptions<C, S, G, P extends LambderMockRateLimitPolicie
     apiSignatures?: LambderApiSignatureMap;
     /** Artificial latency per call; off by default. */
     latency?: LambderMockLatency;
-    /** Sessions over the memory store: `true` for the defaults, or the options. Off by default: session endpoints then fail at registration. */
-    sessions?: boolean | LambderMockSessionsOptions<S>;
-    /** The rate-limit policies endpoints may restate, over a memory limiter unless one is given. Off by default. */
-    rateLimits?: LambderMockRateLimitsOptions<S, P>;
-    /** Idempotency over a memory store: `true` for the defaults, or the options. Off by default. */
-    idempotency?: I & LambderMockSurplusKeys<I, LambderMockIdempotencyOptions<S>>;
     /**
      * The host the runtime's cookies belong to: what signIn plants them
      * under, what the direct transport's jar scopes them by, what the MSW

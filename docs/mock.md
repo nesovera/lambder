@@ -54,10 +54,14 @@ guard's shape (`apiInput` or `guardInput` or neither, `session`, a typed param,
 a typed return that lands on `guardData`) and runs through the same engine.
 
 Every option is off unless present, so `mock.create({})` answers calls from its
-registry and nothing else. The one option that is not optional is `guards`,
-and only for a contract that declares guard names: a guard the map leaves out
+registry and nothing else. Four options stop being optional once the contract
+needs them: `guards` when it declares guard names, `sessions` when it has a
+session endpoint, `idempotency` when an endpoint declares idempotency, and
+`rateLimits` when an endpoint references a policy. A guard the map leaves out
 cannot run, so the mock would answer 200 where the server answers
-`notAuthorized`.
+`notAuthorized`; an entry that needs one of the other three cannot be
+registered, so leaving the option out is a compile error rather than a throw
+when the registry loads.
 
 | Option | Default | Description |
 | --- | --- | --- |
@@ -65,9 +69,9 @@ cannot run, so the mock would answer 200 where the server answers
 | `minApiVersion` | none | The version floor, as on the server: a call naming a lower `version` answers `versionExpired` whatever its signature says |
 | `apiSignatures` | none | The generated signature map, as the server's option is: a call whose signature is not the map's entry for its endpoint answers `versionExpired`; without it every signature passes |
 | `latency` | `0` | Milliseconds, a `{ min, max }` range, or `(apiName) => number` |
-| `sessions` | off | `true`, or `{ store?, sessionSalt?, ttlSeconds?, crypto?, dataRefresh?, enableSlidingExpiration?, slidingWriteIntervalSeconds?, tokenCookieKey?, csrfCookieKey?, cookieOptions? }` |
-| `rateLimits` | off | `{ policies, limiter?, failOpen? }`: the same policies the server declares, over `LambderMemoryRateLimiter` unless a limiter is given. `failOpen: false` refuses a call whose limiter threw instead of letting it through |
-| `idempotency` | off | `true`, or `{ defaultTtlSeconds?, defaultPendingTtlSeconds?, failOpen?, store?, callerIdentity? }`: the server's own options, `callerIdentity` bound to the mock call context without its session, since it runs on public endpoints alone |
+| `sessions` | off | Required when the contract has a session endpoint. `true`, or `{ store?, sessionSalt?, ttlSeconds?, crypto?, dataRefresh?, enableSlidingExpiration?, slidingWriteIntervalSeconds?, tokenCookieKey?, csrfCookieKey?, cookieOptions? }` |
+| `rateLimits` | off | Required when an endpoint references a policy. `{ policies, limiter?, failOpen? }`: the same policies the server declares, over `LambderMemoryRateLimiter` unless a limiter is given, checked against the contract (below). `failOpen: false` refuses a call whose limiter threw instead of letting it through |
+| `idempotency` | off | Required when an endpoint declares idempotency. `true`, or `{ defaultTtlSeconds?, defaultPendingTtlSeconds?, failOpen?, store?, callerIdentity? }`: the server's own options, `callerIdentity` bound to the mock call context without its session, since it runs on public endpoints alone |
 | `guards` | none | The mock guard map; required whenever the contract declares a guard name, and checked against the contract (below) |
 | `cookieHost` | the page's host, else `localhost` | The host this runtime's cookies belong to: what `signIn` plants them under, what the transport's jar sends them to, and what a call naming no `siteHost` is read as arriving at |
 | `maxRequestPayloadBytes` | `20_000_000` | Ceiling on what a compressed request payload may restore to |
@@ -81,13 +85,23 @@ A misspelled option is a compile error, nested ones included: `idempotency:
 are refused at the key rather than dropped in silence, which would leave the
 control they name switched off.
 
-### The guard map is checked against the contract
+### The guard map and the policies are checked against the contract
 
 `guards` must name every guard any endpoint of the contract declares, and for
 every guard the contract knows in `guardInput` mode its schema must parse to
-what the server inferred. A missing name, or a schema that parses to something
-else, fails at the option. Guards the contract does not declare may be added
-freely.
+what the server inferred. A guard a public endpoint names may not require a
+session. A missing name, a schema that parses to something else, or a session
+guard where a public endpoint names it fails at the option. Guards the
+contract does not declare may be added freely.
+
+`rateLimits.policies` is held to what the server's own policies were held to
+when it registered the same endpoints: it names every policy any endpoint of
+the contract references, a policy a public endpoint names is not keyed
+`per: "session"`, and a policy whose windows an endpoint overrides keeps the
+`perApi` budget. So a policy added on the server and not to the mock, or a
+mock copy that differs from the server's where it matters, fails at the
+option rather than when the registry loads. Policies the contract does not
+reference may be added freely.
 
 ## The registry
 

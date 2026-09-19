@@ -280,7 +280,7 @@ and the contract helpers (client too): `LambderApiMode`,
 `LambderContractGuardsOf`, `LambderContractGuardNames`,
 `LambderContractGuardInputsOf`, `LambderContractGuardInput`,
 `LambderContractGuardInputNames`, `LambderContractRateLimitOf`,
-`LambderContractIdempotencyOf`.
+`LambderContractRateLimitNames`, `LambderContractIdempotencyOf`.
 
 See [The API core](./api-core.md).
 

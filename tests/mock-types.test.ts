@@ -67,6 +67,12 @@ const mockGuards = {
 };
 /** The policies an entry may restate, which the runtime checks a restatement against at registration. */
 const mockPolicies = { tight: { perMin: 5, per: 'ip' } } as const;
+/**
+ * What the contract makes create() require beside the guard map: it has
+ * session, idempotent and rate-limited endpoints. The tests below spread it,
+ * so each @ts-expect-error still points at the one mistake it names.
+ */
+const requiredOptions = { sessions: true, idempotency: true, rateLimits: { policies: mockPolicies } } as const;
 const mockApp = mock.create({ sessions: true, idempotency: true, guards: mockGuards, rateLimits: { policies: mockPolicies } });
 
 describe('Mock registry types - builders', () => {
@@ -359,10 +365,10 @@ describe('Mock registry types - slices and register()', () => {
 describe('Mock registry types - the guard map', () => {
     it('must name every guard the contract declares, with guardInput schemas that parse to what the server inferred', () => {
         const { orgPermission, captcha, sessionOnly, open } = mockGuards;
-        mock.create({ sessions: true, guards: { orgPermission, captcha, sessionOnly, open } });
+        mock.create({ ...requiredOptions, guards: { orgPermission, captcha, sessionOnly, open } });
         // @ts-expect-error captcha is declared by the contract and missing here
-        mock.create({ sessions: true, guards: { orgPermission, sessionOnly, open } });
-        mock.create({ sessions: true, guards: {
+        mock.create({ ...requiredOptions, guards: { orgPermission, sessionOnly, open } });
+        mock.create({ ...requiredOptions, guards: {
             orgPermission, sessionOnly, open,
             // @ts-expect-error the server's captcha input is { token: string }, not { code: number }
             captcha: mock.guard({ guardInput: z.object({ code: z.number() }), handler: () => {} }),
@@ -375,7 +381,7 @@ describe('Mock registry types - the guard map', () => {
         // mock these used to compile and then authorize on a context they
         // could not read, which is the guard twin of the rate-limit key below.
         // @ts-expect-error these guards expect the server's render contexts, not the mock's
-        mock.create({ sessions: true, guards: serverGuards });
+        mock.create({ ...requiredOptions, guards: serverGuards });
     });
 
     it('a mock guard sees the mock contexts: the session on session guards, the request everywhere', () => {
@@ -394,12 +400,75 @@ describe('Mock registry types - the guard map', () => {
     });
 });
 
+describe('Mock registry types - the rate-limit policies', () => {
+    it('must name every policy the contract references', () => {
+        mock.create({ ...requiredOptions, guards: mockGuards, rateLimits: { policies: { tight: { perMin: 5, per: 'ip' } } } });
+        // Policies the contract does not reference may be added freely.
+        mock.create({ ...requiredOptions, guards: mockGuards, rateLimits: { policies: { tight: { perMin: 5, per: 'ip' }, extra: { perDay: 9, per: 'ip' } } } });
+        // @ts-expect-error tight is referenced by the contract and missing here
+        mock.create({ ...requiredOptions, guards: mockGuards, rateLimits: { policies: { other: { perMin: 5, per: 'ip' } } } });
+    });
+});
+
+describe('Mock app options - what the contract makes required', () => {
+    it('requires sessions, idempotency and rateLimits whenever the contract has an endpoint that needs each', () => {
+        // The guard map's argument, once per option: an entry that needs an
+        // option the mock was created without cannot be registered, so
+        // leaving the option out is refused here rather than when the
+        // registry loads.
+        mock.create({ sessions: true, idempotency: true, rateLimits: { policies: mockPolicies }, guards: mockGuards });
+        // @ts-expect-error the contract has session endpoints
+        mock.create({ idempotency: true, rateLimits: { policies: mockPolicies }, guards: mockGuards });
+        // @ts-expect-error switched off is the same as left out
+        mock.create({ sessions: false, idempotency: true, rateLimits: { policies: mockPolicies }, guards: mockGuards });
+        // @ts-expect-error the contract has idempotent endpoints
+        mock.create({ sessions: true, rateLimits: { policies: mockPolicies }, guards: mockGuards });
+        // @ts-expect-error switched off is the same as left out
+        mock.create({ sessions: true, idempotency: false, rateLimits: { policies: mockPolicies }, guards: mockGuards });
+        // @ts-expect-error the contract references rate-limit policies
+        mock.create({ sessions: true, idempotency: true, guards: mockGuards });
+    });
+
+    it('leaves each optional for a contract that needs none of them', () => {
+        initLambderMock<{ health: { input: {}; output: { ok: boolean }; mode: 'public' } }>().create({});
+    });
+
+    it('refuses a session guard or a per-session policy where a public endpoint names it', () => {
+        // The server refused both pairings when it registered the endpoint,
+        // so a contract never carries one; a mock copy that differs from the
+        // server's could not register the entry.
+        mock.create({
+            ...requiredOptions,
+            // @ts-expect-error open is named by public endpoints, so it may not require a session
+            guards: { ...mockGuards, open: mock.guard({ session: true, handler: (_ctx, _payload, _reason: string) => {} }) },
+        });
+        mock.create({
+            ...requiredOptions, guards: mockGuards,
+            // @ts-expect-error tight is named by a public endpoint, so it may not be keyed per session
+            rateLimits: { policies: { tight: { perMin: 5, per: 'session' } } },
+        });
+    });
+
+    it('refuses a shared budget for a policy whose windows an endpoint overrides', () => {
+        // One counter shared by every referencing endpoint has one set of
+        // windows, so the server refused the override on a perPolicy budget.
+        const overriding = initLambderMock<{ burst: { input: {}; output: { n: number }; mode: 'public'; rateLimit: { tight: { perMin: 1 } } } }>();
+        overriding.create({ rateLimits: { policies: { tight: { perMin: 5, per: 'ip' } } } });
+        // @ts-expect-error burst overrides tight's windows
+        overriding.create({ rateLimits: { policies: { tight: { perMin: 5, per: 'ip', budget: 'perPolicy' } } } });
+        // An errorMessage alone is overridable on either budget.
+        initLambderMock<{ burst: { input: {}; output: { n: number }; mode: 'public'; rateLimit: { tight: { errorMessage: { type: 'warning'; content: 'Slow down.' } } } } }>()
+            .create({ rateLimits: { policies: { tight: { perMin: 5, per: 'ip', budget: 'perPolicy' } } } });
+    });
+});
+
 describe('Mock rate-limit keys are bound to the mock context', () => {
     it('types a key handler for the runtime that will actually call it', () => {
         // The engine hands a key handler whatever context the adapter runs on,
         // and the two adapters run on different ones. Built with the mock's
         // own builder, the handler sees the mock call context.
         const policies = {
+            ...mockPolicies,
             perUser: {
                 perMin: 5,
                 budget: 'perApi',
@@ -407,7 +476,7 @@ describe('Mock rate-limit keys are bound to the mock context', () => {
             },
         } as const;
 
-        expect(() => mock.create({ sessions: true, guards: mockGuards, rateLimits: { policies } })).not.toThrow();
+        expect(() => mock.create({ ...requiredOptions, guards: mockGuards, rateLimits: { policies } })).not.toThrow();
     });
 
     it('refuses a key handler written against the server context', () => {
@@ -421,7 +490,7 @@ describe('Mock rate-limit keys are bound to the mock context', () => {
             sessions: true,
             guards: mockGuards,
             // @ts-expect-error the handler expects the server's render context, not the mock's
-            rateLimits: { policies: { byIp: { perMin: 5, budget: 'perApi', per: serverKey } } },
+            rateLimits: { policies: { ...mockPolicies, byIp: { perMin: 5, budget: 'perApi', per: serverKey } } },
         });
     });
 });
@@ -433,10 +502,10 @@ describe('Mock app options - what a typo costs', () => {
         // answers 200 where the server answers notAuthorized. Optional, it was
         // the droppable half of the check it exists for.
         // @ts-expect-error the contract declares guards, so the map is required
-        mock.create({ sessions: true });
+        mock.create({ ...requiredOptions });
         // @ts-expect-error still required beside other options
-        mock.create({ sessions: true, idempotency: true });
-        mock.create({ sessions: true, guards: mockGuards });
+        mock.create({ ...requiredOptions, latency: 0 });
+        mock.create({ ...requiredOptions, guards: mockGuards });
     });
 
     it('catches a typo INSIDE rateLimits.policies and idempotency, not only at the top level', () => {
@@ -447,17 +516,17 @@ describe('Mock app options - what a typo costs', () => {
         // runtime on the default: a typo'd failOpen is fail-open, and a typo'd
         // callerIdentity leaves every public replay key a bearer token.
         mock.create({
-            sessions: true, guards: mockGuards,
+            ...requiredOptions, guards: mockGuards,
             // @ts-expect-error budgt is not a policy option
             rateLimits: { policies: { tight: { perMin: 5, per: 'ip', budgt: 'perPolicy' } } },
         });
         mock.create({
-            sessions: true, guards: mockGuards,
+            ...requiredOptions, guards: mockGuards,
             // @ts-expect-error failOpn is not an idempotency option
             idempotency: { failOpn: false },
         });
         mock.create({
-            sessions: true, guards: mockGuards,
+            ...requiredOptions, guards: mockGuards,
             // @ts-expect-error callerIdentitiy is not an idempotency option
             idempotency: { callerIdentitiy: () => null },
         });
@@ -468,7 +537,7 @@ describe('Mock app options - what a typo costs', () => {
             rateLimits: { policies: { tight: { perMin: 5, per: 'ip', budget: 'perPolicy' } } },
             idempotency: { failOpen: false, defaultPendingTtlSeconds: 900, callerIdentity: (ctx) => ctx.request.ip },
         });
-        mock.create({ sessions: true, guards: mockGuards, idempotency: true });
+        mock.create({ ...requiredOptions, guards: mockGuards, idempotency: true });
     });
 });
 
@@ -560,7 +629,7 @@ describe('The mock guards map is checked for surplus keys', () => {
         // guard meant for sessions ran on a context with no session and
         // answered where the server refuses.
         // @ts-expect-error sesion is not a guard option
-        mock.create({ sessions: true, guards: { ...mockGuards, extra: { sesion: true, handler: async () => undefined } } });
-        expect(() => mock.create({ sessions: true, guards: { ...mockGuards, extra: { session: true, handler: async () => undefined } } })).not.toThrow();
+        mock.create({ ...requiredOptions, guards: { ...mockGuards, extra: { sesion: true, handler: async () => undefined } } });
+        expect(() => mock.create({ ...requiredOptions, guards: { ...mockGuards, extra: { session: true, handler: async () => undefined } } })).not.toThrow();
     });
 });

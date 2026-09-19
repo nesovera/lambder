@@ -118,9 +118,9 @@ export type LambderContractKeysWithMode<C, M extends LambderApiMode> =
 /** The endpoint's guards option as written, or never when it declared none. */
 export type LambderContractGuardsOf<C, K extends keyof C> = C[K] extends { guards: infer G } ? G : never;
 
-/** Every guard name any endpoint of the contract declares. */
-export type LambderContractGuardNames<C> =
-    { [K in keyof C]: LambderGuardNamesIn<LambderContractGuardsOf<C, K>> }[keyof C] & string;
+/** Every guard name any endpoint of the contract declares, or only the endpoints of mode M. */
+export type LambderContractGuardNames<C, M extends LambderApiMode = LambderApiMode> =
+    { [K in LambderContractKeysWithMode<C, M>]: LambderGuardNamesIn<LambderContractGuardsOf<C, K>> }[LambderContractKeysWithMode<C, M>] & string;
 
 /** The endpoint's guardInputs requirement, or never when its guards take no client input. */
 export type LambderContractGuardInputsOf<C, K extends keyof C> = C[K] extends { guardInputs: infer G } ? G : never;
@@ -140,6 +140,10 @@ export type LambderContractGuardInputNames<C> =
 
 /** The endpoint's rateLimit option as written, or never. */
 export type LambderContractRateLimitOf<C, K extends keyof C> = C[K] extends { rateLimit: infer R } ? R : never;
+
+/** Every rate-limit policy name any endpoint of the contract references, or only the endpoints of mode M. The rateLimit option takes the guards option's three forms, so the names come out the same way. */
+export type LambderContractRateLimitNames<C, M extends LambderApiMode = LambderApiMode> =
+    { [K in LambderContractKeysWithMode<C, M>]: LambderGuardNamesIn<LambderContractRateLimitOf<C, K>> }[LambderContractKeysWithMode<C, M>] & string;
 
 /** The endpoint's idempotency option as written, or never. */
 export type LambderContractIdempotencyOf<C, K extends keyof C> = C[K] extends { idempotency: infer I } ? I : never;
