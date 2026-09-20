@@ -125,8 +125,12 @@ on the context, and how to refuse a call without it reading as a crash.
 ## 3. Export the contract and the handler
 
 ```typescript
+import type { LambderFlattenContract } from "lambder";
+
 // The type the frontend imports. Type-only: no runtime code crosses over.
-export type ApiContractType = typeof lambder.ApiContract;
+// An interface rather than a type alias, so that reading the contract stays
+// cheap as endpoints are added; see apis.md for what that is worth.
+export interface ApiContractType extends LambderFlattenContract<typeof lambder.ApiContract> {}
 
 // The Lambda entry point. Dispatches HTTP requests and non-HTTP events alike.
 export const handler = lambder.getHandler();

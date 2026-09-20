@@ -14,7 +14,7 @@ import { LambderMemorySessionStore } from '../src/stores/LambderMemorySessionSto
 import { lambderGuard } from '../src/core/LambderPolicyBuilders.js';
 import type { LambderGuardMetaMap } from '../src/api/LambderApiGuards.js';
 import LambderCaller from '../src/client/LambderCaller.js';
-import type { LambderApiContractShape } from '../src/shared/wire/LambderApiContract.js';
+import type { LambderApiContractShape, LambderFlattenContract } from '../src/shared/wire/LambderApiContract.js';
 import { createApiEvent, createMockContext, testPublicFiles } from './helpers.js';
 
 type Permission = 'USERS.MANAGE' | 'USERS.VIEW' | 'BILLING.MANAGE';
@@ -312,5 +312,62 @@ describe('ApiContract - the declaration is what runs', () => {
         expect(JSON.parse(result.body || '{}').payload).toEqual({ result: 'removed' });
         // The literal on the contract and the value handed to the guard are the same declaration.
         expect(sawPermission).toBe('USERS.MANAGE' satisfies Declared);
+    });
+});
+
+describe('LambderFlattenContract - the interface an app exports its contract as', () => {
+    /**
+     * Chaining leaves the contract an intersection one member deep per
+     * endpoint, and reading it generically resolves the property across all
+     * of them. Apps collapse that by exporting an interface extending
+     * LambderFlattenContract, so these assertions hold the interface form to
+     * being the SAME type, not merely a close one.
+     */
+    const _app = createApp()
+        .addApi('open', testSchema, async (_ctx, res) => res.api({ result: 'ok' }))
+        .addApi('guarded', { ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } }, async (_ctx, res) => res.api({ result: 'ok' }))
+        .addSessionApi('member', { ...testSchema, guards: 'sessionOnly' }, async (_ctx, res) => res.api({ result: 'ok' }));
+
+    type Raw = typeof _app.ApiContract;
+    // no-empty-object-type would have this written as a type alias, and a type
+    // alias is exactly what does not collapse the intersection. The empty body
+    // is the point; see LambderFlattenContract.
+    // eslint-disable-next-line @typescript-eslint/no-empty-object-type
+    interface Flat extends LambderFlattenContract<Raw> {}
+
+    it('is the same type as the intersection it flattens', () => {
+        expectTypeOf<keyof Flat>().toEqualTypeOf<keyof Raw>();
+        expectTypeOf<Flat['open']>().toEqualTypeOf<Raw['open']>();
+        expectTypeOf<Flat['guarded']>().toEqualTypeOf<Raw['guarded']>();
+        expectTypeOf<Flat['member']>().toEqualTypeOf<Raw['member']>();
+    });
+
+    it('keeps an undeclared option absent rather than optional-undefined', () => {
+        // Every `[X] extends [never]` branch in the mock and the caller keys
+        // on absence, so a flatten that added the key would change what the
+        // contract means, not just how fast it reads.
+        expectTypeOf<Flat['open']>().not.toHaveProperty('guards');
+        expectTypeOf<Flat['open']>().not.toHaveProperty('rateLimit');
+        expectTypeOf<keyof Flat['open']>().toEqualTypeOf<keyof Raw['open']>();
+        expectTypeOf<Flat['guarded']['guards']>().toEqualTypeOf<{ readonly orgPermission: 'USERS.MANAGE' }>();
+    });
+
+    it('still satisfies the contract-shape constraint every consumer is checked against', () => {
+        // Load-bearing and easy to break. An interface gets no implicit index
+        // signature, so a hand-written `interface C { ... }` is NOT assignable
+        // to LambderApiContractShape (Record<string, ...>) and would be
+        // rejected by initLambderMock<C>, LambderCaller<C> and
+        // LambderInvokeCaller<C>. Extending a mapped type is what keeps the
+        // inferable index, which is why the helper exists at all.
+        type Assert<T extends true> = T;
+        type _Accepted = Assert<Flat extends LambderApiContractShape ? true : false>;
+        const holdsAsTypeArgument = new LambderCaller<Flat>({ apiPath: '/api', isCorsEnabled: false });
+        expect(holdsAsTypeArgument).toBeInstanceOf(LambderCaller);
+
+        interface HandWritten { 'a.b': { input: { v: string }; output: { r: string } } }
+        // @ts-expect-error an interface that extends nothing has no inferable index signature
+        type _Rejected = Assert<HandWritten extends LambderApiContractShape ? true : false>;
+        // The same members as a type alias are accepted, which is the whole difference.
+        type _AliasAccepted = Assert<{ 'a.b': { input: { v: string }; output: { r: string } } } extends LambderApiContractShape ? true : false>;
     });
 });
