@@ -273,8 +273,10 @@ Types: `LambderApiRequest`, `LambderApiRequestInfo`, `LambderCompressedPayloadFi
 `LambderApiIdempotencyOption`, `LambderApiPipelineOptions`,
 `LambderApiSessionsConfig`, `LambderApiInputRefusal`, `LambderApiRunResult`,
 `LambderApiExec`, `LambderApiEnvelopeConfig`, `LambderValidationAnswerBody`,
-`LambderSynthesizedRequest`, `LambderLambdaHttpResult`, and the two contract
-builders the root alone exports, `LambderContractEntry` and `LambderMergeContract`;
+`LambderSynthesizedRequest`, `LambderLambdaHttpResult`, and the three contract
+builders the root alone exports, `LambderContractEntry`, `LambderMergeContract`
+and `LambderFlattenContract` (what an app's `export interface ApiContractType`
+extends, so that reading the contract stays cheap as endpoints are added);
 and the contract helpers (client too): `LambderApiMode`,
 `LambderGuardNamesIn`, `LambderContractMode`, `LambderContractKeysWithMode`,
 `LambderContractGuardsOf`, `LambderContractGuardNames`,

@@ -286,6 +286,7 @@ export type {
     LambderApiNullAnswerConfig,
     LambderContractEntry,
     LambderMergeContract,
+    LambderFlattenContract,
     LambderGuardNamesIn,
     LambderContractMode,
     LambderContractKeysWithMode,

@@ -140,10 +140,17 @@ export default class Lambder<
      * Type property for extracting the API contract
      * Use this to export your API types to the frontend
      *
+     * Export it as an interface extending LambderFlattenContract, not as a
+     * type alias. Chaining builds the contract as an intersection one member
+     * deep per endpoint, and an interface collapses that into one declared
+     * set of members, which every generic read of the contract (a mock
+     * registry, a needs map, the typed caller) is then far cheaper against.
+     * See LambderFlattenContract for the measurements.
+     *
      * @example
      * ```typescript
      * const lambder = new Lambder().addApi(...).addApi(...);
-     * export type ApiContractType = typeof lambder.ApiContract;
+     * export interface ApiContractType extends LambderFlattenContract<typeof lambder.ApiContract> {}
      * ```
      */
     public readonly ApiContract!: _TContract;

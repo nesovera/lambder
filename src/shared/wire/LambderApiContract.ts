@@ -94,6 +94,55 @@ export type LambderContractEntry<In, Out, Mode extends LambderApiMode, GuardInpu
 /** Helper type for merging a new entry into the contract during chaining. */
 export type LambderMergeContract<Old, Name extends string, Entry> = Old & { [K in Name]: Entry };
 
+/**
+ * The contract as one object type, for the `export interface` a consuming
+ * app declares its contract through:
+ *
+ * ```ts
+ * export interface ApiContractType extends LambderFlattenContract<typeof lambder.ApiContract> {}
+ * ```
+ *
+ * Chaining leaves the contract an intersection one member deep per endpoint
+ * (LambderMergeContract above), and every `C[K]` written against a type
+ * parameter then resolves the property across all of them. That lookup is
+ * the atom the reading helpers below are built from, so its cost is paid
+ * again by each of them, per endpoint, in every app that registers a mock,
+ * declares a needs map, or otherwise reads the contract generically: in a
+ * 182-endpoint app one indexed access measured ~3,000 type instantiations
+ * and one mock registration ~18,000.
+ *
+ * Extending an interface is what collapses it. An interface's members are
+ * declared, so they are resolved once for the whole declaration rather than
+ * per lookup, and the same access measured ~6 instantiations after the
+ * change: a 182-endpoint app's frontend type check went from 27.8M
+ * instantiations to 7.0M and from 20.2s to 10.6s of check time. The alias
+ * form (`type C = LambderFlattenContract<...>`) does NOT do this: a mapped
+ * type stays deferred and each lookup pays the full cost again, so the
+ * `interface ... extends` spelling is the point.
+ *
+ * Diagnostics are the same ones, and they read better: a message naming the
+ * contract prints the interface by name, where the intersection is printed
+ * as a truncated spill of entries.
+ *
+ * Every endpoint name must be a string literal for an interface to extend
+ * the result, which registration through addApi/addSessionApi guarantees.
+ *
+ * Two things quietly undo it, both of which look like tidying:
+ *
+ * - `@typescript-eslint/no-empty-object-type` reports the empty body as
+ *   "equivalent to its supertype" and its fix is a type alias, which is the
+ *   one spelling that does not collapse anything. Disable the rule on the
+ *   line rather than taking the fix.
+ * - Extending anything but a mapped type loses the inferable index signature.
+ *   An interface has none of its own, so a hand-written `interface C { ... }`
+ *   is not assignable to LambderApiContractShape and is rejected by
+ *   initLambderMock<C>, LambderCaller<C> and LambderInvokeCaller<C>;
+ *   extending this mapped type is what keeps it. api-contract.test.ts pins
+ *   that, along with the flattened contract being the same type member for
+ *   member.
+ */
+export type LambderFlattenContract<C> = { [K in keyof C]: C[K] };
+
 // ---------------------------------------------------------------------------
 // Reading a contract without importing it: the helpers a mock registry, a
 // typed caller or a client-side needs map use to check themselves against

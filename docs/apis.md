@@ -55,9 +55,39 @@ second registration would be silently dead code.
 ## The inferred contract
 
 ```typescript
-export type ApiContractType = typeof lambder.ApiContract;
+import type { LambderFlattenContract } from "lambder";
+
+export interface ApiContractType extends LambderFlattenContract<typeof lambder.ApiContract> {}
 export const handler = lambder.getHandler();
 ```
+
+An interface, not a type alias, and the distinction is worth real time in a
+large app. Chaining leaves the contract an intersection one member deep per
+endpoint, so every `C[K]` written against a type parameter resolves the
+property across all of them. That lookup is the atom the contract-reading
+helpers are built from, which means a mock registry, a needs map or a typed
+caller pays it again per endpoint. Extending an interface declares the
+members once instead, and the lookups become ordinary property access. In a
+182-endpoint app the frontend type check went from 27.8M type instantiations
+and 20.2s of check time to 7.0M and 10.6s, with the same diagnostics.
+
+`type C = LambderFlattenContract<...>` does not do this. A mapped type stays
+deferred and each lookup pays the full cost again, so the `interface ...
+extends` spelling is the point. Diagnostics stay the same ones and read
+better: a message naming the contract prints the interface by name, where an
+intersection is printed as a truncated spill of entries.
+
+Two things quietly undo it, and both look like tidying:
+
+- `@typescript-eslint/no-empty-object-type` reports the empty body as
+  "equivalent to its supertype" and offers a type alias as the fix. Disable
+  the rule on that line instead.
+- Extending anything other than the mapped type loses the inferable index
+  signature. An interface has none of its own, so a hand-written
+  `interface ApiContractType { ... }` is not assignable to
+  `LambderApiContractShape` and `initLambderMock<C>`, `LambderCaller<C>` and
+  `LambderInvokeCaller<C>` all reject it. Extending
+  `LambderFlattenContract<...>` is what keeps it.
 
 Each contract entry carries the API's `input` and `output`, its `guardInputs`
 when a guardInput-mode guard applies, and its `guards` option exactly as
@@ -108,7 +138,7 @@ import { userApi } from "./user-api";
 
 const lambder = lambderApp.use(userApi);
 
-export type ApiContractType = typeof lambder.ApiContract;
+export interface ApiContractType extends LambderFlattenContract<typeof lambder.ApiContract> {}
 export const handler = lambder.getHandler();
 ```
 
