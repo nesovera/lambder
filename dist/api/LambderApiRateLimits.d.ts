@@ -6,6 +6,7 @@ import type { LambderApiCallContext } from "./LambderApiCallContext.js";
 import { type LambderRateLimiter, type LambderRateLimitPolicy } from "../shared/contracts/LambderRateLimiter.js";
 import { LambderApiRefusal, type LambderAppRefusalMessage } from "../shared/wire/LambderApiRefusal.js";
 import type { LambderNonEmptyOptionMap } from "../shared/util/LambderTypeUtilities.js";
+import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
 /** Refusal a rate-limited request answers unless the policy or the API's override names its own. */
 export declare const DEFAULT_RATE_LIMIT_REFUSAL: {
     type: "warning";
@@ -184,6 +185,12 @@ export declare class LambderApiRateLimitsEngine {
     /** True once rateLimits were configured. */
     get isConfigured(): boolean;
     configure(config: LambderApiRateLimitsConfig<Record<string, LambderApiRateLimitPolicyConfig>>): void;
+    /**
+     * Puts the engine over another limiter, for `lambder/testing`; the named
+     * policies and failOpen stay as configured. False when rateLimits were
+     * never configured: there is nothing for a limiter to sit under.
+     */
+    [LAMBDER_BACKEND_SWAP](limiter: LambderRateLimiter): boolean;
     /** Startup validation of one API registration's rateLimit option. */
     assertRegistration(apiName: string, mode: LambderApiMode, rateLimitOption?: LambderRateLimitOptionValue): void;
     /**

@@ -1,6 +1,6 @@
 # Exports reference
 
-Every name the three entry points export, grouped by what it is for. Anything
+Every name the four entry points export, grouped by what it is for. Anything
 not listed here is internal and may change without a major version.
 
 - `lambder` is the server surface: the Lambda adapter, the API core, the
@@ -10,6 +10,8 @@ not listed here is internal and may change without a major version.
   compression helpers (`compressPayloadGzip`, `isRequestCompressionAvailable`)
   are also exported from `lambder`.
 - `lambder/mock` carries the mock runtime, browser-safe like `lambder/client`.
+- `lambder/testing` puts a real app under test in this process. Server-only,
+  and reached by nothing else in the package, so no deployment carries it.
 
 The **Client** column marks what `lambder/client` also exports; `client only`
 marks the two names it exports that the root entry does not.
@@ -264,7 +266,7 @@ See [Frontend client](./client.md) and [The API core](./api-core.md#transports).
 | `API_ANSWER_CONTENT_TYPE` | | The content type every API answer carries (`application/json; charset=utf-8`) |
 | `LambderApiValidationRefusal`, `isLambderApiValidationRefusal` | | Input validation as a typed throw |
 | `answerFromResponse`, `responseFromAnswer` | | The server adapter's conversions between a `LambderResponse` and an answer |
-| `synthesizeLambdaHttpEvent`, `decodeLambdaHttpResult`, `localLambdaContext` | | The Lambda event conversions the invoke caller and the handler transport share |
+| `synthesizeLambdaHttpEvent`, `decodeLambdaHttpResult`, `localLambdaContext` | | The Lambda event conversions the invoke caller and the handler transport share. The event is payload format 2.0 unless `eventFormat: "v1"` asks for a REST API's |
 
 Types: `LambderApiRequest`, `LambderApiRequestInfo`, `LambderCompressedPayloadFields`,
 `LambderRestorePayloadResult`, `LambderApiAnswer`, `LambderResolverApiMethod`,
@@ -333,6 +335,7 @@ See [Translations](./i18n.md).
 | `lambderMockMswHandler` | One MSW handler for the whole API path, over the runtime |
 | `lambderMockInvokeTransport` | The runtime as a callee of `LambderInvokeCaller` |
 | `LambderMockTransportError` | An injected network failure or timeout, as the transport rejects |
+| `assertApiSuccess`, `assertApiFailure` | The outcome assertions, shared with `lambder/testing`: narrow an `apiOutcome` and say what it was when it is not what the test expected |
 | `LambderCookieJar`, `lambderCookieJarTransport`, `LambderMemorySessionStore`, `LambderMemoryRateLimiter`, `LambderMemoryIdempotencyStore`, `LambderWebCrypto`, `LambderPlainSessionCrypto`, `LambderApiRefusal`, `refuse`, `LAMBDER_REFUSAL_CODES` | Re-exported for a mock setup's convenience |
 
 Types: `LambderMockAppOptions`, `LambderMockSessionsOptions`,
@@ -357,6 +360,27 @@ The entry also re-exports the types a mock setup names around those values:
 `LambderApiTransport`, `LambderApiTransportRequest`, `LambderSessionCrypto`,
 `LambderRefusalMessage`, `LambderApiRequest`, `LambderApiAnswer`,
 `LambderSessionRecord`, and the return types of the two session members it
-hands out, `LambderCreatedSession` and `LambderSessionManager`.
+hands out, `LambderCreatedSession` and `LambderSessionManager`; and
+`LambderExpectedFailure`, what `assertApiFailure` may be told to expect beside
+the reason.
 
 See [The mock runtime](./mock.md).
+
+## Testing a real app (`lambder/testing`)
+
+| Export | Description |
+| --- | --- |
+| `lambderTestApp` | Puts a built Lambder instance under test: memory stores under it in place, simulated browsers in front of it. Returns a `LambderTestApp` |
+| `assertApiSuccess`, `assertApiFailure` | Narrow an `apiOutcome` through an `asserts` signature, and throw a plain Error naming what the outcome was. No test runner is imported |
+| `LambderMemorySessionStore`, `LambderMemoryRateLimiter`, `LambderMemoryIdempotencyStore`, `LambderLocalFileSource`, `LambderCookieJar`, `LAMBDER_REFUSAL_CODES` | Re-exported for a test's convenience: the stores to inspect or hand in, a file source over fixtures, a visitor's jar, the codes to assert on |
+
+Types: `LambderTestApp` and `LambderTestVisitor` (the two classes, reached
+through `lambderTestApp()` and `visitor()` rather than constructed),
+`LambderTestAppOptions`, `LambderTestVisitorOptions`, `LambderTestRequestInit`,
+`LambderTestedInstance` (an instance as `lambderTestApp` takes it),
+`LambderExpectedFailure`, and what a visitor hands back:
+`LambderLambdaHttpResult` from `request()`, `LambderCreatedSession` from
+`signIn()`, `LambderApiOutcome` and `LambderApiFailureReason` from
+`apiOutcome()`.
+
+See [Testing](./testing.md).

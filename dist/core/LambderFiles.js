@@ -1,5 +1,6 @@
 import mimeTypeResolver from "mime-types";
 import { LambderTemplatingEngine } from "./LambderTemplatingEngine.js";
+import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
 const DEFAULT_MEMORY_CACHE_MAX_BYTES = 32 * 1024 * 1024;
 const DEFAULT_MEMORY_CACHE_MAX_FILE_BYTES = 2 * 1024 * 1024;
 /**
@@ -44,6 +45,17 @@ export class LambderFiles {
         this.cache = memoryCache === false ? null : new Map();
         this.maxBytes = memoryCache === false ? 0 : (memoryCache?.maxBytes ?? DEFAULT_MEMORY_CACHE_MAX_BYTES);
         this.maxFileBytes = memoryCache === false ? 0 : (memoryCache?.maxFileBytes ?? DEFAULT_MEMORY_CACHE_MAX_FILE_BYTES);
+    }
+    /**
+     * Puts the reader over another source, for `lambder/testing`. In place,
+     * because servePublicFiles holds this reader rather than the instance's
+     * field; both caches go with the source they were filled from.
+     */
+    [LAMBDER_BACKEND_SWAP](source) {
+        this.source = source;
+        this.cache?.clear();
+        this.cacheBytes = 0;
+        this.templates.clear();
     }
     /**
      * The file at a request or handler path (leading slash optional), mime

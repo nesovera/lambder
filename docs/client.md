@@ -310,7 +310,7 @@ behaviour `isCorsEnabled` selects. Pass `transport` at construction, or
 | Transport | Use |
 | --- | --- |
 | `mockApp.transport()` | The [mock runtime](./mock.md), in development and in tests |
-| `lambderHandlerTransport(handler)` | A real Lambder handler in this process, for integration tests with no HTTP and no AWS (root entry) |
+| `lambderHandlerTransport(handler)` | A real Lambder handler in this process, for integration tests with no HTTP and no AWS (root entry). Options: `host`, `clientIp`, `context`, `maxResponseBytes`, and `eventFormat` (`"v2"` by default, `"v1"` for a REST API's event). `lambderTestApp` from `lambder/testing` wires it for you, with a cookie jar per visitor; see [Testing](./testing.md) |
 | `lambderCookieJarTransport(inner, { jar })` | Any transport carrying a `LambderCookieJar`, so a session survives between calls where there is no browser |
 
 ```typescript

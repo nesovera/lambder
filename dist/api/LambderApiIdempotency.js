@@ -2,6 +2,7 @@ import { getAnswerHeader } from "../shared/wire/LambderAnswerHeaders.js";
 import { LambderApiRefusal, LAMBDER_REFUSAL_CODES } from "../shared/wire/LambderApiRefusal.js";
 import { joinKeyFields } from "../shared/util/LambderKeyFields.js";
 import { assertPositiveInteger } from "../shared/util/LambderOptionChecks.js";
+import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
 /**
  * A crashed original must not block retries forever, so a pending claim
  * expires on its own. The default is five minutes, which covers the great
@@ -101,6 +102,17 @@ export class LambderApiIdempotencyEngine {
         this.defaultPendingTtlSeconds = config.defaultPendingTtlSeconds ?? DEFAULT_IDEMPOTENCY_PENDING_TTL_SECONDS;
         this.failOpen = config.failOpen ?? true;
         this.callerIdentity = config.callerIdentity;
+    }
+    /**
+     * Puts the engine over another store, for `lambder/testing`; the replay
+     * TTLs, failOpen and callerIdentity stay as configured. False when
+     * idempotency was never configured.
+     */
+    [LAMBDER_BACKEND_SWAP](store) {
+        if (!this.store)
+            return false;
+        this.store = store;
+        return true;
     }
     /** Startup validation of one API registration's idempotency option. */
     assertRegistration(apiName, config) {

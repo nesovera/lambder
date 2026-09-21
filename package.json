@@ -1,6 +1,6 @@
 {
   "name": "lambder",
-  "version": "7.2.5",
+  "version": "7.3.1",
   "sideEffects": false,
   "description": "Opinionated serverless web framework for TypeScript on AWS Lambda: type-safe APIs from Zod schemas, DynamoDB sessions, and declarative rate limits, authorization guards and idempotency.",
   "keywords": [
@@ -49,6 +49,10 @@
       "types": "./dist/mock.d.ts",
       "default": "./dist/mock.js"
     },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
+    },
     "./package.json": "./package.json"
   },
   "typesVersions": {
@@ -58,10 +62,14 @@
       ],
       "mock": [
         "./dist/mock.d.ts"
+      ],
+      "testing": [
+        "./dist/testing.d.ts"
       ]
     }
   },
   "browser": {
+    "async_hooks": false,
     "fs": false,
     "path": false,
     "zlib": false,

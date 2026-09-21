@@ -3,6 +3,7 @@ import { LambderWebCrypto } from "./LambderSessionCrypto.js";
 import type { LambderSessionRecord, LambderSessionStore } from "../shared/contracts/LambderSessionStore.js";
 import { coerceToError } from "../shared/wire/LambderCrashDetail.js";
 import { assertPositiveInteger } from "../shared/util/LambderOptionChecks.js";
+import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
 
 
 /**
@@ -135,7 +136,8 @@ export const isMintedSessionToken = (token: string): boolean => {
  * stored too.
  */
 export default class LambderSessionManager<SessionData = any> {
-    private readonly store: LambderSessionStore<SessionData>;
+    /** Replaceable through the backend swap alone; see LAMBDER_BACKEND_SWAP. */
+    private store: LambderSessionStore<SessionData>;
     private readonly sessionSalt: string;
     private readonly enableSlidingExpiration: boolean;
     private readonly slidingWriteIntervalSeconds: number | null;
@@ -158,6 +160,14 @@ export default class LambderSessionManager<SessionData = any> {
         if(dataRefresh) assertPositiveInteger(dataRefresh.ttlSeconds, "session.dataRefresh.ttlSeconds");
         this.dataRefresh = dataRefresh ?? null;
         this.crypto = crypto ?? new LambderWebCrypto();
+        this.assertCryptoFitsStore(store);
+        if(typeof sessionSalt !== "string" || sessionSalt.length === 0){
+            throw new Error("Lambder: session sessionSalt is empty. It salts the hash that partitions the store, so it has to be a real, stable secret.");
+        }
+    }
+
+    /** A store this manager's crypto may sit in front of. Asked of every store it is given, the one at creation and a swapped one alike. */
+    private assertCryptoFitsStore(store: LambderSessionStore<SessionData>): void {
         if(!this.crypto.isCryptographic && !store.isMemoryOnly){
             throw new Error(
                 "Lambder: this session crypto does not hash and does not draw cryptographically random bytes, " +
@@ -165,9 +175,17 @@ export default class LambderSessionManager<SessionData = any> {
                 "record would be a usable credential and the sessionSalt would be readable from it."
             );
         }
-        if(typeof sessionSalt !== "string" || sessionSalt.length === 0){
-            throw new Error("Lambder: session sessionSalt is empty. It salts the hash that partitions the store, so it has to be a real, stable secret.");
-        }
+    }
+
+    /**
+     * Puts the manager over another store, for `lambder/testing`. The model
+     * (salt, tokens, expiry, dataRefresh) stays this manager's own, so a test
+     * runs the app's sessions as configured over a store that dies with the
+     * process. Sessions held by the store it leaves are simply out of reach.
+     */
+    [LAMBDER_BACKEND_SWAP](store: LambderSessionStore<SessionData>): void {
+        this.assertCryptoFitsStore(store);
+        this.store = store;
     }
 
     /**

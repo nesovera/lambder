@@ -5,6 +5,9 @@ import type { LambderApiDefinition } from "./LambderApiDefinition.js";
 import { type LambderApiGuard } from "./LambderApiGuards.js";
 import { type LambderApiRateLimitPolicyConfig, type LambderApiRateLimitsConfig } from "./LambderApiRateLimits.js";
 import { type LambderApiIdempotencyConfig } from "./LambderApiIdempotency.js";
+import type { LambderRateLimiter } from "../shared/contracts/LambderRateLimiter.js";
+import type { LambderIdempotencyStore } from "../shared/contracts/LambderIdempotencyStore.js";
+import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
 /**
  * Runtime side of the declarative API options: composes the three policy
  * subsystems (rate limits in ./LambderApiRateLimits.ts, guards in
@@ -23,6 +26,14 @@ export declare class LambderApiPolicyEngine {
     configureRateLimits(config: LambderApiRateLimitsConfig<Record<string, LambderApiRateLimitPolicyConfig>>): void;
     configureGuards(guards: Record<string, LambderApiGuard<any, any, any>>): void;
     configureIdempotency(config: LambderApiIdempotencyConfig): void;
+    /** The backend swap, handed on to the two subsystems that hold a store. Each answers whether it had a place for one. */
+    [LAMBDER_BACKEND_SWAP](backends: {
+        rateLimiter?: LambderRateLimiter;
+        idempotencyStore?: LambderIdempotencyStore;
+    }): {
+        rateLimits: boolean;
+        idempotency: boolean;
+    };
     /** Startup validation of one API's declarative options. */
     assertRegistration(definition: LambderApiDefinition): void;
     /** The rate-limit policies that can be checked before the session is read: see LambderApiRateLimitsEngine.run. */

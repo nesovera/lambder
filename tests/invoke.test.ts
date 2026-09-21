@@ -32,7 +32,8 @@ import { getEventListeners } from 'node:events';
 import type { APIGatewayProxyEventV2 } from 'aws-lambda';
 import { mockClient } from 'aws-sdk-client-mock';
 import { LambdaClient, InvokeCommand } from '@aws-sdk/client-lambda';
-import { initLambder } from '../src/core/Lambder.js';
+import Lambder, { initLambder } from '../src/core/Lambder.js';
+import { isV2HttpEvent } from '../src/core/LambderContext.js';
 import { LambderMemorySessionStore } from '../src/stores/LambderMemorySessionStore.js';
 import LambderInvokeCaller, {
     LAMBDER_INVOKE_MAX_EVENT_BYTES,
@@ -47,6 +48,7 @@ import { lambderGuard } from '../src/core/LambderPolicyBuilders.js';
 import { refuse, LAMBDER_REFUSAL_CODES } from '../src/shared/wire/LambderApiRefusal.js';
 import { compressPayloadBrotli, compressPayloadGzip } from '../src/shared/wire/LambderRequestPayload.js';
 import { LambderTransportFailure } from '../src/shared/transport/LambderApiTransport.js';
+import { assertApiFailure } from '../src/shared/wire/LambderOutcomeAssertions.js';
 import { createApiEvent, createMockContext, brotliBody, decodeBody, DEFAULT_GATEWAY_SOURCE_IP } from './helpers.js';
 
 /** A payload big and repetitive enough that Brotli is a large win. */
@@ -202,6 +204,36 @@ describe('LambderInvokeCaller - the synthesized event', () => {
         expect(browserShaped.headers['x-forwarded-for']).toBeUndefined();
     });
 
+    it('synthesizes the REST API shape on request, with the same ownership of headers and address', () => {
+        const event = synthesizeLambdaHttpEvent({
+            method: 'POST', path: '/orders', host: 'shop.test', query: { page: '2' },
+            headers: { 'X-Custom': 'kept', 'X-Forwarded-For': '198.51.100.9' },
+            clientIp: '203.0.113.7', cookies: ['a=1', 'b=2'], body: '{"sku":"kettle"}',
+        }, { invoke: false, eventFormat: 'v1' });
+
+        expect(Lambder.isHttpEvent(event)).toBe(true);
+        expect(isV2HttpEvent(event)).toBe(false);
+        expect(event.httpMethod).toBe('POST');
+        expect(event.path).toBe('/orders');
+        expect(event.queryStringParameters).toEqual({ page: '2' });
+        expect(event.multiValueQueryStringParameters).toEqual({ page: ['2'] });
+        // A REST API has no cookies array: they ride in the Cookie header, once per delivery form.
+        expect(event.headers.cookie).toBe('a=1; b=2');
+        expect(event.multiValueHeaders.cookie).toEqual(['a=1; b=2']);
+        expect(event.headers.host).toBe('shop.test');
+        expect(event.headers['x-custom']).toBe('kept');
+        // The asserted address is the gateway's observation here too, never a header.
+        expect(event.headers['x-forwarded-for']).toBeUndefined();
+        expect(event.requestContext.identity.sourceIp).toBe('203.0.113.7');
+        expect(event.body).toBe('{"sku":"kettle"}');
+        expect(event.isBase64Encoded).toBe(false);
+
+        const bare = synthesizeLambdaHttpEvent({ method: 'GET', path: '/', host: 'shop.test' }, { invoke: false, eventFormat: 'v1' });
+        expect(bare.queryStringParameters).toBeNull();
+        expect(bare.body).toBeNull();
+        expect(bare.headers.cookie).toBeUndefined();
+    });
+
     it('names the invoking function when it runs in Lambda', () => {
         vi.stubEnv('AWS_LAMBDA_FUNCTION_NAME', 'caller-fn');
         try {
@@ -256,8 +288,7 @@ describe('LambderInvokeCaller - round trips through a real Lambder app', () => {
         expect(provider).toHaveBeenCalledWith('captchaed');
         // A short per-call token overrides the provider's and the guard refuses it: validation, not a crash.
         const outcome = await caller.apiOutcome('captchaed', {}, { guardInputs: { captcha: { token: 'x' } } });
-        expect(outcome.ok).toBe(false);
-        if(!outcome.ok) expect(outcome.reason).toBe('validation');
+        assertApiFailure(outcome, 'validation');
     });
 
     it('apiOutcome() carries the answer and its logList; onLogList receives the entries', async () => {
@@ -397,9 +428,9 @@ describe('LambderInvokeCaller - the logs of an answer that failed', () => {
 
         const outcome = await caller.apiOutcome('echo', { text: 'hi' });
 
-        expect(outcome.ok).toBe(false);
+        assertApiFailure(outcome);
         expect(seen).toEqual([['echo', [{ step: 'before the crash' }]]]);
-        if(!outcome.ok) expect(outcome.logList).toEqual([{ step: 'before the crash' }]);
+        expect(outcome.logList).toEqual([{ step: 'before the crash' }]);
     });
 });
 
@@ -713,14 +744,12 @@ describe('LambderInvokeCaller - the transport\'s own failures', () => {
         const caller = new LambderInvokeCaller({ functionName: 'slow-fn', transport: hanging, timeoutMs: 20 });
 
         const timedOut = await caller.apiOutcome('echo', {});
-        expect(timedOut.ok).toBe(false);
-        if(!timedOut.ok) expect(timedOut.reason).toBe('timeout');
+        assertApiFailure(timedOut, 'timeout');
 
         const controller = new AbortController();
         controller.abort();
         const external = await caller.apiOutcome('echo', {}, { signal: controller.signal });
-        expect(external.ok).toBe(false);
-        if(!external.ok) expect(external.reason).toBe('network');
+        assertApiFailure(external, 'network');
     });
 
     it('request() throws the same LambderInvokeError for a crash or a rejected send', async () => {
@@ -836,8 +865,7 @@ describe('LambderInvokeCaller - hooks cannot break the call', () => {
             const caller = callerFor(createCallee(), { onFailure: async () => { throw new Error('reporter down'); } });
 
             const outcome = await caller.apiOutcome('refuse', {});
-            expect(outcome.ok).toBe(false);
-            if(!outcome.ok) expect(outcome.reason).toBe('errorMessage');
+            assertApiFailure(outcome, 'errorMessage');
 
             const thrown = await caller.api('refuse', {}).then(() => null, (err: unknown) => err);
             expect(isLambderInvokeError(thrown)).toBe(true);
@@ -940,8 +968,7 @@ describe('LambderInvokeCaller - validation issues are typed as what crosses the 
             const handler = vi.fn();
             const browser = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, apiInputValidationErrorHandler: handler });
             const outcome = await browser.apiOutcome('echo', { text: 42 });
-            expect(outcome.ok).toBe(false);
-            if(!outcome.ok) expect(outcome.reason).toBe('validation');
+            assertApiFailure(outcome, 'validation');
             expect(handler).toHaveBeenCalledOnce();
             const [received] = handler.mock.calls[0] as [LambderValidationError];
             expect(received.issues[0]?.path).toEqual(['text']);
@@ -1073,8 +1100,7 @@ describe('LambderInvokeCaller - an answer that arrives after the call was given 
             transport: LambderInvokeCaller.localTransport(slowCallee.getHandler()),
         });
         const fromLocal = await local.apiOutcome('slow', {});
-        expect(fromLocal.ok).toBe(false);
-        if(!fromLocal.ok) expect(fromLocal.reason).toBe('timeout');
+        assertApiFailure(fromLocal, 'timeout');
         // And the wait ended with the timeout rather than with the handler:
         // the handler is still running, which is what a timeout buys here. An
         // elapsed-milliseconds bound says the same thing less reliably on a
@@ -1089,8 +1115,7 @@ describe('LambderInvokeCaller - an answer that arrives after the call was given 
         };
         const custom = new LambderInvokeCaller<typeof slowCallee.ApiContract>({ functionName: 'callee-fn', timeoutMs: 10, transport: deafToAbort });
         const fromCustom = await custom.apiOutcome('slow', {});
-        expect(fromCustom.ok).toBe(false);
-        if(!fromCustom.ok) expect(fromCustom.reason).toBe('timeout');
+        assertApiFailure(fromCustom, 'timeout');
     });
 
     it('refuses a call whose signal had already aborted, without reaching the transport', async () => {
@@ -1111,8 +1136,7 @@ describe('LambderInvokeCaller - an answer that arrives after the call was given 
 
         const outcome = await caller.apiOutcome('echo', { text: 'hi' }, { signal: controller.signal });
 
-        expect(outcome.ok).toBe(false);
-        if(!outcome.ok) expect(outcome.reason).toBe('network');
+        assertApiFailure(outcome, 'network');
         expect(transportCalls).toBe(0);
     });
 
@@ -1129,8 +1153,7 @@ describe('LambderInvokeCaller - an answer that arrives after the call was given 
 
         const outcome = await caller.apiOutcome('echo', { text: 'hi' }, { signal: controller.signal });
 
-        expect(outcome.ok).toBe(false);
-        if(!outcome.ok) expect(outcome.reason).toBe('network');
+        assertApiFailure(outcome, 'network');
         expect(handlerRan).toBe(false);
     });
 });
@@ -1186,8 +1209,8 @@ describe('LambderInvokeCaller - the answer\'s cookies', () => {
             functionName: 'callee-fn',
             transport: async () => { throw new Error('offline'); },
         }).apiOutcome('login', { user: 'ada' });
-        expect(noAnswer.ok).toBe(false);
-        if(!noAnswer.ok) expect(noAnswer.cookies).toEqual([]);
+        assertApiFailure(noAnswer);
+        expect(noAnswer.cookies).toEqual([]);
     });
 });
 

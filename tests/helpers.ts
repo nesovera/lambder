@@ -10,6 +10,19 @@ import {
 } from '@aws-sdk/client-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyEventV2, Context } from 'aws-lambda';
 import type { LambderHttpResponse } from '../src/core/LambderResponse.js';
+import { lambderTestApp } from '../src/testing.js';
+
+/**
+ * A stranger's browser in front of an app under test, for the tests whose
+ * subject is what the app does (routing, hooks, handlers, refusals) rather
+ * than the wire: a request goes in the way a consumer's test sends one, and
+ * the answer comes back decoded. The tests about the wire itself (event
+ * parsing, response finalization, compression, the two gateway formats) build
+ * their events by hand with the functions below, because the event is what
+ * they test.
+ */
+export const browse = (lambder: Parameters<typeof lambderTestApp>[0], options: { host?: string; headers?: Record<string, string> } = {}) =>
+    lambderTestApp(lambder).visitor(options);
 
 /** Decode a finalized response body: base64-aware, gzip-unaware (tests opt out of gzip by not sending Accept-Encoding). */
 export const decodeBody = (result: { body: string | null, isBase64Encoded?: boolean }): string => {

@@ -6,6 +6,9 @@ import { LambderApiGuardsEngine, type LambderApiGuard } from "./LambderApiGuards
 import { LambderApiRateLimitsEngine, type LambderApiRateLimitPolicyConfig, type LambderApiRateLimitsConfig } from "./LambderApiRateLimits.js";
 import { LambderApiIdempotencyEngine, type LambderApiIdempotencyConfig } from "./LambderApiIdempotency.js";
 import type { LambderApiIdempotencyOption } from "../shared/wire/LambderApiOptionValues.js";
+import type { LambderRateLimiter } from "../shared/contracts/LambderRateLimiter.js";
+import type { LambderIdempotencyStore } from "../shared/contracts/LambderIdempotencyStore.js";
+import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
 
 /** An API that asks for idempotency: declared, and not the explicit `false` opt-out. */
 const usesIdempotency = (definition: LambderApiDefinition): definition is LambderApiDefinition & { idempotency: LambderApiIdempotencyOption } =>
@@ -40,6 +43,14 @@ export class LambderApiPolicyEngine {
 
     configureIdempotency(config: LambderApiIdempotencyConfig): void {
         this.idempotency.configure(config);
+    }
+
+    /** The backend swap, handed on to the two subsystems that hold a store. Each answers whether it had a place for one. */
+    [LAMBDER_BACKEND_SWAP](backends: { rateLimiter?: LambderRateLimiter; idempotencyStore?: LambderIdempotencyStore }): { rateLimits: boolean; idempotency: boolean } {
+        return {
+            rateLimits: backends.rateLimiter ? this.rateLimits[LAMBDER_BACKEND_SWAP](backends.rateLimiter) : false,
+            idempotency: backends.idempotencyStore ? this.idempotency[LAMBDER_BACKEND_SWAP](backends.idempotencyStore) : false,
+        };
     }
 
     /** Startup validation of one API's declarative options. */

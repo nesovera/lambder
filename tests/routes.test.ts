@@ -11,60 +11,11 @@
  * - Wildcard routes
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
-import nodeCrypto from 'crypto';
-import { decodeBody, testPublicFiles } from './helpers.js';
-import { mockClient } from 'aws-sdk-client-mock';
-import { DynamoDBDocumentClient, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { describe, it, expect } from 'vitest';
+import { browse, testPublicFiles } from './helpers.js';
 import Lambder, { initLambder } from '../src/core/Lambder.js';
 import { LambderDdbSessionStore } from '../src/stores/LambderDdbSessionStore.js';
-import type { APIGatewayProxyEvent, Context } from 'aws-lambda';
-
-// Session records store only hashes of the bearer secrets.
-const hashTok = (value: string) => nodeCrypto.createHash('sha256').update(value).digest('hex');
-
-// A session cookie carries `sessionKeyHash:secret`, both lowercase hex, and a
-// value that is not shaped like a minted token is "no session" before any
-// store read. So the fixtures below carry the real shape.
-const SESSION_KEY_HASH = 'a1'.repeat(32);
-const SESSION_SECRET = 'b2'.repeat(32);
-const SESSION_TOKEN = `${SESSION_KEY_HASH}:${SESSION_SECRET}`;
-
-// Mock DynamoDB
-const ddbMock = mockClient(DynamoDBDocumentClient);
-
-const createMockEvent = (path: string, method: string = 'GET', sessionToken?: string): APIGatewayProxyEvent => ({
-    body: null,
-    headers: { 
-        Host: 'localhost',
-        Cookie: sessionToken ? `LMDRSESSIONTKID=${sessionToken}` : ''
-    },
-    multiValueHeaders: {},
-    httpMethod: method,
-    isBase64Encoded: false,
-    path,
-    pathParameters: null,
-    queryStringParameters: null,
-    multiValueQueryStringParameters: null,
-    stageVariables: null,
-    requestContext: {} as any,
-    resource: '',
-});
-
-const createMockContext = (): Context => ({
-    callbackWaitsForEmptyEventLoop: false,
-    functionName: 'test',
-    functionVersion: '1',
-    invokedFunctionArn: 'arn',
-    memoryLimitInMB: '128',
-    awsRequestId: '123',
-    logGroupName: 'group',
-    logStreamName: 'stream',
-    getRemainingTimeInMillis: () => 1000,
-    done: () => {},
-    fail: () => {},
-    succeed: () => {},
-});
+import { lambderTestApp } from '../src/testing.js';
 
 describe('Routes - Basic Path Matching', () => {
     it('should match simple string paths', async () => {
@@ -76,12 +27,11 @@ describe('Routes - Basic Path Matching', () => {
                 return res.html('Hello World');
             });
 
-        const handler = lambder.getHandler();
-        const event = createMockEvent('/hello');
-        const result = await handler(event, createMockContext());
+        const visitor = browse(lambder);
+        const result = await visitor.request('GET', '/hello');
 
         expect(result.statusCode).toBe(200);
-        const body = decodeBody(result);
+        const body = result.text();
         expect(body).toBe('Hello World');
     });
 
@@ -97,9 +47,8 @@ describe('Routes - Basic Path Matching', () => {
                 return res.status404('Not Found');
             });
 
-        const handler = lambder.getHandler();
-        const event = createMockEvent('/goodbye');
-        const result = await handler(event, createMockContext());
+        const visitor = browse(lambder);
+        const result = await visitor.request('GET', '/goodbye');
 
         expect(result.statusCode).toBe(404);
     });
@@ -119,16 +68,16 @@ describe('Routes - Basic Path Matching', () => {
                 return res.html('Contact Page');
             });
 
-        const handler = lambder.getHandler();
+        const visitor = browse(lambder);
 
-        const homeResult = await handler(createMockEvent('/home'), createMockContext());
-        expect(decodeBody(homeResult)).toBe('Home Page');
+        const homeResult = await visitor.request('GET', '/home');
+        expect(homeResult.text()).toBe('Home Page');
 
-        const aboutResult = await handler(createMockEvent('/about'), createMockContext());
-        expect(decodeBody(aboutResult)).toBe('About Page');
+        const aboutResult = await visitor.request('GET', '/about');
+        expect(aboutResult.text()).toBe('About Page');
 
-        const contactResult = await handler(createMockEvent('/contact'), createMockContext());
-        expect(decodeBody(contactResult)).toBe('Contact Page');
+        const contactResult = await visitor.request('GET', '/contact');
+        expect(contactResult.text()).toBe('Contact Page');
     });
 });
 
@@ -142,12 +91,11 @@ describe('Routes - Path Parameters', () => {
                 return res.json({ userId: ctx.pathParams?.userId });
             });
 
-        const handler = lambder.getHandler();
-        const event = createMockEvent('/user/123');
-        const result = await handler(event, createMockContext());
+        const visitor = browse(lambder);
+        const result = await visitor.request('GET', '/user/123');
 
         expect(result.statusCode).toBe(200);
-        const body = JSON.parse(result.body || '{}');
+        const body = result.json() as Record<string, unknown>;
         expect(body.userId).toBe('123');
     });
 
@@ -163,11 +111,10 @@ describe('Routes - Path Parameters', () => {
                 });
             });
 
-        const handler = lambder.getHandler();
-        const event = createMockEvent('/users/456/posts/789');
-        const result = await handler(event, createMockContext());
+        const visitor = browse(lambder);
+        const result = await visitor.request('GET', '/users/456/posts/789');
 
-        const body = JSON.parse(result.body || '{}');
+        const body = result.json() as Record<string, unknown>;
         expect(body.userId).toBe('456');
         expect(body.postId).toBe('789');
     });
@@ -181,11 +128,10 @@ describe('Routes - Path Parameters', () => {
                 return res.json({ path: ctx.pathParams?.path });
             });
 
-        const handler = lambder.getHandler();
-        const event = createMockEvent('/files/documents/report.pdf');
-        const result = await handler(event, createMockContext());
+        const visitor = browse(lambder);
+        const result = await visitor.request('GET', '/files/documents/report.pdf');
 
-        const body = JSON.parse(result.body || '{}');
+        const body = result.json() as Record<string, unknown>;
         expect(body.path).toBeTruthy();
     });
 });
@@ -200,13 +146,13 @@ describe('Routes - RegExp Matching', () => {
                 return res.html('Admin Area');
             });
 
-        const handler = lambder.getHandler();
+        const visitor = browse(lambder);
         
-        const adminResult = await handler(createMockEvent('/admin'), createMockContext());
-        expect(decodeBody(adminResult)).toBe('Admin Area');
+        const adminResult = await visitor.request('GET', '/admin');
+        expect(adminResult.text()).toBe('Admin Area');
 
-        const adminDashResult = await handler(createMockEvent('/admin/dashboard'), createMockContext());
-        expect(decodeBody(adminDashResult)).toBe('Admin Area');
+        const adminDashResult = await visitor.request('GET', '/admin/dashboard');
+        expect(adminDashResult.text()).toBe('Admin Area');
     });
 
     it('should extract regex match groups', async () => {
@@ -219,11 +165,10 @@ describe('Routes - RegExp Matching', () => {
                 return res.json({ productId });
             });
 
-        const handler = lambder.getHandler();
-        const event = createMockEvent('/products/999');
-        const result = await handler(event, createMockContext());
+        const visitor = browse(lambder);
+        const result = await visitor.request('GET', '/products/999');
 
-        const body = JSON.parse(result.body || '{}');
+        const body = result.json() as Record<string, unknown>;
         expect(body.productId).toBe('999');
     });
 
@@ -236,13 +181,13 @@ describe('Routes - RegExp Matching', () => {
                 return res.json({ matched: true });
             });
 
-        const handler = lambder.getHandler();
+        const visitor = browse(lambder);
         
-        const v1Result = await handler(createMockEvent('/api/v1'), createMockContext());
-        expect(JSON.parse(v1Result.body || '{}').matched).toBe(true);
+        const v1Result = await visitor.request('GET', '/api/v1');
+        expect((v1Result.json() as { matched: boolean }).matched).toBe(true);
 
-        const v2Result = await handler(createMockEvent('/api/v2'), createMockContext());
-        expect(JSON.parse(v2Result.body || '{}').matched).toBe(true);
+        const v2Result = await visitor.request('GET', '/api/v2');
+        expect((v2Result.json() as { matched: boolean }).matched).toBe(true);
     });
 });
 
@@ -256,11 +201,10 @@ describe('Routes - Function-based Conditional Routing', () => {
                 return res.html('Custom Route');
             });
 
-        const handler = lambder.getHandler();
-        const event = createMockEvent('/custom/anything');
-        const result = await handler(event, createMockContext());
+        const visitor = browse(lambder);
+        const result = await visitor.request('GET', '/custom/anything');
 
-        expect(decodeBody(result)).toBe('Custom Route');
+        expect(result.text()).toBe('Custom Route');
     });
 
     it('should support complex conditional logic', async () => {
@@ -275,20 +219,13 @@ describe('Routes - Function-based Conditional Routing', () => {
                 }
             );
 
-        const handler = lambder.getHandler();
-        
+        const visitor = browse(lambder);
+
         // Without query param
-        const event1 = createMockEvent('/special');
-        const result1 = await handler(event1, createMockContext());
-        expect(result1.statusCode).toBe(404); // Fallback
+        expect((await visitor.request('GET', '/special')).statusCode).toBe(404); // Fallback
 
         // With query param
-        const event2: APIGatewayProxyEvent = {
-            ...createMockEvent('/special'),
-            queryStringParameters: { key: 'secret' }
-        };
-        const result2 = await handler(event2, createMockContext());
-        expect(decodeBody(result2)).toBe('Special Access');
+        expect((await visitor.request('GET', '/special?key=secret')).text()).toBe('Special Access');
     });
 
     it('should access context variables in condition', async () => {
@@ -303,41 +240,22 @@ describe('Routes - Function-based Conditional Routing', () => {
                 }
             );
 
-        const handler = lambder.getHandler();
-        
-        const event: APIGatewayProxyEvent = {
-            ...createMockEvent('/dashboard'),
-            headers: { Host: 'admin.example.com' }
-        };
-        const result = await handler(event, createMockContext());
-        
-        expect(decodeBody(result)).toBe('Admin Dashboard');
+        const page = await browse(lambder, { host: 'admin.example.com' }).request('GET', '/dashboard');
+
+        expect(page.text()).toBe('Admin Dashboard');
     });
 });
 
 describe('Routes - Session Protected Routes', () => {
-    beforeEach(() => {
-        ddbMock.reset();
-    });
+    type SessionData = { userId: string; role: string; username?: string };
+    // Created over the DynamoDB store, as a deployed app is; the test app puts
+    // a memory store under the instance, so no table and no SDK mock is needed
+    // to get a session in front of a session route.
+    const createSessionApp = () => initLambder<SessionData>().create({ files: testPublicFiles(),
+        apiPath: '/api', session: { store: new LambderDdbSessionStore({ tableName: 'test-sessions', region: 'us-east-1', partitionKey: 'pk', sortKey: 'sk' }), sessionSalt: 'test-salt' } });
 
     it('should protect routes with addSessionRoute', async () => {
-        const mockSession = {
-            pk: SESSION_KEY_HASH,
-            sk: hashTok(SESSION_SECRET),
-            csrfTokenHash: hashTok('csrf-token'),
-            sessionKey: 'user-123',
-            data: { userId: '123', role: 'user' },
-            createdAt: Math.floor(Date.now() / 1000),
-            expiresAt: Math.floor(Date.now() / 1000) + 3600,
-            lastAccessedAt: Math.floor(Date.now() / 1000),
-            ttlInSeconds: 3600,
-        };
-
-        ddbMock.on(GetCommand).resolves({ Item: mockSession });
-        ddbMock.on(PutCommand).resolves({});
-
-        const lambder = initLambder().create({ files: testPublicFiles(),
-            apiPath: '/api', session: { store: new LambderDdbSessionStore({ tableName: 'test-sessions', region: 'us-east-1', partitionKey: 'pk', sortKey: 'sk' }), sessionSalt: 'test-salt' } })
+        const lambder = createSessionApp()
             .setGlobalErrorHandler((err, ctx, res) => {
                 return res.html(`<h1>Error: ${err.message}</h1>`);
             })
@@ -345,19 +263,15 @@ describe('Routes - Session Protected Routes', () => {
                 return res.html(`Welcome ${ctx.session.data.userId}`);
             });
 
-        const handler = lambder.getHandler();
-        const event = createMockEvent('/protected', 'GET', SESSION_TOKEN);
-        const result = await handler(event, createMockContext());
+        const visitor = await lambderTestApp(lambder).signIn('user-123', { userId: '123', role: 'user' });
+        const page = await visitor.request('GET', '/protected');
 
-        expect(result.statusCode).toBe(200);
-        expect(decodeBody(result)).toContain('Welcome 123');
+        expect(page.statusCode).toBe(200);
+        expect(page.text()).toContain('Welcome 123');
     });
 
     it('should reject access without valid session', async () => {
-        ddbMock.on(GetCommand).resolves({}); // No session found
-
-        const lambder = initLambder().create({ files: testPublicFiles(),
-            apiPath: '/api', session: { store: new LambderDdbSessionStore({ tableName: 'test-sessions', region: 'us-east-1', partitionKey: 'pk', sortKey: 'sk' }), sessionSalt: 'test-salt' } })
+        const lambder = createSessionApp()
             .addSessionRoute('/protected', (ctx, res) => {
                 return res.html('Protected');
             })
@@ -365,31 +279,18 @@ describe('Routes - Session Protected Routes', () => {
                 return res.raw({ statusCode: 401, body: 'Unauthorized' });
             });
 
-        const handler = lambder.getHandler();
-        const event = createMockEvent('/protected', 'GET', 'invalid-token');
-        const result = await handler(event, createMockContext());
+        const app = lambderTestApp(lambder);
+        expect((await app.visitor().request('GET', '/protected')).statusCode).toBe(401);
 
-        expect(result.statusCode).toBe(401);
+        // A cookie that is not a minted token is no session either.
+        const forged = app.visitor();
+        forged.jar.storeSetCookies(['LMDRSESSIONTKID=invalid-token; Path=/'], { host: forged.host });
+        expect((await forged.request('GET', '/protected')).statusCode).toBe(401);
+        expect(app.crashes).toEqual([]);
     });
 
     it('should access session data in session routes', async () => {
-        const mockSession = {
-            pk: SESSION_KEY_HASH,
-            sk: hashTok(SESSION_SECRET),
-            csrfTokenHash: hashTok('csrf-token'),
-            sessionKey: 'user-456',
-            data: { userId: '456', username: 'testuser', role: 'admin' },
-            createdAt: Math.floor(Date.now() / 1000),
-            expiresAt: Math.floor(Date.now() / 1000) + 3600,
-            lastAccessedAt: Math.floor(Date.now() / 1000),
-            ttlInSeconds: 3600,
-        };
-
-        ddbMock.on(GetCommand).resolves({ Item: mockSession });
-        ddbMock.on(PutCommand).resolves({});
-
-        const lambder = initLambder().create({ files: testPublicFiles(),
-            apiPath: '/api', session: { store: new LambderDdbSessionStore({ tableName: 'test-sessions', region: 'us-east-1', partitionKey: 'pk', sortKey: 'sk' }), sessionSalt: 'test-salt' } })
+        const lambder = createSessionApp()
             .setGlobalErrorHandler((err, ctx, res) => {
                 return res.json({ error: err.message });
             })
@@ -401,14 +302,9 @@ describe('Routes - Session Protected Routes', () => {
                 });
             });
 
-        const handler = lambder.getHandler();
-        const event = createMockEvent('/profile', 'GET', SESSION_TOKEN);
-        const result = await handler(event, createMockContext());
+        const visitor = await lambderTestApp(lambder).signIn('user-456', { userId: '456', username: 'testuser', role: 'admin' });
 
-        const body = JSON.parse(result.body || '{}');
-        expect(body.sessionKey).toBe('user-456');
-        expect(body.username).toBe('testuser');
-        expect(body.role).toBe('admin');
+        expect((await visitor.request('GET', '/profile')).json()).toEqual({ sessionKey: 'user-456', username: 'testuser', role: 'admin' });
     });
 });
 
@@ -425,12 +321,11 @@ describe('Routes - Priority and Ordering', () => {
                 return res.html('Regex Match');
             });
 
-        const handler = lambder.getHandler();
-        const event = createMockEvent('/item');
-        const result = await handler(event, createMockContext());
+        const visitor = browse(lambder);
+        const result = await visitor.request('GET', '/item');
 
         // First route should win
-        expect(decodeBody(result)).toBe('Exact Match');
+        expect(result.text()).toBe('Exact Match');
     });
 
     it('should respect route definition order', async () => {
@@ -445,15 +340,15 @@ describe('Routes - Priority and Ordering', () => {
                 return res.html(`User ${ctx.pathParams?.userId}`);
             });
 
-        const handler = lambder.getHandler();
+        const visitor = browse(lambder);
         
         // Should match specific route first
-        const adminResult = await handler(createMockEvent('/users/admin'), createMockContext());
-        expect(decodeBody(adminResult)).toBe('Admin User');
+        const adminResult = await visitor.request('GET', '/users/admin');
+        expect(adminResult.text()).toBe('Admin User');
 
         // Should match parameterized route
-        const userResult = await handler(createMockEvent('/users/123'), createMockContext());
-        expect(decodeBody(userResult)).toContain('User 123');
+        const userResult = await visitor.request('GET', '/users/123');
+        expect(userResult.text()).toContain('User 123');
     });
 });
 
@@ -467,13 +362,13 @@ describe('Routes - Wildcard and Catch-all Routes', () => {
                 return res.html('Catch All');
             });
 
-        const handler = lambder.getHandler();
+        const visitor = browse(lambder);
         
-        const result1 = await handler(createMockEvent('/anything'), createMockContext());
-        expect(decodeBody(result1)).toBe('Catch All');
+        const result1 = await visitor.request('GET', '/anything');
+        expect(result1.text()).toBe('Catch All');
 
-        const result2 = await handler(createMockEvent('/deeply/nested/path'), createMockContext());
-        expect(decodeBody(result2)).toBe('Catch All');
+        const result2 = await visitor.request('GET', '/deeply/nested/path');
+        expect(result2.text()).toBe('Catch All');
     });
 
     it('should use wildcard as final fallback', async () => {
@@ -488,13 +383,13 @@ describe('Routes - Wildcard and Catch-all Routes', () => {
                 return res.html('Fallback');
             });
 
-        const handler = lambder.getHandler();
+        const visitor = browse(lambder);
         
-        const specificResult = await handler(createMockEvent('/specific'), createMockContext());
-        expect(decodeBody(specificResult)).toBe('Specific');
+        const specificResult = await visitor.request('GET', '/specific');
+        expect(specificResult.text()).toBe('Specific');
 
-        const fallbackResult = await handler(createMockEvent('/anything-else'), createMockContext());
-        expect(decodeBody(fallbackResult)).toBe('Fallback');
+        const fallbackResult = await visitor.request('GET', '/anything-else');
+        expect(fallbackResult.text()).toBe('Fallback');
     });
 });
 
@@ -508,17 +403,15 @@ describe('Routes - Method Filtering', () => {
                 return res.html(`${ctx.method} Response`);
             });
 
-        const handler = lambder.getHandler();
+        const visitor = browse(lambder);
         
         // GET should work
-        const getEvent = createMockEvent('/resource', 'GET');
-        const getResult = await handler(getEvent, createMockContext());
-        expect(decodeBody(getResult)).toBe('GET Response');
+        const getResult = await visitor.request('GET', '/resource');
+        expect(getResult.text()).toBe('GET Response');
 
         // POST should also work (no method restriction)
-        const postEvent = createMockEvent('/resource', 'POST');
-        const postResult = await handler(postEvent, createMockContext());
+        const postResult = await visitor.request('POST', '/resource');
         expect(postResult.statusCode).toBe(200);
-        expect(decodeBody(postResult)).toBe('POST Response');
+        expect(postResult.text()).toBe('POST Response');
     });
 });

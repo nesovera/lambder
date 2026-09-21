@@ -7,6 +7,7 @@ import { DEFAULT_MAX_RESTORED_PAYLOAD_BYTES } from "../shared/wire/LambderReques
 import { assertPositiveInteger } from "../shared/util/LambderOptionChecks.js";
 import { compareDottedVersions, isDottedVersion } from "../shared/wire/LambderVersionOrder.js";
 import { LambderApiPolicyEngine } from "./LambderApiPolicyEngine.js";
+import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
 import LambderSessionController, { assertSessionCookiePrefixes, } from "../session/LambderSessionController.js";
 import { DEFAULT_SESSION_CSRF_COOKIE_KEY, DEFAULT_SESSION_TOKEN_COOKIE_KEY } from "../shared/wire/LambderSessionCookieNames.js";
 /**
@@ -108,6 +109,19 @@ export class LambderApiPipeline {
             ctx,
             request,
         });
+    }
+    /**
+     * The backend swap: each store given goes under the subsystem that holds
+     * one, and everything the app configured around it (the session model,
+     * the named policies, the replay TTLs) stays in force.
+     */
+    [LAMBDER_BACKEND_SWAP](backends) {
+        if (this.sessions && backends.sessionStore)
+            this.sessions.manager[LAMBDER_BACKEND_SWAP](backends.sessionStore);
+        return {
+            sessions: this.sessions ? { tokenCookieKey: this.sessions.tokenCookieKey, csrfCookieKey: this.sessions.csrfCookieKey } : null,
+            ...this.policies[LAMBDER_BACKEND_SWAP](backends),
+        };
     }
     /** The session request info of an API request: its cookies, and the CSRF token it posted. */
     static sessionInfoOf(request) {

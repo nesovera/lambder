@@ -99,13 +99,14 @@ so if you need a specific one, install it and bundle it yourself.
 
 ## Package entry points
 
-The package ships three entry points; pick by where the code runs:
+The package ships four entry points; pick by where the code runs:
 
 | Entry | Runs in | Carries |
 | --- | --- | --- |
 | `lambder` | Server (Lambda) | The full framework: pipeline, sessions, DDB stores, policies, plus the API core's building blocks and everything from `lambder/client` except the two request-compression helpers, `compressPayloadGzip` and `isRequestCompressionAvailable`, which stay on the client entry where a payload is compressed |
 | `lambder/client` | Browser and isomorphic shared code | `LambderCaller`, `LambderApiRefusal`/`refuse`, the API contract and envelope types, `html`/`xml` tagged templates, `createLambderI18n` |
 | `lambder/mock` | Browser and Node, in development and tests | `LambderMockApp`, the mock runtime: your typed contract served from mock handlers over the real API pipeline and memory stores |
+| `lambder/testing` | Node, in tests | `lambderTestApp`: your real instance under test in this process, memory stores put under it in place, simulated browsers with typed callers in front of it, and the outcome assertions |
 
 Frontends and shared isomorphic packages should import from `lambder/client`
 only; the entry's module graph contains no AWS SDK, Node built-ins, or server
@@ -142,6 +143,7 @@ guide that matches what you are building. The full index lives in
 | [Sessions](./docs/sessions.md) | Sessions over a store, cookie scope, secrets at rest, `dataRefresh`, the controller API |
 | [API policies](./docs/api-policies.md) | Declarative rate limits, guards and idempotency, and mandatory authorization declarations |
 | [Calling another lambda](./docs/invoke.md) | `LambderInvokeCaller`: invoking a Lambder app in another function, its contract, failures and compression |
+| [Testing](./docs/testing.md) | `lambderTestApp`: the real instance under test with no HTTP and no AWS, visitors, sign-in without a login endpoint, outcome assertions, crashes, time |
 | [The API core](./docs/api-core.md) | `LambderApiPipeline`: the one pipeline the server and the mock runtime run, the store interfaces, the transports |
 | [Frontend client](./docs/client.md) | `LambderCaller`: typed calls, failure outcomes, timeouts, guard inputs, request compression, transports |
 | [Frontend hosting](./docs/frontend-hosting.md) | File sources, `servePublicFiles`, `serveIndexHtml`, `res.templateFile` |
@@ -149,7 +151,7 @@ guide that matches what you are building. The full index lives in
 | [Translations](./docs/i18n.md) | `createLambderI18n`: typed keys, extension, detection, on-demand languages, runtime dictionaries |
 | [The mock runtime](./docs/mock.md) | `LambderMockApp`: the typed contract served from mock handlers over the real pipeline, in the browser and in tests |
 | [DynamoDB tables](./docs/dynamodb-tables.md) | Table shapes, TTL and IAM for sessions, cache, rate limits and idempotency |
-| [Exports reference](./docs/exports.md) | Every name the three entry points export, grouped by purpose |
+| [Exports reference](./docs/exports.md) | Every name the four entry points export, grouped by purpose |
 
 ## Standalone modules
 

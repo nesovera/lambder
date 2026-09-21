@@ -4,8 +4,9 @@
  * This file tests the plugin system that allows modular API composition
  */
 
-import { testPublicFiles } from './helpers.js';
+import { browse, testPublicFiles } from './helpers.js';
 import { describe, it, expect, expectTypeOf } from 'vitest';
+import { assertApiSuccess } from '../src/testing.js';
 import { z } from 'zod';
 import Lambder, { initLambder } from '../src/core/Lambder.js';
 import { lambderGuard } from '../src/core/LambderPolicyBuilders.js';
@@ -14,38 +15,6 @@ import type { LambderDdbRateLimiter } from '../src/stores/LambderDdbRateLimiter.
 import { LambderLocalFileSource } from '../src/stores/LambderLocalFileSource.js';
 import { LambderMemorySessionStore } from '../src/stores/LambderMemorySessionStore.js';
 import LambderCaller from '../src/client/LambderCaller.js';
-import { APIGatewayProxyEvent, Context } from 'aws-lambda';
-
-// Mock AWS Lambda event and context helpers
-const createMockEvent = (apiName: string, payload: any): APIGatewayProxyEvent => ({
-    body: JSON.stringify({ apiName, payload }),
-    headers: { Host: 'localhost' },
-    multiValueHeaders: {},
-    httpMethod: 'POST',
-    isBase64Encoded: false,
-    path: '/api',
-    pathParameters: null,
-    queryStringParameters: null,
-    multiValueQueryStringParameters: null,
-    stageVariables: null,
-    requestContext: {} as any,
-    resource: '',
-});
-
-const createMockContext = (): Context => ({
-    callbackWaitsForEmptyEventLoop: false,
-    functionName: 'test',
-    functionVersion: '1',
-    invokedFunctionArn: 'arn',
-    memoryLimitInMB: '128',
-    awsRequestId: '123',
-    logGroupName: 'group',
-    logStreamName: 'stream',
-    getRemainingTimeInMillis: () => 1000,
-    done: () => {},
-    fail: () => {},
-    succeed: () => {},
-});
 
 // ============================================================================
 // Test 1: Basic Plugin Usage
@@ -71,13 +40,11 @@ describe('Plugin System - Basic Usage', () => {
         }).use(userPlugin);
 
         // Test runtime execution
-        const handler = lambder.getHandler();
-        const event = createMockEvent('getUser', { userId: '123' });
-        const result = await handler(event, createMockContext());
+        const visitor = browse(lambder);
+        const result = await visitor.apiOutcome('getUser', { userId: '123' });
 
-        expect(result.statusCode).toBe(200);
-        const body = JSON.parse(result.body || '{}');
-        expect(body.payload).toEqual({ id: '123', name: 'John Doe' });
+        assertApiSuccess(result);
+        expect(result.payload).toEqual({ id: '123', name: 'John Doe' });
     });
 
     it('should preserve type contract after using plugin', () => {
@@ -163,25 +130,22 @@ describe('Plugin System - Multiple Plugins', () => {
             .use(orderPlugin);
 
         // Test each API works
-        const handler = lambder.getHandler();
+        const visitor = browse(lambder);
 
         // Test user API
-        const userEvent = createMockEvent('getUser', { userId: '123' });
-        const userResult = await handler(userEvent, createMockContext());
-        expect(userResult.statusCode).toBe(200);
-        expect(JSON.parse(userResult.body || '{}').payload.name).toBe('John');
+        const userResult = await visitor.apiOutcome('getUser', { userId: '123' });
+        assertApiSuccess(userResult);
+        expect(userResult.payload?.name).toBe('John');
 
         // Test product API
-        const productEvent = createMockEvent('getProduct', { productId: 'prod-456' });
-        const productResult = await handler(productEvent, createMockContext());
-        expect(productResult.statusCode).toBe(200);
-        expect(JSON.parse(productResult.body || '{}').payload.title).toBe('Test Product');
+        const productResult = await visitor.apiOutcome('getProduct', { productId: 'prod-456' });
+        assertApiSuccess(productResult);
+        expect(productResult.payload?.title).toBe('Test Product');
 
         // Test order API
-        const orderEvent = createMockEvent('createOrder', { userId: '123', productId: 'prod-456' });
-        const orderResult = await handler(orderEvent, createMockContext());
-        expect(orderResult.statusCode).toBe(200);
-        expect(JSON.parse(orderResult.body || '{}').payload.orderId).toBe('order-123');
+        const orderResult = await visitor.apiOutcome('createOrder', { userId: '123', productId: 'prod-456' });
+        assertApiSuccess(orderResult);
+        expect(orderResult.payload?.orderId).toBe('order-123');
     });
 
     it('should accumulate types from multiple plugins', () => {
@@ -264,22 +228,16 @@ describe('Plugin System - Mixed Usage', () => {
                 return res.api({ version: '2.0' });
             });
 
-        const handler = lambder.getHandler();
+        const visitor = browse(lambder);
 
         // Test direct API before plugin
-        const healthEvent = createMockEvent('healthCheck', undefined);
-        const healthResult = await handler(healthEvent, createMockContext());
-        expect(JSON.parse(healthResult.body || '{}').payload.status).toBe('ok');
+        expect((await visitor.api('healthCheck', undefined))?.status).toBe('ok');
 
         // Test plugin API
-        const userEvent = createMockEvent('getUser', { userId: '123' });
-        const userResult = await handler(userEvent, createMockContext());
-        expect(JSON.parse(userResult.body || '{}').payload.name).toBe('John');
+        expect((await visitor.api('getUser', { userId: '123' }))?.name).toBe('John');
 
         // Test direct API after plugin
-        const versionEvent = createMockEvent('getVersion', undefined);
-        const versionResult = await handler(versionEvent, createMockContext());
-        expect(JSON.parse(versionResult.body || '{}').payload.version).toBe('2.0');
+        expect((await visitor.api('getVersion', undefined))?.version).toBe('2.0');
     });
 });
 
@@ -305,18 +263,9 @@ describe('Plugin System - Routes', () => {
             apiPath: '/api'
         }).use(healthPlugin);
 
-        const handler = lambder.getHandler();
-
-        // Create GET request event
-        const healthEvent: APIGatewayProxyEvent = {
-            ...createMockEvent('', {}),
-            httpMethod: 'GET',
-            path: '/health'
-        };
-
-        const result = await handler(healthEvent, createMockContext());
+        const result = await browse(lambder).request('GET', '/health');
         expect(result.statusCode).toBe(200);
-        expect(JSON.parse(result.body || '{}').status).toBe('healthy');
+        expect(result.json()).toEqual({ status: 'healthy' });
     });
 });
 
@@ -352,16 +301,12 @@ describe('Plugin System - Complex Composition', () => {
             apiPath: '/api'
         }).use(extendedPlugin);
 
-        const handler = lambder.getHandler();
+        const visitor = browse(lambder);
 
         // Both base and extended APIs should work
-        const baseEvent = createMockEvent('base', undefined);
-        const baseResult = await handler(baseEvent, createMockContext());
-        expect(JSON.parse(baseResult.body || '{}').payload.value).toBe('base');
+        expect((await visitor.api('base', undefined))?.value).toBe('base');
 
-        const extendedEvent = createMockEvent('extended', undefined);
-        const extendedResult = await handler(extendedEvent, createMockContext());
-        expect(JSON.parse(extendedResult.body || '{}').payload.value).toBe('extended');
+        expect((await visitor.api('extended', undefined))?.value).toBe('extended');
     });
 
     it('should allow plugins to be reusable across different lambder instances', async () => {
@@ -387,13 +332,8 @@ describe('Plugin System - Complex Composition', () => {
         }).use(sharedPlugin);
 
         // Both should work independently
-        const event = createMockEvent('shared', { id: 'test-123' });
-
-        const result1 = await lambder1.getHandler()(event, createMockContext());
-        const result2 = await lambder2.getHandler()(event, createMockContext());
-
-        expect(JSON.parse(result1.body || '{}').payload.source).toBe('shared-plugin');
-        expect(JSON.parse(result2.body || '{}').payload.source).toBe('shared-plugin');
+        expect((await browse(lambder1).api('shared', { id: 'test-123' }))?.source).toBe('shared-plugin');
+        expect((await browse(lambder2).api('shared', { id: 'test-123' }))?.source).toBe('shared-plugin');
     });
 });
 

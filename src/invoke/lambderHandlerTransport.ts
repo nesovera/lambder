@@ -9,6 +9,7 @@ import { LOOPBACK_CLIENT_IP } from "../shared/util/LambderClientIp.js";
 // server and decodes its results, so naming the handler it calls is the layer
 // working as intended. Type-only, and neither directory is browser-reachable.
 import type { LambderHandler } from "../core/LambderCreateOptions.js";
+import type { LambderHttpEventFormat } from "../core/LambderContext.js";
 import { decodeLambdaHttpResult, localLambdaContext, synthesizeLambdaHttpEvent } from "./LambderLambdaEvent.js";
 
 export type LambderHandlerTransportOptions = {
@@ -20,6 +21,8 @@ export type LambderHandlerTransportOptions = {
     maxResponseBytes?: number;
     /** Fields of the Lambda context the handler receives. */
     context?: Partial<Context>;
+    /** The gateway shape the handler is called with: "v2" (an HTTP API, a Function URL) or "v1" (a REST API). Default: "v2". A handler answers both alike; name the one your deployment delivers when the difference is what you are testing. */
+    eventFormat?: LambderHttpEventFormat;
 };
 
 /** The rejection an abort produces here: the signal's own reason, which is a DOMException("AbortError") unless the aborting code named another. */
@@ -73,7 +76,7 @@ export const lambderHandlerTransport = (
             clientIp: request.clientIp ?? clientIp,
             cookies: request.cookies,
             body: JSON.stringify(buildTransportEnvelope({ ...request, siteHost: request.siteHost || host })),
-        }, { invoke: false });
+        }, { invoke: false, eventFormat: options.eventFormat });
         let result: unknown;
         try {
             result = await stopWaitingWhenAborted(

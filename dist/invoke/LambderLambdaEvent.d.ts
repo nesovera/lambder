@@ -8,7 +8,8 @@
  * its body envelope, and a carried session as the cookie pair it travels as.
  * Server-only: Buffer and the codec's zlib restore.
  */
-import type { APIGatewayProxyEventV2, Context } from "aws-lambda";
+import type { APIGatewayProxyEvent, APIGatewayProxyEventV2, Context } from "aws-lambda";
+import type { LambderHttpEventFormat } from "../core/LambderContext.js";
 import type { LambderCompressedBrotliPayload, LambderCompressedGzipPayload } from "../shared/wire/LambderRequestPayload.js";
 /** Marks a synthesized request as an invoke, for guards and hooks that want to tell. Not an authorization. */
 export declare const LAMBDER_INVOKE_HEADER = "x-lambder-invoke";
@@ -34,19 +35,32 @@ export type LambderSynthesizedRequest = {
     body?: string | Buffer;
 };
 /**
- * The payload-format-2.0 event API Gateway would deliver for this request.
+ * The event API Gateway would deliver for this request: payload format 2.0
+ * (an HTTP API, a Function URL) unless `eventFormat: "v1"` asks for the REST
+ * API's. An invoke is always 2.0; the other format is for an in-process call
+ * that wants the handler to meet the shape its own deployment delivers.
  * `invoke: true` adds the invoke marker headers a server-to-server call
  * carries; a browser-shaped request (the handler transport) leaves them off.
  *
- * The client address is `clientIp` and reaches the callee as
- * requestContext.http.sourceIp only. Writing it as x-forwarded-for as well
- * would put the same fact on a channel a callee may be configured to trust
- * (trustedClientIpHeaders), and the header is the one the caller's own
- * `headers` could otherwise have set.
+ * The client address is `clientIp` and reaches the callee as the gateway's
+ * observed source address only (requestContext.http.sourceIp, or
+ * requestContext.identity.sourceIp on a REST API event). Writing it as
+ * x-forwarded-for as well would put the same fact on a channel a callee may
+ * be configured to trust (trustedClientIpHeaders), and the header is the one
+ * the caller's own `headers` could otherwise have set.
  */
-export declare const synthesizeLambdaHttpEvent: (request: LambderSynthesizedRequest, options: {
+export declare function synthesizeLambdaHttpEvent(request: LambderSynthesizedRequest, options: {
     invoke: boolean;
-}) => APIGatewayProxyEventV2;
+    eventFormat?: "v2";
+}): APIGatewayProxyEventV2;
+export declare function synthesizeLambdaHttpEvent(request: LambderSynthesizedRequest, options: {
+    invoke: boolean;
+    eventFormat: "v1";
+}): APIGatewayProxyEvent;
+export declare function synthesizeLambdaHttpEvent(request: LambderSynthesizedRequest, options: {
+    invoke: boolean;
+    eventFormat?: LambderHttpEventFormat;
+}): APIGatewayProxyEventV2 | APIGatewayProxyEvent;
 /**
  * The body envelope LambderCaller sends, minus the fields only a browser has
  * a value for, as JSON. A plain payload arrives already serialized (the

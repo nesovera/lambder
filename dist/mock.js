@@ -25,3 +25,6 @@ export { LambderMemoryRateLimiter } from "./stores/LambderMemoryRateLimiter.js";
 export { LambderMemoryIdempotencyStore } from "./stores/LambderMemoryIdempotencyStore.js";
 export { LambderWebCrypto, LambderPlainSessionCrypto } from "./session/LambderSessionCrypto.js";
 export { LambderApiRefusal, refuse, LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";
+// The outcome assertions a test over the mock app narrows with; the same two
+// `lambder/testing` exports for a test over the real server.
+export { assertApiSuccess, assertApiFailure } from "./shared/wire/LambderOutcomeAssertions.js";

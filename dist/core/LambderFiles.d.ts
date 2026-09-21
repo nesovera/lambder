@@ -1,5 +1,6 @@
 import { LambderTemplatingEngine } from "./LambderTemplatingEngine.js";
 import type { LambderFileSource } from "../shared/contracts/LambderFileSource.js";
+import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
 /** In-memory cache of files for warm invocations. Default: { maxBytes: 32MB, maxFileBytes: 2MB }. false disables it. */
 export type LambderFileMemoryCacheOption = false | {
     maxBytes?: number;
@@ -30,6 +31,12 @@ export declare class LambderFiles {
     private maxFileBytes;
     private templates;
     constructor(option: LambderFilesOption);
+    /**
+     * Puts the reader over another source, for `lambder/testing`. In place,
+     * because servePublicFiles holds this reader rather than the instance's
+     * field; both caches go with the source they were filled from.
+     */
+    [LAMBDER_BACKEND_SWAP](source: LambderFileSource): void;
     /**
      * The file at a request or handler path (leading slash optional), mime
      * type resolved; null when the path is invalid or the source has none.

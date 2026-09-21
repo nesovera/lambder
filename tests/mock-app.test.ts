@@ -20,6 +20,7 @@ import { refuse, LAMBDER_REFUSAL_CODES } from '../src/shared/wire/LambderApiRefu
 import { LambderPlainSessionCrypto } from '../src/session/LambderSessionCrypto.js';
 import { LambderMemorySessionStore } from '../src/stores/LambderMemorySessionStore.js';
 import type { LambderSessionStore } from '../src/shared/contracts/LambderSessionStore.js';
+import { assertApiSuccess, assertApiFailure } from '../src/shared/wire/LambderOutcomeAssertions.js';
 
 type SessionData = { userId: string; tenants: { tenantId: string; role: 'reader' | 'writer' }[] };
 
@@ -134,8 +135,7 @@ describe('LambderMockApp - answers', () => {
         const { mockApp } = createMockApp({ apiVersion: '3' });
         const caller = callerFor(mockApp, { apiVersion: '3' });
         const outcome = await caller.apiOutcome('user.get', { userId: '42' });
-        expect(outcome.ok).toBe(true);
-        if(!outcome.ok) return;
+        assertApiSuccess(outcome);
         expect(outcome.payload).toEqual({ id: '42', name: 'Ada' });
         expect(outcome.response.apiVersion).toBe('3');
     });
@@ -185,8 +185,7 @@ describe('LambderMockApp - answers', () => {
 
         const outcome = await callerFor(mockApp).apiOutcome('admin.audit', {});
 
-        expect(outcome.ok).toBe(false);
-        if(!outcome.ok) expect(outcome.reason).toBe('sessionExpired');
+        assertApiFailure(outcome, 'sessionExpired');
         expect(mockApp.calls.at(-1)?.outcome).toBe('sessionExpired');
         // And the mode it reports is the endpoint's own.
         expect(mockApp.calls.at(-1)?.mode).toBe('session');
@@ -199,13 +198,12 @@ describe('LambderMockApp - answers', () => {
         // is restored in time to appear on the call log.
         const { mockApp } = createMockApp({ apiVersion: '2' });
         const stale = await callerFor(mockApp, { apiSignatures: { ...mockSignatures, [await apiNameKeyOf('admin.run')]: 'an-older-shape' } }).apiOutcome('admin.run', {});
-        expect(stale.ok).toBe(false);
-        if(!stale.ok) expect(stale.reason).toBe('versionExpired');
+        assertApiFailure(stale, 'versionExpired');
         expect(mockApp.calls.at(-1)?.outcome).toBe('versionExpired');
 
         const current = await callerFor(mockApp, { apiSignatures: mockSignatures }).apiOutcome('admin.run', {});
-        expect(current.ok).toBe(false);
-        if(!current.ok) expect(current.errorMessage).toMatchObject({ code: LAMBDER_REFUSAL_CODES.notMocked });
+        assertApiFailure(current);
+        expect(current.errorMessage).toMatchObject({ code: LAMBDER_REFUSAL_CODES.notMocked });
 
         const compressing = new LambderCaller<Contract>({
             apiPath: '/api', isCorsEnabled: false, apiVersion: '2', requestCompression: true, transport: mockApp.transport(),
@@ -276,8 +274,7 @@ describe('LambderMockApp - sessions', () => {
         expect(await bob.api('me', {})).toEqual({ userId: 'bob' });
 
         const stranger = await callerFor(mockApp).apiOutcome('me', {});
-        expect(stranger.ok).toBe(false);
-        if(!stranger.ok) expect(stranger.reason).toBe('sessionExpired');
+        assertApiFailure(stranger, 'sessionExpired');
     });
 
     it('logout ends the session and clears the cookies, so the next call is signed out', async () => {
@@ -286,8 +283,7 @@ describe('LambderMockApp - sessions', () => {
         await caller.api('login', { user: 'ada' });
         expect(await caller.api('logout', {})).toEqual({ ok: true });
         const after = await caller.apiOutcome('me', {});
-        expect(after.ok).toBe(false);
-        if(!after.ok) expect(after.reason).toBe('sessionExpired');
+        assertApiFailure(after, 'sessionExpired');
         expect(mockApp.sessionStore?.size).toBe(0);
     });
 
@@ -399,8 +395,7 @@ describe('LambderMockApp - guards, rate limits, idempotency, version', () => {
         expect(mockApp.calls.at(-1)?.guardsRun).toEqual(['tenant']);
 
         const notMember = await ada.apiOutcome('order.create', { qty: 2 }, { guardInputs: { tenant: { tenantId: 't9' } }, idempotencyKey: 'k-order-two-abcdefabcdef' });
-        expect(notMember.ok).toBe(false);
-        if(!notMember.ok) expect(notMember.reason).toBe('notAuthorized');
+        assertApiFailure(notMember, 'notAuthorized');
 
         const missing = await ada.apiOutcome('order.create', { qty: 2 }, { guardInputs: { tenant: {} as never }, idempotencyKey: 'k-order-three-abcdefabcdef' });
         expect(missing.ok).toBe(false);
@@ -413,8 +408,8 @@ describe('LambderMockApp - guards, rate limits, idempotency, version', () => {
         const bob = callerFor(mockApp);
         await bob.api('login', { user: 'bob' });
         const readOnly = await bob.apiOutcome('order.create', { qty: 1 }, { guardInputs: { tenant: { tenantId: 't1' } }, idempotencyKey: 'k-order-four-abcdefabcdef' });
-        expect(readOnly.ok).toBe(false);
-        if(!readOnly.ok) expect(readOnly.errorMessage).toMatchObject({ code: 'app/read-only' });
+        assertApiFailure(readOnly);
+        expect(readOnly.errorMessage).toMatchObject({ code: 'app/read-only' });
         expect(orderRuns()).toBe(1);
     });
 
@@ -482,16 +477,14 @@ describe('LambderMockApp - guards, rate limits, idempotency, version', () => {
         expect(await build().api('limited', {})).toEqual({ n: 1 });
         const refused = await build(false).apiOutcome('limited', {});
 
-        expect(refused.ok).toBe(false);
-        if(!refused.ok) expect(refused.reason).toBe('server');
+        assertApiFailure(refused, 'server');
         error.mockRestore();
     });
 
     it('the signature gate answers versionExpired to a caller built against another shape, given the generated map', async () => {
         const { mockApp } = createMockApp({ apiVersion: '2' });
         const stale = await callerFor(mockApp, { apiSignatures: { ...mockSignatures, [await apiNameKeyOf('user.get')]: 'an-older-shape' } }).apiOutcome('user.get', { userId: '1' });
-        expect(stale.ok).toBe(false);
-        if(!stale.ok) expect(stale.reason).toBe('versionExpired');
+        assertApiFailure(stale, 'versionExpired');
         expect((await callerFor(mockApp, { apiSignatures: mockSignatures }).apiOutcome('user.get', { userId: '1' })).ok).toBe(true);
         // A caller that sends no signature is never gated, as on the server.
         expect((await callerFor(mockApp).apiOutcome('user.get', { userId: '1' })).ok).toBe(true);
@@ -566,8 +559,8 @@ describe('LambderMockApp - failure injection and latency', () => {
         mockApp.setLatency(0);
 
         const refused = await caller.apiOutcome('user.get', { userId: '1' });
-        expect(refused.ok).toBe(false);
-        if(!refused.ok) expect(refused.errorMessage).toEqual({ type: 'warning', content: 'Queued.' });
+        assertApiFailure(refused);
+        expect(refused.errorMessage).toEqual({ type: 'warning', content: 'Queued.' });
         expect((await caller.apiOutcome('user.get', { userId: '1' })).ok).toBe(true);
     });
 
@@ -597,8 +590,7 @@ describe('LambderMockApp - failure injection and latency', () => {
         const pending = caller.apiOutcome('user.get', { userId: '1' }, { signal: controller.signal });
         controller.abort();
         const aborted = await pending;
-        expect(aborted.ok).toBe(false);
-        if(!aborted.ok) expect(aborted.reason).toBe('network');
+        assertApiFailure(aborted, 'network');
     });
 });
 
@@ -684,8 +676,7 @@ describe('LambderMockApp - overrides, reset, observation', () => {
         // next call look signed in until the answer said otherwise.
         expect(transport.cookieJar?.size).toBe(0);
         const after = await caller.apiOutcome('me', {});
-        expect(after.ok).toBe(false);
-        if(!after.ok) expect(after.reason).toBe('sessionExpired');
+        assertApiFailure(after, 'sessionExpired');
         // The caller's own jar is the caller's, as an app-supplied store is.
         expect(ownJar.size).toBeGreaterThan(0);
     });
@@ -727,8 +718,7 @@ describe('LambderMockApp - overrides, reset, observation', () => {
         expect(await caller.api('user.get', { userId: '1' })).toEqual({ id: '1', name: 'Ada' });
 
         const refused = await caller.apiOutcome('user.get', { userId: 42 } as never);
-        expect(refused.ok).toBe(false);
-        if(!refused.ok) expect(refused.reason).toBe('validation');
+        assertApiFailure(refused, 'validation');
         // An endpoint with no schema still takes whatever arrives.
         expect(await caller.api('echo', { notes: ['a', 'b'] })).toEqual({ count: 2 });
     });
@@ -762,12 +752,12 @@ describe('LambderMockApp - overrides, reset, observation', () => {
         };
 
         const revealed = await build().apiOutcome('echo', { notes: [] });
-        expect(revealed.ok).toBe(false);
-        if(!revealed.ok) expect(revealed.errorMessage).toBe('Translations not found for "pledge"');
+        assertApiFailure(revealed);
+        expect(revealed.errorMessage).toBe('Translations not found for "pledge"');
 
         const hidden = await build(false).apiOutcome('echo', { notes: [] });
-        expect(hidden.ok).toBe(false);
-        if(!hidden.ok) expect(hidden.errorMessage).toBe('Internal server error.');
+        assertApiFailure(hidden);
+        expect(hidden.errorMessage).toBe('Internal server error.');
     });
 
     it('reset also puts back the configured latency and restarts the call numbering', async () => {
@@ -1162,15 +1152,14 @@ describe('LambderMockApp - the rest entry', () => {
         recording.forgetReads();
 
         const signedIn = await callerFor(app, { jar }).apiOutcome('me', {});
-        expect(signedIn.ok).toBe(false);
-        if(!signedIn.ok) expect(signedIn.errorMessage).toMatchObject({ code: LAMBDER_REFUSAL_CODES.notMocked });
+        assertApiFailure(signedIn);
+        expect(signedIn.errorMessage).toMatchObject({ code: LAMBDER_REFUSAL_CODES.notMocked });
         expect(recording.reads()).toBe(0);
 
         // And with no session at all it is still "not mocked" rather than the
         // sessionExpired the server answers.
         const signedOut = await callerFor(app).apiOutcome('me', {});
-        expect(signedOut.ok).toBe(false);
-        if(!signedOut.ok) expect(signedOut.reason).toBe('errorMessage');
+        assertApiFailure(signedOut, 'errorMessage');
         expect(app.calls.at(-1)?.outcome).toBe('notMocked');
         expect(recording.reads()).toBe(0);
     });
@@ -1179,13 +1168,12 @@ describe('LambderMockApp - the rest entry', () => {
         const app = createRestApp({ apiVersion: '2' });
 
         const stale = await callerFor(app, { apiSignatures: { ...mockSignatures, [await apiNameKeyOf('limited')]: 'an-older-shape' } }).apiOutcome('limited', {});
-        expect(stale.ok).toBe(false);
-        if(!stale.ok) expect(stale.reason).toBe('versionExpired');
+        assertApiFailure(stale, 'versionExpired');
         expect(app.calls.at(-1)?.outcome).toBe('versionExpired');
 
         const current = await callerFor(app, { apiSignatures: mockSignatures }).apiOutcome('limited', {});
-        expect(current.ok).toBe(false);
-        if(!current.ok) expect(current.errorMessage).toMatchObject({ code: LAMBDER_REFUSAL_CODES.notMocked });
+        assertApiFailure(current);
+        expect(current.errorMessage).toMatchObject({ code: LAMBDER_REFUSAL_CODES.notMocked });
     });
 
     it('a second rest entry is refused the way a duplicate name is, and leaves the registry as it was', () => {

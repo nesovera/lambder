@@ -7,6 +7,7 @@ import type { LambderIdempotencyDoneRecord, LambderIdempotencyBeginResult, Lambd
 import type { LambderApiIdempotencyOption } from "../shared/wire/LambderApiOptionValues.js";
 import { joinKeyFields } from "../shared/util/LambderKeyFields.js";
 import { assertPositiveInteger } from "../shared/util/LambderOptionChecks.js";
+import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
 
 /**
  * A crashed original must not block retries forever, so a pending claim
@@ -159,6 +160,17 @@ export class LambderApiIdempotencyEngine {
         this.defaultPendingTtlSeconds = config.defaultPendingTtlSeconds ?? DEFAULT_IDEMPOTENCY_PENDING_TTL_SECONDS;
         this.failOpen = config.failOpen ?? true;
         this.callerIdentity = config.callerIdentity;
+    }
+
+    /**
+     * Puts the engine over another store, for `lambder/testing`; the replay
+     * TTLs, failOpen and callerIdentity stay as configured. False when
+     * idempotency was never configured.
+     */
+    [LAMBDER_BACKEND_SWAP](store: LambderIdempotencyStore): boolean {
+        if(!this.store) return false;
+        this.store = store;
+        return true;
     }
 
     /** Startup validation of one API registration's idempotency option. */

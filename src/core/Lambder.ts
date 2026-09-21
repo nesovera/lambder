@@ -23,7 +23,9 @@ import { LambderPublicFilesHandler, type LambderPublicFilesOptions } from "./Lam
 import { LambderIndexHtmlHandler, type LambderIndexHtmlOptions } from "./LambderIndexHtml.js";
 import { LambderFiles } from "./LambderFiles.js";
 import { isLambderApiRefusal, type LambderApiRefusal } from "../shared/wire/LambderApiRefusal.js";
-import { LambderApiPipeline } from "../api/LambderApiPipeline.js";
+import { LambderApiPipeline, type LambderPipelineBackends, type LambderPipelineBackendSwap } from "../api/LambderApiPipeline.js";
+import type { LambderFileSource } from "../shared/contracts/LambderFileSource.js";
+import { LAMBDER_BACKEND_SWAP, LAMBDER_CRASH_WATCH } from "../shared/util/LambderTestingDoors.js";
 import type { LambderApiDefinition } from "../api/LambderApiDefinition.js";
 import { apiSignatureOf, type LambderApiSignatureEntry } from "../api/LambderApiSignature.js";
 import { apiNameKeyOf, type LambderApiSignatureMap } from "../shared/wire/LambderApiSignature.js";
@@ -85,6 +87,11 @@ import {
  * because its parameter is the class, and an options module that names the
  * class cannot be read without it.
  */
+/** Everything `lambder/testing` may put under a built instance: the pipeline's stores, and the source its files are read from. */
+export type LambderInstanceBackends = LambderPipelineBackends & { fileSource?: LambderFileSource };
+/** What the instance had a place for; see LambderPipelineBackendSwap. `files` is false on an instance created without the files option. */
+export type LambderInstanceBackendSwap = LambderPipelineBackendSwap & { files: boolean };
+
 export type LambderCreatedHook = (lambderInstance: Lambder<any, any, any, any, any, any, any, any>) => void | Promise<void>;
 
 // The two shapes the class keeps for its own handler lists: a compiled route
@@ -181,6 +188,8 @@ export default class Lambder<
     private corsConfig: LambderCorsConfig | null = null;
     private finalizeOptions: LambderFinalizeOptions;
     private requireSessionApiGuards: boolean;
+    /** Told what a request threw, beside whatever answers it; null outside a test. See LAMBDER_CRASH_WATCH. */
+    private crashWatcher: ((error: Error) => void) | null = null;
     private readonly trustedClientIpHeaders: readonly string[];
     private requirePublicApiGuards: boolean;
 
@@ -505,6 +514,27 @@ export default class Lambder<
     }
 
     /**
+     * The backend swap `lambder/testing` performs: the stores given go under
+     * this instance in place, so every handler and guard that closed over it
+     * reaches them, and the production ones are out of reach from then on.
+     * Keyed by a symbol no entry point exports, so it is not part of what an
+     * app can call; see LAMBDER_BACKEND_SWAP.
+     */
+    [LAMBDER_BACKEND_SWAP](backends: LambderInstanceBackends): LambderInstanceBackendSwap {
+        if(this.files && backends.fileSource) this.files[LAMBDER_BACKEND_SWAP](backends.fileSource);
+        return { ...this.pipeline[LAMBDER_BACKEND_SWAP](backends), files: this.files !== null };
+    }
+
+    /**
+     * The crash watch `lambder/testing` sets: told every error a request
+     * throws past the framework's own handling, before the global error
+     * handler or the last-resort 500 answers it. The answer is unchanged.
+     */
+    [LAMBDER_CRASH_WATCH](watcher: (error: Error) => void): void {
+        this.crashWatcher = watcher;
+    }
+
+    /**
      * Every registered endpoint's signature, keyed by its hashed name: the
      * LambderApiSignatureMap both sides ship with. A generator imports the
      * finished instance, awaits this, and writes the result to a file the
@@ -754,6 +784,7 @@ export default class Lambder<
             // client could parse. coerceToError is the shared version of that
             // care, the one every site in the framework now uses.
             const wrappedError = coerceToError(err, "an unstringifiable thrown value");
+            this.crashWatcher?.(wrappedError);
             // ctx may be null (createContext failed): derive the format from the raw event.
             const eventFormat = ctx?.eventFormat ?? (isV2HttpEvent(event) ? "v2" : "v1");
             try {
