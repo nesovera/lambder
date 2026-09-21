@@ -1,5 +1,6 @@
 import type { LambderSessionCrypto } from "./LambderSessionCrypto.js";
 import type { LambderSessionRecord, LambderSessionStore } from "../shared/contracts/LambderSessionStore.js";
+import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
 /**
  * A freshly created (or regenerated) session: the persisted record plus the
  * RAW cookie secrets, which exist only here and in the cookies the caller
@@ -92,13 +93,23 @@ export declare const isMintedSessionToken: (token: string) => boolean;
  * stored too.
  */
 export default class LambderSessionManager<SessionData = any> {
-    private readonly store;
+    /** Replaceable through the backend swap alone; see LAMBDER_BACKEND_SWAP. */
+    private store;
     private readonly sessionSalt;
     private readonly enableSlidingExpiration;
     private readonly slidingWriteIntervalSeconds;
     private readonly dataRefresh;
     private readonly crypto;
     constructor({ store, sessionSalt, enableSlidingExpiration, slidingWriteIntervalSeconds, dataRefresh, crypto, }: LambderSessionManagerOptions<SessionData>);
+    /** A store this manager's crypto may sit in front of. Asked of every store it is given, the one at creation and a swapped one alike. */
+    private assertCryptoFitsStore;
+    /**
+     * Puts the manager over another store, for `lambder/testing`. The model
+     * (salt, tokens, expiry, dataRefresh) stays this manager's own, so a test
+     * runs the app's sessions as configured over a store that dies with the
+     * process. Sessions held by the store it leaves are simply out of reach.
+     */
+    [LAMBDER_BACKEND_SWAP](store: LambderSessionStore<SessionData>): void;
     /**
      * The salted partition hash of a sessionKey: sha256 of the key followed
      * by the salt, with NO separator between them.

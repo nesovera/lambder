@@ -4,7 +4,7 @@
 
 import { describe, it, expect } from 'vitest';
 import Lambder from '../src/core/Lambder.js';
-import { decodeBody, createMockEvent, createMockContext, testPublicFiles } from './helpers.js';
+import { browse, testPublicFiles } from './helpers.js';
 describe('Thrown responses and die', () => {
     it('a thrown response becomes the response (any call depth)', async () => {
         const guard = (res: any) => { throw res.redirect('/login', 302); };
@@ -14,9 +14,9 @@ describe('Thrown responses and die', () => {
                 return res.html('never reached');
             });
 
-        const result = await lambder.render(createMockEvent('/deep'), createMockContext());
+        const result = await browse(lambder).request('GET', '/deep');
         expect(result.statusCode).toBe(302);
-        expect(result.multiValueHeaders?.['Location']).toEqual(['/login']);
+        expect(result.headers['location']).toBe('/login');
     });
 
     it('res.die.* halts the handler immediately', async () => {
@@ -28,9 +28,9 @@ describe('Thrown responses and die', () => {
                 return res.html('never');
             });
 
-        const result = await lambder.render(createMockEvent('/die'), createMockContext());
+        const result = await browse(lambder).request('GET', '/die');
         expect(result.statusCode).toBe(404);
-        expect(decodeBody(result)).toBe('Gone');
+        expect(result.text()).toBe('Gone');
         expect(afterDieRan).toBe(false);
     });
 
@@ -46,7 +46,7 @@ describe('Thrown responses and die', () => {
             return res.html('secret');
         });
 
-        const result = await lambder.render(createMockEvent('/gated'), createMockContext());
+        const result = await browse(lambder).request('GET', '/gated');
         expect(result.statusCode).toBe(404);
         expect(handlerRan).toBe(false);
     });
@@ -60,7 +60,7 @@ describe('Thrown responses and die', () => {
             return res.html('x');
         });
 
-        const result = await lambder.render(createMockEvent('/x'), createMockContext());
+        const result = await browse(lambder).request('GET', '/x');
         expect(result.statusCode).toBe(301);
         expect(handlerRan).toBe(false);
     });

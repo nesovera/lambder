@@ -23,7 +23,10 @@ import { LambderApiPolicyEngine } from "./LambderApiPolicyEngine.js";
 import type { LambderApiGuard } from "./LambderApiGuards.js";
 import type { LambderApiRateLimitPolicyConfig, LambderApiRateLimitsConfig } from "./LambderApiRateLimits.js";
 import type { LambderApiIdempotencyConfig } from "./LambderApiIdempotency.js";
-import type { LambderSessionRecord } from "../shared/contracts/LambderSessionStore.js";
+import type { LambderSessionRecord, LambderSessionStore } from "../shared/contracts/LambderSessionStore.js";
+import type { LambderRateLimiter } from "../shared/contracts/LambderRateLimiter.js";
+import type { LambderIdempotencyStore } from "../shared/contracts/LambderIdempotencyStore.js";
+import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
 import type LambderSessionManager from "../session/LambderSessionManager.js";
 import LambderSessionController, {
     assertSessionCookiePrefixes,
@@ -87,6 +90,25 @@ export type LambderApiPipelineOptions<TCtx extends LambderApiCallContext<TSessio
     // to name its session context type here.
     guards?: Record<string, LambderApiGuard<any, any, any, TCtx, TCtx & { session: LambderSessionRecord<TSessionData> }>>;
     idempotency?: LambderApiIdempotencyConfig;
+};
+
+/** The stores `lambder/testing` puts under a built pipeline. One the pipeline has no subsystem for is left aside. */
+export type LambderPipelineBackends = {
+    sessionStore?: LambderSessionStore<any>;
+    rateLimiter?: LambderRateLimiter;
+    idempotencyStore?: LambderIdempotencyStore;
+};
+
+/**
+ * What a backend swap found: whether the rate-limit and idempotency
+ * subsystems exist to take a store, and, when sessions are configured, the
+ * cookie names a caller over this pipeline has to be told (they are the
+ * app's own choice and nothing else hands them out).
+ */
+export type LambderPipelineBackendSwap = {
+    sessions: { tokenCookieKey: string; csrfCookieKey: string } | null;
+    rateLimits: boolean;
+    idempotency: boolean;
 };
 
 /** What one run produced, beside the answer: what an adapter may want to report. */
@@ -194,6 +216,19 @@ export class LambderApiPipeline<TCtx extends LambderApiCallContext<TSessionData>
             ctx,
             request,
         });
+    }
+
+    /**
+     * The backend swap: each store given goes under the subsystem that holds
+     * one, and everything the app configured around it (the session model,
+     * the named policies, the replay TTLs) stays in force.
+     */
+    [LAMBDER_BACKEND_SWAP](backends: LambderPipelineBackends): LambderPipelineBackendSwap {
+        if(this.sessions && backends.sessionStore) this.sessions.manager[LAMBDER_BACKEND_SWAP](backends.sessionStore);
+        return {
+            sessions: this.sessions ? { tokenCookieKey: this.sessions.tokenCookieKey, csrfCookieKey: this.sessions.csrfCookieKey } : null,
+            ...this.policies[LAMBDER_BACKEND_SWAP](backends),
+        };
     }
 
     /** The session request info of an API request: its cookies, and the CSRF token it posted. */

@@ -31,18 +31,7 @@ const randomRequestId = () => {
         return webCrypto.randomUUID();
     return `${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 10)}`;
 };
-/**
- * The payload-format-2.0 event API Gateway would deliver for this request.
- * `invoke: true` adds the invoke marker headers a server-to-server call
- * carries; a browser-shaped request (the handler transport) leaves them off.
- *
- * The client address is `clientIp` and reaches the callee as
- * requestContext.http.sourceIp only. Writing it as x-forwarded-for as well
- * would put the same fact on a channel a callee may be configured to trust
- * (trustedClientIpHeaders), and the header is the one the caller's own
- * `headers` could otherwise have set.
- */
-export const synthesizeLambdaHttpEvent = (request, options) => {
+export function synthesizeLambdaHttpEvent(request, options) {
     // The caller's own headers go on first, so the ones this function owns
     // cannot be displaced by them. Forwarding an incoming browser request's
     // headers into `headers` is an ordinary gateway-lambda pattern, and with
@@ -72,7 +61,45 @@ export const synthesizeLambdaHttpEvent = (request, options) => {
     if (request.body !== undefined && !headers["content-type"]) {
         headers["content-type"] = isBinary ? "application/octet-stream" : "application/json";
     }
+    const body = request.body === undefined ? undefined : isBinary ? bytesToBase64(request.body) : request.body;
     const now = Date.now();
+    if (options.eventFormat === "v1") {
+        // A REST API has no cookies array: cookies ride in the Cookie header,
+        // and every header is delivered twice, once as its last value and
+        // once as the list of all of them.
+        if (request.cookies?.length)
+            headers.cookie = request.cookies.join("; ");
+        const query = request.query && Object.keys(request.query).length ? request.query : null;
+        return {
+            resource: "/{proxy+}",
+            path: request.path,
+            httpMethod: request.method,
+            headers,
+            multiValueHeaders: Object.fromEntries(Object.entries(headers).map(([name, value]) => [name, [value]])),
+            queryStringParameters: query,
+            multiValueQueryStringParameters: query ? Object.fromEntries(Object.entries(query).map(([name, value]) => [name, [value]])) : null,
+            pathParameters: null,
+            stageVariables: null,
+            // The fields a handler might read, filled plausibly; the rest of
+            // a REST API's request context (authorizer, the API key, the
+            // Cognito identity) describes a deployment this event has none of.
+            requestContext: {
+                accountId: "",
+                apiId: "lambder-local",
+                domainName: request.host,
+                httpMethod: request.method,
+                identity: { sourceIp: request.clientIp ?? "", userAgent: "lambder-local" },
+                path: request.path,
+                protocol: "HTTP/1.1",
+                requestId: randomRequestId(),
+                requestTimeEpoch: now,
+                resourcePath: "/{proxy+}",
+                stage: "local",
+            },
+            body: body ?? null,
+            isBase64Encoded: isBinary,
+        };
+    }
     return {
         version: "2.0",
         routeKey: "$default",
@@ -98,12 +125,10 @@ export const synthesizeLambdaHttpEvent = (request, options) => {
             time: new Date(now).toISOString(),
             timeEpoch: now,
         },
-        ...(request.body !== undefined
-            ? { body: isBinary ? bytesToBase64(request.body) : request.body }
-            : {}),
+        ...(body !== undefined ? { body } : {}),
         isBase64Encoded: isBinary,
     };
-};
+}
 /**
  * The body envelope LambderCaller sends, minus the fields only a browser has
  * a value for, as JSON. A plain payload arrives already serialized (the

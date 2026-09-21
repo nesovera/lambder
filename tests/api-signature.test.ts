@@ -13,6 +13,7 @@ import { lambderGuard } from '../src/core/LambderPolicyBuilders.js';
 import LambderCaller from '../src/client/LambderCaller.js';
 import LambderInvokeCaller from '../src/invoke/LambderInvokeCaller.js';
 import { lambderHandlerTransport } from '../src/invoke/lambderHandlerTransport.js';
+import { assertApiFailure } from '../src/shared/wire/LambderOutcomeAssertions.js';
 import { LambderMemorySessionStore } from '../src/stores/LambderMemorySessionStore.js';
 import { apiSignatureOf } from '../src/api/LambderApiSignature.js';
 import { apiNameKeyOf, lookupApiSignature, readApiSignature, extensibleEnum, API_SIGNATURE_HEX_LENGTH, type LambderApiSignatureMap } from '../src/shared/wire/LambderApiSignature.js';
@@ -361,11 +362,8 @@ describe('LambderInvokeCaller with a signature map', () => {
         expect(bodies[0]).toMatchObject({ apiName: 'user.get', signature: 'callee-shape' });
 
         const missing = await caller.apiOutcome('user.list', {});
-        expect(missing.ok).toBe(false);
-        if(!missing.ok){
-            expect(missing.reason).toBe('unknown');
-            expect((missing.error.cause as Error).message).toMatch(/no signature for API "user.list"/);
-        }
+        assertApiFailure(missing, 'unknown');
+        expect((missing.error.cause as Error).message).toMatch(/no signature for API "user.list"/);
         expect(bodies.length).toBe(1);
 
         // createEvent carries it too, for a boot check that hands a package an event file.

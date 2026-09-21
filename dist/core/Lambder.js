@@ -10,6 +10,7 @@ import { LambderIndexHtmlHandler } from "./LambderIndexHtml.js";
 import { LambderFiles } from "./LambderFiles.js";
 import { isLambderApiRefusal } from "../shared/wire/LambderApiRefusal.js";
 import { LambderApiPipeline } from "../api/LambderApiPipeline.js";
+import { LAMBDER_BACKEND_SWAP, LAMBDER_CRASH_WATCH } from "../shared/util/LambderTestingDoors.js";
 import { apiSignatureOf } from "../api/LambderApiSignature.js";
 import { apiNameKeyOf } from "../shared/wire/LambderApiSignature.js";
 import { apiNotFoundAnswer, crashAnswer, refusalAnswer, } from "../api/LambderApiEnvelope.js";
@@ -90,6 +91,8 @@ export default class Lambder {
     corsConfig = null;
     finalizeOptions;
     requireSessionApiGuards;
+    /** Told what a request threw, beside whatever answers it; null outside a test. See LAMBDER_CRASH_WATCH. */
+    crashWatcher = null;
     trustedClientIpHeaders;
     requirePublicApiGuards;
     constructor(options = {}) {
@@ -293,6 +296,26 @@ export default class Lambder {
     /** The session manager, for code that works on sessions outside a request (maintenance, tests). */
     getSessionManager() {
         return this.pipeline.sessionManager;
+    }
+    /**
+     * The backend swap `lambder/testing` performs: the stores given go under
+     * this instance in place, so every handler and guard that closed over it
+     * reaches them, and the production ones are out of reach from then on.
+     * Keyed by a symbol no entry point exports, so it is not part of what an
+     * app can call; see LAMBDER_BACKEND_SWAP.
+     */
+    [LAMBDER_BACKEND_SWAP](backends) {
+        if (this.files && backends.fileSource)
+            this.files[LAMBDER_BACKEND_SWAP](backends.fileSource);
+        return { ...this.pipeline[LAMBDER_BACKEND_SWAP](backends), files: this.files !== null };
+    }
+    /**
+     * The crash watch `lambder/testing` sets: told every error a request
+     * throws past the framework's own handling, before the global error
+     * handler or the last-resort 500 answers it. The answer is unchanged.
+     */
+    [LAMBDER_CRASH_WATCH](watcher) {
+        this.crashWatcher = watcher;
     }
     /**
      * Every registered endpoint's signature, keyed by its hashed name: the
@@ -552,6 +575,7 @@ export default class Lambder {
             // client could parse. coerceToError is the shared version of that
             // care, the one every site in the framework now uses.
             const wrappedError = coerceToError(err, "an unstringifiable thrown value");
+            this.crashWatcher?.(wrappedError);
             // ctx may be null (createContext failed): derive the format from the raw event.
             const eventFormat = ctx?.eventFormat ?? (isV2HttpEvent(event) ? "v2" : "v1");
             try {

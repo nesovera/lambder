@@ -22,6 +22,7 @@ import { LambderMemorySessionStore } from '../src/stores/LambderMemorySessionSto
 import { initLambderMock } from '../src/mock/LambderMockApp.js';
 import { lambderMockInvokeTransport } from '../src/mock/lambderMockInvokeTransport.js';
 import { lambderMockMswHandler } from '../src/mock/lambderMockMswHandler.js';
+import { assertApiFailure } from '../src/shared/wire/LambderOutcomeAssertions.js';
 
 type SessionData = { userId: string };
 
@@ -70,8 +71,7 @@ describe('lambderHandlerTransport', () => {
         const stale = { ...await server.apiSignatures(), [await apiNameKeyOf('echo')]: 'an-older-shape' };
         const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false, apiVersion: '1', apiSignatures: stale, transport: lambderHandlerTransport(server.getHandler()) });
         const outcome = await caller.apiOutcome('echo', { text: 'hi' });
-        expect(outcome.ok).toBe(false);
-        if(!outcome.ok) expect(outcome.reason).toBe('versionExpired');
+        assertApiFailure(outcome, 'versionExpired');
     });
 
     it('a cookie jar keeps a real session across calls, and a fresh jar is a stranger', async () => {
@@ -83,15 +83,13 @@ describe('lambderHandlerTransport', () => {
 
         const stranger = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false, transport: lambderCookieJarTransport(lambderHandlerTransport(server.getHandler()), { jar: new LambderCookieJar() }) });
         const outcome = await stranger.apiOutcome('me', {});
-        expect(outcome.ok).toBe(false);
-        if(!outcome.ok) expect(outcome.reason).toBe('sessionExpired');
+        assertApiFailure(outcome, 'sessionExpired');
     });
 
     it('a crash inside the app is its 500 envelope; a handler that throws outright is the error itself', async () => {
         const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false, transport: lambderHandlerTransport(server.getHandler()) });
         const crash = await caller.apiOutcome('crash', {});
-        expect(crash.ok).toBe(false);
-        if(!crash.ok){ expect(crash.reason).toBe('server'); expect(crash.status).toBe(500); }
+        assertApiFailure(crash, 'server', { status: 500 });
 
         // This used to assert a 502, which the transport synthesized because
         // API Gateway would have. A synthetic status was then the only thing
@@ -127,8 +125,7 @@ describe('lambderHandlerTransport', () => {
 
         const outcome = await caller.apiOutcome('slow', {});
 
-        expect(outcome.ok).toBe(false);
-        if(!outcome.ok) expect(outcome.reason).toBe('timeout');
+        assertApiFailure(outcome, 'timeout');
         // The caller answered while the handler was still running, which is
         // what the timeout buys; a wall-clock bound says the same thing less
         // reliably on a loaded machine.
@@ -150,8 +147,7 @@ describe('lambderHandlerTransport', () => {
 
         const outcome = await caller.apiOutcome('echo', { text: 'hi' }, { signal: controller.signal });
 
-        expect(outcome.ok).toBe(false);
-        if(!outcome.ok) expect(outcome.reason).toBe('network');
+        assertApiFailure(outcome, 'network');
         expect(handlerRan).toBe(false);
     });
 });
@@ -442,8 +438,7 @@ describe('LambderCaller in-flight state', () => {
 
         const outcome = await caller.apiOutcome('echo', { text: 'hi' });
 
-        expect(outcome.ok).toBe(false);
-        if(!outcome.ok) expect(outcome.reason).toBe('timeout');
+        assertApiFailure(outcome, 'timeout');
         expect(errors.length).toBe(1);
     });
 });
@@ -466,11 +461,10 @@ describe('The mock app as a callee', () => {
         expect(await caller.api('echo', { text: 'hi' }, { clientIp: '10.0.0.1' })).toEqual({ text: 'hi', ip: '10.0.0.1', host: 'callee.internal' });
         expect(await caller.api('me', {}, { session: { token: created.sessionToken, csrf: created.csrfToken } })).toEqual({ userId: 'ada' });
         const stranger = await caller.apiOutcome('me', {});
-        expect(stranger.ok).toBe(false);
-        if(!stranger.ok) expect(stranger.reason).toBe('sessionExpired');
+        assertApiFailure(stranger, 'sessionExpired');
         const unknown = await (caller as LambderInvokeCaller<any>).apiOutcome('nope', {});
-        expect(unknown.ok).toBe(false);
-        if(!unknown.ok) expect(unknown.errorMessage?.code).toBe('lambder/api-not-found');
+        assertApiFailure(unknown);
+        expect(unknown.errorMessage?.code).toBe('lambder/api-not-found');
     });
 
     it('serves one MSW handler for the whole api path, cookies riding on the request and the response', async () => {

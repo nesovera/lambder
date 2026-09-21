@@ -6,41 +6,12 @@
 
 import { describe, it, expect } from 'vitest';
 import path from 'path';
-import { decodeBody, testPublicFiles } from './helpers.js';
+import { browse, testPublicFiles } from './helpers.js';
 import { z } from 'zod';
 import Lambder from '../src/core/Lambder.js';
 import { LambderLocalFileSource } from '../src/stores/LambderLocalFileSource.js';
-import type { APIGatewayProxyEvent, Context } from 'aws-lambda';
 
-const createMockEvent = (path: string, method: string = 'GET', apiName?: string, payload?: any): APIGatewayProxyEvent => ({
-    body: apiName ? JSON.stringify({ apiName, payload }) : null,
-    headers: { Host: 'localhost' },
-    multiValueHeaders: {},
-    httpMethod: method,
-    isBase64Encoded: false,
-    path: apiName ? '/api' : path,
-    pathParameters: null,
-    queryStringParameters: null,
-    multiValueQueryStringParameters: null,
-    stageVariables: null,
-    requestContext: {} as any,
-    resource: '',
-});
 
-const createMockContext = (): Context => ({
-    callbackWaitsForEmptyEventLoop: false,
-    functionName: 'test',
-    functionVersion: '1',
-    invokedFunctionArn: 'arn',
-    memoryLimitInMB: '128',
-    awsRequestId: '123',
-    logGroupName: 'group',
-    logStreamName: 'stream',
-    getRemainingTimeInMillis: () => 1000,
-    done: () => {},
-    fail: () => {},
-    succeed: () => {},
-});
 
 describe('Hooks - beforeRender Hook', () => {
     it('should execute beforeRender hook before route handler', async () => {
@@ -61,8 +32,8 @@ describe('Hooks - beforeRender Hook', () => {
             return res.html('Test');
         });
 
-        const handler = lambder.getHandler();
-        await handler(createMockEvent('/test'), createMockContext());
+        const visitor = browse(lambder);
+        await visitor.request('GET', '/test');
 
         expect(executionOrder).toEqual(['beforeRender', 'routeHandler']);
     });
@@ -83,10 +54,10 @@ describe('Hooks - beforeRender Hook', () => {
             return res.json({ data: (ctx as any).customData });
         });
 
-        const handler = lambder.getHandler();
-        const result = await handler(createMockEvent('/test'), createMockContext());
+        const visitor = browse(lambder);
+        const result = await visitor.request('GET', '/test');
 
-        const body = JSON.parse(result.body || '{}');
+        const body = (result.json() as Record<string, any>);
         expect(body.data).toBe('modified');
     });
 
@@ -115,8 +86,8 @@ describe('Hooks - beforeRender Hook', () => {
 
         lambder.addRoute('/test', (ctx, res) => res.html('Test'));
 
-        const handler = lambder.getHandler();
-        await handler(createMockEvent('/test'), createMockContext());
+        const visitor = browse(lambder);
+        await visitor.request('GET', '/test');
 
         expect(executionOrder).toEqual([1, 2, 3]);
     });
@@ -141,11 +112,11 @@ describe('Hooks - beforeRender Hook', () => {
             return res.html('Test');
         });
 
-        const handler = lambder.getHandler();
-        const result = await handler(createMockEvent('/test'), createMockContext());
+        const visitor = browse(lambder);
+        const result = await visitor.request('GET', '/test');
 
         expect(result.statusCode).toBe(403);
-        expect(result.body).toBe('Access Denied');
+        expect(result.text()).toBe('Access Denied');
         expect(routeHandlerCalled).toBe(false);
     });
 });
@@ -169,8 +140,8 @@ describe('Hooks - afterRender Hook', () => {
             return response;
         });
 
-        const handler = lambder.getHandler();
-        await handler(createMockEvent('/test'), createMockContext());
+        const visitor = browse(lambder);
+        await visitor.request('GET', '/test');
 
         expect(executionOrder).toEqual(['routeHandler', 'afterRender']);
     });
@@ -193,10 +164,10 @@ describe('Hooks - afterRender Hook', () => {
             return response;
         });
 
-        const handler = lambder.getHandler();
-        const result = await handler(createMockEvent('/test'), createMockContext());
+        const visitor = browse(lambder);
+        const result = await visitor.request('GET', '/test');
 
-        const body = JSON.parse(result.body || '{}');
+        const body = (result.json() as Record<string, any>);
         expect(body.original).toBe(true);
         expect(body.modified).toBe(true);
     });
@@ -226,8 +197,8 @@ describe('Hooks - afterRender Hook', () => {
             return response;
         });
 
-        const handler = lambder.getHandler();
-        await handler(createMockEvent('/test'), createMockContext());
+        const visitor = browse(lambder);
+        await visitor.request('GET', '/test');
 
         expect(executionOrder).toEqual([1, 2, 3]);
     });
@@ -245,10 +216,10 @@ describe('Hooks - afterRender Hook', () => {
             return response;
         });
 
-        const handler = lambder.getHandler();
-        const result = await handler(createMockEvent('/test'), createMockContext());
+        const visitor = browse(lambder);
+        const result = await visitor.request('GET', '/test');
 
-        expect(result.multiValueHeaders?.['X-Custom-Header']).toEqual(['CustomValue']);
+        expect(result.headers['x-custom-header']).toBe('CustomValue');
     });
 
     it('should stop execution if afterRender returns Error', async () => {
@@ -266,11 +237,11 @@ describe('Hooks - afterRender Hook', () => {
             return new Error('Post-processing failed');
         });
 
-        const handler = lambder.getHandler();
-        const result = await handler(createMockEvent('/test'), createMockContext());
+        const visitor = browse(lambder);
+        const result = await visitor.request('GET', '/test');
 
         expect(result.statusCode).toBe(500);
-        expect(result.body).toContain('Post-processing failed');
+        expect(result.text()).toContain('Post-processing failed');
     });
 });
 
@@ -293,8 +264,8 @@ describe('Hooks - fallback Hook', () => {
             return res.status404('Not Found');
         });
 
-        const handler = lambder.getHandler();
-        await handler(createMockEvent('/nonexistent'), createMockContext());
+        const visitor = browse(lambder);
+        await visitor.request('GET', '/nonexistent');
 
         expect(fallbackCalled).toBe(true);
     });
@@ -317,8 +288,8 @@ describe('Hooks - fallback Hook', () => {
 
         lambder.setRouteFallbackHandler((ctx, res) => res.status404('Not Found'));
 
-        const handler = lambder.getHandler();
-        await handler(createMockEvent('/nonexistent'), createMockContext());
+        const visitor = browse(lambder);
+        await visitor.request('GET', '/nonexistent');
 
         expect(executionOrder).toEqual([1, 2]);
     });
@@ -337,8 +308,8 @@ describe('Hooks - fallback Hook', () => {
             fallbackCalled = true;
         });
 
-        const handler = lambder.getHandler();
-        await handler(createMockEvent('/test'), createMockContext());
+        const visitor = browse(lambder);
+        await visitor.request('GET', '/test');
 
         expect(fallbackCalled).toBe(false);
     });
@@ -363,8 +334,8 @@ describe('Hooks - created Hook', () => {
         expect(createdCalled).toBe(false);
 
         lambder.addRoute('/test', (ctx, res) => res.html('Test'));
-        const handler = lambder.getHandler();
-        await handler(createMockEvent('/test'), createMockContext());
+        const visitor = browse(lambder);
+        await visitor.request('GET', '/test');
 
         expect(createdCalled).toBe(true);
         expect(lambderInstance).toBe(lambder);
@@ -380,9 +351,9 @@ describe('Hooks - created Hook', () => {
             instance.addRoute('/from-created', (ctx, res) => res.html('Configured'));
         });
 
-        const handler = lambder.getHandler();
-        const result = await handler(createMockEvent('/from-created'), createMockContext());
-        expect(decodeBody(result)).toBe('Configured');
+        const visitor = browse(lambder);
+        const result = await visitor.request('GET', '/from-created');
+        expect(result.text()).toBe('Configured');
     });
 
     /**
@@ -403,17 +374,17 @@ describe('Hooks - created Hook', () => {
             if(attempts === 1) throw new Error('the secret store was not there yet');
         });
 
-        const handler = lambder.getHandler();
-        const failed = await handler(createMockEvent('/test'), createMockContext());
+        const visitor = browse(lambder);
+        const failed = await visitor.request('GET', '/test');
         expect(failed.statusCode).toBe(500);
-        expect(decodeBody(failed)).toContain('the secret store was not there yet');
+        expect(failed.text()).toContain('the secret store was not there yet');
 
-        const recovered = await handler(createMockEvent('/test'), createMockContext());
-        expect(decodeBody(recovered)).toBe('Ready');
+        const recovered = await visitor.request('GET', '/test');
+        expect(recovered.text()).toBe('Ready');
         expect(attempts).toBe(2);
 
         // And a hook that has succeeded still runs only once.
-        await handler(createMockEvent('/test'), createMockContext());
+        await visitor.request('GET', '/test');
         expect(attempts).toBe(2);
     });
 });
@@ -444,8 +415,8 @@ describe('Hooks - Priority Ordering', () => {
 
         lambder.addRoute('/test', (ctx, res) => res.html('Test'));
 
-        const handler = lambder.getHandler();
-        await handler(createMockEvent('/test'), createMockContext());
+        const visitor = browse(lambder);
+        await visitor.request('GET', '/test');
 
         // Should execute in priority order: 10, 20, 30
         expect(executionOrder).toEqual([10, 20, 30]);
@@ -476,8 +447,8 @@ describe('Hooks - Priority Ordering', () => {
             return response;
         }, 25);
 
-        const handler = lambder.getHandler();
-        await handler(createMockEvent('/test'), createMockContext());
+        const visitor = browse(lambder);
+        await visitor.request('GET', '/test');
 
         expect(executionOrder).toEqual([5, 25, 50]);
     });
@@ -507,8 +478,8 @@ describe('Hooks - Priority Ordering', () => {
 
         lambder.addRoute('/test', (ctx, res) => res.html('Test'));
 
-        const handler = lambder.getHandler();
-        await handler(createMockEvent('/test'), createMockContext());
+        const visitor = browse(lambder);
+        await visitor.request('GET', '/test');
 
         expect(executionOrder).toEqual(['negative', 'no-priority', 'positive']);
     });
@@ -548,8 +519,8 @@ describe('Hooks - Combined Workflow', () => {
             return response;
         });
 
-        const handler = lambder.getHandler();
-        await handler(createMockEvent('/test'), createMockContext());
+        const visitor = browse(lambder);
+        await visitor.request('GET', '/test');
 
         expect(executionOrder).toEqual([
             'before-1',
@@ -586,9 +557,7 @@ describe('Hooks - Combined Workflow', () => {
             return response;
         });
 
-        const handler = lambder.getHandler();
-        const event = createMockEvent('/api', 'POST', 'testApi', { value: 'test' });
-        await handler(event, createMockContext());
+        await browse(lambder).api('testApi', { value: 'test' });
 
         expect(executionOrder).toEqual(['beforeRender', 'apiHandler', 'afterRender']);
     });
@@ -618,20 +587,20 @@ describe('Hooks - beforeRender on the fallback chain', () => {
                 res.setHeader('Content-Security-Policy', "default-src 'self'");
                 return ctx;
             });
-        const handler = lambder.getHandler();
+        const visitor = browse(lambder);
 
-        const asset = await handler(createMockEvent('/main.css'), createMockContext());
+        const asset = await visitor.request('GET', '/main.css');
         expect(asset.statusCode).toBe(200);
-        expect(decodeBody(asset)).toContain('body { margin: 0; }');
-        expect(asset.multiValueHeaders?.['Content-Security-Policy']).toEqual(["default-src 'self'"]);
+        expect(asset.text()).toContain('body { margin: 0; }');
+        expect(asset.headers['content-security-policy']).toBe("default-src 'self'");
 
-        const shell = await handler(createMockEvent('/some/app/page'), createMockContext());
+        const shell = await visitor.request('GET', '/some/app/page');
         expect(shell.statusCode).toBe(200);
-        expect(decodeBody(shell)).toContain('<h1>Test HTML</h1>');
-        expect(shell.multiValueHeaders?.['Content-Security-Policy']).toEqual(["default-src 'self'"]);
+        expect(shell.text()).toContain('<h1>Test HTML</h1>');
+        expect(shell.headers['content-security-policy']).toBe("default-src 'self'");
 
-        const route = await handler(createMockEvent('/route'), createMockContext());
-        expect(route.multiValueHeaders?.['Content-Security-Policy']).toEqual(["default-src 'self'"]);
+        const route = await visitor.request('GET', '/route');
+        expect(route.headers['content-security-policy']).toBe("default-src 'self'");
 
         expect(seen).toEqual(['/main.css', '/some/app/page', '/route']);
     });
@@ -639,12 +608,12 @@ describe('Hooks - beforeRender on the fallback chain', () => {
     it('can short-circuit an asset and a shell, the way a maintenance-mode hook has to', async () => {
         const lambder = buildApp()
             .addHook('beforeRender', async (ctx, res) => res.text('maintenance', { statusCode: 503 }));
-        const handler = lambder.getHandler();
+        const visitor = browse(lambder);
 
         for(const requestPath of ['/main.css', '/some/app/page']){
-            const result = await handler(createMockEvent(requestPath), createMockContext());
+            const result = await visitor.request('GET', requestPath);
             expect(result.statusCode).toBe(503);
-            expect(decodeBody(result)).toBe('maintenance');
+            expect(result.text()).toBe('maintenance');
         }
     });
 
@@ -654,9 +623,9 @@ describe('Hooks - beforeRender on the fallback chain', () => {
             .addRoute('/user/:userId', (ctx, res) => res.text(ctx.pathParams.userId ?? ''))
             .addHook('beforeRender', async (ctx) => { seenParams = { ...ctx.pathParams }; return ctx; });
 
-        const result = await lambder.getHandler()(createMockEvent('/user/u-7'), createMockContext());
+        const result = await browse(lambder).request('GET', '/user/u-7');
 
-        expect(decodeBody(result)).toBe('u-7');
+        expect(result.text()).toBe('u-7');
         expect(seenParams).toEqual({ userId: 'u-7' });
     });
 
@@ -666,7 +635,7 @@ describe('Hooks - beforeRender on the fallback chain', () => {
             .addHook('beforeRender', async (ctx) => { order.push('beforeRender'); return ctx; })
             .addHook('fallback', async () => { order.push('fallback'); });
 
-        await lambder.getHandler()(createMockEvent('/main.css'), createMockContext());
+        await browse(lambder).request('GET', '/main.css');
 
         expect(order).toEqual(['beforeRender', 'fallback']);
     });

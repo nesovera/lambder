@@ -4,7 +4,8 @@
 
 import { describe, it, expect } from 'vitest';
 import Lambder from '../src/core/Lambder.js';
-import { decodeBody, createMockEvent, createMockContext, testPublicFiles } from './helpers.js';
+import { browse, testPublicFiles } from './helpers.js';
+import { lambderTestApp } from '../src/testing.js';
 describe('Actions (addAction: raw event or context filtering)', () => {
     const sourceIs = (source: string) => (event: unknown) =>
         (event as { source?: string } | null)?.source === source;
@@ -15,9 +16,9 @@ describe('Actions (addAction: raw event or context filtering)', () => {
             .addAction(sourceIs('app.reconciliation'), async (event) => ({ reconciled: true, id: (event as any).id }))
             .addAction(() => true, async () => 'catch-all');
 
-        const handler = lambder.getHandler();
-        expect(await handler({ source: 'app.reconciliation', id: 'evt-1' }, createMockContext())).toEqual({ reconciled: true, id: 'evt-1' });
-        expect(await handler({ source: 'anything.else' }, createMockContext())).toBe('catch-all');
+        const app = lambderTestApp(lambder);
+        expect(await app.event({ source: 'app.reconciliation', id: 'evt-1' })).toEqual({ reconciled: true, id: 'evt-1' });
+        expect(await app.event({ source: 'anything.else' })).toBe('catch-all');
     });
 
     it('supports type-guard filters for typed events', async () => {
@@ -29,8 +30,7 @@ describe('Actions (addAction: raw event or context filtering)', () => {
         const lambder = new Lambder({ files: testPublicFiles() })
             .addAction(isSqsEvent, async (event) => event.Records.map((r) => r.body));
 
-        const handler = lambder.getHandler();
-        const result = await handler({ Records: [{ eventSource: 'aws:sqs', body: 'msg' }] }, createMockContext());
+        const result = await lambderTestApp(lambder).event({ Records: [{ eventSource: 'aws:sqs', body: 'msg' }] });
         expect(result).toEqual(['msg']);
     });
 
@@ -39,10 +39,10 @@ describe('Actions (addAction: raw event or context filtering)', () => {
         const lambder = new Lambder({ files: testPublicFiles() })
             .addAction(() => true, async (event, tools) => { seenTools = tools; return 'ok'; });
 
-        await lambder.getHandler()({ source: 'x' }, createMockContext());
+        await lambderTestApp(lambder).event({ source: 'x' }, { functionName: 'nightly' });
         expect(seenTools.ctx).toBeNull();
         expect(seenTools.res).toBeNull();
-        expect(seenTools.lambdaContext.functionName).toBe('test');
+        expect(seenTools.lambdaContext.functionName).toBe('nightly');
     });
 
     it('can intercept HTTP requests by filtering on ctx', async () => {
@@ -54,15 +54,12 @@ describe('Actions (addAction: raw event or context filtering)', () => {
             )
             .addRoute('/page', (ctx, res) => { handlerRan = true; return res.html('secret'); });
 
-        const blocked = await lambder.render(
-            createMockEvent('/page', { headers: { Host: 'dev.example.com' } }),
-            createMockContext(),
-        );
+        const blocked = await browse(lambder, { host: 'dev.example.com' }).request('GET', '/page');
         expect(blocked.statusCode).toBe(404);
         expect(handlerRan).toBe(false);
 
-        const allowed = await lambder.render(createMockEvent('/page'), createMockContext());
-        expect(decodeBody(allowed)).toBe('secret');
+        const allowed = await browse(lambder).request('GET', '/page');
+        expect(allowed.text()).toBe('secret');
     });
 
     it('joins the same first-match chain as routes, in registration order', async () => {
@@ -70,8 +67,8 @@ describe('Actions (addAction: raw event or context filtering)', () => {
             .addRoute('/page', (ctx, res) => res.html('route wins'))
             .addAction((event, ctx) => ctx !== null && ctx.path === '/page', async (event, { res }) => res!.html('action'));
 
-        const result = await lambder.render(createMockEvent('/page'), createMockContext());
-        expect(decodeBody(result)).toBe('route wins');
+        const result = await browse(lambder).request('GET', '/page');
+        expect(result.text()).toBe('route wins');
     });
 
     it('errors when an HTTP-matched action does not return a response', async () => {
@@ -79,9 +76,9 @@ describe('Actions (addAction: raw event or context filtering)', () => {
             .setGlobalErrorHandler((err, ctx, res) => res.status(500, err.message))
             .addAction((event, ctx) => ctx !== null && ctx.path === '/oops', async () => ({ not: 'a response' }));
 
-        const result = await lambder.render(createMockEvent('/oops'), createMockContext());
+        const result = await browse(lambder).request('GET', '/oops');
         expect(result.statusCode).toBe(500);
-        expect(decodeBody(result)).toContain('did not return a response');
+        expect(result.text()).toContain('did not return a response');
     });
 
     it('still routes HTTP events normally when no action filter matches', async () => {
@@ -89,14 +86,14 @@ describe('Actions (addAction: raw event or context filtering)', () => {
             .addAction((event, ctx) => ctx === null, async () => 'event only')
             .addRoute('/page', (ctx, res) => res.html('http'));
 
-        const handler = lambder.getHandler();
-        const result = await handler(createMockEvent('/page'), createMockContext());
-        expect(decodeBody(result as any)).toBe('http');
+        const visitor = browse(lambder);
+        const result = await visitor.request('GET', '/page');
+        expect(result.text()).toBe('http');
     });
 
     it('throws a descriptive error for unmatched non-HTTP events', async () => {
         const lambder = new Lambder({ files: testPublicFiles() });
-        await expect(lambder.getHandler()({ source: 'unknown.source' }, createMockContext()))
+        await expect(lambderTestApp(lambder).event({ source: 'unknown.source' }))
             .rejects.toThrow(/no action matched.*unknown\.source/);
     });
 
@@ -105,7 +102,7 @@ describe('Actions (addAction: raw event or context filtering)', () => {
             .setGlobalErrorHandler((err, ctx, res) => res.status(500, 'should not be used for events'))
             .addAction(sourceIs('app.fails'), async () => { throw new Error('job failed'); });
 
-        await expect(lambder.getHandler()({ source: 'app.fails' }, createMockContext())).rejects.toThrow('job failed');
+        await expect(lambderTestApp(lambder).event({ source: 'app.fails' })).rejects.toThrow('job failed');
     });
 });
 

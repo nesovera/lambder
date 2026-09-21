@@ -240,7 +240,8 @@ A `Map`, for tests and for the mock runtime. Records are copied on the way in
 and out through JSON, the way a real store serializes them, so an `undefined`
 field drops and a cyclic value throws here exactly as it does on the way into
 DynamoDB. `list()`, `size` and `reset()` are there for assertions and for
-rewinding.
+rewinding. `lambderTestApp` puts one under an app's built instance, and signs
+visitors in without a login endpoint; see [Testing](./testing.md).
 
 ```typescript
 new LambderMemorySessionStore({

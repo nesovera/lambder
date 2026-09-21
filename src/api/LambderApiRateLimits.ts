@@ -15,6 +15,7 @@ import { LambderApiRefusal, LAMBDER_REFUSAL_CODES, type LambderAppRefusalMessage
 import { parsePreflightSlice } from "./LambderApiValidationRefusal.js";
 import type { LambderNonEmptyOptionMap } from "../shared/util/LambderTypeUtilities.js";
 import { assertNonNegativeInteger } from "../shared/util/LambderOptionChecks.js";
+import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
 
 const RATE_LIMIT_WINDOW_KEYS: readonly LambderRateLimitWindow[] = RATE_LIMIT_WINDOWS.map((window) => window.key);
 
@@ -303,6 +304,17 @@ export class LambderApiRateLimitsEngine {
         this.limiter = config.limiter;
         this.failOpen = config.failOpen ?? true;
         this.policies = new Map(Object.entries(config.policies));
+    }
+
+    /**
+     * Puts the engine over another limiter, for `lambder/testing`; the named
+     * policies and failOpen stay as configured. False when rateLimits were
+     * never configured: there is nothing for a limiter to sit under.
+     */
+    [LAMBDER_BACKEND_SWAP](limiter: LambderRateLimiter): boolean {
+        if(!this.limiter) return false;
+        this.limiter = limiter;
+        return true;
     }
 
     /** Startup validation of one API registration's rateLimit option. */

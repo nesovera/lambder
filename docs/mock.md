@@ -418,6 +418,10 @@ The mock app can also stand in for a callee Lambda in a server test, through
 `lambderMockInvokeTransport(mockApp)` on a `LambderInvokeCaller`, with the same
 registry.
 
+`assertApiSuccess` and `assertApiFailure` are exported here too: they narrow an
+`apiOutcome` and say what it was when it is not what the test expected. To
+test the real server rather than the mock handlers, see [Testing](./testing.md).
+
 ### The network panel (MSW)
 
 The direct transport shows nothing in the browser's network panel, because no

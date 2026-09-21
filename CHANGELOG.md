@@ -9,6 +9,94 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [7.3.1] - 2026-09-21
+
+### Added
+
+- **`lambder/testing`: a real app under test, in one call.** `lambderTestApp(lambder)`
+  takes the instance an app already exports and returns a `LambderTestApp`:
+  memory stores put under the instance, and simulated browsers in front of it,
+  with no HTTP and no AWS. Every piece existed before (the in-process handler
+  transport, the cookie jar, the memory stores), but each app had to assemble
+  them, and none could do the one thing that needs the framework's help: an
+  app is a module-level instance whose handlers and guards close over it, so a
+  test cannot be handed a copy over other stores, because the copy's closures
+  still reach the original and the production table under it. The stores are
+  therefore replaced **in place**, through a door keyed by a symbol no entry
+  point exports, so nothing on an instance's typed surface offers it to a
+  serving app. Nothing about the app is restructured, its guards, policies,
+  session model, hooks and error handlers all run as written, and from the
+  moment the test app exists the stores the app was created with are out of
+  the instance's reach.
+  - **Visitors.** `app.visitor()` is one simulated browser: its own cookie
+    jar, its own address (so a `per: "ip"` limit counts visitors apart, as it
+    does for two people in production), a typed `api` / `apiOutcome` over the
+    real pipeline, and `request(method, path)` for everything that is not an
+    API call (routes, redirects, session routes, public files), sharing the
+    same jar. `app.signIn(sessionKey, data)` returns a visitor already signed
+    in, minted by the app's own session model, so no login endpoint has to
+    exist. It throws, and says why, when the app's cookie domain does not
+    cover the visitor's host, instead of leaving every later call to answer
+    `sessionExpired`. `guardInputsProvider`, `headers`, `host`, `clientIp`,
+    `apiVersion` and `apiSignatures` are per visitor.
+  - **The mock app's verbs**, over the real handlers: `signIn`, `signOut`,
+    `expireSessionData`, `reset`, plus `event()` for what is not an HTTP
+    request (a schedule, SNS, SQS) and the stores themselves for assertions.
+  - **What the app threw.** A crash is answered by the app's global error
+    handler or by the framework's 500, and either answer deliberately says
+    nothing about the error, which leaves a test author with "status 500". The
+    test app watches what the instance throws without changing what it
+    answers: `visitor.apiOutcome` sets the thrown error as the failure's
+    `error.cause`, per call even with others in flight, and `app.crashes`
+    lists every one since the last reset.
+  - **Options** sit where `create()` takes them (`session.store`,
+    `rateLimits.limiter`, `idempotency.store`, `files`), each defaulting to a
+    fresh memory store, or for `files` to the app's own source.
+  - **`eventFormat: "v1" | "v2"`** (default `"v2"`): the gateway shape the
+    handler is called with, so an app behind a REST API can run its suite on
+    the event production delivers. `synthesizeLambdaHttpEvent` and
+    `lambderHandlerTransport` take the same option; a REST API event carries
+    its cookies in the Cookie header and every header in both delivery forms,
+    and the asserted client address stays the gateway's observation
+    (`requestContext.identity.sourceIp`) rather than a header, as on 2.0.
+  - The test app owns no clock, on purpose: faking `Date` with the test runner
+    moves the framework, the memory stores and the app's own handlers
+    together, which a clock of the test app's could not.
+- **`assertApiSuccess` and `assertApiFailure`**, from `lambder/testing` and
+  `lambder/mock`. They narrow an outcome through an `asserts` signature, so
+  what the proved arm carries reads on the next line, and they throw a plain
+  Error naming what the outcome actually was, with the failure's own error as
+  its cause. `assertApiFailure(outcome, reason?, { code?, status? })` types
+  the reason against the union it was handed, so a misspelled one does not
+  compile, and narrows per arm, since `server` shares its arm with three other
+  reasons and `Extract` would have dropped it. Typed structurally over `ok`
+  and `reason`, so a `LambderInvokeOutcome` narrows through the same two
+  functions, and no test runner is imported.
+- **[docs/testing.md](./docs/testing.md)**: testing a Lambder app in one page.
+  It was spread across ten pages as asides before.
+
+### Changed
+
+- The session manager asks "may this crypto sit in front of this store" of
+  every store it is given, a swapped one included, rather than only in its
+  constructor.
+- **The suite uses its own tools where the subject is what an app does.**
+  The routing, hook, plugin, action, redirect and thrown-response tests run
+  on the test app: a visitor's `request()` in place of a hand-built event, a
+  context and a body decoder, `app.event()` for the non-HTTP actions, a typed
+  `api()` for the plugin tests (which now also prove the contract flows
+  through `use()` to a caller), and `signIn()` in place of session records
+  forged with an SDK mock and hand-made hashes. Seven files lost their private
+  copies of the event and context builders. The hand-written `if(!outcome.ok)`
+  narrowing in the mock app's, the invoke caller's and the transports' tests
+  became the two assertions.
+- The tests whose subject is the wire stay on hand-built events, because the
+  event or the raw answer is what they test: event parsing, response
+  finalization, compression, cookies and CORS headers, the policy and refusal
+  answers (status, envelope, Retry-After), error answers, the two gateway
+  formats, and the transports themselves. `tests/helpers.ts` says which is
+  which.
+
 ## [7.2.4] - 2026-09-19
 
 ### Changed

@@ -50,7 +50,7 @@ export const lambderHandlerTransport = (handler, options = {}) => {
             clientIp: request.clientIp ?? clientIp,
             cookies: request.cookies,
             body: JSON.stringify(buildTransportEnvelope({ ...request, siteHost: request.siteHost || host })),
-        }, { invoke: false });
+        }, { invoke: false, eventFormat: options.eventFormat });
         let result;
         try {
             result = await stopWaitingWhenAborted(handler(event, localLambdaContext("lambder-local", options.context)), request.signal);

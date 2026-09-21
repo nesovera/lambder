@@ -554,6 +554,9 @@ before it is sent, as a `payloadTooLarge` failure naming the size.
 
 ## Testing and boot checks
 
+This section is about testing a caller of another function. For the app's own
+endpoints, routes and sessions, see [Testing](./testing.md).
+
 `LambderInvokeCaller.localTransport(handler)` runs a callee's real handler in
 this process the way Lambda would, including turning a thrown error into a
 `FunctionError` payload. Tests then exercise the real handlers behind the real

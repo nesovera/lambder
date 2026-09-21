@@ -123,9 +123,9 @@ const sourceGraph = (entryFile: string) => {
     };
 };
 
-const ENTRY_FILES = ['../src/index.ts', '../src/client.ts', '../src/mock.ts'] as const;
+const ENTRY_FILES = ['../src/index.ts', '../src/client.ts', '../src/mock.ts', '../src/testing.ts'] as const;
 
-/** The three entry graphs merged: every module the package can reach, once. */
+/** The four entry graphs merged: every module the package can reach, once. */
 const wholeSourceTree = () => {
     const merged = new Map<string, ModuleImports>();
     for(const entryFile of ENTRY_FILES){
@@ -233,11 +233,31 @@ describe('The published entry points', () => {
         expect(mock.importersOf('tough-cookie')).toEqual(['shared/transport/LambderCookieJar.ts']);
     });
 
-    it('no longer resolves the subpath the mock runtime replaced', async () => {
-        // Through a variable, so the specifier is not resolved at transform
-        // time: the point is what happens when someone asks for it.
-        const removedSubpath = 'lambder/testing';
-        await expect(import(/* @vite-ignore */ removedSubpath)).rejects.toThrow(/not exported|ERR_PACKAGE_PATH_NOT_EXPORTED/);
+    it('resolves the testing entry', async () => {
+        const testing = await import('lambder/testing');
+
+        expect(typeof testing.lambderTestApp).toBe('function');
+        expect(typeof testing.assertApiSuccess).toBe('function');
+        expect(typeof testing.assertApiFailure).toBe('function');
+        expect(typeof testing.LambderMemorySessionStore).toBe('function');
+    });
+
+    it('keeps the testing entry out of every other entry, so no deployment or bundle carries it', () => {
+        // The test app exists to put other stores under a built instance.
+        // Nothing an app ships should be able to reach it, and "nothing else
+        // imports it" is only true while something checks.
+        for(const entryFile of ['../src/index.ts', '../src/client.ts', '../src/mock.ts']){
+            const reached = sourceGraph(entryFile).modules.filter(file => file === 'testing.ts' || file.startsWith('testing/'));
+            expect(reached, `${entryFile} reaches the testing entry`).toEqual([]);
+        }
+    });
+
+    it('serves the same outcome assertions from the mock entry and the testing entry', async () => {
+        const mock = await import('lambder/mock');
+        const testing = await import('lambder/testing');
+
+        expect(mock.assertApiFailure).toBe(testing.assertApiFailure);
+        expect(mock.assertApiSuccess).toBe(testing.assertApiSuccess);
     });
 
     it('maps every Node built-in a bundler is asked to resolve away for the browser', () => {
@@ -270,8 +290,8 @@ describe('The published entry points', () => {
     });
 
     it('declares the subpaths it means to, in exports and typesVersions', () => {
-        expect(Object.keys(packageJson.exports).sort()).toEqual(['.', './client', './mock', './package.json']);
-        expect(Object.keys(packageJson.typesVersions['*']).sort()).toEqual(['client', 'mock']);
+        expect(Object.keys(packageJson.exports).sort()).toEqual(['.', './client', './mock', './package.json', './testing']);
+        expect(Object.keys(packageJson.typesVersions['*']).sort()).toEqual(['client', 'mock', 'testing']);
     });
 });
 
@@ -297,11 +317,16 @@ const MAY_IMPORT: Record<string, readonly string[]> = {
     // invoke/ sits above core/: it synthesizes events for and decodes results
     // from a Lambder server. The edge is type-only, pinned separately below.
     invoke: ['shared', 'session', 'api', 'invoke', 'core'],
+    // testing/ sits on top of the server: it puts a built instance under test
+    // through the typed caller and the in-process transport, over the memory
+    // stores. Nothing imports it back, which its own gate above pins.
+    testing: ['shared', 'stores', 'session', 'api', 'client', 'core', 'invoke', 'testing'],
     // The entries. The root one is the whole framework minus the mock
     // runtime, which is its own entry and stays out of a server bundle.
     'index.ts': ['shared', 'stores', 'session', 'api', 'client', 'core', 'invoke'],
     'client.ts': ['shared', 'client'],
     'mock.ts': ['shared', 'stores', 'session', 'api', 'mock'],
+    'testing.ts': ['shared', 'stores', 'session', 'invoke', 'testing'],
 };
 
 /** The layer a src-relative path belongs to: its directory, or the entry file itself. */
@@ -441,7 +466,7 @@ const entryExportNames = (entryFile: string) => {
 const EXPORT_NAME_PREFIXES = [
     'Lambder', 'LAMBDER_', 'DEFAULT_', 'API_', 'RATE_LIMIT_', 'COMPRESSED_',
     'Api', 'Condition', 'Http', 'PathParams', 'Route',
-    'accepts', 'addAnswer', 'answer', 'apiNot', 'buildApi', 'buildTransport',
+    'accepts', 'addAnswer', 'answer', 'apiNot', 'assertApi', 'buildApi', 'buildTransport',
     'compress', 'crash', 'create', 'decode', 'describe', 'envelope', 'error',
     'escapeHtml', 'finalize', 'getAnswer', 'html', 'init', 'invalid', 'is',
     'jsonScript', 'lambder', 'local', 'parse', 'raw', 'read', 'refusal',
@@ -459,7 +484,7 @@ describe('docs/exports.md', () => {
     const page = readFileSync(new URL('../docs/exports.md', import.meta.url), 'utf8');
     const backticked = new Set([...page.matchAll(/`([^`\n]+)`/g)].map(match => match[1]!.trim()));
 
-    it('names every export of the three entries', () => {
+    it('names every export of the four entries', () => {
         expect([...exported].filter(name => !backticked.has(name)).sort()).toEqual([]);
     });
 

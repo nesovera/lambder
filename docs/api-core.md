@@ -66,8 +66,11 @@ Directories are layers, and imports only ever point down. From the bottom:
    `core/` TYPE (it synthesizes events for a Lambder server and decodes its
    results) and never a `core/` value; `mock/` may import only
    `stores/LambderMemory*`.
-7. `index.ts`, `client.ts`, `mock.ts`: the three entries, each reaching only
-   the layers its consumers may have.
+7. `testing/`: the test app, on top of the server. It puts a built instance
+   under test through the typed caller and the in-process transport, over the
+   memory stores, and nothing imports it back, so no deployment carries it.
+8. `index.ts`, `client.ts`, `mock.ts`, `testing.ts`: the four entries, each
+   reaching only the layers its consumers may have.
 
 A type-only import obeys the same rule as a value import. A type edge is still
 a dependency: it binds every consumer's typecheck, it is where the next value
@@ -280,7 +283,8 @@ owner-checked claims and expiry, session records under the two hashes) with a
 `Map` in place of the table, and an injectable clock so a test can move time.
 A test of a rate limit, a replay or a session therefore runs in microseconds
 with no AWS, and an app may bring its own store (Redis, a database) by
-implementing the interface.
+implementing the interface. `lambderTestApp` puts the memory ones under an
+app's built instance in one call; see [Testing](./testing.md).
 
 ## Transports
 
@@ -295,7 +299,7 @@ type LambderApiTransport = (request: LambderApiTransportRequest) => Promise<Lamb
 | --- | --- | --- |
 | `lambderFetchTransport({ cors })` | `lambder/client` | The default: one POST to the API path over fetch |
 | `mockApp.transport(options)` | `lambder/mock` | The mock runtime, cookies carried by a jar |
-| `lambderHandlerTransport(handler, options)` | `lambder` | A real Lambder handler in this process, called through a browser-shaped event; with the memory stores, an integration test of the real app through the typed caller with no HTTP and no AWS |
+| `lambderHandlerTransport(handler, options)` | `lambder` | A real Lambder handler in this process, called through a browser-shaped event; with the memory stores, an integration test of the real app through the typed caller with no HTTP and no AWS. A test app's visitors run on it; see [Testing](./testing.md) |
 | `lambderCookieJarTransport(inner, { jar })` | both | Makes any transport carry a `LambderCookieJar` the way a browser carries cookies, so a session survives between calls where there is no browser |
 
 A transport may reject; the caller reports that as `network`, or `timeout`

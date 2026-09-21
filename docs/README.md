@@ -21,6 +21,7 @@ order the first time.
 | [Sessions](./sessions.md) | Sessions over a store (DynamoDB, memory, your own), cookie scope and migrations, secrets at rest, `dataRefresh`, the session controller |
 | [API policies](./api-policies.md) | Declarative rate limits, guards and idempotency, and making an authorization declaration mandatory |
 | [Calling another lambda](./invoke.md) | `LambderInvokeCaller`: invoking a Lambder app in another function directly, with its contract, crash detail and logs |
+| [Testing](./testing.md) | `lambderTestApp`: your real instance under test in this process, memory stores put under it in place, simulated browsers in front of it, outcome assertions, time, and where every other kind of test lives |
 | [The API core](./api-core.md) | `LambderApiPipeline`: the one request pipeline the server and the mock runtime run, the request and answer shapes, store interfaces, transports |
 
 ## Building a frontend
@@ -46,7 +47,7 @@ order the first time.
 
 | Page | Covers |
 | --- | --- |
-| [Exports reference](./exports.md) | Every name the three entry points export, grouped by purpose |
+| [Exports reference](./exports.md) | Every name the four entry points export, grouped by purpose |
 
 ## Elsewhere in the repository
 

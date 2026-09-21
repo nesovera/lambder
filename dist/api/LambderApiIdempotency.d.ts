@@ -3,6 +3,7 @@ import type { LambderApiCallContext, LambderApiCallTrace } from "./LambderApiCal
 import type { LambderApiAnswer } from "./LambderApiAnswer.js";
 import type { LambderIdempotencyStore } from "../shared/contracts/LambderIdempotencyStore.js";
 import type { LambderApiIdempotencyOption } from "../shared/wire/LambderApiOptionValues.js";
+import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
 export type LambderApiIdempotencyConfig = {
     /** Your idempotency store instance; may share the rate limiter's table (distinct key prefix). */
     store: LambderIdempotencyStore;
@@ -66,6 +67,12 @@ export declare class LambderApiIdempotencyEngine {
      */
     private readonly scopeByCall;
     configure(config: LambderApiIdempotencyConfig): void;
+    /**
+     * Puts the engine over another store, for `lambder/testing`; the replay
+     * TTLs, failOpen and callerIdentity stay as configured. False when
+     * idempotency was never configured.
+     */
+    [LAMBDER_BACKEND_SWAP](store: LambderIdempotencyStore): boolean;
     /** Startup validation of one API registration's idempotency option. */
     assertRegistration(apiName: string, config: LambderApiIdempotencyOption): void;
     /** True once the idempotency option was configured; registration asserts check it. */

@@ -1,6 +1,7 @@
 import type { Context } from "aws-lambda";
 import type { LambderApiTransport } from "../shared/transport/LambderApiTransport.js";
 import type { LambderHandler } from "../core/LambderCreateOptions.js";
+import type { LambderHttpEventFormat } from "../core/LambderContext.js";
 export type LambderHandlerTransportOptions = {
     /** The Host the handler sees (ctx.host), and the siteHost the envelope carries when the caller has none. Default: the apiPath's own host when it is absolute, otherwise "localhost". */
     host?: string;
@@ -10,6 +11,8 @@ export type LambderHandlerTransportOptions = {
     maxResponseBytes?: number;
     /** Fields of the Lambda context the handler receives. */
     context?: Partial<Context>;
+    /** The gateway shape the handler is called with: "v2" (an HTTP API, a Function URL) or "v1" (a REST API). Default: "v2". A handler answers both alike; name the one your deployment delivers when the difference is what you are testing. */
+    eventFormat?: LambderHttpEventFormat;
 };
 /**
  * A transport that calls a Lambder handler in this process, the way a
