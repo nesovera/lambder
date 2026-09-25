@@ -4,13 +4,12 @@ import { LambderApiRefusal, isLambderApiRefusal } from "../shared/wire/LambderAp
  * response. The API's own schema and every preflight slice (a guard's input,
  * a rate-limit key's fields) throw this when a value fails to parse, and the
  * pipeline renders it in one place: through the app's input validation
- * handler when it set one, otherwise as the standard 422 body. The engines
- * therefore never build a response and never see a resolver, which is what
- * lets them run outside a Lambda.
+ * handler when set, otherwise as the standard 422 body. The engines never
+ * build a response or see a resolver, which lets them run outside a Lambda.
  *
- * A LambderApiRefusal, so every catch that maps refusals already handles it;
- * the brand tells the pipeline to route it through the validation handler
- * instead of the refusal envelope.
+ * It is a LambderApiRefusal, so every catch that maps refusals handles it;
+ * the brand routes it through the validation handler instead of the refusal
+ * envelope.
  */
 export class LambderApiValidationRefusal extends LambderApiRefusal {
     /** Brand for detection across duplicate lambder installs, like LambderApiRefusal's. */
@@ -29,11 +28,12 @@ export const isLambderApiValidationRefusal = (err) => isLambderApiRefusal(err) &
  * a guardInput value from the raw guardInputs map). Runs before the API's
  * own validation; a failure throws the same LambderApiValidationRefusal the
  * API's schema throws, so the pipeline answers every rejected input alike.
- * Shared by the guards engine and the rate-limit engine, and living here
- * beside the error it throws rather than in one of the two.
+ * Shared by the guards and rate-limit engines, so it lives beside the error
+ * it throws. Parsed asynchronously, so a slice with an async refinement (a
+ * lookup, say) validates instead of making zod throw on every call.
  */
-export const parsePreflightSlice = (input, value) => {
-    const parsed = input.safeParse(value);
+export const parsePreflightSlice = async (input, value) => {
+    const parsed = await input.safeParseAsync(value);
     if (!parsed.success)
         throw new LambderApiValidationRefusal(parsed.error);
     return parsed.data;

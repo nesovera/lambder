@@ -41,13 +41,14 @@ export type {
     LambderCallerOptions,
     LambderGuardInputsProvider,
     LambderProvidedGuardInputs,
-    LambderIdempotencyKeyScope,
     LambderLogListHandler,
 } from "./client/LambderCaller.js";
+export { createIdempotencyKey, createIdempotencyKeyScope } from "./shared/wire/LambderIdempotencyKeyScope.js";
+export type { LambderIdempotencyKeyScope } from "./shared/wire/LambderIdempotencyKeyScope.js";
 
 // Typed API refusals (isomorphic: shared code may throw them from anywhere;
 // in the browser they are plain Errors).
-export { LambderApiRefusal, isLambderApiRefusal, refuse, LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";
+export { LambderApiRefusal, isLambderApiRefusal, refuse, refusalMessageOf, LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";
 export type { LambderApiRefusalOptions, LambderRefusalMessage, LambderAppRefusalMessage, LambderRefusalCode, LambderRefuseOptions } from "./shared/wire/LambderApiRefusal.js";
 
 // The API contract and wire envelope both sides speak, and the helpers that read a contract type.
@@ -59,6 +60,9 @@ export type {
     LambderGuardNamesIn,
     LambderContractMode,
     LambderContractKeysWithMode,
+    LambderContractKeysWithGuard,
+    LambderJsonOf,
+    LambderJsonOutputOf,
     LambderContractGuardsOf,
     LambderContractGuardNames,
     LambderContractGuardInputsOf,

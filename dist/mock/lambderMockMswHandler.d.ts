@@ -4,13 +4,11 @@ import { LambderCookieJar } from "../shared/transport/LambderCookieJar.js";
 /**
  * The parts of the msw module the adapter uses: `import * as msw from "msw"`.
  *
- * Written so the real package satisfies it, which is the whole point of a
- * structural declaration and was not true of the previous one. msw's resolver
- * answers a Response, or `undefined` to hand the request back (its
- * AsyncResponseResolverReturnType), and a resolver declared to return
- * `Promise<unknown>` is not assignable to that, so `http.post` did not fit
- * here and the handler this returned did not fit `setupWorker`. Both errors
- * landed on the documented five-line wiring.
+ * Written so the real package satisfies it. msw's resolver answers a
+ * Response, or `undefined` to hand the request back (its
+ * AsyncResponseResolverReturnType); a resolver declared to return
+ * `Promise<unknown>` is not assignable to that, so `http.post` would not fit
+ * here and the returned handler would not fit `setupWorker`.
  */
 export type LambderMswModule = {
     http: {
@@ -43,10 +41,10 @@ export type LambderMockMswTarget = {
     /**
      * The host the runtime's cookies belong to, which this adapter's jar is
      * scoped by. The runtime's value, not the request URL's: signIn plants at
-     * the app's cookieHost and the direct transport's jar sends from there, so
-     * an adapter scoping by whatever host the page is served from held the
-     * session cookies at a host it never sent them to, and every session call
-     * behind the worker answered sessionExpired with a full jar.
+     * the app's cookieHost and the direct transport's jar sends from there.
+     * Scoped by the page's host instead, the jar would hold session cookies
+     * at a host it never sends them to, and every session call behind the
+     * worker would answer sessionExpired with a full jar.
      */
     readonly cookieHost: string;
 };
@@ -54,25 +52,31 @@ export type LambderMockMswTarget = {
  * ONE MSW request handler for the whole API path, over the mock app: the
  * opt-in that makes mocked calls appear in the browser's network panel as
  * genuine requests, with real method, status, timing and bodies. The request
- * is read the way the server reads it, its headers and Cookie header
- * included.
+ * is read the way the server reads it, headers included, with the cookies a
+ * browser would send.
  *
- * Session cookies are held in a jar here rather than by the browser, because
- * the browser will not hold them: a response a service worker synthesizes
- * never reaches the cookie store, and MSW's own jar comma-joins the
- * Set-Cookie headers before parsing them, which loses every cookie after the
- * first. So the answer's cookies go into the jar, the next request carries
- * them back, and the ones a page's scripts may see are mirrored into
- * document.cookie. The Set-Cookie headers still travel on the response, where
- * the network panel shows them.
+ * Session cookies are held in a jar here, because the browser will not hold
+ * them: a response a service worker synthesizes never reaches the cookie
+ * store, and MSW's own jar comma-joins the Set-Cookie headers before parsing
+ * them, losing every cookie after the first. So the answer's cookies go into
+ * the jar, the next request carries them back, and the ones a page's scripts
+ * may see are mirrored into document.cookie. The Set-Cookie headers still
+ * travel on the response, where the network panel shows them.
+ *
+ * A request's cookies are therefore the jar's and document.cookie's, never
+ * its Cookie header: MSW fills that from its own store, which captures the
+ * HttpOnly session cookie off those Set-Cookie headers and keeps it in
+ * localStorage across reloads. Reading it would send a second session after
+ * a user switch (every call answering sessionExpired), keep a cleared jar
+ * signed in, and put the raw token into request events.
  *
  * Lambder never depends on msw: the app installs it and passes the module
  * in. An injected network failure answers MSW's network error. A POST whose
  * body is not an API envelope is left to other handlers.
  *
  * Generic over the module so the handler keeps msw's own handler type, which
- * is what `setupWorker(...)` and `setupServer(...)` take. Returning `unknown`
- * made the documented wiring an error at the consumer.
+ * is what `setupWorker(...)` and `setupServer(...)` take; typed `unknown`,
+ * the documented wiring would be a type error at the consumer.
  */
 export declare const lambderMockMswHandler: <M extends LambderMswModule>(mockApp: LambderMockMswTarget, options: {
     msw: M;
@@ -86,12 +90,12 @@ export declare const lambderMockMswHandler: <M extends LambderMswModule>(mockApp
      * a partially mocked app runs in while its remaining endpoints still
      * come from a real backend.
      *
-     * This and `mockApp.restNotMocked(reason)` are the two answers to the
-     * same question, and the rest entry wins: it leaves the runtime with
-     * an entry for every name, so nothing is ever unmocked here and a call
-     * that would have gone to the network is answered notMocked instead.
-     * Pick the rest entry for an app with no backend to reach, and this
-     * for one whose remaining endpoints are served by a real one.
+     * This and `mockApp.restNotMocked(reason)` answer the same question,
+     * and the rest entry wins: it gives the runtime an entry for every
+     * name, so nothing is unmocked here and a call is answered notMocked
+     * rather than passed on. Pick the rest entry for an app with no
+     * backend to reach, and this for one whose remaining endpoints are
+     * served by a real one.
      */
     onUnmocked?: "refuse" | "passthrough";
     /** The client IP its calls are read as arriving from. Default: the runtime's own defaultClientIp. */

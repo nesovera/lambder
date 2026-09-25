@@ -2,11 +2,11 @@
  * Marks an object as a response without anyone having to import the class to
  * ask. Layers that must recognise one but must not depend on core at runtime
  * (the guards engine, which runs in the browser too) test for this key.
- * Symbol.for keeps it true across realms and across duplicate copies of the
- * package. Defined here, in shared, so the class that carries the brand and
- * the engine that checks for it import the one constant: a hand-typed copy
- * of the symbol's name would keep compiling after a rename while the runtime
- * check silently stopped matching.
+ * Symbol.for keeps it true across realms and duplicate copies of the
+ * package. Defined in shared so the class that carries the brand and the
+ * engine that checks it import one constant: a hand-typed copy of the
+ * symbol's name would keep compiling after a rename while the runtime check
+ * silently stopped matching.
  */
 export declare const LAMBDER_RESPONSE_BRAND: unique symbol;
 /**

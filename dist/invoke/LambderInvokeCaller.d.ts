@@ -2,17 +2,17 @@
  * Calling a Lambder app from another lambda, or from any server code that
  * holds AWS credentials and lambda:InvokeFunction on it.
  *
- * API Gateway delivers an HTTP request to a Lambder app as a JSON event and
- * takes a JSON response object back; a direct InvokeCommand carries JSON in
- * both directions too. So this caller builds the payload-format-2.0 event
- * API Gateway would have built, invokes the function with it, and reads the
- * response object Lambder returns. The callee is an unmodified Lambder app,
- * and everything it offers over HTTP (zod validation, the inferred contract,
- * refusals, guards, idempotency keys, Brotli answers, logList, the crash
- * detail its global error handler chooses to send) applies unchanged. The
- * callee tells an invoke from a browser only by the x-lambder-invoke header,
- * which is a marker for guards and hooks, never an authorization: the IAM
- * grant is that.
+ * Builds the payload-format-2.0 event API Gateway would have built, invokes
+ * the function with it directly, and reads the response object Lambder
+ * returns. The callee is an unmodified Lambder app, so everything it offers
+ * over HTTP (zod validation, the inferred contract, refusals, guards,
+ * idempotency keys, Brotli answers, logList, the crash detail its error
+ * handler chooses to send) applies unchanged. The callee tells an invoke
+ * apart by the event's requestContext.apiId, which no gateway lets a client
+ * write, and reads no forwarding header on one, so `clientIp` and `host` are
+ * the only address and host it sees. The x-lambder-invoke header is a marker
+ * for guards and hooks, never an authorization: the IAM grant is the
+ * authorization.
  *
  * Server-only (zlib, the Lambda SDK), so it is exported from the root entry
  * and never from lambder/client. The SDK is an optional peer dependency
@@ -72,23 +72,18 @@ type LambderInvokeCallerBaseOptions = {
     /** Function name or ARN. */
     functionName: string;
     /**
-     * A ready client, e.g. one shared with the rest of the app. It keeps
-     * whatever `maxAttempts` it was built with, which is the SDK's own 3
-     * unless the app said otherwise: `clientConfig` below is not consulted
-     * for a client this caller did not create, and a retry at that layer
-     * re-executes a callee whose response was merely lost. Build it with
-     * `{ maxAttempts: 1 }`, or send an `idempotencyKey` and let the callee
-     * settle the repeat.
+     * A ready client, e.g. one shared with the rest of the app. `clientConfig`
+     * does not apply to it, so it keeps its own `maxAttempts` (the SDK's 3 by
+     * default), and a retry re-executes a callee whose response was merely
+     * lost: build it with `{ maxAttempts: 1 }`, or send an `idempotencyKey`.
      */
     client?: LambdaClient;
     /**
      * Otherwise the client is created from this on the first call (region,
-     * credentials, maxAttempts). `maxAttempts` defaults to 1 here rather than
-     * to the SDK's 3: a RequestResponse invoke whose response is lost has
-     * already run the callee, so a retry at this layer executes the operation
-     * a second time, and the transport contract says one call is one delivery
-     * attempt. Raise it deliberately if the callee is idempotent, or send an
-     * `idempotencyKey` and let the callee settle it.
+     * credentials, maxAttempts). `maxAttempts` defaults to 1 rather than the
+     * SDK's 3, since a lost response means the callee already ran and a retry
+     * would run it twice. Raise it only for an idempotent callee, or send an
+     * `idempotencyKey`.
      */
     clientConfig?: LambdaClientConfig;
     /** Must match the callee's apiPath. Default: "/api". */
@@ -118,10 +113,10 @@ type LambderInvokeCallerBaseOptions = {
     /** Receives each answer's logList. Default: console.log with the function and api name. A throw is logged and otherwise ignored. */
     onLogList?: LambderInvokeLogListHandler;
     /**
-     * Called, and awaited, for every failed call before api() throws or
-     * apiOutcome() returns, so failures are reported in one place whichever
-     * method the site used, and before the lambda answers. A throw inside it
-     * is logged and otherwise ignored: apiOutcome() never throws.
+     * Called and awaited for every failed call before api() throws or
+     * apiOutcome() returns, so failures are reported in one place, before the
+     * lambda answers. A throw inside it is logged and otherwise ignored, so
+     * apiOutcome() never throws.
      */
     onFailure?: LambderInvokeFailureHandler;
     /** The session token cookie's name, when a session is carried and the callee uses a non-default `tokenCookieKey`. The CSRF value rides in the envelope's `token` field, which has no name to configure. */
@@ -195,10 +190,9 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
      * Lambda would: a thrown error becomes a FunctionError payload. For
      * tests that want the real handlers behind the real envelope.
      *
-     * It honours the signal the way lambderHandlerTransport does, by ending
-     * the wait: a function call in this process cannot be cancelled, so the
-     * handler runs to completion regardless and what a timeout buys is the
-     * caller's answer. Ignoring it made timeoutMs a no-op here.
+     * It honours the signal by ending the wait, as lambderHandlerTransport
+     * does: an in-process call cannot be cancelled, so the handler runs to
+     * completion regardless, but timeoutMs still frees the caller.
      */
     static localTransport(handler: (event: APIGatewayProxyEventV2, context: Context) => Promise<unknown>, context?: Partial<Context>): LambderInvokeTransport;
     private loadSdk;
@@ -208,25 +202,26 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
     /** Builds the failure and its error, reports it once, and hands it back. */
     private failureOutcome;
     private surfaceLogs;
-    /** One call, one outcome. Never throws; api() is what throws. */
+    /**
+     * One call, one outcome. Never throws; api() is what throws. A key scope
+     * is told how the attempt ended, as it is on LambderCaller.
+     */
     private dispatch;
+    private dispatchAttempt;
     /**
      * Full-fidelity call: resolves to a discriminated LambderInvokeOutcome
-     * instead of throwing. Never throws; for sites that degrade gracefully.
-     *
-     * The output is computed from the contract in the return type rather than
-     * taken as a type parameter, so a call site cannot replace it by
-     * annotating what it assigns to.
+     * instead of throwing, for sites that degrade gracefully. The output type
+     * comes from the contract rather than a type parameter, so a call site
+     * cannot replace it by annotating what it assigns to.
      */
     apiOutcome<TApiName extends keyof TContract & string = string>(apiName: TApiName, ...rest: LambderCallArgs<TContract, TApiName, TProvidedGuards, LambderInvokeCallOptions>): Promise<LambderInvokeOutcome<LambderContractOutputOf<TContract, TApiName>>>;
     /**
      * The declared output, or a thrown LambderInvokeError carrying the
      * outcome. A failed dependency is a failed request: the throw reaches the
      * app's global error handler with the callee's error as its cause. The
-     * result is the callee's output type as it declared it: the resolver
-     * only lets a handler answer null when the output allows it or beside a
-     * reason (LambderApiAnswer), so a nullable output is the one place null
-     * arrives.
+     * resolver lets a handler answer null only when the output allows it or
+     * beside a reason (LambderApiAnswer), so null arrives only for a
+     * nullable output.
      */
     api<TApiName extends keyof TContract & string = string>(apiName: TApiName, ...rest: LambderCallArgs<TContract, TApiName, TProvidedGuards, LambderInvokeCallOptions>): Promise<LambderContractOutputOf<TContract, TApiName>>;
     /**

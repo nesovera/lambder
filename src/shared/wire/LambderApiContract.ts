@@ -49,7 +49,14 @@ export type LambderApiResponseConfig = {
     sessionExpired?: boolean;
     notAuthorized?: boolean;
     message?: any;
-    /** A refusal message, or a plain string: what LambderApiRefusal and res.api(null, { errorMessage }) put here. */
+    /**
+     * A refusal message, or a plain string when writing
+     * (`res.api(null, { errorMessage: "..." })`): the envelope goes out with
+     * the message object either way. Read off the wire it can still be a
+     * string, or no message at all, wherever a Lambder server did not write
+     * the body (a hand-built mock answer, a proxy); refusalMessageOf reads
+     * whatever arrives as a message.
+     */
     errorMessage?: LambderAppRefusalMessage | string;
     logList?: any[];
     /**
@@ -72,17 +79,85 @@ export type LambderApiNullAnswerConfig =
     LambderNonEmptyOptionMap<Pick<LambderApiResponseConfig, "versionExpired" | "sessionExpired" | "notAuthorized" | "errorMessage" | "message">>
     & LambderApiResponseConfig;
 
-/** The API wire envelope both sides speak: res.api() emits it, LambderCaller parses it. */
+/**
+ * The API wire envelope both sides speak: res.api() emits it, LambderCaller
+ * parses it. `apiVersion` is always there (null when the server set none):
+ * it is how a reader tells a Lambder envelope from another JSON answer, such
+ * as API Gateway's own `{ "message": ... }` errors, so an answer without it
+ * reads as a server failure.
+ */
 export type LambderApiEnvelopeBody<T> = LambderApiResponseConfig & {
-    apiVersion?: string | null;
+    apiVersion: string | null;
     payload?: T | null;
 }
+
+/** A value that is already JSON, recursive structures such as z.json() included. */
+type LambderJsonValue = string | number | boolean | null | LambderJsonValue[] | { [key: string]: LambderJsonValue };
+
+/** An array item once it has been through JSON: what an object would drop, an array writes as null. */
+type LambderJsonArrayItemOf<T> = T extends undefined | symbol | ((...args: any[]) => unknown) ? null : LambderJsonOf<T>;
+
+/**
+ * The keys of object T that JSON may leave out: those whose value may be
+ * undefined, since JSON.stringify omits such a key. Distributed over K, the
+ * keys of T, one at a time. An index signature is never one of them: a
+ * record's undefined entries are left out, which its value type already
+ * says once undefined is dropped from it.
+ */
+type LambderJsonOmissibleKeys<T, K extends keyof T = keyof T> =
+    K extends keyof T ? (string extends K ? never : number extends K ? never : undefined extends T[K] ? K : never) : never;
+
+/**
+ * The type a value has once it has been through JSON: what an API's output
+ * reaches a client as. A Date becomes its string (through toJSON), a
+ * function, a symbol or an undefined member is dropped (written as null in
+ * an array), and a bigint, which JSON.stringify refuses, is never. A key
+ * whose value may be undefined is optional, since JSON leaves it out then,
+ * and a Map or a Set, whose entries are not properties, is written as an
+ * empty object. `unknown` stays unknown, and a type that is already JSON
+ * maps to itself, which is also what lets a recursive one such as z.json()
+ * resolve.
+ *
+ * An object is mapped in two steps. The omissible keys are made optional
+ * first, through the key types alone, and the mapping over the result then
+ * keeps each key's modifiers. Deciding optionality inside the mapping, per
+ * key, would need the mapped value of every key before the object's own
+ * keys were known, which a recursive type (a tree of its own nodes) cannot
+ * give without recursing for ever.
+ */
+export type LambderJsonOf<T> =
+    unknown extends T ? T
+    : T extends LambderJsonValue ? T
+    : T extends { toJSON(): infer TJson } ? LambderJsonOf<TJson>
+    : T extends undefined | bigint | symbol | ((...args: any[]) => unknown) ? never
+    : T extends readonly unknown[] ? { [K in keyof T]: LambderJsonArrayItemOf<T[K]> }
+    : T extends ReadonlyMap<unknown, unknown> | ReadonlySet<unknown> ? {}
+    : T extends object ? (Partial<Pick<T, LambderJsonOmissibleKeys<T>>> & Omit<T, LambderJsonOmissibleKeys<T>>) extends infer TKeyed
+        ? { [K in keyof TKeyed as K extends string | number ? (string extends K ? K : number extends K ? K : [LambderJsonOf<TKeyed[K]>] extends [never] ? never : K) : never]: LambderJsonOf<TKeyed[K]> }
+        : never
+    : never;
+
+/**
+ * What an API's output reaches the client as: LambderJsonOf of the schema's
+ * output, except at the top, where an envelope carries no payload at all
+ * rather than a JSON `undefined`. A void or undefined output keeps its type,
+ * so a handler and a mock handler answer nothing, and an output that may be
+ * undefined keeps that member, which LambderJsonOf drops as it would a
+ * member of an object.
+ */
+export type LambderJsonOutputOf<T> = [T] extends [void] ? T : (undefined extends T ? undefined : never) | LambderJsonOf<T>;
 
 /**
  * One contract entry as addApi/addSessionApi record it: the payload types,
  * the mode, and every declarative option exactly as written. Options that
  * were not written are absent rather than undefined, so `keyof` an entry
  * lists only what the endpoint declared.
+ *
+ * `In` is what a client sends (the input schema's z.input: a field with a
+ * default is optional, a transform's source type is what is posted) and `Out`
+ * what it receives (the output schema's z.output as JSON, see
+ * LambderJsonOf). The handler's own types are the other side of each, and
+ * are not recorded here.
  */
 export type LambderContractEntry<In, Out, Mode extends LambderApiMode, GuardInputs = never, Guards = never, RateLimit = never, Idempotency = never> =
     { input: In; output: Out; mode: Mode }
@@ -103,43 +178,33 @@ export type LambderMergeContract<Old, Name extends string, Entry> = Old & { [K i
  * ```
  *
  * Chaining leaves the contract an intersection one member deep per endpoint
- * (LambderMergeContract above), and every `C[K]` written against a type
- * parameter then resolves the property across all of them. That lookup is
- * the atom the reading helpers below are built from, so its cost is paid
- * again by each of them, per endpoint, in every app that registers a mock,
- * declares a needs map, or otherwise reads the contract generically: in a
- * 182-endpoint app one indexed access measured ~3,000 type instantiations
- * and one mock registration ~18,000.
+ * (LambderMergeContract above), and every `C[K]` against a type parameter
+ * resolves the property across all of them. The reading helpers below are
+ * built on that lookup, so each pays it again per endpoint: in a 182-endpoint
+ * app one indexed access costs ~3,000 type instantiations and one mock
+ * registration ~18,000.
  *
- * Extending an interface is what collapses it. An interface's members are
- * declared, so they are resolved once for the whole declaration rather than
- * per lookup, and the same access measured ~6 instantiations after the
- * change: a 182-endpoint app's frontend type check went from 27.8M
- * instantiations to 7.0M and from 20.2s to 10.6s of check time. The alias
- * form (`type C = LambderFlattenContract<...>`) does NOT do this: a mapped
- * type stays deferred and each lookup pays the full cost again, so the
- * `interface ... extends` spelling is the point.
- *
- * Diagnostics are the same ones, and they read better: a message naming the
- * contract prints the interface by name, where the intersection is printed
- * as a truncated spill of entries.
+ * An interface's members are declared, so they resolve once for the whole
+ * declaration: the same access costs ~6 instantiations instead, roughly
+ * halving such an app's frontend type check time. The alias form
+ * (`type C = LambderFlattenContract<...>`) does NOT do this: a mapped type
+ * stays deferred and each lookup pays in full, so the `interface ... extends`
+ * spelling is the point. Diagnostics also print the interface by name rather
+ * than a truncated spill of entries.
  *
  * Every endpoint name must be a string literal for an interface to extend
  * the result, which registration through addApi/addSessionApi guarantees.
  *
- * Two things quietly undo it, both of which look like tidying:
+ * Two things that look like tidying undo it:
  *
  * - `@typescript-eslint/no-empty-object-type` reports the empty body as
- *   "equivalent to its supertype" and its fix is a type alias, which is the
- *   one spelling that does not collapse anything. Disable the rule on the
- *   line rather than taking the fix.
+ *   "equivalent to its supertype" and its fix is a type alias, the one
+ *   spelling that collapses nothing. Disable the rule on the line instead.
  * - Extending anything but a mapped type loses the inferable index signature.
- *   An interface has none of its own, so a hand-written `interface C { ... }`
- *   is not assignable to LambderApiContractShape and is rejected by
- *   initLambderMock<C>, LambderCaller<C> and LambderInvokeCaller<C>;
- *   extending this mapped type is what keeps it. api-contract.test.ts pins
- *   that, along with the flattened contract being the same type member for
- *   member.
+ *   A hand-written `interface C { ... }` has none, so it is not assignable to
+ *   LambderApiContractShape, and initLambderMock<C>, LambderCaller<C> and
+ *   LambderInvokeCaller<C> reject it. api-contract.test.ts pins this, and
+ *   that the flattened contract is the same type member for member.
  */
 export type LambderFlattenContract<C> = { [K in keyof C]: C[K] };
 
@@ -166,6 +231,23 @@ export type LambderContractKeysWithMode<C, M extends LambderApiMode> =
 
 /** The endpoint's guards option as written, or never when it declared none. */
 export type LambderContractGuardsOf<C, K extends keyof C> = C[K] extends { guards: infer G } ? G : never;
+
+/**
+ * The endpoint names whose guards option names guard N, in any of its three
+ * forms and whatever else it declares beside it. What a test that calls
+ * every endpoint behind one guard loops over, and what a list meant to hold
+ * exactly those endpoints is checked against. `satisfies` refuses a name the
+ * guard does not cover; a missing name needs a check of its own:
+ *
+ * ```ts
+ * type AdminApi = LambderContractKeysWithGuard<Contract, "platformAdmin">;
+ * const ADMIN_APIS = ["admin.listUsers", "admin.deleteUser"] as const satisfies readonly AdminApi[];
+ * // Fails to compile while an endpoint behind the guard is left off the list.
+ * const adminApisComplete: [Exclude<AdminApi, (typeof ADMIN_APIS)[number]>] extends [never] ? true : false = true;
+ * ```
+ */
+export type LambderContractKeysWithGuard<C, N extends string> =
+    { [K in keyof C]: N extends LambderGuardNamesIn<LambderContractGuardsOf<C, K>> ? K : never }[keyof C] & string;
 
 /** Every guard name any endpoint of the contract declares, or only the endpoints of mode M. */
 export type LambderContractGuardNames<C, M extends LambderApiMode = LambderApiMode> =

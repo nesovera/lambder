@@ -22,6 +22,12 @@ afterEach(() => {
     vi.restoreAllMocks();
 });
 
+/** A browser page: a document, and the navigator whose languages detection reads there. */
+const stubPage = (navigator: { languages: string[]; language: string }) => {
+    vi.stubGlobal("document", { documentElement: { lang: "", dir: "" } });
+    vi.stubGlobal("navigator", navigator);
+};
+
 describe("LambderI18n: base translation", () => {
     it("translates keys in the default language when no browser is present", () => {
         const i18n = makeI18n();
@@ -33,6 +39,20 @@ describe("LambderI18n: base translation", () => {
         expect(i18n.t("greet", { name: "Ada" })).toBe("Hello Ada");
     });
 
+    it("interpolates on a browser without ES2022's Object.hasOwn, filling only the params' own names", () => {
+        // Safari before 15.4 has no Object.hasOwn: a call to it there throws
+        // on the first text that takes parameters.
+        const hasOwnDescriptor = Object.getOwnPropertyDescriptor(Object, "hasOwn")!;
+        Reflect.deleteProperty(Object, "hasOwn");
+        try {
+            const i18n = makeI18n();
+            expect(i18n.t("greet", { name: "Ada" })).toBe("Hello Ada");
+            expect(i18n.t("greet", Object.create({ name: "inherited" }))).toBe("Hello {name}");
+        } finally {
+            Object.defineProperty(Object, "hasOwn", hasOwnDescriptor);
+        }
+    });
+
     it("interpolates repeated tokens", () => {
         const i18n = createLambderI18n({
             languages: { en: { name: "English" } },
@@ -41,6 +61,17 @@ describe("LambderI18n: base translation", () => {
             base: { en: { twice: "{x} and {x}" } },
         });
         expect(i18n.t("twice", { x: "A" })).toBe("A and A");
+    });
+
+    it("inserts a value as it is, never filling tokens inside a value it inserted", () => {
+        const i18n = createLambderI18n({
+            languages: { en: { name: "English" } },
+            defaultLanguage: "en",
+            enforced: ["en"],
+            base: { en: { invited: "{name} invited you to {org}" } },
+        });
+        expect(i18n.t("invited", { name: "Eve {org}", org: "Acme" })).toBe("Eve {org} invited you to Acme");
+        expect(i18n.t("invited", { name: "$& and $1", org: "Acme" })).toBe("$& and $1 invited you to Acme");
     });
 
     it("forLanguage returns an explicitly-bound translator", () => {
@@ -122,6 +153,24 @@ describe("LambderI18n: language resolution", () => {
         expect(i18n.t("hi")).toBe("Selam");
     });
 
+    it("detects afresh on every read, so a detector reading the path follows the page", () => {
+        let path = "/en/about";
+        const i18n = createLambderI18n({
+            languages: { en: { name: "English" }, tr: { name: "Türkçe" } },
+            defaultLanguage: "en",
+            enforced: ["en"],
+            base: { en: { hi: "Hi" }, tr: { hi: "Selam" } },
+            detectLanguage: ({ isLanguageCode }) => {
+                const segment = path.split("/")[1] ?? "";
+                return isLanguageCode(segment) ? segment : null;
+            },
+        });
+        expect(i18n.t("hi")).toBe("Hi");
+        path = "/tr/hakkinda";
+        expect(i18n.currentLanguage).toBe("tr");
+        expect(i18n.t("hi")).toBe("Selam");
+    });
+
     it("continues the chain when detectLanguage returns null", () => {
         const i18n = createLambderI18n({
             languages: { en: { name: "English" }, tr: { name: "Türkçe" } },
@@ -134,13 +183,31 @@ describe("LambderI18n: language resolution", () => {
     });
 
     it("detects from navigator.languages: full code, then primary subtag", () => {
-        vi.stubGlobal("navigator", { languages: ["fr-CA", "tr-TR", "en"], language: "fr-CA" });
+        stubPage({ languages: ["fr-CA", "tr-TR", "en"], language: "fr-CA" });
         const i18n = makeI18n();
         expect(i18n.currentLanguage).toBe("tr"); // fr unsupported, tr via primary subtag
     });
 
+    it("reads no navigator outside a page, so a server answers in defaultLanguage", () => {
+        // Pins server-side t() answering in the process locale: Node 21 and
+        // later define navigator.languages from it (en-US on Lambda).
+        const makeTurkishFirst = () => createLambderI18n({
+            languages: { en: { name: "English" }, tr: { name: "Türkçe" } },
+            defaultLanguage: "tr",
+            enforced: ["tr"],
+            base: { en: { hi: "Hi" }, tr: { hi: "Selam" } },
+        });
+        expect(typeof document).toBe("undefined");
+        // The process's own navigator, whatever this machine's locale is...
+        expect(makeTurkishFirst().t("hi")).toBe("Selam");
+        // ...and one that names English outright.
+        vi.stubGlobal("navigator", { languages: ["en-US", "en"], language: "en-US" });
+        expect(makeTurkishFirst().currentLanguage).toBe("tr");
+        expect(makeTurkishFirst().t("hi")).toBe("Selam");
+    });
+
     it("ignores navigator when nothing matches and falls back to default", () => {
-        vi.stubGlobal("navigator", { languages: ["fr-FR"], language: "fr-FR" });
+        stubPage({ languages: ["fr-FR"], language: "fr-FR" });
         const i18n = makeI18n();
         expect(i18n.currentLanguage).toBe("en");
     });
@@ -162,7 +229,7 @@ describe("LambderI18n: language resolution", () => {
     });
 
     it("resetLanguage clears the override and re-detects", () => {
-        vi.stubGlobal("navigator", { languages: ["tr"], language: "tr" });
+        stubPage({ languages: ["tr"], language: "tr" });
         const i18n = makeI18n();
         i18n.setLanguage("ar");
         expect(i18n.currentLanguage).toBe("ar");
@@ -342,7 +409,7 @@ describe("LambderI18n: loaders", () => {
     });
 
     it("resetLanguage starts the loaders of the language detection lands on", async () => {
-        vi.stubGlobal("navigator", { languages: ["tr"], language: "tr" });
+        stubPage({ languages: ["tr"], language: "tr" });
         const { i18n } = makeLazyI18n();
         i18n.setLanguage("en");
         i18n.resetLanguage();
@@ -596,7 +663,9 @@ describe("LambderI18n: quality behaviors", () => {
             detectLanguage: () => { throw new Error("boom"); },
         });
         expect(i18n.t("hi")).toBe("Hi"); // chain continued to default
-        expect(consoleError).toHaveBeenCalled();
+        expect(i18n.t("hi")).toBe("Hi");
+        // Reported once, not on every t() that runs the detector.
+        expect(consoleError).toHaveBeenCalledOnce();
         consoleError.mockRestore();
     });
 

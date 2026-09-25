@@ -79,6 +79,7 @@ when the registry loads.
 | `callLogSize` | `200` | How many completed calls `mockApp.calls` keeps |
 | `revealHandlerErrors` | `true` | Answer a thrown handler with the message it threw rather than the server's "Internal server error." |
 | `onReset` | none | Called at the end of `reset()`, so the app rewinds its own data |
+| `onInvalidInput` | none | `(zodError, ctx) => ({ payload?, config?, statusCode? }) \| null`: the answer to an input that fails its schema, for a server app that sets `setApiInputValidationErrorHandler`. The same answer as data, `res.api(payload, config)` with its status (200 unless named); `null` answers the standard 422 |
 
 A misspelled option is a compile error, nested ones included: `idempotency:
 { failOpn: false }` and `rateLimits: { policies: { p: { budgt: "perApi" } } }`
@@ -266,11 +267,14 @@ exactly as the server would. It is optional and it is the mock's own: the
 contract is a type, so the server's schemas do not exist on this side, and
 importing them would put the whole endpoint surface into the browser bundle.
 Restate the shape for the endpoints whose rejection path a test needs. What it
-parses to is pinned to the contract's input in both directions, so a schema
-that is stricter than the endpoint (an extra required field, a literal where
-the contract says string) is refused too: such a schema makes the mock 422
-payloads the server accepts, which is the exact failure the schema exists to
-reproduce.
+takes is pinned to the contract's input (the form a client posts) in both
+directions, so a schema that is stricter than the endpoint (an extra required
+field, a literal where the contract says string) is refused too: such a schema
+makes the mock 422 payloads the server accepts, which is the exact failure the
+schema exists to reproduce. What it parses to must still read as that input,
+which is how the handler's payload is typed: the server's own schema restated
+with a `.default()` passes, and one whose transform changes a field's type
+does not.
 
 ```typescript
 mockApp.publicApi("user.get", {
@@ -282,6 +286,11 @@ mockApp.publicApi("user.get", {
 A handler returns its payload, so the rest of the envelope goes on the
 context: `ctx.envelope.message` is what a server handler passes to
 `res.api(payload, { message })`, and `ctx.logList` is the usual log channel.
+`ctx.sessionController`, `ctx.rateLimit(policy, key?)` and `ctx.isRateLimited(policy,
+key?)` are the server's, bound the same way: a policy charged from code
+counts on the mock's limiter and refuses with the same 429. The policy name is
+any string here, since the mock's context does not carry its policy map's
+types; the charge checks the name and the key when it runs.
 
 A handler that throws answers with the message it threw. That is deliberate,
 and the one place the mock does not copy the server, which would send
@@ -309,10 +318,10 @@ survives: the runtime did not create it and does not know what else holds it.
 ```typescript
 mockApp.sessionApi("order.create", {
     guards: { orgPermission: "ORDERS.CREATE" },
-    handler: async ({ apiName, payload, session, sessions, guardData, guardInputs, idempotencyKey, request, responseHeaders, logList, signal }) => {
+    handler: async ({ apiName, payload, session, sessionController, guardData, guardInputs, idempotencyKey, request, responseHeaders, logList, signal }) => {
         // payload: the contract's input, never optional
         // session: LambderSessionRecord<SessionData> on a session endpoint, null on a public one
-        // sessions: the session controller for this call (create, regenerate, end, endAll, update, refresh)
+        // sessionController: the session controller for this call (create, regenerate, end, endAll, update, refresh)
         // guardData: what the declared guards returned, typed from the mock guard map
         // guardInputs: what the caller sent, typed by the contract
         // request: headers, cookies, ip, host, siteHost, version
@@ -334,12 +343,12 @@ in and then threw still leaves the session cookie with the caller.
 A login mock is an ordinary handler:
 
 ```typescript
-mockApp.publicApi("login", async ({ payload, sessions }) => {
+mockApp.publicApi("login", async ({ payload, sessionController }) => {
     const user = users.find((u) => u.email === payload.email) ?? refuse("Wrong email or password.");
-    await sessions.createSession(user.id, { userId: user.id, memberships: user.memberships });
+    await sessionController.createSession(user.id, { userId: user.id, memberships: user.memberships });
     return { ok: true };
 });
-mockApp.sessionApi("logout", async ({ sessions }) => { await sessions.endSession(); return { ok: true }; });
+mockApp.sessionApi("logout", async ({ sessionController }) => { await sessionController.endSession(); return { ok: true }; });
 ```
 
 ## Sessions and cookies
@@ -350,6 +359,20 @@ jar stores what an answer's `Set-Cookie` headers set, honours their expiry,
 attaches them to the next request, and fills in the request's CSRF token from
 the non-HttpOnly cookie the way a page's script would read it. So a session a
 login handler creates is on the next call, and a logout clears it.
+
+The payload reaches the handler through the same JSON a server-bound request
+travels as, so a handler holds its own copy (never the page's form object), a
+`Date` arrives as its ISO string and a key set to `undefined` does not arrive.
+
+Where a page's readable cookies live is one answer per mode. In the default
+memory mode (and with a jar you pass) the jar is the page's whole cookie
+store: the CSRF token posted is the jar's, and the one the page's caller read
+from `document.cookie` is dropped, since nothing in this mode keeps
+`document.cookie` current after `signIn` mirrored into it. The
+jar's token is also what the caller judges a `sessionExpired` by, so a call
+sent before a login that answers after it leaves the new session alone, as it
+does in a browser. In `"document"` mode and behind the MSW adapter,
+`document.cookie` holds them.
 
 - `mockApp.transport()` creates a fresh jar. Two transports are two browsers,
   each with its own session. The jar is on the transport as `cookieJar`, so a
@@ -371,7 +394,7 @@ login handler creates is on the next call, and a logout clears it.
 Every cookie this runtime holds belongs to one host, the app's `cookieHost`:
 `signIn` plants them there and the jar sends them there, the way a browser
 scopes what it stores. It defaults to the page's own host, so a dev server on
-`transit.localhost:5173` needs nothing; set it explicitly where the runtime has
+`shop.localhost:5173` needs nothing; set it explicitly where the runtime has
 no page to read (a Node test against a host-scoped cookie domain).
 
 ```typescript
@@ -411,7 +434,7 @@ if (import.meta.env.MODE === "development") {
 In a test, one caller per browser you want to simulate:
 
 ```typescript
-const caller = new LambderCaller<ApiContractType>({ apiPath: "/api", isCorsEnabled: false, transport: mockApp.transport() });
+const caller = new LambderCaller<ApiContractType>({ apiPath: "/api", transport: mockApp.transport() });
 ```
 
 The mock app can also stand in for a callee Lambda in a server test, through
@@ -457,6 +480,13 @@ the app's `cookieHost`, the same host `signIn` plants at and the direct
 transport sends to, with the path taken from the call's own URL. The jar it
 builds for itself is the runtime's, so `reset()` empties it; pass your own as
 `cookieJar` to inspect or clear it from a test, and it stays yours.
+
+A call's cookies are that jar's and the page's own `document.cookie`, never
+the request's Cookie header. MSW fills that header from its own cookie store,
+which captures the HttpOnly session cookie off the mocked `Set-Cookie`
+headers and keeps it in localStorage across reloads; read, it would send a
+second session after a user switch, keep a cleared jar signed in, and put the
+raw token into request events.
 
 A mock that uses this adapter **and** `signIn` should pass the same jar to
 both (`lambderMockMswHandler(mockApp, { msw, apiPath, cookieJar: jar })` and
@@ -552,10 +582,17 @@ which has no business in a log a panel renders and a test snapshots.
 The contract is a type, so the server's schemas do not exist on this side:
 nothing validates an endpoint's input or output unless the mock restates it.
 An entry that carries an `input` schema validates the payload and answers 422
-exactly as the server does; one without takes whatever arrives, and a handler
+exactly as the server does (or what `onInvalidInput` states, for a server app
+with its own validation handler); one without takes whatever arrives, and a
+handler
 returning the wrong shape is a compile error rather than a runtime one.
-Output is never validated. Guard inputs and rate-limit key slices, whose
-schemas the mock guard map declares, are validated as on the server.
+Output is never validated: the contract is type-only, so the mock has no
+output schema to strip a handler's extra fields with, where the server does.
+Guard inputs and rate-limit key slices, whose schemas the mock guard map
+declares, are validated as on the server. The MSW adapter and the invoke
+transport take a POST as an API call only with `Content-Type:
+application/json`, as the server does, so a hand-built call that leaves it out
+fails in development too.
 
 Response finalization is the server's alone: response compression, the
 `maxResponseBytes` ceiling, ETag and conditional answers, and CORS headers all

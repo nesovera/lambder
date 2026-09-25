@@ -20,7 +20,7 @@ import type {
     LambderContractRateLimitOf,
 } from "../shared/wire/LambderApiContract.js";
 import type { LambderApiGuard, LambderGuardDataOf, LambderGuardMetaMap } from "../api/LambderApiGuards.js";
-import type { LambderApiRateLimitPolicyConfig } from "../api/LambderApiRateLimits.js";
+import type { LambderApiRateLimitPolicyConfig, LambderContextRateLimit, LambderContextRateLimitCheck } from "../api/LambderApiRateLimits.js";
 import type { LambderApiCallContext } from "../api/LambderApiCallContext.js";
 import type { LambderApiRequest } from "../api/LambderApiRequest.js";
 import type { LambderHttpStatusCode } from "../shared/wire/LambderHttpStatus.js";
@@ -46,21 +46,16 @@ export type LambderMockOutputOf<C, K extends keyof C> = C[K] extends { output: i
  * `never`, so a typo is an error on the key itself.
  *
  * Needed once per nesting level: inferring a generic from an object literal
- * (`const G`, `const P` on create()) switches excess-property checking off for
- * the WHOLE literal, nested objects included, so `idempotency: { failOpn:
- * false }` compiled, was dropped in silence, and left the runtime on the
- * default. Intersected into a nested position rather than applied to the
- * option type as a whole, because the type variable has to stay naked
- * somewhere for the literal to be inferred from at all.
+ * (`const G`, `const P` on create()) switches excess-property checking off
+ * for the WHOLE literal, so `idempotency: { failOpn: false }` would compile
+ * and be dropped. Intersected into a nested position because the type
+ * variable must stay naked somewhere for the literal to be inferred at all.
+ * `unknown` for a non-object (`idempotency: true`), since mapping Boolean's
+ * prototype keys to `never` would refuse the boolean form.
  *
- * `unknown` for anything that is not an object (`idempotency: true`), which
- * intersects away: `keyof boolean` is Boolean's own prototype members, and
- * mapping those to `never` would refuse the boolean form outright.
- *
- * The server's create() has the same construction in `LambderNoExtraKeys`
- * (core/Lambder.ts). It is written twice on purpose: `lambder/mock` is
- * browser-safe by its import graph, and reaching into core/ for a type alias
- * would pull the server's whole type graph (aws-lambda included) back into it.
+ * Duplicates `LambderNoExtraKeys` (core/LambderCreateOptions.ts) on purpose: importing it
+ * would pull the server's type graph (aws-lambda included) into the
+ * browser-safe `lambder/mock`.
  */
 export type LambderMockSurplusKeys<TOptions, TShape> =
     [TOptions] extends [object] ? Record<Exclude<keyof TOptions, keyof TShape>, never> : unknown;
@@ -77,8 +72,16 @@ export type LambderMockSurplusKeys<TOptions, TShape> =
 export type LambderMockCallContext<S = any> = LambderApiCallContext<S> & {
     apiName: string;
     request: LambderApiRequest;
-    /** Create, rotate, refresh and end sessions, exactly as a server handler does through getSessionController(ctx). */
-    sessions: LambderSessionController<S>;
+    /** Create, rotate, refresh and end sessions, exactly as a server handler does through its own ctx.sessionController. */
+    sessionController: LambderSessionController<S>;
+    /**
+     * Charges a named policy from code, as a server handler does through its
+     * own ctx.rateLimit: a 429 refusal when it is over. The name is any
+     * string and the key optional here; the charge checks both.
+     */
+    rateLimit: LambderContextRateLimit<Record<string, LambderApiRateLimitPolicyConfig>>;
+    /** The same count, answered instead of thrown, as ctx.isRateLimited on the server. */
+    isRateLimited: LambderContextRateLimitCheck<Record<string, LambderApiRateLimitPolicyConfig>>;
     signal: AbortSignal;
     /**
      * The envelope fields that travel beside the payload, the mock's stand-in
@@ -115,20 +118,19 @@ export type LambderMockContext<C, K extends keyof C, S, G> = Omit<LambderMockCal
 
 /**
  * The guard map a mock app must declare: one guard per name any endpoint of
- * the contract declares, and for every guard the contract knows in
- * guardInput mode, a `guardInput` schema whose output is what the server
- * inferred. A guard a public endpoint names may not require a session, since
- * an entry naming one cannot be registered. A missing name, a schema that
- * parses to something else, or a session guard where the contract has a
- * public endpoint fails at the `guards` option.
+ * the contract declares, plus, for each guardInput-mode guard, a `guardInput`
+ * schema whose input is what the contract says a client sends. A guard a
+ * public endpoint names may not require a session. A missing name, a schema
+ * that parses to something else, or such a session guard fails at the
+ * `guards` option.
  */
 export type LambderMockGuards<C, S = any> =
     // Pinned to the mock call contexts: a guard built with the server's
-    // lambderGuard() reads ctx.ip, ctx.method and ctx.path, none of which a
-    // mock call context carries, so it belongs in the server's map and is
-    // rejected here rather than silently authorizing everything.
+    // lambderGuard() reads ctx.ip, ctx.method and ctx.path, which a mock call
+    // context lacks, so it is rejected here rather than silently authorizing
+    // everything.
     { [N in LambderContractGuardNames<C>]: LambderApiGuard<any, any, any, LambderMockCallContext<S>, LambderMockSessionCallContext<S>> }
-    & { [N in LambderContractGuardInputNames<C>]: { guardInput: z.ZodType<LambderContractGuardInput<C, N>, any> } }
+    & { [N in LambderContractGuardInputNames<C>]: { guardInput: z.ZodType<unknown, LambderContractGuardInput<C, N>> } }
     & { [N in LambderContractGuardNames<C, "public">]: { session?: false } };
 
 // ---------------------------------------------------------------------------
@@ -141,14 +143,10 @@ export type LambderMockHandler<C, K extends keyof C, S, G> =
 /**
  * The guards field of an entry: required whenever the contract declares any
  * guard for the endpoint, and type-equal to the server's own declaration.
- *
- * Keyed on the guards themselves rather than on guardInputs, because the
- * restatement is the only thing that tells the runtime which guards to run:
- * a guard the entry leaves out simply does not run, and the mock answers 200
- * where the server answers notAuthorized. The guards that carry no
- * guardInput are exactly the "may this role call it" ones (session-only,
- * param-only), so keying on guardInputs made the authorization checks the
- * droppable half.
+ * The restatement is what tells the runtime which guards to run, so a guard
+ * left out would let the mock answer 200 where the server answers
+ * notAuthorized. Keyed on the guards rather than on guardInputs, since the
+ * guards without a guardInput are the "may this role call it" ones.
  */
 type LambderMockGuardsField<C, K extends keyof C> =
     [LambderContractGuardsOf<C, K>] extends [never]
@@ -157,10 +155,9 @@ type LambderMockGuardsField<C, K extends keyof C> =
 
 /**
  * The rate-limit field of an entry: required whenever the contract declares
- * one, absent otherwise. Same reasoning as LambderMockGuardsField, and the
- * argument transfers word for word: the restatement is the only thing that
- * tells the runtime to apply the limit, so an entry that leaves it out
- * answers 200 where the server answers 429.
+ * one, absent otherwise. As with LambderMockGuardsField, the restatement is
+ * the only thing that tells the runtime to apply the limit, so an entry that
+ * left it out would answer 200 where the server answers 429.
  */
 type LambderMockRateLimitField<C, K extends keyof C> =
     [LambderContractRateLimitOf<C, K>] extends [never]
@@ -182,58 +179,49 @@ type LambderMockIdempotencyField<C, K extends keyof C> =
  * What override() hands back: call restore() to put the original handler
  * back.
  *
- * Restore and nothing else. The handle also carried a `[Symbol.dispose]`
- * member, for `using`, and that member is declared in `lib: ESNext` alone: a
- * consumer on `lib: ES2022` (a Vue app's own setting, and the only consumer
- * this package has) got TS2550 "Property 'dispose' does not exist on type
- * 'SymbolConstructor'" out of the published .d.ts, from importing the entry at
- * all, whenever skipLibCheck was off. A scoped override is a try/finally,
- * which needs no lib.
+ * Deliberately no `[Symbol.dispose]` for `using`: it is declared only in
+ * `lib: ESNext`, so a consumer on `lib: ES2022` with skipLibCheck off would
+ * get TS2550 from the published .d.ts just by importing the entry. A scoped
+ * override is a try/finally, which needs no lib.
  */
 export type LambderMockOverride = {
     restore(): void;
 };
 
 /**
- * What an entry's `input` schema must parse to: the endpoint's contract
- * input, in both directions.
- *
- * One direction is not enough, and the missing one is the direction the drift
- * actually travels in. `z.ZodType<Input>` is covariant in its output, so a
- * schema parsing to a SUBTYPE of the contract input passed: an extra required
- * field, or a literal where the contract says string. Such a schema refuses
- * payloads the server accepts, and the mock then answers 422 to a call that
- * works against the real backend, which is the exact failure the schema was
- * added to reproduce, produced by the thing added to reproduce it. Requiring
- * assignability the other way as well makes the schema's output the contract's
- * input and nothing else.
+ * What an entry's `input` schema must take and give: it takes exactly the
+ * endpoint's contract input (the form a client posts), in both directions,
+ * and what it parses to still reads as that input, which is how the mock's
+ * handler is typed. `z.ZodType<Input>` alone is covariant, so a schema
+ * taking a SUBTYPE (an extra required field, a literal where the contract
+ * says string) would pass, and the mock would then answer 422 to payloads
+ * the server accepts. A default passes (the parsed field is simply there);
+ * a transform that changes a field's type does not, since the handler would
+ * read it as the posted type.
  *
  * Intersected onto the schema rather than mapped to `never`, so the compiler
- * quotes the reason at the `input` property. `z.any()` passes in both
- * directions, which is the one deliberate escape hatch; `z.unknown()` does
- * not.
+ * quotes the reason at the `input` property. `z.any()` passes both ways as
+ * the one deliberate escape hatch; `z.unknown()` does not.
  */
 type LambderMockInputPin<C, K extends keyof C, TSchema extends z.ZodType> =
-    [z.output<TSchema>] extends [LambderMockInputOf<C, K>]
-        ? ([LambderMockInputOf<C, K>] extends [z.output<TSchema>]
-            ? unknown
-            : { "LambderMockApp: this input schema parses to less than the endpoint takes (an extra required field, or a narrower type), so the mock would answer 422 to payloads the server accepts": LambderMockInputOf<C, K> })
-        : { "LambderMockApp: this input schema parses to something else than the endpoint's contract input": LambderMockInputOf<C, K> };
+    [z.input<TSchema>] extends [LambderMockInputOf<C, K>]
+        ? ([LambderMockInputOf<C, K>] extends [z.input<TSchema>]
+            ? ([z.output<TSchema>] extends [LambderMockInputOf<C, K>]
+                ? unknown
+                : { "LambderMockApp: this input schema transforms the payload into a type the mock handler is not typed for (it reads the payload as the endpoint's contract input)": LambderMockInputOf<C, K> })
+            : { "LambderMockApp: this input schema takes less than the endpoint takes (an extra required field, or a narrower type), so the mock would answer 422 to payloads the server accepts": LambderMockInputOf<C, K> })
+        : { "LambderMockApp: this input schema takes something else than the endpoint's contract input": LambderMockInputOf<C, K> };
 
 /** An entry written in full: the declarations restated and pinned, plus the handler. */
 export type LambderMockEntryOptions<C, K extends keyof C, S, G, TInputSchema extends z.ZodType = z.ZodType> =
     LambderMockGuardsField<C, K> & LambderMockRateLimitField<C, K> & LambderMockIdempotencyField<C, K> & {
     /**
-     * A schema to validate the posted payload against, which makes the mock
-     * answer 422 exactly as the server would. Optional, and deliberately the
-     * mock's own: the contract is a type, so the server's schemas do not exist
-     * at runtime on this side, and importing them would put the whole endpoint
-     * surface into the browser bundle. Restate the shape for the endpoints
-     * whose rejection path a test needs to exercise; leave it off and a bad
-     * payload reaches the handler, as it does today.
-     *
-     * Pinned to the contract's input all the same: the schema is the mock's,
-     * but what it parses to is the server's, in both directions (see
+     * A schema to validate the posted payload against, so the mock answers
+     * 422 exactly as the server would. Optional, and the mock's own: the
+     * contract is type-only, and importing the server's schemas would put the
+     * whole endpoint surface into the browser bundle. Restate it for endpoints
+     * whose rejection path a test exercises; without it a bad payload reaches
+     * the handler. What it parses to is pinned to the contract's input (see
      * LambderMockInputPin).
      */
     input?: TInputSchema & LambderMockInputPin<C, K, TInputSchema>;
@@ -243,14 +231,9 @@ export type LambderMockEntryOptions<C, K extends keyof C, S, G, TInputSchema ext
 /**
  * What publicApi/sessionApi accept: a bare handler only for an endpoint the
  * contract declares nothing for, the full options otherwise, so the form that
- * cannot carry a restatement is unavailable exactly where one is owed.
- *
- * All three declarations, not guards alone. The three fields above make each
- * restatement required INSIDE the options form, and the bare handler is the
- * form that has no fields at all, so keying this on guards left every
- * guardless endpoint free to drop its rate limit and its idempotency again:
- * the handler ran twice for one key and a perMin limit never answered 429,
- * which is the whole of what those two fields exist to prevent.
+ * cannot carry a restatement is unavailable exactly where one is owed. Keyed
+ * on all three declarations: keyed on guards alone, a guardless endpoint
+ * could drop its rate limit and idempotency through the bare form.
  */
 export type LambderMockEntryInput<C, K extends keyof C, S, G, TInputSchema extends z.ZodType = z.ZodType> =
     [LambderContractGuardsOf<C, K> | LambderContractRateLimitOf<C, K> | LambderContractIdempotencyOf<C, K>] extends [never]
@@ -275,13 +258,9 @@ export type LambderMockSlice<C, K extends keyof C & string> = { readonly [P in K
 
 /**
  * What restNotMocked(reason) hands register(): "every endpoint the slices
- * beside me leave out is not mocked, for this reason".
- *
- * A one-field object rather than a slice, because it names no endpoint: it
- * answers the names nothing else claimed, and which those are is only known
- * once the other arguments have been read. Every check below filters it out
- * before it reads a name, so the field it does carry is neither a stray nor
- * half of a duplicate; the one clause it changes is completeness.
+ * beside me leave out is not mocked, for this reason". A one-field object
+ * rather than a slice, because it names no endpoint; every check below
+ * filters it out before reading names, so it changes only completeness.
  */
 export type LambderMockRestEntry = {
     readonly restNotMockedReason: string;
@@ -291,15 +270,11 @@ export type LambderMockRestEntry = {
  * The names one slice holds; distributes over a union of slices.
  *
  * A slice typed with an index signature (`Record<string, LambderMockEntry>`,
- * or a list built in a loop) holds `string` as its key type, which would
- * subtract every name from the missing list and pass the completeness check
- * while registering almost nothing. Such a slice names nothing the compiler
- * can check, so it contributes nothing here and LambderMockUncheckableSlices
- * reports it for what it is.
- *
- * The rest entry contributes nothing either, and for the opposite reason: the
- * one key it carries is not an endpoint name, so reading it would report
- * "restNotMockedReason" as a stray, and two rest entries as a duplicate of it.
+ * a list built in a loop) has `string` as its key type, which would pass the
+ * completeness check while registering almost nothing, so it contributes
+ * nothing here and LambderMockUncheckableSlices reports it. The rest entry
+ * contributes nothing either: its one key is not an endpoint name, and
+ * reading it would report "restNotMockedReason" as a stray or a duplicate.
  */
 type LambderMockSliceNames<S> = S extends unknown
     ? (S extends LambderMockRestEntry ? never : (string extends keyof S ? never : keyof S & string))
@@ -329,10 +304,9 @@ type LambderMockHasRestEntry<Slices extends readonly unknown[]> =
  * The endpoints register() would leave unanswered: the ones no slice covers,
  * unless a rest entry stands for them.
  *
- * The completeness clause and nothing else. An endpoint the rest entry answers
- * is still an endpoint with no mock of its own, which is what
- * LambderMockMissingNames says and why that one keeps its meaning; what the
- * rest entry changes is whether leaving it out is a mistake.
+ * Separate from LambderMockMissingNames, because an endpoint the rest entry
+ * answers still has no mock of its own; the rest entry only changes whether
+ * leaving it out is a mistake.
  */
 type LambderMockUncoveredNames<C, Slices extends readonly unknown[]> =
     LambderMockHasRestEntry<Slices> extends true ? never : LambderMockMissingNames<C, Slices>;
@@ -349,14 +323,10 @@ export type LambderMockDuplicateNames<Slices extends readonly unknown[]> =
 
 /**
  * True for a slice list whose length the compiler does not know: an array
- * type rather than a tuple, `length: number`.
- *
- * Every check below is written over a tuple, and an array type quietly
- * disables all of them: the overlap and index-signature walks fall to their
- * `never` base case on the first step, and completeness reduces to "the
- * element type mentions these names", which one element satisfies as well as
- * twenty. `const slices = [userMocks, orderMocks]` spread into register() is
- * exactly that type, so the array form is refused rather than passed.
+ * type rather than a tuple. Every check here walks a tuple, and an array
+ * type quietly disables them all (completeness reduces to "the element type
+ * mentions these names"), so the array form, such as a spread
+ * `const slices = [userMocks, orderMocks]`, is refused.
  */
 type LambderMockUncountableSlices<Slices extends readonly unknown[]> = number extends Slices["length"] ? true : false;
 

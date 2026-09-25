@@ -23,9 +23,9 @@ export type LambderTestAppOptions = {
     /**
      * The gateway shape the handler is called with: "v2" (an HTTP API, a
      * Function URL) or "v1" (a REST API). Default: "v2". A handler answers
-     * both alike through its context, so this matters to code that reads the
-     * raw `ctx.event`, and to anyone who wants the suite to run on exactly
-     * what production delivers.
+     * both alike through its context, so this matters only to code that reads
+     * the raw `ctx.event`, or to a suite that should run on exactly what
+     * production delivers.
      */
     eventFormat?: LambderHttpEventFormat;
     /** Default: a fresh LambderMemorySessionStore. Pass your own to run the suite over another store (DynamoDB Local, say). */
@@ -46,8 +46,8 @@ export type LambderTestAppOptions = {
 /**
  * A Lambder instance as a test app takes it: any instance, read for its
  * session data type and, through the ApiContract property rather than the
- * class parameter, for its contract. The property is what lets a large app
- * name its flattened contract interface explicitly
+ * class parameter, for its contract. The property lets a large app name its
+ * flattened contract interface explicitly
  * (`lambderTestApp<SessionData, ApiContractType>(lambder)`) and keep the
  * cheap type check that interface exists for.
  */
@@ -59,17 +59,17 @@ export type LambderTestedInstance<TSessionData, TContract> = Lambder<TSessionDat
  * stores put under it in place, and as many simulated browsers in front of it
  * as a test needs. No HTTP, no AWS, and nothing in the app restructured.
  *
- * The app's own declarations all run as written: its guards, its named
- * rate-limit policies, its idempotency settings, its session salt, cookie
- * options and dataRefresh, its hooks and error handlers. Only where things
- * rest is replaced, and from the moment this is created the stores the app
- * was configured with are out of the instance's reach, so a test cannot touch
- * a production table even by mistake. What the app reaches on its own (its
- * database, a mailer) is the app's to replace.
+ * The app's own declarations all run as written: guards, named rate-limit
+ * policies, idempotency settings, session salt, cookie options and
+ * dataRefresh, hooks and error handlers. Only where things rest is replaced:
+ * once this is created, the stores the app was configured with are out of the
+ * instance's reach, so a test cannot touch a production table by mistake.
+ * What the app reaches on its own (its database, a mailer) is the app's to
+ * replace.
  *
  * The sibling of LambderMockApp, which serves a contract from mock handlers:
  * the same verbs (`signIn`, `signOut`, `expireSessionData`, `reset`) over the
- * real handlers instead.
+ * real handlers.
  *
  * Time is not this class's: fake `Date` with the test runner
  * (`vi.useFakeTimers({ toFake: ["Date"] })`), which moves the framework, the
@@ -97,22 +97,20 @@ export declare class LambderTestApp<TContract extends LambderApiContractShape = 
     private resetCount;
     private readonly crashList;
     /**
-     * The call a crash happened under. The app answers a crash with a 500
-     * that says nothing about it, so the error has to travel beside the
-     * answer, and with calls running concurrently (a duplicate sent while
-     * the original is in flight is an ordinary idempotency test) only the
-     * async context says which call a crash belongs to.
+     * The call a crash happened under. The app's 500 says nothing about the
+     * crash, so the error travels beside the answer, and with concurrent
+     * calls (a duplicate sent while the original is in flight is an ordinary
+     * idempotency test) only the async context says which call it belongs to.
      */
     private readonly crashScope;
     constructor(lambder: LambderTestedInstance<TSessionData, TContract>, options?: LambderTestAppOptions);
     /**
      * Every error the app threw while answering a request since the last
      * reset, in order: what reached its global error handler, or the
-     * framework's last-resort 500. The answers themselves say nothing about
-     * what was thrown, so this is where a test reads it, and
-     * `expect(app.crashes).toEqual([])` is how one says nothing crashed.
-     * A refusal is not a crash, and neither is an error an `event()` rejects
-     * with, which the test already holds.
+     * framework's last-resort 500. The answers say nothing about what was
+     * thrown, so a test reads it here; `expect(app.crashes).toEqual([])`
+     * says nothing crashed. A refusal is not a crash, and neither is an
+     * error an `event()` rejects with, which the test already holds.
      */
     get crashes(): readonly Error[];
     /** The session manager, for tests that inspect or manipulate sessions directly. Throws when the app has no sessions. */

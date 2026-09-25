@@ -5,8 +5,8 @@
  * `@ts-expect-error` directives, which `npm run typecheck` evaluates and
  * vitest alone never would. A misspelled nested option key is the failure
  * mode this file exists for: `const TOptions` switches excess-property
- * checking off for the whole literal, so before the nested rule every one of
- * these typos compiled and silently disabled the control it named.
+ * checking off for the whole literal, so without the nested rule every one of
+ * these typos would compile and silently disable the control it names.
  *
  * The runtime `it` blocks cover the option values validated at construction
  * and the registration checks that must not burn an API name.
@@ -110,8 +110,10 @@ describe('create(): surplus keys one level down', () => {
             cors: { origins: ['https://app.example.com'], credentials: true, methods: ['GET'], allowHeaders: ['Content-Type'], exposeHeaders: ['Retry-After'], maxAge: 600 },
         });
 
+        // The typo is a compile error, and at runtime the allowlist it lost
+        // leaves credentials on for every origin, which create() refuses.
         // @ts-expect-error origns: the allowlist is gone, which means "*", and credentials are on
-        initLambder().create({ apiPath: '/api', cors: { credentials: true, origns: ['https://app.example.com'] } });
+        expect(() => initLambder().create({ apiPath: '/api', cors: { credentials: true, origns: ['https://app.example.com'] } })).toThrow(/allowlist or a predicate/);
         // @ts-expect-error credential, no trailing "s"
         initLambder().create({ apiPath: '/api', cors: { origins: ['https://app.example.com'], credential: true } });
     });

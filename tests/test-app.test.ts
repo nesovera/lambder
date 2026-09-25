@@ -32,10 +32,10 @@ const productionStoreTouched = (what: string) => (): never => {
 const productionSessionStore: LambderSessionStore<any> = {
     isMemoryOnly: false,
     get: productionStoreTouched('session store'),
-    put: productionStoreTouched('session store'),
+    create: productionStoreTouched('session store'),
+    update: productionStoreTouched('session store'),
     delete: productionStoreTouched('session store'),
     listSecretHashes: productionStoreTouched('session store'),
-    markDataExpired: productionStoreTouched('session store'),
 };
 const productionRateLimiter: LambderRateLimiter = { isRateLimited: productionStoreTouched('rate limiter') };
 const productionIdempotencyStore = new Proxy({}, { get: () => productionStoreTouched('idempotency store') }) as LambderIdempotencyStore;
@@ -176,6 +176,17 @@ describe('lambderTestApp: visitors', () => {
         assertApiFailure(await guest.apiOutcome('me', {}), 'sessionExpired');
     });
 
+    it('posts the CSRF token of its own jar, not one a page\'s document.cookie holds', async () => {
+        const ada = await app.signIn('ada', { userId: 'ada', role: 'member' });
+        // A test with a DOM: the caller would read this and post it over the jar's.
+        (globalThis as { document?: unknown }).document = { cookie: 'LMDRSESSIONCSTK=a-token-of-the-page' };
+        try {
+            assertApiSuccess(await ada.apiOutcome('me', {}));
+        } finally {
+            delete (globalThis as { document?: unknown }).document;
+        }
+    });
+
     it('gives each visitor an address of its own, so a per-ip limit counts them apart', async () => {
         const first = app.visitor();
         const second = app.visitor();
@@ -257,7 +268,7 @@ describe('lambderTestApp: what the app threw', () => {
 
         // The answer is the app's own, untouched: a 500 that says nothing.
         assertApiFailure(crashed, 'server', { status: 500 });
-        expect(crashed.errorMessage).toBe('Internal server error.');
+        expect(crashed.errorMessage).toEqual({ type: 'error', content: 'Internal server error.' });
         // What was thrown travels beside it, stack and all.
         expect(crashed.error.cause).toBeInstanceOf(Error);
         expect((crashed.error.cause as Error).message).toBe('boom');
@@ -303,7 +314,7 @@ describe('lambderTestApp: what the app threw', () => {
 
         const outcome = await handled.visitor().apiOutcome('crash', {});
         assertApiFailure(outcome, 'errorMessage');
-        expect(outcome.errorMessage).toBe('Something went wrong on our side.');
+        expect(outcome.errorMessage).toEqual({ type: 'error', content: 'Something went wrong on our side.' });
         expect(handled.crashes.map((error) => error.message)).toEqual(['boom']);
     });
 
@@ -441,6 +452,21 @@ describe.each(['v2', 'v1'] as const)('lambderTestApp on %s events', (eventFormat
         expect((await visitor.request('GET', '/main.css')).headers['content-type']).toContain('text/css');
         await visitor.api('limited', {});
         assertApiFailure(await visitor.apiOutcome('limited', {}), 'errorMessage', { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
+    });
+
+    it('decodes the path once whatever host the visitor browses, a Function URL\'s included', async () => {
+        // Regression: a 2.0 event arrives with its path decoded, and the app
+        // told a Function URL's event (whose path arrives encoded) by its
+        // domain alone, so a visitor on a lambda-url host had the path
+        // decoded again: `/%2561dmin` reached `/admin`.
+        const seenPaths: string[] = [];
+        const guarded = lambderTestApp(initLambder().create({})
+            .addRoute('/admin', (ctx, res) => res.text('admin'))
+            .setRouteFallbackHandler((ctx, res) => { seenPaths.push(ctx.path); return res.text('other', { statusCode: 404 }); }),
+        { eventFormat, host: 'abc.lambda-url.us-east-1.on.aws' });
+        const answer = await guarded.visitor().request('GET', '/%2561dmin');
+        expect(answer.statusCode).toBe(404);
+        expect(seenPaths).toEqual(['/%2561dmin']);
     });
 });
 

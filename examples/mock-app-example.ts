@@ -84,12 +84,12 @@ export const userMocks = mockApp.apiSlice(
         const user = users.find((u) => u.id === payload.userId) ?? refuse("No such user.", { code: "app/not-found" });
         return { id: user.id, name: user.name };
     }),
-    mockApp.publicApi("login", { rateLimit: "authPerIp", handler: async ({ payload, sessions }) => {
+    mockApp.publicApi("login", { rateLimit: "authPerIp", handler: async ({ payload, sessionController }) => {
         const user = users.find((u) => u.email === payload.email) ?? refuse("Wrong email or password.");
-        await sessions.createSession(user.id, { userId: user.id, memberships: user.memberships });
+        await sessionController.createSession(user.id, { userId: user.id, memberships: user.memberships });
         return { ok: true };
     } }),
-    mockApp.sessionApi("logout", { guards: "sessionOnly", handler: async ({ sessions }) => { await sessions.endSession(); return { ok: true }; } }),
+    mockApp.sessionApi("logout", { guards: "sessionOnly", handler: async ({ sessionController }) => { await sessionController.endSession(); return { ok: true }; } }),
 );
 
 export const orderMocks = mockApp.apiSlice(
@@ -108,7 +108,7 @@ mockApp.register(userMocks, orderMocks);
 // 3. In the browser, at boot, behind the app's own dev guard
 // ---------------------------------------------------------------------------
 
-export const caller = new LambderCaller<ApiContractType>({ apiPath: "/api", isCorsEnabled: false, apiVersion: "1.0.0" });
+export const caller = new LambderCaller<ApiContractType>({ apiPath: "/api", apiVersion: "1.0.0" });
 
 export const attachMocksInDevelopment = (isDevelopment: boolean) => {
     if (!isDevelopment) return;
@@ -123,7 +123,7 @@ export const attachMocksInDevelopment = (isDevelopment: boolean) => {
 export const exampleTest = async () => {
     const jar = new LambderCookieJar();
     await mockApp.signIn("u1", { userId: "u1", memberships: users[0]!.memberships }, { jar });
-    const signedIn = new LambderCaller<ApiContractType>({ apiPath: "/api", isCorsEnabled: false, transport: mockApp.transport({ cookies: jar }) });
+    const signedIn = new LambderCaller<ApiContractType>({ apiPath: "/api", transport: mockApp.transport({ cookies: jar }) });
 
     // The contract declares idempotency for this endpoint, so the call owes a key.
     const order = await signedIn.api("order.create", { qty: 2 }, { guardInputs: { orgPermission: { organizationId: "org1" } }, idempotencyKey: "order-2f8c41d6" });

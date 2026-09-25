@@ -9,6 +9,936 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [8.0.2] - 2026-09-25
+
+A major, out of a review of 7.3.1. Most of it closes holes: session writes
+that could undo a logout or a password change, a login any website could
+submit through a plain form, output fields that reached the client past their
+schema, rate limits an IPv6 client or a guessed key could step around, and
+idempotency keys that replayed another request's answer. The rest makes the
+framework behave the same on every gateway, and in the mock as on the server,
+and adds crash reporting, `ctx.sessionController`, `ctx.rateLimit`, the memory
+cache and `writeApiSignatures`.
+
+The wire format is unchanged in both directions apart from one new refusal
+code (`lambder/idempotency-key-reused`, 409) and an `errorMessage` that is
+always the message object (a 7.x caller already read both forms), so a
+deployed callee and a 7.x client still understand each other. The one
+exception is a 7.x `LambderInvokeCaller` call that forwarded a Content-Type of
+its own in `headers`: it won over the JSON one there, and an 8.x callee does
+not read such a call as an API call.
+
+Stored state mostly carries over, with three exceptions. Every live session
+is signed out once: a session record carries `dataVersion` now, and a 7.x
+record, which has none, reads as no session until its TTL retires it (the
+partition key is an HMAC of the sessionKey now as well, so a new session
+never lands in a 7.x partition). An idempotency record a 7.x server wrote
+carries no fingerprint, and until it expires a key that finds one is refused
+as reused (409, which a key scope moves past) rather than replayed. A 7.x
+cache `lock` item is ignored and expires by its TTL; cached values read as
+before.
+
+The compiler finds most of what an upgrade from 7 has to change: the session
+and idempotency store contracts, the session crypto, the contract's input and
+output types, the context's new members. Fourteen it cannot:
+
+- A hand-built API call (fetch, curl, a tool) has to send
+  `Content-Type: application/json`, or it is not an API call at all.
+- A hand-built API answer (an MSW handler, a test stub, a proxy) has to carry
+  `apiVersion` (`null` will do), or the caller reads it as a `server`
+  failure rather than a success.
+- A handler whose payload does not match its output schema now crashes, and
+  extra fields it returns are stripped before they are sent, a refusal's
+  payload included. An output schema with an async refinement or transform
+  crashes on every call (`LambderApiOutputValidationError`) rather than
+  answering; move the async check into the handler.
+- `ctx.path` is decoded, so code that decoded it itself decodes twice. A
+  percent sign in it is kept as `%25` (see below).
+- String routes match case-sensitively: `/Admin` no longer reaches
+  `addRoute("/admin")`. Register each spelling an app answers, or use a
+  RegExp with the `i` flag.
+- Behind a REST API, compression is off until `compression` is named, and
+  binary files and compressed answers need `binaryMediaTypes: ["*/*"]`.
+- The IAM policies need two more actions. The session table needs
+  `dynamodb:UpdateItem`: every renewal and data write is an `UpdateItem`
+  where 7.x used `PutItem`. Without it every `updateSessionData` fails its
+  request, and renewal writes fail and are logged, so sessions stop sliding
+  and users are signed out once their TTL runs from creation. The rate-limit
+  table needs `dynamodb:GetItem`, for the read on a throttled partition;
+  without it every key-range throttle goes to `failOpen`.
+  `docs/dynamodb-tables.md` lists both.
+- A custom-keyed rate limit is charged after the guards. A limit meant to
+  count the wrong guesses of something a guard checks (a one-time code keyed
+  per email) counts none of them until its policy says
+  `chargeAt: "beforeGuards"`.
+- An idempotency key belongs to the request it was first sent with. A
+  single-use token carried inside the payload (checked by an `apiInput`
+  guard) makes every genuine retry a 409 `lambder/idempotency-key-reused`:
+  move it to `guardInputs`. A client that sends one fixed key with edited
+  requests gets the same 409.
+- `errorMessage` is always `{ type, content }` on the wire. A client that is
+  not a Lambder caller (a native app, a script, a test asserting on the raw
+  envelope) and read a string reads the object's `content`.
+- `cors: { credentials: true }` with every origin allowed makes `create()`
+  throw at cold start: name the origins, or a predicate.
+- Templates refuse more slot positions when they compile: inside a tag where
+  an attribute name goes (`<input <!--slot:x/-->>`), inside the quoted value
+  of an `on*` attribute, `style` or `srcdoc`, inside a comment right before a
+  `-`, `!` or `>` that a value ending in `--` would turn into its end, and
+  wherever the branches of an if/else (or a slot's default content and its
+  value) leave the HTML in different positions before the next slot or block.
+  A URL attribute whose scheme a slot can reach renders `about:invalid` unless
+  the scheme is http, https, mailto or tel. `` html`...` `` and `` xml`...` ``
+  apply the same rules to their interpolations and throw when called, not
+  compiled, so a call site that interpolates into one of those positions fails
+  on its first render.
+- The session controller's `refreshSessionData()` and `updateSessionData()`
+  throw `LambderSessionNotFoundError` where they answered null, and an API
+  call answers that as `sessionExpired`, a public API's included. A call site
+  written `(await refreshSessionData())?.data ?? null` still compiles and
+  never sees its null: catch the error where a signed-out answer is meant.
+- A schema field annotated `z.ZodType<T>`, or built with `z.coerce` or
+  `z.preprocess`, has `unknown` as its input, and the contract's `input`, the
+  handler's `res.api` type and the guard and rate-limit slices read `z.input`
+  now, so such a field goes unchecked on the typed caller and in the handler.
+  Annotate it `z.ZodType<T, T>`, or write `satisfies` in place of `as`.
+
+### Added
+
+- **`runAt: "afterInputValidation"` on a guard** runs it after the input schema
+  passes rather than before: for a guard that spends something on the
+  request, such as a single-use captcha token, which a request refused for a
+  mistyped field would otherwise have wasted. Default placement is unchanged.
+- **`trustedHostHeaders`**: headers that may name the host the viewer asked
+  for, e.g. `["x-forwarded-host"]` for a Function URL behind CloudFront, which
+  sends the origin its own lambda-url Host, so cookie domains and host
+  routing saw the wrong host. Nothing is trusted by default, as with
+  `trustedClientIpHeaders`, and a value that is not a host is not taken.
+- **`notFoundStatuses` on `LambderHttpFileSource`**: the statuses read as "no
+  such file" (default below).
+- **Mock `onInvalidInput`**: the answer to an input that fails its schema,
+  for a server app that sets `setApiInputValidationErrorHandler`, stated as
+  data (`{ payload?, config?, statusCode? }`, `res.api(payload, config)` with
+  its status); `null` answers the standard 422. The mock answered 422 where
+  such a server answered 200 with an errorMessage.
+- **`ctx.rawPath`**: the request path as the gateway delivered it, stage
+  stripped, beside the decoded `ctx.path`.
+- **The file reader remembers a miss** for `memoryCache.missTtlSeconds` (60
+  by default, `0` to ask every time). An SPA over S3 or an HTTP origin paid a
+  source round trip, an S3 `GetObject` answering NoSuchKey, on every page
+  navigation before the shell was served, in warm containers too. The misses
+  are bounded by the bytes of their paths (4 MB), which the caller chooses.
+  The file cache beside it now evicts the least recently served file rather
+  than the first one read, so a hot bundle outlives a file fetched once; both
+  sit on `lru-cache`, which Lambder already depended on.
+- **`crashes`: one reporter for every crash, and who may read one.**
+  `create({ crashes: { report, reveal } })`.
+  - `report(error, site)` is told every crash wherever it happened, with
+    `site.kind` saying where: `"api"`, `"route"`, `"event"` (a non-HTTP
+    action that threw, or an event no action matched) or `"startup"` (a
+    `created` hook). It is awaited before the answer goes out, never told a
+    refusal, and a reporter that throws is logged and swallowed. A global
+    error handler that throws while answering a crash is reported as a second
+    crash with what it threw as its cause. An event's error is still rethrown
+    to Lambda after the report, so retries and dead-letter queues are
+    unchanged. Before this, a crash in an `addAction` or a `created` hook
+    reached no hook at all, and an app wrapped `getHandler()` to see it.
+  - `reveal(ctx)` decides whether the framework's own 500 carries the crash:
+    `describeCrash` on an API call's `crash` field beside the call's
+    `logList`, the stack as text on a route. A callee reached only by trusted
+    invokers sets `reveal: () => true` instead of writing a global error
+    handler to attach `describeCrash`. It governs the framework's answer
+    only; a reveal that throws counts as no. Default: nobody.
+- **`ctx.sessionController` on the server's context.** Every context the
+  instance renders carries the request's session controller, typed to the
+  app's session data, so a handler, guard or hook reaches it without holding
+  the instance (and without the import cycle a guards module that needs the
+  instance runs into). `lambder.getSessionController(ctx)` stays, for a
+  context the instance did not render (one `createContext()` built). The
+  tools are bound onto each context and bound again onto a context a
+  `beforeRender` hook hands back, spread copies included.
+- **`initLambder<SessionData>().guard()` and `.rateLimitKey()`**: the policy
+  builders typed to the app's session, where the standalone `lambderGuard()`
+  leaves `ctx.session.data` as `any`. The mock's `guard` and `rateLimitKey`
+  are the same builders bound to its contexts.
+- **`ctx.rateLimit(policy, key?)` and `ctx.isRateLimited(policy, key?)`**: a
+  named policy charged by code, for a key only the handler knows (one
+  recipient of an invitation). `rateLimit` refuses the way a declared limit
+  does (a 429 envelope with Retry-After and the policy's `errorMessage` on an
+  API call, a plain 429 on a route); `isRateLimited` answers the check
+  result (`LambderRateLimitCheckResult`), with `retryAfterSeconds`, for a
+  handler whose output says "too many" its own way. Both run on the instance's limiter, so `failOpen`, key bounding
+  and `lambder/testing`'s memory limiter apply, none of which a direct call to
+  a limiter's `isRateLimited` gets. A policy may now leave `per` out, which
+  makes it one the code charging it keys; an API cannot declare such a
+  policy. Policy names and the key argument are checked at compile time where
+  the types say (a handler's context), and when the charge runs elsewhere (a
+  hook's or a guard's context, or a policy typed as the general
+  `LambderApiRateLimitPolicyConfig`). A per-API policy charged from a hook or
+  the fallback for a call no registered API matched counts under no API, so a
+  fresh posted name is no fresh counter. Mock handlers have both too.
+- **`LambderMemoryCache` and the `LambderCache` interface.** The DynamoDB
+  cache's twin for tests, with the same rules: the same key and value limits
+  (the key and value checks are shared modules both caches go through), the
+  same JSON round trip, TTL, sort-key order and `getOrSet` answers, and the
+  same counts from `delete` and `deletePartition` (live entries only). A
+  conformance suite drives both. `LambderDdbCache` implements the interface.
+- **`lambder/build` with `writeApiSignatures(instance, { file })`.** Writes
+  the signature module both sides ship, or checks it (`check: true`), naming
+  the endpoints whose signatures moved. It compares the map the file holds, so
+  line endings or a formatter (one that re-indents the file or takes the
+  quotes off its keys) neither make a file stale nor get it rewritten, and the
+  map carries a `// prettier-ignore` line. A write goes to a temporary file
+  renamed over the old one, through a symlink to the file it names. With
+  `verifyInFreshProcess: { module, exportName }` it loads the module that
+  holds the instance in a fresh Node process, never the calling script, and
+  checks the file against what it digests there, after a write and after a
+  check that finds the file current, which is where a schema that digests
+  differently per process shows. `module` is a path or a file URL, as a `URL`
+  or as the string `import.meta.resolve()` answers. The fresh process gets the
+  generator's Node flags less the inspector, watch mode, the test runner and
+  the eval flags (`-e`, `-p`, `-pe`, `--input-type`); `exportName` defaults to
+  `"default"`. `header`, `quotes` and `semicolons` match a project's style.
+  Every app with `apiSignatures` wrote this generator itself from a sketch in
+  the docs.
+- **`LambderContractKeysWithGuard<Contract, "guardName">`**: the endpoints
+  whose guards option names that guard, in any form, for a list a test loops
+  over. `satisfies` refuses a name the guard does not cover; the JSDoc shows
+  the one-line check that also refuses a list missing one.
+- **`chargeAt: "beforeGuards"` on a custom-keyed rate-limit policy** charges
+  it before the guards and the input schema, so the attempts they refuse are
+  counted: a limit on guessing a one-time code a guard checks, keyed per
+  email. The default stays `"afterGuards"` (below).
+- **`LambderApiOutputValidationError`**: the crash a handler's answer causes
+  when its output schema does not accept it, for a crash reporter to tell
+  apart, with the `apiName`, the `zodError` when the schema rejected the
+  payload (null when parsing threw), and what was thrown as its `cause`.
+- **A `servePublicFiles` path mapper receives the file path** as its second
+  argument, `(ctx, filePath) => ...`: the file `ctx.path` names, its kept
+  escapes turned back (see `ctx.path` below).
+- `LambderSessionChanges` and `LambderSessionUpdateResult` are exported, the
+  types a session store of your own writes its `update` with.
+- **`refusalMessageOf(value)`**: an envelope's errorMessage as the message
+  object (a plain string becomes `{ type: "error", content }`), exported from
+  `lambder` and `lambder/client`.
+- **`crashes.reportTimeoutMs`**: how long a crash's answer waits for
+  `crashes.report` (default 3000). A report still running then is logged
+  with the crash as unfinished and the request is answered; the report
+  itself is not cancelled.
+- **`notFoundErrorNames` on `LambderS3FileSource`**: the S3 error names read
+  as "no such file", as `notFoundStatuses` is on `LambderHttpFileSource`
+  (default below).
+
+### Changed (breaking)
+
+- **A custom-keyed rate limit is charged after the guards and the input
+  validation.** The order is now: session-keyed limits (and custom keys
+  charged `"beforeGuards"`), guards, input validation, guards placed after
+  it, custom-key limits, handler. What refuses a request for free runs first
+  and what spends something last. The key is a value the caller chose (an
+  email in the payload): charged before a captcha guard, it let a caller who
+  never solved the captcha spend a victim's per-email budget and keep them
+  locked out of reset, register and send-code, and charged before the input
+  schema, a request refused for its input spent that budget too. `per: "ip"`
+  still runs before the session read and `per: "session"` before the guards.
+  After the guards, an attempt they refuse is not counted, so a limit on
+  guessing what a guard checks (a one-time code, keyed per email) would count
+  none of the wrong guesses: such a policy says `chargeAt: "beforeGuards"`
+  and is charged where 7.x charged it.
+- **`LambderHttpFileSource` reads a 403 as a missing file**, beside 404 and
+  410. A private S3 bucket behind CloudFront answers a missing key 403 when
+  its reader may not list the bucket, so every SPA route failed with a 500
+  before the shell was served. `notFoundStatuses: [404, 410]` makes a 403 an
+  error again, for an origin that answers missing keys 404.
+- **`LambderS3FileSource` reads AccessDenied as a missing file by default**,
+  for the same reason: a reader without `s3:ListBucket` is told AccessDenied
+  for a missing key. S3's key refusals (KeyTooLongError, InvalidURI) and R2's
+  InvalidObjectName read the same way, so a long path is a 404 rather than a
+  crash. A reader granted `s3:ListBucket` that wants a refused credential to
+  surface passes a `notFoundErrorNames` without AccessDenied.
+- **An answer that carries Set-Cookie is never publicly cacheable.** When its
+  Cache-Control is neither `private` nor `no-store`, `public` becomes
+  `private`, and `s-maxage` and `immutable` are dropped, on every exit, the
+  304 and the crash answer included. A hook that set a cookie (a guest
+  session, a session read that re-issues the cookies) on a content-hashed
+  asset sent it as `public, max-age=31536000, immutable`, which a shared
+  cache that keeps Set-Cookie hands to everyone.
+- **`createContext(event, lambdaContext, options?)`** takes
+  `{ apiPath?, trustedClientIpHeaders?, trustedHostHeaders? }`
+  (`LambderContextOptions`) in place of positional arguments; `apiPath`
+  defaults to `"/api"`, as at `create()`.
+- **String routes match case-sensitively**, as API Gateway routes and
+  CloudFront behaviors do. `/ADMIN/users` reached `addRoute("/admin/:x")`
+  past an authorizer or a behavior on `/admin/*`, which the gateway never
+  matched.
+- **`ctx.path` is decoded, whichever gateway sent it.** A REST API and a
+  Function URL deliver the path percent-encoded and an HTTP API decoded, so
+  `addRoute("/hakkımızda")` answered 404 on two of the three, a file named
+  `team photo.jpg` was never found there (and `serveIndexHtml` answered an
+  `<img>` for it with the HTML shell), and regex routes saw a different
+  string per gateway. `ctx.path` is now the path decoded exactly once: an HTTP
+  API's is taken as delivered, and a Function URL is told apart by its own
+  `*.lambda-url.<region>.on.aws` domain, which its events always carry. Two
+  escapes stay in it, so it reads back unambiguously and no decoded text can
+  pass for an escape (`/%2561dmin` is never `/admin`, which would get past an
+  authorizer or a WAF rule in front of the function that checked the path
+  once): a slash inside a segment stays `%2F`, so it cannot become a
+  separator, and a percent sign stays `%25`. A path param and a RegExp
+  route's captures turn both back, and keep a decoded `#` or `?`
+  (`/tags/C%23` is the tag `C#`); `servePublicFiles` looks up the file the
+  path names, its `%25` read as `%`, and a path with an encoded slash names
+  none. An app that decoded `ctx.path` itself should stop. The path as
+  delivered is `ctx.rawPath`. The v2 events `lambder/testing` and
+  `LambderInvokeCaller` synthesize are an HTTP API's, their path decoded; the
+  v1 ones (`eventFormat: "v1"`) carry it as written, as a REST API's do.
+  The server tells those events by their own `requestContext.apiId`
+  (`lambder-invoke`, `lambder-local`) and reads their path as decoded whatever
+  host they name, so a caller or a test visitor naming a Function URL's
+  `*.lambda-url.*` host does not have it decoded a second time, where
+  `/%2561dmin` reached `/admin`.
+- **On a REST API, compression is off unless `compression` is named**, and
+  **text leaves as text** on every gateway. A REST API decodes a base64 body
+  only for its `binaryMediaTypes`, so compressed answers and every served
+  file (CSS and JS included) reached the browser as base64 unless those were
+  `*/*`. A text body that is not compressed (a string, or a text-typed Buffer
+  that is valid UTF-8) now goes out with `isBase64Encoded: false`; binary
+  files and compressed bodies still need `binaryMediaTypes: ["*/*"]` there.
+- **ETags are taken over the uncompressed body and name the encoding**
+  (`"<hash>-br"`), so a revalidation that ends in a 304 compresses nothing.
+  Every tag changes once, which costs each client one full answer.
+- **The default immutable Cache-Control takes only bundler output**:
+  everything under `_next/static/`, and under `assets/` or `static/` a name
+  ending in its hash. The old rule matched from a name's first hyphen, so
+  `android-chrome-192x192.png`, `og-image-1200x630.png` or
+  `privacy-policy-v2.html` were cached for a year wherever they lived, and a
+  replaced copy never reached a returning browser. Inside `assets/` or
+  `static/`, a hand-named file whose last part could be a hash
+  (`assets/og-image-1200x630.png`) is still taken for bundler output. An
+  8-character last part counts as a hash only when it looks random (a capital,
+  a lowercase letter and a digit, or at least three capitals and a lowercase
+  letter), so `assets/Inter-SemiBold.woff2`, `assets/icon-Settings.svg` and
+  `assets/og-image-v2-final.png` keep the ordinary Cache-Control, as does
+  about one Vite hash in twenty. Pass `immutablePattern` for another layout.
+- **Served text files carry `charset=utf-8`** (`text/css; charset=utf-8`), so
+  a UTF-8 `.txt`, or an `.html` with no meta charset, is not read in the
+  browser's legacy encoding. A source's own content type is kept as given.
+- **A template slot inside an unquoted attribute value is refused even with
+  a prefix before it** (`class=big-<!--slot:x/-->`), where a space in the
+  value starts a new attribute, and **so is a slot inside a tag where an
+  attribute name goes** (`<input <!--slot:x/-->>`), where any value is a new
+  attribute: vary attributes with `<!--if:...-->` around whole-tag variants,
+  or put the slot inside a quoted value. The check now reads the tag, past
+  the template's own tokens, so an `=` inside a quoted value or in text no
+  longer counts as one.
+- **A template slot inside the quoted value of an event handler (`onclick`
+  and every other `on` attribute), `style` or `srcdoc` is refused** when the
+  template compiles. The browser decodes the escapes and then reads that
+  value as JavaScript, CSS or a whole document, so escaping cannot protect it.
+- **A template's URL attribute is checked when it renders** (`href`, `src`,
+  `action`, `formaction`, `xlink:href` and the other single-URL attributes).
+  When a slot can reach the value's scheme and that scheme is not http,
+  https, mailto or tel (`javascript:` and `data:` included), the value
+  renders as `about:invalid`. The whole rendered value is checked, so a
+  scheme split across two slots, or completed by the template's own text
+  after a slot, is caught too. Relative URLs and values whose scheme the
+  template fixed render as written.
+- **`html` and `xml` apply the same rules to their interpolations.** They
+  read each call site's static strings to find where every interpolation
+  lands, and throw where escaping cannot protect the value: an unquoted
+  attribute value (`class=${x}`), a tag where an attribute name goes
+  (`<input ${x}>`), the quoted value of an `on` attribute, `style` or
+  `srcdoc`, and the content of a `<script>` or `<style>` element. A quoted URL
+  attribute value holding an interpolation gets the template's scheme check.
+  The rules follow the template, not the value, so they hold for strings,
+  numbers, nested `html` fragments, `raw()` and empty values alike, and a
+  call site that breaks one throws on every call. Quote the attribute, pass
+  script data in a `data-` attribute or through `jsonScript()`, or build the
+  whole tag conditionally; a `data:` URL writes its scheme in the template
+  (`src="data:image/png;base64,${pngBase64}"`).
+- **`getOrSet` answers the stored JSON on every call**, the call that filled
+  the entry included, on `LambderDdbCache` and `LambderMemoryCache` alike.
+  The filling call used to answer the loader's own object, so a `Date` was a
+  `Date` once and a string forever after, and a field the JSON dropped was
+  there only the first time. A value handed back uncached because the cache
+  failed open has the same shape. A loader's `undefined` is no longer stored
+  or logged as a failure: it comes back uncached and the next call loads
+  again (answer `null` to cache "not found").
+- **An idempotency key belongs to the request it was first sent with.** The
+  claim and the stored record keep a fingerprint of the request's payload
+  (key order aside, and a key named `__proto__` kept as data), and the same
+  key with a different payload is refused with
+  `lambder/idempotency-key-reused` (409) instead of being handed the first
+  request's answer. Guard inputs stay out of it: a captcha or proof token is
+  single use, so a genuine retry carries a new one and still replays. Such a
+  token belongs in `guardInputs`; one carried inside the payload (checked by an
+  `apiInput` guard) is part of the fingerprint. `LambderIdempotencyStore.begin`
+  takes the `fingerprint`, reports the one it holds with `"pending"` and
+  `"done"`, and `complete` stores it; a store of your own keeps it the same way.
+  The fingerprint is a required `string` on the stored record and on the
+  `"pending"` answer. A record a store cannot tie to a request (one another
+  writer left in its table) reports `""`, which no request matches, so its
+  key is refused as reused; a claim refused with no record behind it (no
+  room to hold one) reports the caller's own fingerprint, so the engine
+  answers the in-flight 409 and the client keeps its key.
+- **`LambderIdempotencyStore.abandon()` releases only a pending claim.** A
+  settled record stays, even when the owner that stored it asks.
+  `LambderDdbIdempotencyStore` deletes on `ownerToken = :owner AND
+  #state = :pending`, and a store of your own does the same.
+- **`idempotencyKey` also takes a key scope** (`createIdempotencyKeyScope()`),
+  on `LambderCaller` and `LambderInvokeCaller` alike: the call sends its
+  current key and moves to a new one once an answer settles the operation,
+  so a corrected form after a refusal is sent under a new key. A success
+  settles it, and so does a key refused as reused. A refusal of this request
+  does too, unless an earlier attempt under the key went unanswered (a
+  timeout, a 5xx, an original still in flight): guards, validation and rate
+  limits refuse before the replay record is claimed, so the key is kept and
+  the next attempt replays the original rather than running it again. A rate
+  limit, an expired session and a stale version keep the key, and an answer
+  for a key the scope has already moved past changes nothing. A refusal
+  while another attempt under the key is still in flight keeps it too (a
+  double-tap refused by a single-use captcha guard while the first tap runs).
+  A double-tap's duplicate-in-flight answer leaves the key to the first tap's
+  own answer, so a first tap refused ("only 5 in stock") still moves the scope
+  on and the corrected order goes under a new key.
+  `LambderIdempotencyKeyScope` is a class now, made by
+  `createIdempotencyKeyScope()`, rather than an object type a site could
+  build itself, and only the callers start and settle its attempts.
+- **`createIdempotencyKey()` and `createIdempotencyKeyScope()` are standalone
+  functions** of the root entry and `lambder/client`, in place of the
+  `LambderCaller` statics of the same names, since the invoke caller takes
+  their keys too. `LambderCaller.createIdempotencyKey()` becomes
+  `createIdempotencyKey()`.
+- **A payload is parsed through the API's output schema before it is sent.**
+  The type system accepts a value carrying more than its type (a row read
+  straight from a table is assignable to a narrower output), and those extra
+  fields, secrets included, went to the client and into the idempotency store.
+  zod now strips them, fills defaults and runs transforms; a payload the
+  schema rejects is answered as a crash rather than sent. That covers every
+  payload the handler's `res.api()` answers, a refusal's beside an
+  `errorMessage` or a flag included; only `null` passes as it is. A hook, the
+  input validation handler and the global error handler answer in shapes of
+  their own and are sent as given. The handler writes the schema's input form
+  (`z.input`), what the transforms take, so each runs once: a handler for an
+  output with a transform writes the transform's source type. Output schemas
+  are parsed synchronously, so one cannot be async: an async refinement or
+  transform, or a transform that throws, is the same crash, with the thrown
+  error as its cause. The handler has run by the time its answer is refused,
+  so under an idempotency key the framework's crash answer is recorded as the
+  key's answer, and a retry is told the same thing rather than running the
+  operation again.
+- **The contract records the client's side of each schema.** `input` is the
+  schema's `z.input` (a defaulted field is optional to send, a transformed
+  field is posted as its source type) and `output` its output as JSON
+  (`LambderJsonOf`: a `z.date()` field is a string, an `undefined` inside an
+  array is `null`, and `unknown` and recursive JSON such as `z.json()` stay as
+  they are, a key whose value may be undefined is optional since JSON leaves
+  it out, and a `Map` or `Set` is `{}`). At the top of an output a `void` or
+  `undefined` schema stays as it is, since an envelope carries no payload
+  rather than a JSON `undefined`, and an output that may be undefined keeps
+  that member (`LambderJsonOutputOf`). Guard and rate-limit `apiInput`
+  slices are checked against the posted form. An endpoint with a transform in
+  its input used to be uncallable through the typed caller, and a `z.date()`
+  output typed `Date` arrived as a string. A mock entry's `input` schema is
+  pinned the same way: it takes exactly the posted form, and what it parses to
+  must still read as it, so the server's schema restated with a `.default()`
+  passes and one whose transform changes a field's type does not.
+- **A POST to `apiPath` is an API call only with `Content-Type:
+  application/json`.** Every Lambder caller sends it, and owns it: a
+  Content-Type among a call's own headers (a forwarded form post's) does not
+  replace it. A POST of another type reaches the API fallback, and the mock's
+  MSW adapter and invoke transport read it the same way. Before, the body was
+  read as JSON whatever its type, so a plain HTML form on any website (no
+  preflight) could post a login envelope and plant the attacker's session
+  cookies in a visitor's browser.
+- **`cors: { credentials: true }` needs an allowlist or a predicate in
+  `origins`**; create() refuses it with every origin allowed, which echoed
+  whatever Origin asked and let any website read a signed-in user's answers.
+- **A `cors.origins` predicate is asked once per request**, right after the
+  request is read and before any hook or handler runs, and its answer holds
+  for every answer the request ends in, a crash's included. A predicate that
+  throws (`new URL(origin)` on `Origin: null`) counts as refused and is
+  logged once.
+- **`LambderCaller`'s `isCorsEnabled` is optional**, and
+  `lambderFetchTransport()`'s `cors` defaults to whether the call's `apiPath`
+  is on another origin than the page's, where it was `false`. Credentialed
+  cross-origin mode applies exactly when a browser needs it; an explicit
+  value still wins.
+- **`LambderSessionStore` has `create` and `update` in place of `put` and
+  `markDataExpired`.** No write replaces a record any more: `create` writes a
+  new session and refuses an existing one, and `update(hashes, changes,
+  condition?)` changes only the named fields, only while the record exists,
+  answering `"updated"`, `"missing"` or `"stale"`. `delete` hands back the
+  record it removed, or null when there was none. A store of your own
+  implements the three; `LambderDdbSessionStore` does them with conditional
+  writes and `ReturnValues` (a refused update tells stale from missing by the
+  item it hands back, with no read after it), and `listSecretHashes` reads
+  consistently.
+- **`LambderSessionRecord` has a required `dataVersion`**, created at 0, and
+  `update`'s condition is `{ dataVersion }`. A store adds one to
+  `dataVersion`, in the same atomic write, on every update whose changes carry
+  `data` or `dataExpiresAt`, even when the value written is unchanged, and
+  applies a conditioned update only while `dataVersion` equals the
+  condition's, answering `"stale"` otherwise. `dataExpiresAt` is a plain
+  deadline. `LambderDdbSessionStore` reads an item without `dataVersion` as no
+  session, and the manager reads a record without a numeric one the same way,
+  whatever store handed it back.
+- **The session manager's `deleteSession()` answers false when there was no
+  record to delete**; 7.x always answered true.
+- **The session partition key is HMAC-SHA256 of the sessionKey keyed by
+  `sessionSalt`**, in place of sha256 of the sessionKey followed by the salt,
+  so two deployments sharing a table cannot collide when a sessionKey absorbs
+  the difference between their salts. Every existing session is signed out
+  once. `LambderSessionCrypto` has a required `hmacSha256Hex(key, value)`,
+  which `LambderWebCrypto` and `LambderPlainSessionCrypto` implement and a
+  crypto of your own adds.
+- **`updateSessionData` and `refreshSessionData` no longer slide the
+  expiry**; a session read does, which is also what re-issues the cookies.
+  The manager's `updateSessionData` answers null, and the controller's
+  throws `LambderSessionNotFoundError`, when the session was ended while the
+  request held it; an API call answers that as sessionExpired rather than as
+  a crash. The controller's `refreshSessionData` throws the same when the
+  session is over, whether the `dataRefresh` callback ended it or something
+  else did, rather than answering null and clearing the session cookies by
+  name, which could delete a session another response had just set.
+- **`regenerateSession()` carries the data over as it was stored**, not as
+  the request read it, and leaves no session behind for a session ended
+  during the request: the manager's answers null and the controller's throws
+  `LambderSessionNotFoundError`. It writes the new record before deleting the
+  old one, and takes the new one back out when the old one is already gone,
+  so a rotation racing "log out everywhere" cannot slip its new record past
+  the subject-wide delete's listing. With `dataRefresh`, the new session's
+  data starts due, so its next read renews it from the source of truth. It
+  deleted without checking and created a new session from the request's
+  copy, so a thief's request that rotated after the owner's password change
+  came away with a live session, and a rotation after
+  `expireSessionDataAllByKey` kept the revoked data.
+- **A refusal's `errorMessage` is the message object, on the wire and for every
+  reader.** A plain string a handler writes (`new LambderApiRefusal("Denied.")`,
+  `res.api(null, { errorMessage: "Denied." })`, the framework's own crash
+  answer) goes out as `{ type: "error", content: "Denied." }`, and
+  `LambderApiRefusal`'s `errorMessage` property is that object. `LambderCaller`
+  and `LambderInvokeCaller` outcomes, `LambderInvokeError` and
+  `errorMessageHandler` hand over `LambderAppRefusalMessage`, never a string. A
+  reader that compared `envelope.errorMessage` to a string compares its
+  `content`. A handler typed for the old union still compiles. An outcome
+  narrowed to `reason: "errorMessage"` carries `errorMessage` as a required
+  field, on both callers.
+- **`LambderRenderContext` has four more members** (`sessionController`,
+  `rateLimit`, `isRateLimited`, `rawPath`) and a fifth type parameter, the
+  app's policies. A context written out by hand as an object literal has to
+  add them.
+- **Handler contexts carry the app's session type.** A handler registered
+  with `addApi`, `addSessionApi` or a literal-path `addRoute` reads
+  `ctx.session` as the app's `SessionData` rather than `any`, which can
+  surface type errors that were hidden. The `guards` option of `create()` is
+  typed to the app's session too. A RegExp route, a hook and a fallback still
+  read it as `any`.
+- The mock's `ctx.sessions` is `ctx.sessionController`, the server's name for
+  it, so it is not one letter from `ctx.session` (the record). It is bound
+  the way the server's is, as a non-enumerable member, so it does not show in
+  `Object.keys(ctx)` or a spread copy of a mock context; destructuring reads
+  it as before. `ctx.rateLimit` and `ctx.isRateLimited` are bound beside it.
+- `LambderApiEnvelopeBody`'s `apiVersion` is required (`string | null`), as
+  every envelope carries it: a hand-built answer typed with it without one no
+  longer compiles.
+- **`LambderDdbCache` keeps a `getOrSet` fill's lease on the entry's manifest
+  item** instead of a separate `lock` item. The manifest item holds either
+  the value or, while a fill runs, only the lease (`leaseOwner`), whose
+  `expiresAt` is the end of the lease, so the table's TTL removes an
+  abandoned one. The IAM actions are unchanged.
+- **`getOrSet` checks `ttlSeconds`, `leaseSeconds` and `waitForFillMs`
+  before it reads or loads**, on both caches, and an invalid one throws to
+  the caller. The fail-open caught it, logged, handed back the loader's value
+  and left caching off.
+- **The `@aws-sdk/client-dynamodb` peer dependency starts at 3.868.0**, the
+  first version whose throttling errors name their reasons. Below it the
+  rate limiter never recognizes a key-range throttle.
+  On Lambda, a deployment that relies on the runtime's bundled SDK needs a
+  runtime whose client is at least that, or bundles its own (see the README).
+- create() does not check at runtime for `LambderDdbSessionStore` fields
+  (`tableName`, `partitionKey` and the rest) on the session option; the
+  compile-time key check refuses them.
+- `LambderCacheKey` is declared in the cache contract now; the export name is
+  unchanged. `LambderDdbCacheSetOptions` and `LambderDdbCacheListOptions` are
+  gone: both caches take the shared `LambderCacheSetOptions` and
+  `LambderCacheListOptions`.
+
+### Fixed
+
+- **A `lambder/testing` visitor posts its own jar's CSRF token** where a
+  `document` holds one too (a test with a DOM): it posted the page's, and
+  every session call answered `sessionExpired`.
+- **A flood on one rate-limit key is refused, and only that key.** DynamoDB
+  throttles a partition at roughly a thousand writes a second, and the
+  limiter passed the throttle on as a failure, which `failOpen` turned into
+  no limit at all for exactly the flood the limit exists for. A key-range
+  throttle (`KeyRangeThroughputExceeded` among the error's throttling
+  reasons) falls on every key of the partition, so the limiter reads the
+  window's own count with a consistent read: a key at or over its limit is
+  refused with a Retry-After of 5 seconds, and a key under it (a neighbour of
+  the flood, or of a session or cache spike on a shared table) has the
+  throttle passed on for `failOpen` to decide, as does a throttle of the
+  table or the account.
+- **A key over a later window's cap is refused on a throttled partition.** The
+  limiter read only the throttled window, so at each minute rollover a key
+  over its daily cap went to `failOpen`. It now reads every window the attempt
+  was not counted against, in parallel, and refuses when any is at its limit.
+  Each process remembers such a window for 5 seconds and refuses the key's
+  repeats without touching the table. A key whose read is throttled as well
+  rethrows its first throttle, which `failOpen` logs once rather than per
+  request.
+- **An idempotency scope's caller identity and sessionKey are bounded** like a
+  rate-limit key: past 1024 bytes they become `i:h:<sha256>` and
+  `s:h:<sha256>`. A long `callerIdentity` (a device token) put the scope past
+  DynamoDB's key limit, and `failOpen` turned the refusal into no idempotency
+  for that caller.
+- **Key bounds measure the key as written**, escaped separators included.
+  1,000 `|` characters passed the 1024-byte bound, overflowed the partition
+  key and failed open.
+- **A replay is built from a copy of the stored record**, so a store that
+  hands back its own object cannot have the replaying call's Set-Cookie
+  written into it.
+- **A guard or rate-limit `apiInput` slice is checked against a union input
+  whole**: a slice only some members carry is a compile error rather than a
+  422 on every request of the others.
+- **Retry-After is measured on the limiter's clock**
+  (`LambderRateLimiter.clockMilliseconds`, optional; both shipped limiters
+  have it).
+- **DynamoDB stores share one default client per region.** Sessions, rate
+  limits, idempotency and the cache each built their own client when given
+  none: four connection pools and, on a cold container, four TLS handshakes
+  and credential lookups inside the first request. A store given a `client`
+  keeps using it.
+- **The mock hands a handler a parse of the request's JSON**, as every
+  server-bound transport sends it. The direct transport handed over the
+  page's own object: a handler that stored the payload shared it with the
+  form, later edits changed the "saved" record with no call, and a `Date` or
+  a key set to `undefined` reached the handler as no server ever sees one.
+- **A mock memory-mode page stays signed in after a logout and a login.**
+  `signIn` mirrors the CSRF cookie into `document.cookie` for the MSW
+  adapter, a page's caller reads its token from there, and a memory
+  transport never writes there again, so the next login's token landed in
+  the jar only and the stale one failed the pairing. In memory mode (and with
+  a jar you pass) the jar is the page's cookie store and its CSRF token is
+  the one posted.
+- **The MSW adapter no longer reads the request's Cookie header.** MSW fills
+  it from its own store, which captured the HttpOnly session cookie and kept
+  it in localStorage across reloads: after a user switch both sessions went
+  out and every call answered sessionExpired, a cleared jar stayed signed
+  in, and the raw token showed in request events. A call's cookies are the
+  adapter's jar and `document.cookie`.
+- **i18n detects the language on every read.** The first detection was kept
+  for the life of the process, so a path-based detector never saw `/en/`
+  become `/tr/`. A throwing detector is reported once.
+- **i18n fills parameters in one pass**, so a value is inserted as it is: a
+  display name `Eve {org}` no longer had its `{org}` filled by the next
+  parameter.
+- **A response object kept between requests no longer collects another
+  caller's headers.** A handler, hook or error handler that answered with an
+  object it keeps (a module-level 404) had the call's Set-Cookie, CORS,
+  `Vary`, `Content-Encoding` and `ETag` written into it, and the next caller
+  was sent the previous caller's session cookie. Each request now writes into
+  its own copy, and a response an afterRender hook answers with is copied
+  before the hooks after it write into it.
+- **`redirectTrailingSlash` percent-encodes the Location, and so does
+  `res.redirect()`.** A TAB or line break in the path (`/%09/evil.example/`)
+  reached the header as it was, a browser drops those before resolving, and
+  `//evil.example` is another host; a decoded `ctx.path` carries them on every
+  gateway now, so an app redirecting to a path built from it was exposed the
+  same way. `res.redirect()` percent-encodes control characters, a space, a
+  backslash and anything outside ASCII in every Location, leaves `%` alone,
+  and collapses a path's leading run of slashes and backslashes to one slash,
+  so `//evil.example` built from the path stays on the site; another host is
+  named with its scheme.
+- **The DynamoDB cache's memory layer keeps to `memoryMaxBytes`.** A small
+  compressed value was a view into zlib's much larger output buffer and was
+  counted as its own few bytes, so a warm container could hold many times
+  its budget. The layer now keeps each value in a buffer of exactly its own
+  size, and counts each entry with its key and a fixed overhead.
+- **Waiters on a cache fill wait as long as the lease**, and a second more:
+  `waitForFillMs` defaults to (`leaseSeconds` + 1) × 1000 instead of 5 s, so a
+  loader slower than 5 s is no longer run again by every container that asked
+  for the key, and a waiter is still there to take over the lease of a holder
+  that crashed (a lease expires in whole seconds). A container refused the
+  lease because a value is already there serves it from the refusal, which
+  carries the item as the table's leader holds it (a chunked value's chunks
+  are read consistently), rather than loading: the read that found it missing
+  may have come from a replica that had not seen another container's fill yet,
+  and the loader would have run twice. A holder whose loader runs past the
+  lease has its publish refused by the takeover and is told so with
+  `console.warn`: such a call needs a `leaseSeconds` longer than its loader
+  takes, or under demand the entry never fills.
+- **Overwriting a chunked cache value deletes the old version's chunks**,
+  which stayed in the table until their TTL (a year by default), and which
+  `delete`, `deletePartition` and `listSortKeys` then paid to read.
+- **A cache read no longer deletes a fresh entry over replica lag.** Chunks
+  an eventually consistent read did not find yet, or that a newer write had
+  just replaced, counted as corruption and dropped the manifest. The read
+  now tries once more with a consistent read and drops only what fails that.
+- **A cache that fails open no longer logs the key**, which is the app's
+  data (an email address, a user id).
+- **API Gateway's own JSON errors no longer resolve as successes.** A 413, a
+  throttle, a WAF or missing-route 403 and an authorizer 401 answer
+  `{"message": ...}`, which read as an envelope with no payload: `ok: true`,
+  no `errorHandler`, the gateway text shown as an app message, and a refused
+  save that looked saved. An object is an envelope only when it carries
+  `apiVersion`, on a 5xx too, so a gateway's 502 `{"message": ...}` or a
+  proxy's body never lands on `response`, `errorMessage` or the invoke
+  caller's `crash`. A non-2xx answer that names no reason is a `server`
+  failure, with its status and `retryAfterSeconds`, a 503's `Retry-After`
+  included.
+- **A stale `sessionExpired` no longer signs a fresh login out.** A call sent
+  before a login (a poll, another tab) that answered after it deleted the
+  CSRF cookie the login had just set. The caller now acts on it only while
+  the cookie is still the one it sent, or is gone. It reads the token right
+  before sending, after any guard-input provider, so a rotation answered
+  meanwhile does not pair the new session cookie with the old token.
+  Over a cookie jar (the mock's memory mode, `lambder/testing`,
+  `lambderCookieJarTransport`) it compares the jar's CSRF token, which the
+  transport reports on the answer as `csrfTokens: { posted, held() }`, since
+  that session never reaches `document.cookie`.
+- **A timeout or abort while the answer's body downloads is reported as
+  one**, not as a malformed answer: the fetch transport reads the body inside
+  the call.
+- **A corrected or edited retry is no longer handed another request's
+  stored answer.** A key reused after a refusal replayed that refusal for
+  the whole window (qty 2 told "only 5 in stock", from the qty 10 before
+  it), and an edited retry after a timeout was told the first order went
+  through while only the first was placed.
+- **A DynamoDB claim the SDK retried after it had landed recognizes itself**
+  instead of answering its own original 409, and a refused claim costs one
+  write rather than a write and a read (`ALL_OLD`).
+- **A `per: "ip"` limit counts an IPv6 caller by its /64**
+  (`rateLimits.ipv6PrefixLength`, default 64). Any IPv6 subscriber holds at
+  least a /64 and may rotate the address inside it, so one counter per full
+  address let it through on every request. An IPv4-mapped address counts as
+  its IPv4 address, and the port CloudFront-Viewer-Address always appends is
+  taken off by the header it came from, not guessed from the text, so a
+  compressed address cannot carry its port into the /64
+  (`2600:3c00::1111:91ff:fe93:1234:443` counts under `2600:3c00::/64`). An
+  unbracketed IPv6 address in any other header is read as the address it
+  spells.
+- An async refinement in an input schema, a guard slice or a rate-limit key
+  slice validates instead of making zod throw on every call.
+- Under a CORS allowlist or predicate every answer carries `Vary: Origin`,
+  including one to a refused or absent Origin, so a cache cannot serve it to
+  an allowed origin.
+- **A logout, "log out everywhere", a password change or a revocation can no
+  longer be undone by a session write already in flight**, and "log out
+  everywhere" or a password change not by a rotation either. Every renewal,
+  data write and refresh wrote the whole record back unconditionally, so a
+  poll that slid the session as the user logged out re-created it (and
+  re-issued the cookies), and a thief's in-flight request brought a stolen
+  session back after the owner changed their password. Writes are now
+  conditional on the record existing, renewal writes only the expiry fields, a
+  data write that finds the data version moved since its read lands marked
+  due, so a revocation marked or already applied meanwhile stays in force, and
+  a rotation leaves no session behind for a session ended meanwhile. Deleting
+  every session of a subject lists them again when it finds a listed one
+  already gone, which is how a rotation that replaced it in between shows. It
+  lists at most four times; when a rotation completed inside every pass, it
+  logs that with `console.error` and the manager's `deleteSessionAll()` and
+  `deleteSessionAllByKey()` answer false, since a session may still stand. A
+  plain logout in one tab racing a rotation in another ends the session it
+  read; the rotated one lives on.
+- **`updateSessionData()` no longer pushes back the `dataRefresh`
+  deadline.** Only the refresh callback's output is stamped fresh, so an app
+  that writes session data more often than `ttlSeconds` (usually
+  `{ ...ctx.session.data, x }`, still carrying the roles read at login)
+  still refreshes on schedule, and a session rotated by
+  `regenerateSession()` stays due when the handler writes data right after.
+- **A revocation in the same second as the stored deadline holds.**
+  `expireSessionDataAllByKey()` marked data stale by writing the current
+  second, so a mark in the second the deadline already read, or a second
+  mark within one second, changed nothing, and a refresh already in flight
+  landed the revoked data for a full `ttlSeconds`. Conditional session
+  writes compare the data version instead.
+- **A `LambderSessionNotFoundError` thrown from a route, a session route or a
+  `beforeRender` or `afterRender` hook is answered as a missing session**
+  (the `setSessionExpiredRouteHandler` answer or the default 401, or the
+  sessionExpired envelope on an API call), not as a 500 and a crash report.
+  It happens when the session was ended while the request held it.
+  So is `LambderSessionAmbiguousError`, now a subclass of
+  `LambderSessionNotFoundError`, when a route, a hook or an API handler calls
+  `fetchSession()` on a request whose cookies name more than one live session.
+  It answered a 500 and a crash report there, where `fetchSessionIfExists()`
+  read it as no session; the answer carries the clearing cookies.
+- **The context a `beforeRender` hook hands back is the request's from then
+  on.** The handler received it, but the `afterRender` hooks, the global error
+  handler and a crash's `site.ctx` and `reveal(ctx)` received the context as
+  it arrived, without what the hook added and without the session a session
+  route or API read onto the replacement.
+- **Active users are no longer signed out at creation plus TTL** by an app
+  that writes session data often: the data write slid the record but not the
+  cookies, and renewal then saw nothing to slide.
+- **"Log out everywhere" finds a session created a moment before it** (the
+  listing reads consistently), and a subject's sessions are deleted or
+  expired a bounded number at a time rather than one round trip after
+  another.
+- **Session data holding an `undefined` no longer fails the DynamoDB write**
+  with compression off (a login that answered 500 in production only): the
+  plain attribute is written from the same JSON the compressed one is.
+- Session cookies carry `Max-Age` beside `Expires`, so a device whose clock
+  runs ahead does not drop a short-lived session early.
+- **A crash nothing answered is no longer silent.** With no reporter, the
+  framework's own 500 logs the crash with `console.error` (and a global error
+  handler that threw, beside it). That invocation succeeds, so Lambda's error
+  metric never counted it, and nothing else recorded it.
+- **A stored idempotency answer survives a `complete()` that reported a
+  failure after landing.** The engine releases the claim after any failed
+  store, and the release deleted on the owner token alone, which the stored
+  record still carries: a write whose response was lost took its record with
+  it, and the client's retry ran the operation again.
+- **An invoke cannot set `ctx.ip` or `ctx.host` through forwarded headers.**
+  The server tells an invoke by its `requestContext.apiId`, which no gateway
+  lets a client write, and reads neither `trustedClientIpHeaders` nor
+  `trustedHostHeaders` on one, so the invoker's `clientIp` and `host` are the
+  only channel. A gateway lambda that forwarded a browser's headers handed a
+  callee that trusted `x-real-ip` or `x-forwarded-host` an address and a host
+  the browser chose.
+  The invoke event also drops an `x-forwarded-for` the caller forwards, so an
+  8.x gateway lambda forwarding a browser's headers to a callee still on 7.x
+  that trusts that header hands it no address the browser chose. A
+  browser-shaped request (`lambder/testing`, `lambderHandlerTransport`) keeps
+  every header it is given, a forwarding header included, so a test exercises
+  the app's own `trustedClientIpHeaders`; 7.x dropped `x-forwarded-for` there
+  too.
+- **An HTTP API sending payload format 1.0 has its path read as already
+  decoded**, as its 2.0 events are, so `/%2561dmin` stays text instead of
+  reaching `/admin` past a route an authorizer guards, and a named stage is
+  dropped from the front of its path.
+- **A stale bundle with two or more stale endpoints no longer reloads
+  forever.** Each refusal overwrote the other's record, so no load saw a
+  repeat. The caller keeps every call refused within the window, by endpoint,
+  signature and version, with the time it was refused, per tab and per origin
+  in `sessionStorage`. Only a call recorded before the document loaded counts
+  as a repeat, so a retry or a second caller in the same page is asked about,
+  not reported as a loop. A page asks one `versionExpiredHandler` at a time,
+  however many of its calls, and of its callers, answer `versionExpired`:
+  refusals heard while it runs call nothing, and one heard after it returned
+  with the page still open asks again, so a per-call handler that does
+  something else, or a reload cancelled at a `beforeunload` prompt, leaves no
+  later call failing silently. Without `sessionStorage` nothing survives a
+  reload, so the protection lasts for the page only.
+- **Server-side `t()` answers in `defaultLanguage`**, not the process
+  locale: Node 21 and later define `navigator.languages` from it. Browser
+  detection runs only where there is a `document`.
+- **A `getOrSet` fill that finishes after a `set`, `delete` or
+  `deletePartition` of its key does not store the value its loader read
+  before that write**, on either cache. On `LambderDdbCache` the write
+  replaced or removed the fill's lease, so the fill's publish is refused, the
+  chunks it wrote are deleted, and its value goes back to its callers
+  uncached; a fill whose lease lapsed and was taken over is refused the same
+  way. A `getOrSet` made after the write starts its own load rather than
+  joining the overtaken one.
+  `delete` removes the manifest item by its key and `deletePartition` finds
+  the partition's items with a consistent Query, so a lease another container
+  took a moment before goes too.
+- **A `LambderDdbCache` read whose reply arrives after a `set`, `delete` or
+  `deletePartition` in the same instance does not put the replaced value back
+  in the memory layer**, and two overlapping writes of one key leave no memory
+  copy. For a few seconds after an instance writes a key (or drops its
+  partition) it reads that key with consistent reads, so a read that starts
+  after the write and reaches a replica that has not applied it cannot answer
+  or keep the old value either. Only the key written is affected: reads and
+  writes of other keys in flight keep their values in memory.
+- **`LambderDdbCache.delete` and `deletePartition` remove what another
+  container wrote a moment before.** Both found the items to delete with an
+  eventually consistent Query, which can miss an item the table accepted
+  within replica lag: `delete` answered false and a value published just
+  before it stayed, served by every container for its TTL, and a fill's lease
+  stayed, so that fill published a value its loader read before the change.
+  `delete` removes the manifest item by its key and finds its chunks with a
+  consistent Query; `deletePartition` queries consistently.
+- **`LambderDdbCache.delete` answers `true` only when a live value was
+  there**, and `deletePartition` counts only live values, as
+  `LambderMemoryCache` does: a fill's lease, a value past its TTL the table
+  had not removed yet, orphan chunks and a 7.x `lock` item all counted.
+  `delete` leaves a 7.x `lock` item to its TTL.
+- **Calls that share one `getOrSet` load each get a parse of their own**, on
+  both caches, as every read does. They got one object between them, so one
+  caller's change to its answer showed in the others'.
+- **A throwing `cors.origins` predicate no longer fails the request** with a
+  502 and a second, misattributed crash report (see the predicate above).
+- **A stalled `crashes.report` no longer turns every crash into a Lambda
+  timeout** (see `crashes.reportTimeoutMs`).
+- **`html` and `xml` no longer let a user-supplied value run script.**
+  `` html`<a href="${user.website}">` `` with `javascript:alert(document.cookie)`
+  produced a live link, and an interpolation inside `onclick="..."` ran once
+  the browser decoded the escapes. The tagged templates and
+  `LambderTemplatingEngine` slots share one implementation of the position
+  rules and the URL check.
+- **`LambderTemplatingEngine` reads `<script>` and `<style>` content as raw
+  text up to the element's own end tag.** A `<` and a quote inside a script
+  no longer hide an unquoted slot after it, and `</scripts>` does not end a
+  script. A `<script>` mentioned in a comment or an attribute value, or a
+  custom element such as `<style-box>`, no longer makes a slot refused.
+- **A template slot's position is read along the template's branches.** The
+  check read the text of both branches of an `<!--if:...-->` run together, so
+  an attribute name the if/else chose (`<a
+  <!--if:x-->title<!--else-->onclick<!--/if:x-->="<!--slot:v/-->">`) read as
+  `titleonclick`, neither refused nor URL-checked, while the else branch
+  rendered the slot inside a live `onclick` (and `href` against `data-lang`
+  gave an unchecked `href`). Each branch is now read from where its block
+  starts, a slot's default content and its value are two branches, and the
+  branches have to leave the HTML in the same position before the next slot or
+  block, or the template is refused when it compiles, naming the block. Vary
+  whole tags or elements inside the branches. The check is one pass over the
+  template instead of a rescan from the start per slot.
+- **Comments end where the browser ends them.** `<!-->`, `<!--->` and `--!>`
+  close a comment, and the check kept reading what followed as comment text,
+  so a slot or interpolation after it in an unquoted attribute (`<!--><a
+  title=<!--slot:v/-->>`) passed and rendered a live attribute list. A value
+  in a comment right before a `-`, `!` or `>` that would end the comment after
+  a value ending in `--` is refused too; put a space after it.
+- **The position check reads markup the way a browser's tokenizer does.** The
+  attributes of an end tag, bogus comments and DOCTYPEs (`<!x ...>`,
+  `<?...>`), the content of `<title>`, `<textarea>`, `<xmp>`, `<iframe>`,
+  `<noembed>` and `<noframes>`, a script's `<!--<script>` escape, a no-break
+  space inside a tag, and an `=` that starts an attribute name each left the
+  check inside a quote, or outside a script, that the browser had left or was
+  still in, so a slot or interpolation passed in an unquoted value or inside a
+  script.
+- **The position check fails closed where inline SVG and MathML read the
+  template apart from plain HTML.** It read the content of `<title>`,
+  `<textarea>`, `<xmp>`, `<iframe>`, `<noembed>` and `<noframes>` as text
+  everywhere, and a CDATA section as a bogus comment ending at its first `>`,
+  where inside `<svg>` or `<math>` that content is markup and the section runs
+  to `]]>`, so `<svg><title><img src=x onerror="${v}">` rendered a live
+  handler. Once such content holds a tag, or a CDATA section runs past its
+  first `>`, every value from there on is refused, past the element's end tag
+  too, in `html` and in `LambderTemplatingEngine` alike; plain
+  `<title>${v}</title>` and `<textarea>${v}</textarea>` render escaped as
+  before. And `html` and `xml` throw when a call's template does not end in
+  plain text (inside a tag, an attribute value, a comment, or the content of a
+  `<script>` or a text-only element): a nested fragment is inserted without
+  being read, so one that ended mid-markup (`${html`<a href=`}${url}>`) moved
+  the interpolations after it and rendered a value unquoted.
+
+### Documentation
+
+- [docs/sessions.md](./docs/sessions.md) recommended `regenerateSession()`
+  after a password change, which rotates only the caller's own session; it
+  now says `endSessionAll()` then `createSession()`.
+- [docs/routing.md](./docs/routing.md#crashes) says a crash reporter's
+  `site.ctx` carries the request's secrets (the session cookie, a login's
+  password in the body, the session record), so a reporter forwards the
+  fields a crash needs rather than the whole context.
+- [docs/configuration.md](./docs/configuration.md#trustedhostheaders) says a
+  Function URL with auth `NONE` can be called directly with any
+  `x-forwarded-host`, so the header is trustworthy only when the function is
+  reachable solely through the distribution (`AWS_IAM` auth plus CloudFront
+  origin access control).
+- [docs/testing.md](./docs/testing.md) said the production stores are out of
+  reach under the test app; that holds for the stores the instance holds. A new
+  section says which Lambder classes an app constructs itself and what to swap
+  each for (`LambderMemoryCache`, `ctx.rateLimit`,
+  `LambderInvokeCaller.localTransport`).
+- [docs/templating.md](./docs/templating.md#branches) describes the branch
+  rule, and says what the URL check leaves to the app: SVG animation targets
+  and a meta refresh `content` are not checked, and a value starting with `/`
+  or `\` turns a root-relative `href="/..."` protocol-relative.
+
 ## [7.3.1] - 2026-09-21
 
 ### Added
@@ -1612,7 +2542,7 @@ out silently falls back to the SDK's default chain.
 - **The mock no longer signs a browser out on any host but plain `localhost`.**
   `signIn` planted cookies at `localhost` while the transport's jar scoped them
   by the caller's site host, so every session call on a dev host such as
-  `transit.localhost:5173` answered sessionExpired with a full jar.
+  `shop.localhost:5173` answered sessionExpired with a full jar.
 - **`sessionNotMocked` runs the same registration checks the other builders
   run**, so a session endpoint on a mock without the `sessions` option fails
   where it is written instead of answering 500 at the first call with a message
@@ -2175,8 +3105,8 @@ than a migration.
 
 - **Grouped cache keys.** `LambderDdbCache` keys may be a `{ pk, sk }` pair
   instead of a string, which stores related entries in one partition:
-  `{ pk: "division:ist-34", sk: "1700:1800" }` keeps every cached window of one
-  division together. `deletePartition(pk)` then drops the whole group without
+  `{ pk: "store:nyc-01", sk: "1700:1800" }` keeps every cached window of one
+  store together. `deletePartition(pk)` then drops the whole group without
   knowing which sort keys exist, and `listSortKeys(pk, { prefix, limit })`
   reads back what is currently cached under it. The group invalidation a cache
   of derived, per-entity values needs, in place of remembering every key ever

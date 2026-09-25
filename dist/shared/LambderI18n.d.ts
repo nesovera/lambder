@@ -106,17 +106,16 @@ export interface LambderI18nInstance<TLanguages extends Record<string, LambderLa
         [D in TDefault]: Partial<Record<keyof TContract, never>>;
     } & TExt): LambderI18nInstance<TLanguages, TDefault, TEnforced, TContract & TExt[TDefault]>;
     /**
-     * Run the loaders a language has in this instance and in every instance
-     * sharing its root, and resolve once their dictionaries are merged.
-     * Defaults to the active language; resolves at once when nothing is left
-     * to load. Until then `t` falls back per key to the default language, so
-     * await it before the first render, and before `setLanguage` to switch
-     * without a flash of the default language. Change listeners fire once
-     * per load, however many calls share it. A loader that answered never
-     * runs again; one that rejected rejects this call and runs again on the
-     * next. Creating an extension loads nothing: one created after its
-     * language was loaded awaits its own `loadLanguage()`, which runs only
-     * what is still missing.
+     * Run the loaders a language has in this instance and every instance
+     * sharing its root, resolving once their dictionaries are merged.
+     * Defaults to the active language. Until then `t` falls back per key to
+     * the default language, so await it before the first render, and before
+     * `setLanguage` to switch without a flash of the default language.
+     * Change listeners fire once per load, however many calls share it. A
+     * loader that answered never runs again; one that rejected rejects this
+     * call and is retried on the next. Creating an extension loads nothing:
+     * one created after its language was loaded needs its own
+     * `loadLanguage()`, which runs only what is still missing.
      */
     loadLanguage(code?: keyof TLanguages & string): Promise<void>;
     /** Merge additional translations at runtime (e.g. fetched from an API). Notifies change listeners. */

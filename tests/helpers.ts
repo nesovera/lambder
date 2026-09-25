@@ -60,8 +60,8 @@ export const createMockEvent = (
 /**
  * The address the gateway reports for an API event unless a test names its
  * own. A fixed one, because `per: "ip"` counters key off it: with no source
- * IP at all every caller in the suite shared the empty-string counter, so a
- * per-caller limit and a global one looked identical.
+ * IP, every caller in the suite would share the empty-string counter, and a
+ * per-caller limit would look the same as a global one.
  */
 export const DEFAULT_GATEWAY_SOURCE_IP = '203.0.113.7';
 
@@ -77,11 +77,13 @@ export const createApiEvent = (
     body: Record<string, unknown>,
     overrides: Partial<APIGatewayProxyEvent> & { sourceIp?: string } = {},
 ): APIGatewayProxyEvent => {
-    const { sourceIp = DEFAULT_GATEWAY_SOURCE_IP, ...eventOverrides } = overrides;
+    const { sourceIp = DEFAULT_GATEWAY_SOURCE_IP, headers, ...eventOverrides } = overrides;
     return createMockEvent('/api', {
         body: JSON.stringify(body),
         httpMethod: 'POST',
-        headers: { Host: 'localhost' },
+        // An API call is JSON, the way every Lambder caller sends one; a test
+        // that wants another content type names its own.
+        headers: { Host: 'localhost', 'Content-Type': 'application/json', ...headers },
         requestContext: { identity: { sourceIp } } as APIGatewayProxyEvent['requestContext'],
         ...eventOverrides,
     });
@@ -180,10 +182,9 @@ export class MemoryDdb extends DynamoDBClient {
             const existing = this.items.get(k);
             const nowOf = () => Number(input.ExpressionAttributeValues?.[":now"]?.N ?? Math.floor(Date.now() / 1000));
             // DynamoDB evaluates a comparison whose operand path is missing,
-            // or whose stored value is not a number, as FALSE. This double
-            // used to read a missing expiresAt as 0, i.e. as expired, which is
-            // the opposite answer and hid a claim condition that refused an
-            // item with no readable expiry for ever.
+            // or whose stored value is not a number, as FALSE. Reading a
+            // missing expiresAt as 0 (expired) would give the opposite answer
+            // and hide a claim condition that refuses such an item for ever.
             const expiryPassed = (item: Item | undefined, now: number): boolean => {
                 const expiresAt = Number(item?.expiresAt?.N);
                 return Number.isFinite(expiresAt) && expiresAt <= now;
@@ -192,10 +193,12 @@ export class MemoryDdb extends DynamoDBClient {
                 const now = nowOf();
                 const claimable = (input.ConditionExpression.includes("attribute_not_exists(expiresAt)") && existing.expiresAt === undefined)
                     || expiryPassed(existing, now);
-                if(!claimable) throw conditionalFailure();
+                // ALL_OLD hands the item that refused the write back with the
+                // failure, as DynamoDB does.
+                if(!claimable) throw Object.assign(conditionalFailure(), input.ReturnValuesOnConditionCheckFailure === "ALL_OLD" ? { Item: { ...existing } } : {});
             }
-            // Matched by clause rather than by whole-string equality: the
-            // exact-string form silently degraded into an unconditional write
+            // Matched by clause rather than by whole-string equality: an
+            // exact-string match would silently become an unconditional write
             // the moment the store's expression changed, which is the one
             // failure a double like this must not have.
             if(input.ConditionExpression?.includes("ownerToken = :owner")){
@@ -213,9 +216,12 @@ export class MemoryDdb extends DynamoDBClient {
             return { Item: this.items.get(keyOf(input.Key)) };
         }
         if(command instanceof DeleteItemCommand){
+            const existing = this.items.get(keyOf(input.Key));
             if(input.ConditionExpression?.includes("ownerToken = :owner")){
-                const existing = this.items.get(keyOf(input.Key));
                 if(existing?.ownerToken?.S !== input.ExpressionAttributeValues?.[":owner"]?.S) throw conditionalFailure();
+            }
+            if(input.ConditionExpression?.includes("#state = :pending")){
+                if(existing?.[input.ExpressionAttributeNames["#state"]]?.S !== input.ExpressionAttributeValues?.[":pending"]?.S) throw conditionalFailure();
             }
             this.items.delete(keyOf(input.Key));
             return {};
@@ -252,6 +258,7 @@ export class MemoryDdbDocument {
         const name = command?.constructor?.name ?? "";
 
         if(name.startsWith("Put")){
+            if(!this.conditionHolds(input, this.items.get(this.keyOf(input.Item)))) throw this.conditionalFailure();
             this.items.set(this.keyOf(input.Item), { ...input.Item });
             return {};
         }
@@ -260,8 +267,10 @@ export class MemoryDdbDocument {
             return item ? { Item: { ...item } } : {};
         }
         if(name.startsWith("Delete")){
-            this.items.delete(this.keyOf(input.Key));
-            return {};
+            const key = this.keyOf(input.Key);
+            const removed = this.items.get(key);
+            this.items.delete(key);
+            return removed && input.ReturnValues === "ALL_OLD" ? { Attributes: { ...removed } } : {};
         }
         if(name.startsWith("Query")){
             // Only the shape the session store sends: one partition, equality.
@@ -278,22 +287,64 @@ export class MemoryDdbDocument {
             // attribute_exists on the sort key is how the store asks "is this
             // record still here", and a missing record must fail the condition
             // rather than create a stub.
-            if(input.ConditionExpression?.startsWith("attribute_exists") && !existing){
-                throw Object.assign(new Error("conditional request failed"), { name: "ConditionalCheckFailedException" });
+            // A refusal hands back the item it found when asked to, as DynamoDB
+            // does, so the store can tell a moved record from a missing one.
+            if(!this.conditionHolds(input, existing)){
+                throw Object.assign(this.conditionalFailure(), existing && input.ReturnValuesOnConditionCheckFailure === "ALL_OLD" ? { Item: { ...existing } } : {});
             }
-            const assignment = /SET\s+(#\w+)\s*=\s*(:\w+)/.exec(input.UpdateExpression ?? "");
-            if(!assignment) throw new Error("MemoryDdbDocument: unsupported UpdateExpression " + input.UpdateExpression);
-            const attribute = input.ExpressionAttributeNames?.[assignment[1]!] ?? assignment[1]!;
-            this.items.set(key, { ...(existing ?? input.Key), [attribute]: input.ExpressionAttributeValues?.[assignment[2]!] });
+            const names = input.ExpressionAttributeNames ?? {};
+            const values = input.ExpressionAttributeValues ?? {};
+            const updated: Record<string, any> = { ...(existing ?? input.Key) };
+            const expression: string = input.UpdateExpression ?? "";
+            const clauseOf = (keyword: string) => new RegExp(`${keyword}\\s+(.*?)(?=\\s+(?:SET|REMOVE|ADD)\\s|$)`).exec(expression)?.[1];
+            const setClause = clauseOf("SET");
+            const removeClause = clauseOf("REMOVE");
+            const addClause = clauseOf("ADD");
+            if(!setClause && !removeClause && !addClause) throw new Error("MemoryDdbDocument: unsupported UpdateExpression " + expression);
+            for(const assignment of setClause?.split(",") ?? []){
+                const [attribute, value] = assignment.split("=").map((part) => part.trim());
+                updated[names[attribute!] ?? attribute!] = values[value!];
+            }
+            // ADD on a number: an absent attribute counts from zero.
+            for(const addition of addClause?.split(",") ?? []){
+                const [attribute, value] = addition.trim().split(/\s+/);
+                const target = names[attribute!] ?? attribute!;
+                updated[target] = (updated[target] ?? 0) + values[value!];
+            }
+            for(const attribute of removeClause?.split(",").map((part) => part.trim()) ?? []){
+                delete updated[names[attribute] ?? attribute];
+            }
+            this.items.set(key, updated);
             return {};
         }
         throw new Error("MemoryDdbDocument: unhandled command " + name);
+    }
+
+    /** The condition shapes the session store writes: attribute_exists, attribute_not_exists and equality, joined by AND. */
+    private conditionHolds(input: Record<string, any>, existing: Record<string, any> | undefined): boolean {
+        const condition: string | undefined = input.ConditionExpression;
+        if(!condition) return true;
+        const names = input.ExpressionAttributeNames ?? {};
+        const values = input.ExpressionAttributeValues ?? {};
+        return condition.split(/\s+AND\s+/).every((clause) => {
+            const exists = /^attribute_exists\((#\w+)\)$/.exec(clause);
+            if(exists) return existing !== undefined && existing[names[exists[1]!] ?? exists[1]!] !== undefined;
+            const absent = /^attribute_not_exists\((#\w+)\)$/.exec(clause);
+            if(absent) return existing === undefined || existing[names[absent[1]!] ?? absent[1]!] === undefined;
+            const equal = /^(#\w+)\s*=\s*(:\w+)$/.exec(clause);
+            if(equal) return existing !== undefined && existing[names[equal[1]!] ?? equal[1]!] === values[equal[2]!];
+            throw new Error("MemoryDdbDocument: unsupported ConditionExpression " + condition);
+        });
+    }
+
+    private conditionalFailure(): Error {
+        return Object.assign(new Error("conditional request failed"), { name: "ConditionalCheckFailedException" });
     }
 }
 
 /**
  * The file source every server test builds its instance on. The directory
  * is never read by these tests (they exercise routes and APIs, not files),
- * so one factory replaces the same literal written in every describe block.
+ * so one factory stands in for the same literal in every describe block.
  */
 export const testPublicFiles = (): LambderLocalFileSource => new LambderLocalFileSource({ root: './public' });

@@ -4,14 +4,14 @@ import type { LambderMockEntry, LambderMockOverride, LambderMockRestEntry } from
  * standing over them.
  *
  * One of the four pieces of state LambderMockApp holds that nothing else
- * touches; it meets the rest of the runtime at one call, the lookup a request
- * makes. The app keeps the whole caller-facing surface (register,
- * registerPartial, override, restoreOverrides, registeredNames) as
- * delegations, because that surface is contract-typed and the checks that
- * make it safe are compile-time; what lives here is the bookkeeping.
+ * touches; the rest of the runtime reaches it only through a request's
+ * lookup. The app keeps the caller-facing surface (register, registerPartial,
+ * override, restoreOverrides, registeredNames) as delegations, because that
+ * surface is contract-typed and its safety checks are compile-time; this
+ * class holds the bookkeeping.
  *
- * Generic over the contract only so the entries keep their type through the
- * map; the registry itself never reads one.
+ * Generic over the contract only so entries keep their type through the map;
+ * the registry itself never reads one.
  */
 export declare class LambderMockEntryRegistry<C> {
     private readonly entries;
@@ -32,11 +32,10 @@ export declare class LambderMockEntryRegistry<C> {
     get restNotMockedReason(): string | null;
     /**
      * Adds every entry of every slice, and the rest entry where one is among
-     * them. Slices are staged and committed together, so a slice that fails a
-     * check leaves nothing behind: a caller that catches the error and retries
-     * sees the problem it is fixing rather than a duplicate-name error from
-     * its own first attempt. The rest entry is staged with them, for the same
-     * reason.
+     * them. Everything is staged and committed together, so a failed check
+     * leaves nothing behind: a caller that catches the error and retries sees
+     * the problem it is fixing, not a duplicate-name error from its own first
+     * attempt.
      */
     addSlices(slices: readonly (Record<string, LambderMockEntry<C, any>> | LambderMockRestEntry)[]): void;
     /** The registered entry for a name, before any override; null when there is none. */

@@ -2,27 +2,27 @@
  * Request payload compression: the wire format both sides speak.
  *
  * When a LambderCaller call's payload clears the configured size, the caller
- * sends the payload's JSON as `payloadGz` (gzip bytes, base64) beside
+ * sends the payload's JSON as `payloadGz` (gzip bytes, base64) plus
  * `payloadBytes` (its UTF-8 byte length) in place of `payload`, and the
  * server restores it before anything reads the payload. A Node caller
  * (LambderInvokeCaller) sends `payloadBr` instead, Brotli under the same
- * rules; the server accepts either. Everything else in the envelope
- * (apiName, version, token, siteHost, guardInputs, idempotencyKey) stays
- * plain text, so routing, logging and request mocking are unaffected.
+ * rules; the server accepts either. The rest of the envelope (apiName,
+ * version, token, siteHost, guardInputs, idempotencyKey) stays plain text,
+ * so routing, logging and request mocking are unaffected.
  *
- * Base64 inside the JSON envelope, rather than a binary body with
- * Content-Encoding: API Gateway hands a binary request body to Lambda
- * base64-encoded anyway, so binary saves nothing against Lambda's ~6MB
- * invoke payload cap while adding a content-type negotiation that gateways,
- * CDNs and mock servers each treat differently. Base64's 4/3 overhead
- * applies to bytes that already shrank several times over.
+ * Base64 inside the JSON envelope rather than a binary body with
+ * Content-Encoding: API Gateway hands a binary body to Lambda base64-encoded
+ * anyway, so binary saves nothing against Lambda's ~6MB invoke cap while
+ * adding content-type negotiation that gateways, CDNs and mock servers each
+ * treat differently. Base64's 4/3 overhead applies to bytes that already
+ * shrank several times over.
  *
  * gzip rather than Brotli because the browser's CompressionStream offers
- * gzip and deflate only; responses, compressed by Node, do prefer Brotli.
+ * only gzip and deflate; responses, compressed by Node, prefer Brotli.
  *
- * `payloadBytes` is not bookkeeping: it bounds the server's decompression
- * and the restored length must match it exactly, the same guarantee
- * LambderCompressionCodec gives stored records, so a malicious or truncated
+ * `payloadBytes` is not bookkeeping: it bounds the server's decompression,
+ * and the restored length must match it exactly (the guarantee
+ * LambderCompressionCodec gives stored records), so a malicious or truncated
  * body fails instead of expanding without limit.
  */
 import type { LambderCompressionOption, LambderCompressionSettings } from "./LambderCompressionOption.js";
@@ -76,9 +76,8 @@ export declare const DEFAULT_MAX_RESTORED_PAYLOAD_BYTES = 20000000;
  * `compressRequest: true` means "whatever the size", which is a threshold of
  * zero rather than a separate path.
  *
- * Both callers decide this, and the three-line ternary they each wrote is the
- * one place a caller can get the override backwards, so it is written once
- * beside the compressors it feeds.
+ * Both callers decide this, and the override is easy to get backwards, so it
+ * is written once, beside the compressors it feeds.
  */
 export declare const resolveRequestCompressionMinBytes: (compressRequest: boolean | undefined, settings: {
     minBytes: number;
@@ -87,11 +86,10 @@ export declare const resolveRequestCompressionMinBytes: (compressRequest: boolea
 export declare const isRequestCompressionAvailable: () => boolean;
 /**
  * Gzip one payload's JSON for sending, or null when the plain JSON should go
- * instead (see compressPayloadWith for the two rules). The second null
+ * instead (see compressPayloadWith for the two rules). The second rule
  * matters for the payloads most likely to be large: a base64 image gzips to
  * nearly its own size, and base64 then inflates the result past the
- * original. Sending that would cost CPU on both ends for a request that got
- * bigger, so the compressed form is only ever sent when it is smaller.
+ * original, so sending it would cost CPU on both ends for a bigger request.
  */
 export declare const compressPayloadGzip: (json: string, minBytes: number) => Promise<LambderCompressedGzipPayload | null>;
 /** Request Brotli when `requestCompression: true` on LambderInvokeCaller: the HTTP request threshold, at the quality every other Lambder site uses. */

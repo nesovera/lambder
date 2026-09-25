@@ -6,8 +6,8 @@
  * a login API whose session cookie is dropped on the way out logs nobody in,
  * writes its session record anyway, and reports no error.
  *
- * Routes always behaved this way. These pin it for APIs too, on the success
- * path, the refusal path and the hook-throws path.
+ * These pin it for APIs and routes alike, on the success path, the refusal
+ * path and the hook-throws path.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -106,12 +106,12 @@ describe('Headers written during a call', () => {
     });
 
     it('survive a crash with NO global error handler, which is the default configuration', async () => {
-        // The fix for a crash losing the call's headers lived only in the
-        // globalErrorHandler branch, and that handler is not the default. So
-        // the plainest app of all, one that just throws, wrote its session
-        // record and sent the browser nothing: signed in on the server, signed
-        // out in the browser, and a cross-origin caller could not read the
-        // error either, because the CORS headers went with them.
+        // The crash path must keep the call's headers without a
+        // globalErrorHandler too, since that handler is not the default.
+        // Otherwise an app that just throws writes its session record and
+        // sends the browser nothing (signed in on the server, signed out in
+        // the browser), and a cross-origin caller cannot read the error
+        // because the CORS headers go with them.
         const lambder = new Lambder({
             files: files(),
             apiPath: '/api',
@@ -133,16 +133,15 @@ describe('Headers written during a call', () => {
         expect(result.multiValueHeaders?.['X-Handler']).toEqual(['ran']);
         expect(result.multiValueHeaders?.['Access-Control-Allow-Origin']).toEqual(['https://site.example']);
         // Still the structured crash envelope a client can parse.
-        expect(JSON.parse(decodeBody(result)).errorMessage).toBe('Internal server error.');
+        expect(JSON.parse(decodeBody(result)).errorMessage).toEqual({ type: 'error', content: 'Internal server error.' });
     });
 });
 
 /**
  * The call's headers go onto the response BEFORE the afterRender hooks run,
- * so a hook is the last writer rather than the first. Replaying them
- * afterwards put the handler's value straight back, which meant a hook could
- * neither override a header nor delete one, and the deletion looked like it
- * had worked right up to the wire.
+ * so a hook is the last writer. Replaying them afterwards would put the
+ * handler's value straight back: a hook could neither override a header nor
+ * delete one, and the deletion would look like it worked right up to the wire.
  */
 describe('An afterRender hook and the headers the handler wrote', () => {
     type AfterRenderHook = (ctx: LambderRenderContext, res: LambderResolver, response: LambderResponse) => LambderResponse;

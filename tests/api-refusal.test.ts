@@ -13,7 +13,7 @@
 import { describe, it, expect } from 'vitest';
 import { z } from 'zod';
 import Lambder from '../src/core/Lambder.js';
-import { LambderApiRefusal, isLambderApiRefusal, refuse, LAMBDER_REFUSAL_CODES } from '../src/shared/wire/LambderApiRefusal.js';
+import { LambderApiRefusal, isLambderApiRefusal, refuse, refusalMessageOf, LAMBDER_REFUSAL_CODES } from '../src/shared/wire/LambderApiRefusal.js';
 import type { LambderAppRefusalMessage, LambderRefusalMessage } from '../src/shared/wire/LambderApiRefusal.js';
 import { decodeBody, createApiEvent as createEnvelopeEvent, createMockContext, testPublicFiles } from './helpers.js';
 import type { APIGatewayProxyEvent } from 'aws-lambda';
@@ -51,7 +51,7 @@ describe('LambderApiRefusal - envelope mapping on API calls', () => {
         expect(result.statusCode).toBe(200);
         const body = JSON.parse(decodeBody(result));
         expect(body.payload).toBe(null);
-        expect(body.errorMessage).toBe('You are not a member of an organization.');
+        expect(body.errorMessage).toEqual({ type: 'error', content: 'You are not a member of an organization.' });
     });
 
     it('works from nested helpers that have no resolver access', async () => {
@@ -69,7 +69,7 @@ describe('LambderApiRefusal - envelope mapping on API calls', () => {
         expect(result.statusCode).toBe(200);
         const body = JSON.parse(decodeBody(result));
         expect(body.notAuthorized).toBe(true);
-        expect(body.errorMessage).toBe('Permission denied.');
+        expect(body.errorMessage).toEqual({ type: 'error', content: 'Permission denied.' });
     });
 
     it('carries structured errorMessage objects verbatim', async () => {
@@ -105,7 +105,7 @@ describe('LambderApiRefusal - envelope mapping on API calls', () => {
         const result = await lambder.render(createApiEvent('refuse', { value: 'x' }), createMockContext());
         expect(result.statusCode).toBe(403);
         const body = JSON.parse(decodeBody(result));
-        expect(body.errorMessage).toBe('Forbidden');
+        expect(body.errorMessage).toEqual({ type: 'error', content: 'Forbidden' });
     });
 
     it('maps refusals thrown from beforeRender hooks on API calls', async () => {
@@ -124,7 +124,7 @@ describe('LambderApiRefusal - envelope mapping on API calls', () => {
 
         expect(handlerRan).toBe(false);
         expect(result.statusCode).toBe(200);
-        expect(JSON.parse(decodeBody(result)).errorMessage).toBe('Blocked by hook');
+        expect(JSON.parse(decodeBody(result)).errorMessage).toEqual({ type: 'error', content: 'Blocked by hook' });
     });
 
     it('maps refusals thrown from afterRender hooks on API calls', async () => {
@@ -135,7 +135,7 @@ describe('LambderApiRefusal - envelope mapping on API calls', () => {
         });
 
         const result = await lambder.render(createApiEvent('ok', { value: 'x' }), createMockContext());
-        expect(JSON.parse(decodeBody(result)).errorMessage).toBe('Rejected after render');
+        expect(JSON.parse(decodeBody(result)).errorMessage).toEqual({ type: 'error', content: 'Rejected after render' });
     });
 
     it('recognizes the brand across duplicate installs (no instanceof)', async () => {
@@ -268,7 +268,7 @@ describe('Last-resort 500 shape', () => {
         expect(result.multiValueHeaders?.['Content-Type']).toEqual(['application/json; charset=utf-8']);
         const body = JSON.parse(result.body || '{}');
         expect(body.payload).toBe(null);
-        expect(body.errorMessage).toBe('Internal server error.');
+        expect(body.errorMessage).toEqual({ type: 'error', content: 'Internal server error.' });
         expect(body.apiVersion).toBe('1.2.3');
     });
 
@@ -284,15 +284,15 @@ describe('Last-resort 500 shape', () => {
 
 describe('LambderRefusalMessage - branching on the code', () => {
     it('narrows in a switch and asserts exhaustiveness, which is what the codes exist for', () => {
-        // `LambderRefusalCode | (string & {})` does not narrow: inside a
-        // switch the case was not assignable to the scrutinee and the
-        // `default: never` assertion failed, so the exhaustiveness the
-        // framework's own vocabulary is designed for was unavailable to every
-        // consumer that tried to use it.
+        // A code typed `LambderRefusalCode | (string & {})` would not narrow:
+        // a case is not assignable to the scrutinee and the `default: never`
+        // assertion fails, so no consumer could get the exhaustiveness the
+        // framework's own vocabulary is designed for.
         const describeRefusal = (message: LambderRefusalMessage): string => {
             switch(message.code){
                 case LAMBDER_REFUSAL_CODES.rateLimited: return 'slow down';
                 case LAMBDER_REFUSAL_CODES.duplicateInFlight: return 'already running';
+                case LAMBDER_REFUSAL_CODES.idempotencyKeyReused: return 'another request';
                 case LAMBDER_REFUSAL_CODES.invalidIdempotencyKey: return 'bad key';
                 case LAMBDER_REFUSAL_CODES.apiNotFound: return 'no such api';
                 case LAMBDER_REFUSAL_CODES.invalidRequestPayload: return 'bad payload';
@@ -331,5 +331,24 @@ describe('LambderRefusalMessage - branching on the code', () => {
         // policy's message carries whatever code the app uses.
         const message: LambderAppRefusalMessage = { type: 'warning', code: 'app/anything', content: 'x' };
         expect(message.code).toBe('app/anything');
+    });
+});
+
+describe('refusalMessageOf', () => {
+    it('reads a plain string as an error message with that content', () => {
+        expect(refusalMessageOf('No.')).toEqual({ type: 'error', content: 'No.' });
+        expect(refusalMessageOf('')).toEqual({ type: 'error', content: '' });
+    });
+
+    it('hands a message object back as it is', () => {
+        const message: LambderAppRefusalMessage = { type: 'warning', code: 'app/no', title: 'Heads up', content: 'No.' };
+        expect(refusalMessageOf(message)).toBe(message);
+    });
+
+    it('gives a message with no readable type the error type, and describes what is not a message at all', () => {
+        expect(refusalMessageOf({ type: 'shout', content: 'No.' })).toEqual({ type: 'error', content: 'No.' });
+        expect(refusalMessageOf({ reason: 'teapot' })).toEqual({ type: 'error', content: '{"reason":"teapot"}' });
+        expect(refusalMessageOf(418)).toEqual({ type: 'error', content: '418' });
+        expect(refusalMessageOf(null)).toEqual({ type: 'error', content: 'null' });
     });
 });

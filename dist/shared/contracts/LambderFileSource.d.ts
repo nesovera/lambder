@@ -5,12 +5,12 @@ export type LambderFile = {
 };
 /**
  * Where an app's files come from: the `files` option at creation, read by
- * servePublicFiles, serveIndexHtml, res.file and res.templateFile alike,
- * through the instance's one reader (LambderFiles). Implement `read` over
- * any backing store: LambderLocalFileSource (a folder), LambderS3FileSource
- * (S3, or R2 and other S3-compatible stores), LambderHttpFileSource (any
- * origin serving files by path), or your own. The reader does the rest for
- * every source: path rule, memory cache, mime fallback from the extension.
+ * servePublicFiles, serveIndexHtml, res.file and res.templateFile alike
+ * through the instance's one reader (LambderFiles), which adds the path rule,
+ * memory cache and mime fallback for every source. Implement `read` over any
+ * backing store, or use LambderLocalFileSource (a folder),
+ * LambderS3FileSource (S3, R2 and other S3-compatible stores) or
+ * LambderHttpFileSource (any origin serving files by path).
  */
 export interface LambderFileSource {
     /**

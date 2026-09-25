@@ -11,7 +11,12 @@
 import type { APIGatewayProxyEvent, APIGatewayProxyEventV2, Context } from "aws-lambda";
 import type { LambderHttpEventFormat } from "../core/LambderContext.js";
 import type { LambderCompressedBrotliPayload, LambderCompressedGzipPayload } from "../shared/wire/LambderRequestPayload.js";
-/** Marks a synthesized request as an invoke, for guards and hooks that want to tell. Not an authorization. */
+/**
+ * Marks a synthesized request as an invoke, for guards and hooks that want to
+ * tell. Not an authorization: over HTTP it is a header any client can send.
+ * The server itself tells an invoke by its requestContext.apiId, which no
+ * gateway lets a client write (see LAMBDER_INVOKE_API_ID).
+ */
 export declare const LAMBDER_INVOKE_HEADER = "x-lambder-invoke";
 /** The invoking function's name, when the caller runs in Lambda; for the callee's logs. */
 export declare const LAMBDER_INVOKED_BY_HEADER = "x-lambder-invoked-by";
@@ -33,21 +38,36 @@ export type LambderSynthesizedRequest = {
     clientIp?: string;
     cookies?: string[];
     body?: string | Buffer;
+    /**
+     * The body's type, owned by the event over any Content-Type in `headers`:
+     * an API call's envelope is JSON whatever headers a caller forwards, and
+     * a server takes a POST to its API path as an API call only when it says
+     * so. Left out, a caller's own Content-Type stands, and a body without
+     * one is typed by its kind.
+     */
+    contentType?: string;
 };
 /**
  * The event API Gateway would deliver for this request: payload format 2.0
- * (an HTTP API, a Function URL) unless `eventFormat: "v1"` asks for the REST
- * API's. An invoke is always 2.0; the other format is for an in-process call
- * that wants the handler to meet the shape its own deployment delivers.
+ * (an HTTP API's, whose path arrives decoded) unless `eventFormat: "v1"` asks
+ * for the REST API's, whose path arrives as written. An invoke is always 2.0;
+ * the other format is for an in-process call that wants the handler to meet
+ * the shape its own deployment delivers.
  * `invoke: true` adds the invoke marker headers a server-to-server call
  * carries; a browser-shaped request (the handler transport) leaves them off.
  *
  * The client address is `clientIp` and reaches the callee as the gateway's
- * observed source address only (requestContext.http.sourceIp, or
- * requestContext.identity.sourceIp on a REST API event). Writing it as
- * x-forwarded-for as well would put the same fact on a channel a callee may
- * be configured to trust (trustedClientIpHeaders), and the header is the one
- * the caller's own `headers` could otherwise have set.
+ * observed source address (requestContext.http.sourceIp, or
+ * requestContext.identity.sourceIp on a REST API event). On an invoke it is
+ * the only channel, and x-forwarded-for is dropped from the caller's
+ * `headers`: a server of this version reads no trusted forwarding header on
+ * an event carrying LAMBDER_INVOKE_API_ID, but a callee on Lambder 7.x reads
+ * the one it trusts on any event, so a gateway lambda forwarding a browser's
+ * headers would hand it a ctx.ip the browser chose. x-forwarded-for is the
+ * header a gateway writes and the one such a callee trusts in the common
+ * case. A browser-shaped request keeps every header it was given: it stands
+ * for what a gateway delivered, and a test that writes a forwarding header
+ * on one is exercising the app's own trustedClientIpHeaders.
  */
 export declare function synthesizeLambdaHttpEvent(request: LambderSynthesizedRequest, options: {
     invoke: boolean;

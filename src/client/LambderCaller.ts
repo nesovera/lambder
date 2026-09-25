@@ -18,6 +18,7 @@ import {
     type LambderGuardInputsProviderOption,
     type LambderSharedCallOptions,
 } from '../shared/wire/LambderCallOptions.js';
+import { beginIdempotentAttempt, IDEMPOTENT_ATTEMPT_NOT_SENT } from '../shared/wire/LambderIdempotencyKeyScope.js';
 import { createCallAbort, type LambderCallAbortStage } from '../shared/util/LambderCallAbort.js';
 import { coerceToError } from '../shared/wire/LambderCrashDetail.js';
 import { isLambderTransportFailure, type LambderApiTransport } from '../shared/transport/LambderApiTransport.js';
@@ -26,15 +27,15 @@ import { readApiSignature, type LambderApiSignatureMap } from '../shared/wire/La
 import { LambderReloadLoopBreaker, RELOAD_LOOP_WINDOW_MS } from './LambderReloadLoopBreaker.js';
 import { lambderFetchTransport } from './lambderFetchTransport.js';
 
-// The outcome vocabulary and the contract-driven option typing are shared
-// with LambderInvokeCaller (src/shared/); re-exported here so the entries
-// keep their names.
+// The outcome vocabulary and the contract-driven option typing live in
+// src/shared/ (LambderInvokeCaller uses them too); re-exported so the client
+// entry offers them under the same names.
 export type { LambderApiOutcome, LambderApiFailureReason, LambderValidationError } from '../shared/wire/LambderApiOutcome.js';
 export type { LambderProvidedGuardInputs, LambderGuardInputsProvider } from '../shared/wire/LambderCallOptions.js';
 
 /** A handler told that something happened, with nothing to hand it. */
 type NotifyHandler = ()=>void|Promise<void>;
-/** One call in flight: pushed when it starts, removed when it settles, so the list is the in-flight list rather than a log of every call ever made. */
+/** One call in flight: pushed when it starts, removed when it settles, so the list holds only calls in flight. */
 type FetchTracker = { apiName: string };
 type EventHandlerFetchParams = {
     apiName: string,
@@ -56,17 +57,11 @@ type FetchEndEventHandler = (params: {
 type ErrorHandler = (err: Error) => void|Promise<void>;
 type ValidationErrorHandler = (zodError: LambderValidationError) => (void|false)|Promise<(void|false)>;
 type MessageHandler = (message: LambderAppRefusalMessage | string) => void|Promise<void>;
+/** Handed the refusal as its message object, a plain-string errorMessage having been read as one (refusalMessageOf). */
+type ErrorMessageHandler = (message: LambderAppRefusalMessage) => void|Promise<void>;
 
 /** The logListHandler option: an answer's logList, success or failure, when it has entries. The invoke caller's onLogList, for a browser. */
 export type LambderLogListHandler = (apiName: string, logList: unknown[]) => void|Promise<void>;
-
-/** One logical operation's rotating idempotency key: see LambderCaller.createIdempotencyKeyScope(). */
-export type LambderIdempotencyKeyScope = {
-    /** The key for the operation currently in progress. */
-    readonly current: string;
-    /** Call after a confirmed success: the next operation is a new intent. Returns the new key. */
-    rotate(): string;
-};
 
 /**
  * Per-call options: the request extras both callers share (see
@@ -76,7 +71,7 @@ export type LambderCallOptions = LambderSharedCallOptions & {
     versionExpiredHandler?: NotifyHandler;
     sessionExpiredHandler?: NotifyHandler;
     messageHandler?: MessageHandler;
-    errorMessageHandler?: MessageHandler;
+    errorMessageHandler?: ErrorMessageHandler;
     apiInputValidationErrorHandler?: ValidationErrorHandler;
     notAuthorizedHandler?: NotifyHandler;
     errorHandler?: ErrorHandler;
@@ -97,13 +92,19 @@ type LambderCallerBaseOptions = {
      * it out and no call is gated.
      */
     apiSignatures?: LambderApiSignatureMap,
-    isCorsEnabled: boolean,
+    /**
+     * Send credentialed cross-origin requests (fetch's `cors` mode, cookies
+     * included). Default: exactly when apiPath is an absolute URL on another
+     * origin than the page's, which is when a browser needs it. Ignored when
+     * a transport is passed.
+     */
+    isCorsEnabled?: boolean,
     /** Default per-request timeout in ms (none unless set; API Gateway caps around 29s, so ~30000 is a sensible value). Overridable per call. */
     timeoutMs?: number,
     versionExpiredHandler?: NotifyHandler,
     sessionExpiredHandler?: NotifyHandler,
     messageHandler?: MessageHandler,
-    errorMessageHandler?: MessageHandler,
+    errorMessageHandler?: ErrorMessageHandler,
     notAuthorizedHandler?: NotifyHandler,
     errorHandler?: ErrorHandler,
     /** Receives each answer's logList, with the API name. Default: console.log with a `[lambder]` prefix, one line per entry. */
@@ -132,6 +133,14 @@ type LambderCallerBaseOptions = {
     transport?: LambderApiTransport,
 };
 
+/**
+ * What keeps a stale bundle from reloading itself forever (see the class):
+ * one for the page, shared by every caller it builds, since a reload is the
+ * page's. Held per caller, two callers would each run an ask of their own at
+ * the same time.
+ */
+const pageReloadLoopBreaker = new LambderReloadLoopBreaker();
+
 /** Constructor options: the base options plus guardInputsProvider, mandatory once TProvided names guards. */
 export type LambderCallerOptions<TContract, TProvided extends string = never> =
     LambderCallerBaseOptions & LambderGuardInputsProviderOption<TContract, TProvided>;
@@ -141,24 +150,21 @@ export type LambderCallerOptions<TContract, TProvided extends string = never> =
  * @typeParam TProvidedGuards - Guard names guardInputsProvider covers; those APIs' options argument becomes optional.
  */
 export default class LambderCaller<TContract extends LambderApiContractShape = any, TProvidedGuards extends string = never> {
-    private isCorsEnabled: boolean;
     private apiPath: string;
     private apiVersion?: string;
     private apiSignatures?: LambderApiSignatureMap;
     private timeoutMs?: number;
-    /** What keeps a stale bundle from reloading itself forever; see the class. */
-    private readonly reloadLoopBreaker = new LambderReloadLoopBreaker();
 
     /** The calls currently in flight, in the order they started. */
     fetchTrackerList: FetchTracker[] = [];
-    /** Whether any call is in flight. Derived, so it cannot drift from the list the way a separate flag did. */
+    /** Whether any call is in flight. Derived from the list, so the two cannot drift apart. */
     get isLoading(): boolean { return this.fetchTrackerList.length > 0; }
 
     private versionExpiredHandler?: NotifyHandler;
     private sessionExpiredHandler?: NotifyHandler;
 
     private messageHandler?: MessageHandler;
-    private errorMessageHandler?: MessageHandler;
+    private errorMessageHandler?: ErrorMessageHandler;
     private notAuthorizedHandler?: NotifyHandler;
     private errorHandler?: ErrorHandler;
     private apiInputValidationErrorHandler?: ValidationErrorHandler;
@@ -194,12 +200,11 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
         this.apiPath = apiPath;
         this.apiVersion = apiVersion;
         this.apiSignatures = apiSignatures;
-        this.isCorsEnabled = isCorsEnabled;
         this.timeoutMs = timeoutMs;
         this.sessionCookieDomain = sessionCookieDomain;
         // `?? false`: unlike the at-rest stores, this one is off unless asked for.
         this.requestCompression = resolveCompressionOption(requestCompression ?? false, DEFAULT_REQUEST_COMPRESSION_SETTINGS);
-        this.transport = transport ?? lambderFetchTransport({ cors: this.isCorsEnabled });
+        this.transport = transport ?? lambderFetchTransport({ cors: isCorsEnabled });
 
         this.versionExpiredHandler = versionExpiredHandler;
         this.sessionExpiredHandler = sessionExpiredHandler;
@@ -225,53 +230,6 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
     setTransport(transport: LambderApiTransport): this {
         this.transport = transport;
         return this;
-    }
-
-    /**
-     * A self-rotating idempotency key for a component or form that performs
-     * the same logical operation repeatedly. `current` is the key for the
-     * operation in progress: send it with every attempt (first try, retry
-     * after a failure, double-tap) so the server collapses them. Call
-     * `rotate()` after a confirmed success so the next operation is a new
-     * intent with its own key.
-     *
-     * ```typescript
-     * const submitKey = LambderCaller.createIdempotencyKeyScope();
-     * await caller.api("order.create", payload, { idempotencyKey: submitKey.current });
-     * submitKey.rotate();
-     * ```
-     */
-    static createIdempotencyKeyScope(): LambderIdempotencyKeyScope {
-        let key = LambderCaller.createIdempotencyKey();
-        return {
-            get current(){ return key; },
-            rotate(){ key = LambderCaller.createIdempotencyKey(); return key; },
-        };
-    }
-
-    /**
-     * Generate an idempotency key for one logical operation. Create it when
-     * the operation begins (a form opens, a draft starts), send the same key
-     * on every attempt of that operation, and generate a new one after a
-     * confirmed success. Uses crypto.randomUUID when available and falls back
-     * to a v4 UUID from getRandomValues, because randomUUID only exists in
-     * secure contexts (plain-http LAN device testing lacks it).
-     *
-     * A runtime with neither throws rather than reaching for Math.random: the
-     * key must be UNGUESSABLE, since it is what scopes the replay record for a
-     * logged-out client, and a guessable one hands that client's stored
-     * response to whoever guesses it.
-     */
-    static createIdempotencyKey(): string {
-        const cryptoObj = globalThis.crypto;
-        if(cryptoObj?.randomUUID) return cryptoObj.randomUUID();
-        if(!cryptoObj?.getRandomValues) throw new Error("LambderCaller.createIdempotencyKey needs crypto.getRandomValues: an idempotency key must be unguessable, and this runtime offers no random source that is.");
-        const bytes = new Uint8Array(16);
-        cryptoObj.getRandomValues(bytes);
-        bytes[6] = (bytes[6]! & 0x0f) | 0x40;
-        bytes[8] = (bytes[8]! & 0x3f) | 0x80;
-        const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-        return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
     }
 
     private clearSessionCookies(){
@@ -308,12 +266,18 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
 
         const headers = options?.headers;
         const fetchTracker: FetchTracker = { apiName };
+        // A key scope sends its current key and is told how the attempt
+        // ended, before any handler runs: a handler that throws must not
+        // leave an unanswered attempt untold. A plain key is sent as it is.
+        const idempotentAttempt = beginIdempotentAttempt(options?.idempotencyKey);
+        const idempotencyKey = idempotentAttempt.key;
+        let sent = false;
 
-        // Dropped the moment the call settles, and idempotently, since the
-        // finally block below runs for the paths fetchEnded never reaches.
-        // Left in, the list grew by one per call forever, and every handler
-        // call scanned all of it: a long-lived page paid more per call the
-        // longer it had been open.
+        // Dropped the moment the call settles, idempotently, since the finally
+        // block below also runs it for the paths fetchEnded never reaches. A
+        // tracker left in would grow the list by one per call, and every
+        // handler call copies the list, so a long-lived page would pay more
+        // per call the longer it stayed open.
         const dropFetchTracker = () => {
             const at = this.fetchTrackerList.indexOf(fetchTracker);
             if(at !== -1) this.fetchTrackerList.splice(at, 1);
@@ -347,6 +311,7 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
         const abandonedOutcome = async (stage: LambderCallAbortStage) => {
             const failure = abort.abortFailure(stage);
             if(!failure) return null;
+            idempotentAttempt.settle(stage === "beforeSending" ? IDEMPOTENT_ATTEMPT_NOT_SENT : { ok: false, reason: failure.reason });
             await fetchEnded(failure.error);
             await reportError(failure.error);
             const outcome: LambderApiOutcome<TOutput> = { ok: false, reason: failure.reason, error: failure.error };
@@ -364,10 +329,6 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
             // carries the map. A name the map lacks fails the call here, as a
             // provider that threw would: the map predates the endpoint.
             const signature = this.apiSignatures ? await readApiSignature(this.apiSignatures, apiName) : undefined;
-            // js-cookie reads nothing without a document, and there is no
-            // location outside a page: both are "" then, and a transport that
-            // carries a cookie jar fills the token in from it.
-            const token = Cookies.get(this.sessionCsrfCookieKey) || "";
             const siteHost = globalThis.location?.hostname ?? "";
             // Provider values underneath, per-call values on top.
             const providedGuardInputs = this.guardInputsProvider
@@ -391,8 +352,16 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
             const refused = await abandonedOutcome("beforeSending");
             if(refused) return refused;
 
+            // Read last, right before the send: the browser attaches the
+            // cookies as the request leaves, and a rotation answered while a
+            // provider above was awaited would otherwise pair the new session
+            // cookie with the old token. js-cookie reads nothing without a
+            // document: the token is "" then, and a transport that carries a
+            // cookie jar fills it in from there.
+            const token = Cookies.get(this.sessionCsrfCookieKey) || "";
             let answer: LambderApiHttpAnswer;
             try {
+                sent = true;
                 answer = await this.transport({
                     apiPath: this.apiPath,
                     apiName, version, token, siteHost,
@@ -400,14 +369,12 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
                     csrfCookieKey: this.sessionCsrfCookieKey,
                     ...(compressedPayload ? { compressed: compressedPayload } : { payload }),
                     ...(guardInputs !== undefined ? { guardInputs } : {}),
-                    ...(options?.idempotencyKey !== undefined ? { idempotencyKey: options.idempotencyKey } : {}),
+                    ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
                     ...(headers ? { headers } : {}),
                     ...(signal ? { signal } : {}),
                 });
             }catch(err){
                 const wrappedError = coerceToError(err, "Request failed");
-                await fetchEnded(wrappedError);
-                await reportError(wrappedError);
                 // The caller's own abort wins, since only it knows about that.
                 // Otherwise a transport that named its reason is believed:
                 // "protocol" means something came back and was not an answer,
@@ -415,6 +382,9 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
                 const reason = abort.timedOut() ? 'timeout'
                     : isLambderTransportFailure(err) && err.reason === 'protocol' ? 'server'
                     : 'network';
+                idempotentAttempt.settle({ ok: false, reason });
+                await fetchEnded(wrappedError);
+                await reportError(wrappedError);
                 return { ok: false, reason, error: wrappedError };
             }
 
@@ -428,12 +398,12 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
             // The reading of the answer is shared with LambderInvokeCaller;
             // only what to do about each outcome is this caller's.
             const outcome = await resolveApiOutcome<TOutput>(answer);
+            idempotentAttempt.settle(outcome);
 
             // Every answer's logs, surfaced once and before any branch that
-            // returns: the 500 whose global error handler attached a crash and
-            // a logList is the answer whose log trail is worth the most, and
-            // surfacing them under the envelope reads meant it was the one
-            // answer that never reached logListHandler at all.
+            // returns: a 500 whose global error handler attached a crash and a
+            // logList has the log trail worth the most, and it returns early
+            // on the `server` branch below.
             const logList = outcome.logList;
             if(logList?.length){
                 if(logListHandler) await logListHandler(apiName, logList);
@@ -461,20 +431,38 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
             await fetchEnded(data);
 
             if(!outcome.ok && outcome.reason === 'versionExpired'){
-                // A repeat of a recent versionExpired for the same endpoint and
-                // signature means the reload the handler performed brought the
-                // same bundle back, and reloading again would loop. The
-                // handler is not called; the failure is reported instead, and
-                // the outcome still says versionExpired.
-                if(this.reloadLoopBreaker.isRepeat(apiName, signature ?? "")){
-                    await reportError(new Error(`Version expired again for API "${apiName}" within ${RELOAD_LOOP_WINDOW_MS / 60000} minutes with the same signature: the bundle being served is still the stale one, so versionExpiredHandler was not called again.`));
+                // A page asks for one reload at a time, however many of its
+                // calls are refused. A call refused again after a reload
+                // means it brought the same bundle back, and reloading again
+                // would loop: the failure is reported instead of calling the
+                // handler. The outcome says versionExpired either way.
+                const decision = pageReloadLoopBreaker.recordVersionExpired(apiName, signature ?? "", version ?? "");
+                if(decision === "alreadyAsked") return outcome;
+                if(decision === "loopConfirmed"){
+                    await reportError(new Error(`Version expired again for API "${apiName}" within ${RELOAD_LOOP_WINDOW_MS / 60000} minutes of a reload: the bundle being served is still the stale one, so versionExpiredHandler was not called again.`));
                     return outcome;
                 }
-                if(versionExpiredHandler){ await versionExpiredHandler(); }
-                else{ await reportError(new Error("Version Expired; Please refresh;")); }
+                await pageReloadLoopBreaker.runReloadAsk(async () => {
+                    if(versionExpiredHandler){ await versionExpiredHandler(); }
+                    else{ await reportError(new Error("Version Expired; Please refresh;")); }
+                });
                 return outcome;
             }
             if(!outcome.ok && outcome.reason === 'sessionExpired'){
+                // Only when the session this answer is about is still the one
+                // the page holds. A call sent before a login or a rotation (a
+                // poll, another tab) can answer sessionExpired after it, and
+                // acting on it would delete the CSRF cookie the login just set
+                // and sign the person out again. A stale answer is returned
+                // with nothing touched. A cookie that is gone is no newer
+                // session: the server clears both cookies when it refuses an
+                // ambiguous pair, and a logout in another tab clears it too.
+                // A transport that keeps its own cookies (a jar) names the
+                // token it posted and the one it holds, since the page's
+                // cookie is not where that session lives.
+                const postedToken = answer.csrfTokens?.posted ?? token;
+                const heldToken = answer.csrfTokens ? answer.csrfTokens.held() : Cookies.get(this.sessionCsrfCookieKey) || "";
+                if(heldToken !== "" && heldToken !== postedToken) return outcome;
                 this.clearSessionCookies();
                 if(sessionExpiredHandler){ await sessionExpiredHandler(); }
                 else{ await reportError(new Error("Session Expired; Please log in again;")); }
@@ -491,7 +479,7 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
                 await messageHandler(data.message);
             }
             if(!outcome.ok && outcome.reason === 'errorMessage'){
-                if(errorMessageHandler && data.errorMessage !== undefined){ await errorMessageHandler(data.errorMessage); }
+                if(errorMessageHandler && outcome.errorMessage !== undefined){ await errorMessageHandler(outcome.errorMessage); }
                 return outcome;
             }
             return outcome;
@@ -505,6 +493,10 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
             } catch { /* an app handler threw again; never propagate */ }
             return { ok: false, reason: 'unknown', error: wrappedError };
         }finally{
+            // Whatever ended the call before its attempt was told (a provider
+            // or a handler that threw): nothing sent tried nothing, and a
+            // request that left may have run.
+            idempotentAttempt.settle(sent ? { ok: false, reason: 'unknown' } : IDEMPOTENT_ATTEMPT_NOT_SENT);
             dropFetchTracker();
             abort.detach();
         }

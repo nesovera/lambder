@@ -4,10 +4,12 @@
  * answer when there is no handler.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { decodeBody, createMockEvent, createApiEvent, createMockContext, testPublicFiles } from './helpers.js';
 import { z } from 'zod';
-import Lambder from '../src/core/Lambder.js';
+import Lambder, { initLambder } from '../src/core/Lambder.js';
+import type { LambderFallbackHandler } from '../src/core/LambderCreateOptions.js';
+import { LambderMemorySessionStore, lambderTestApp, assertApiFailure } from '../src/testing.js';
 
 describe('Error Handling - Global Error Handler', () => {
     it('should catch errors in route handlers', async () => {
@@ -188,7 +190,7 @@ describe('Error Handling - Custom Error Responses', () => {
         const body = JSON.parse(result.body || '{}');
         expect(body.payload.success).toBe(false);
         expect(body.payload.error).toBe('Custom error message');
-        expect(body.errorMessage).toBe('Custom error message');
+        expect(body.errorMessage).toEqual({ type: 'error', content: 'Custom error message' });
     });
 
     it('should return HTML error for routes', async () => {
@@ -570,10 +572,9 @@ describe('Error Handling - Complex Error Scenarios', () => {
     });
 
     it('answers a thrown value that cannot even be turned into a string', async () => {
-        // The last-resort catch coerced the thrown value with String() in its
-        // very first statement, so a value that throws on coercion made the
-        // catch itself throw: no error handler, no envelope, and the
-        // invocation rejected with a 502 carrying nothing a client can read.
+        // A value that throws on coercion must not make the last-resort catch
+        // throw too: that leaves no error handler, no envelope, and an
+        // invocation that rejects with a 502 carrying nothing a client can read.
         const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
             .addRoute('/nullproto', () => { throw Object.create(null); })
             .addRoute('/throwing-tostring', () => {
@@ -584,5 +585,154 @@ describe('Error Handling - Complex Error Scenarios', () => {
             const result = await lambder.render(createMockEvent(path), createMockContext());
             expect(result.statusCode).toBe(500);
         }
+    });
+});
+
+/**
+ * LambderSessionNotFoundError from a route, a session route or a hook: the
+ * session ended while the request held it (another tab logged out, a
+ * password change landed), or a hook asked for a session the request never
+ * had. Pins the bug where only an API handler's was answered as a missing
+ * session; everywhere else it was a 500 and a crash report for what is an
+ * ordinary logout.
+ */
+describe('Error Handling - A session that ended while the request held it', () => {
+    type SessionData = { userId: string; theme: string };
+    const buildApp = (sessionExpiredRouteHandler?: LambderFallbackHandler) => {
+        const reported: string[] = [];
+        const lambder = initLambder<SessionData>().create({
+            apiPath: '/api',
+            session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
+            crashes: { report: (crash) => { reported.push(crash.message); } },
+        })
+            .addHook('beforeRender', async (ctx) => {
+                // A hook that insists on a session for one area of the app.
+                if(ctx.path.startsWith('/members') || ctx.apiName === 'membersOnly') await ctx.sessionController.fetchSession();
+                return ctx;
+            })
+            .addHook('afterRender', async (ctx, res, response) => {
+                if(ctx.path === '/refreshed') await ctx.sessionController.refreshSessionData();
+                return response;
+            })
+            .addSessionRoute('/settings', async (ctx, res) => {
+                // Another tab logs out everywhere while this request holds the session.
+                await ctx.sessionController.deleteSessionAllByKey(ctx.session.sessionKey);
+                await ctx.sessionController.updateSessionData({ ...ctx.session.data, theme: 'dark' });
+                return res.text('saved');
+            })
+            .addRoute('/members/area', (ctx, res) => res.text('members'))
+            .addRoute('/refreshed', (ctx, res) => res.text('refreshed'))
+            .addApi('membersOnly', { input: z.object({}), output: z.object({}) }, async (ctx, res) => res.api({}));
+        if(sessionExpiredRouteHandler) lambder.setSessionExpiredRouteHandler(sessionExpiredRouteHandler);
+        return { app: lambderTestApp(lambder), reported };
+    };
+
+    it('answers a route, a beforeRender hook and an afterRender hook with the default 401, not a crash', async () => {
+        const { app, reported } = buildApp();
+        const ada = await app.signIn('ada', { userId: 'ada', theme: 'light' });
+
+        for(const [visitor, path] of [[ada, '/settings'], [app.visitor(), '/members/area'], [app.visitor(), '/refreshed']] as const){
+            const page = await visitor.request('GET', path);
+            expect(page.statusCode).toBe(401);
+            expect(page.text()).toBe('Session required.');
+        }
+        expect(app.crashes).toEqual([]);
+        expect(reported).toEqual([]);
+    });
+
+    it('answers them with the setSessionExpiredRouteHandler answer when there is one, thrown or returned', async () => {
+        const returned = buildApp((ctx, res) => res.redirect('/login'));
+        const signedIn = await returned.app.signIn('ada', { userId: 'ada', theme: 'light' });
+        const page = await signedIn.request('GET', '/settings');
+        expect(page.statusCode).toBe(302);
+        expect(page.headers['location']).toBe('/login');
+
+        const thrown = buildApp((ctx, res) => { throw res.redirect('/login'); });
+        const hooked = await thrown.app.visitor().request('GET', '/members/area');
+        expect(hooked.statusCode).toBe(302);
+        expect(hooked.headers['location']).toBe('/login');
+
+        expect([...returned.app.crashes, ...thrown.app.crashes]).toEqual([]);
+        expect([...returned.reported, ...thrown.reported]).toEqual([]);
+    });
+
+    it('answers an API call whose hook found no session with the sessionExpired envelope', async () => {
+        const { app, reported } = buildApp();
+
+        assertApiFailure(await app.visitor().apiOutcome('membersOnly', {}), 'sessionExpired');
+        expect(app.crashes).toEqual([]);
+        expect(reported).toEqual([]);
+    });
+});
+
+/**
+ * Session cookies that name more than one live session, at different scopes
+ * (a sibling subdomain planted one at a parent domain): fetchSession()
+ * refuses both with LambderSessionAmbiguousError and clears every scope. A
+ * route, a hook or an API handler that asked for the session answers as a
+ * missing one, with the clearing cookies. Pins the bug where only
+ * fetchSessionIfExists() read the ambiguous case as "no session", and a
+ * route or hook calling fetchSession() answered a 500 and a crash report.
+ */
+describe('Error Handling - Session cookies that name more than one live session', () => {
+    afterEach(() => { vi.restoreAllMocks(); });
+
+    const buildApp = () => {
+        const reported: string[] = [];
+        const lambder = initLambder<{ userId: string }>().create({
+            apiPath: '/api',
+            session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
+            crashes: { report: (crash) => { reported.push(crash.message); } },
+        })
+            .addHook('beforeRender', async (ctx) => {
+                if(ctx.path.startsWith('/members') || ctx.apiName === 'membersOnly') await ctx.sessionController.fetchSession();
+                return ctx;
+            })
+            .addRoute('/me', async (ctx, res) => res.text(`hi ${(await ctx.sessionController.fetchSession()).sessionKey}`))
+            .addRoute('/members/area', (ctx, res) => res.text('members'))
+            .addApi('whoAmI', { input: z.object({}), output: z.object({ sessionKey: z.string() }) },
+                async (ctx, res) => res.api({ sessionKey: (await ctx.sessionController.fetchSession()).sessionKey }))
+            .addApi('membersOnly', { input: z.object({}), output: z.object({}) }, async (ctx, res) => res.api({}));
+        return { lambder, reported };
+    };
+
+    /** The visitor's own session and one a sibling host planted, both live, under the one cookie name. */
+    const twoLiveSessions = async (lambder: ReturnType<typeof buildApp>['lambder']) => {
+        const manager = lambder.getSessionManager();
+        const own = await manager.createSession('ada', { userId: 'ada' });
+        const planted = await manager.createSession('mallory', { userId: 'mallory' });
+        return {
+            headers: { Host: 'app.example.com', Cookie: `LMDRSESSIONTKID=${own.sessionToken}; LMDRSESSIONTKID=${planted.sessionToken}` },
+            csrf: own.csrfToken,
+        };
+    };
+
+    it('answers a route and a beforeRender hook that fetched the session with the default 401 and the clearing cookies, not a crash', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const { lambder, reported } = buildApp();
+        const { headers } = await twoLiveSessions(lambder);
+
+        for(const path of ['/me', '/members/area']){
+            const page = await lambder.render(createMockEvent(path, { headers }), createMockContext());
+            expect(page.statusCode).toBe(401);
+            expect(decodeBody(page)).toBe('Session required.');
+            expect(page.multiValueHeaders?.['Set-Cookie']?.some((cookie) => cookie.startsWith('LMDRSESSIONTKID=;'))).toBe(true);
+        }
+        expect(reported).toEqual([]);
+        expect(warn.mock.calls.some((call) => String(call[0]).includes('Refusing all of them'))).toBe(true);
+    });
+
+    it('answers an API handler and an API call\'s hook that fetched the session with the sessionExpired envelope and the clearing cookies', async () => {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const { lambder, reported } = buildApp();
+        const { headers, csrf } = await twoLiveSessions(lambder);
+
+        for(const apiName of ['whoAmI', 'membersOnly']){
+            const result = await lambder.render(createApiEvent({ apiName, token: csrf, payload: {} }, { headers }), createMockContext());
+            expect(result.statusCode).toBe(200);
+            expect(JSON.parse(decodeBody(result))).toMatchObject({ sessionExpired: true });
+            expect(result.multiValueHeaders?.['Set-Cookie']?.some((cookie) => cookie.startsWith('LMDRSESSIONTKID=;'))).toBe(true);
+        }
+        expect(reported).toEqual([]);
     });
 });

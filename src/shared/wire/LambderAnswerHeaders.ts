@@ -4,9 +4,9 @@
  * call wrote so it can be applied onto whichever answer the call ends up
  * with.
  *
- * One implementation, at the bottom of the stack, because every layer above
- * it needs the same one: LambderResponse's own header methods are these three
- * functions, and a second copy had already drifted from them.
+ * One implementation at the bottom of the stack, because every layer above
+ * needs the same behavior: LambderResponse's own header methods are these
+ * three functions, so a second copy cannot drift from them.
  */
 
 /** The header's values under a case-insensitive lookup, or undefined. */
@@ -51,18 +51,15 @@ export type LambderHeaderTarget = {
  * the session controller's Set-Cookie), applied onto the answer once the
  * call has one. Recorded as operations in call order rather than as a map,
  * so `set` replaces what the answer itself carries (a Content-Type, say) and
- * `add` appends to it, exactly as the two would if called on the answer
- * directly.
+ * `add` appends to it, exactly as if called on the answer directly.
  *
  * These headers belong to the CALL, not to the response that first carried
- * them: on the server an afterRender hook may answer with a different
- * response than the handler produced, and a session cookie written during the
- * call has to travel across to it. So applying never forgets the operations,
- * and applying the same ones twice is a no-op: `set` writes the same value
- * again, and `add` skips a value the header already carries. The one thing
- * that costs is two `add` calls of the identical value under one name, which
- * collapse to one; duplicate identical header values carry no meaning in
- * HTTP, so nothing observable is lost.
+ * them: an afterRender hook may answer with a different response than the
+ * handler produced, and a session cookie written during the call must travel
+ * to it. So applying never forgets the operations, and applying them twice
+ * is a no-op (`add` skips a value the header already carries). The cost is
+ * that two identical `add` values under one name collapse to one, which HTTP
+ * gives no meaning to anyway.
  */
 export class LambderAnswerHeaders {
     private operations: HeaderOperation[] = [];
@@ -84,9 +81,8 @@ export class LambderAnswerHeaders {
 
     /**
      * Applies the recorded operations, in order, onto anything that reads and
-     * writes headers: a LambderResponse, or a header map through applyInto.
-     * One definition of what an operation does, so the two targets cannot
-     * drift apart.
+     * writes headers: a LambderResponse, or a header map through applyInto,
+     * so both targets share one definition of what an operation does.
      */
     applyTo(target: LambderHeaderTarget, fromIndex = 0): void {
         for(const operation of this.operations.slice(fromIndex)){

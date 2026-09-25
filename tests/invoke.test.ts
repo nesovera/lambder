@@ -40,12 +40,13 @@ import LambderInvokeCaller, {
     type LambderInvokeTransport,
 } from '../src/invoke/LambderInvokeCaller.js';
 import { LAMBDER_INVOKE_HEADER, LAMBDER_INVOKED_BY_HEADER, synthesizeLambdaHttpEvent } from '../src/invoke/LambderLambdaEvent.js';
+import { LAMBDER_INVOKE_API_ID, LAMBDER_LOCAL_API_ID } from '../src/shared/wire/LambderInvokeApiId.js';
 import LambderCaller from '../src/client/LambderCaller.js';
 import { describeCrash, errorFromCrashDetail } from '../src/shared/wire/LambderCrashDetail.js';
 import type { LambderValidationError } from '../src/shared/wire/LambderApiOutcome.js';
 import type { LambderApiEnvelopeBody } from '../src/shared/wire/LambderApiContract.js';
 import { lambderGuard } from '../src/core/LambderPolicyBuilders.js';
-import { refuse, LAMBDER_REFUSAL_CODES } from '../src/shared/wire/LambderApiRefusal.js';
+import { refuse, LAMBDER_REFUSAL_CODES, type LambderAppRefusalMessage } from '../src/shared/wire/LambderApiRefusal.js';
 import { compressPayloadBrotli, compressPayloadGzip } from '../src/shared/wire/LambderRequestPayload.js';
 import { LambderTransportFailure } from '../src/shared/transport/LambderApiTransport.js';
 import { assertApiFailure } from '../src/shared/wire/LambderOutcomeAssertions.js';
@@ -56,7 +57,7 @@ const bigPayload = (size = 400) => ({ notes: Array.from({ length: size }, (_, i)
 
 /**
  * The callee: an ordinary app with the shapes the caller has to handle. The
- * invokeOnly guard is the urbanly convention: a marker check, not security.
+ * invokeOnly guard is an app's own convention: a marker check, not security.
  */
 const createCallee = () => initLambder().create({
     apiPath: '/api',
@@ -130,7 +131,7 @@ describe('LambderInvokeCaller - the synthesized event', () => {
         const event = LambderInvokeCaller.createEvent({
             apiPath: '/api', apiName: 'echo', payload: { text: 'x' }, host: 'callee-host',
             apiVersion: '7', guardInputs: { captcha: { token: 'abc' } }, idempotencyKey: 'abcdefghijklmnop',
-            clientIp: '203.0.113.7', headers: { 'X-Custom': 'yes' },
+            clientIp: '203.0.113.7', headers: { 'X-Custom': 'yes', 'Content-Type': 'application/x-www-form-urlencoded' },
         });
 
         expect(event.version).toBe('2.0');
@@ -145,9 +146,10 @@ describe('LambderInvokeCaller - the synthesized event', () => {
         expect(event.headers['accept-encoding']).toBe('br, gzip');
         expect(event.headers[LAMBDER_INVOKE_HEADER]).toBe('1');
         // The address rides in requestContext.http.sourceIp and nowhere else:
-        // written as x-forwarded-for too, it would be the same fact on a
-        // channel a callee may be configured to trust.
+        // no forwarding header is the event's own to write.
         expect(event.headers['x-forwarded-for']).toBeUndefined();
+        // What tells the callee this is a direct invoke: an id no gateway writes.
+        expect(event.requestContext.apiId).toBe('lambder-invoke');
         expect(event.headers['x-custom']).toBe('yes');
         // The body is LambderCaller's envelope.
         const body = JSON.parse(event.body!);
@@ -169,12 +171,11 @@ describe('LambderInvokeCaller - the synthesized event', () => {
         expect(custom.cookies).toEqual(['SID=tok-2']);
     });
 
-    it('owns the forwarded address and the invoke markers, whatever the caller passed as headers', () => {
+    it('owns the invoke markers and the forwarded address whatever the caller passed as headers', () => {
         // Forwarding an incoming browser request's headers into `headers` is
-        // an ordinary gateway-lambda pattern. With the caller's values left
-        // standing, a callee configured with trustedClientIpHeaders read an
-        // end-user-chosen ctx.ip, so a per: "ip" rate limit could be evaded
-        // per request and an audit row keyed on ctx.ip recorded a fiction.
+        // an ordinary gateway-lambda pattern. The markers say what the event
+        // is, so the caller's copies go, and an invoke's address is its
+        // clientIp alone, so a forwarded one goes too.
         const event = LambderInvokeCaller.createEvent({
             apiName: 'echo',
             clientIp: '203.0.113.7',
@@ -193,15 +194,40 @@ describe('LambderInvokeCaller - the synthesized event', () => {
         expect(event.headers[LAMBDER_INVOKED_BY_HEADER]).toBeUndefined();
         // Everything else the caller sent still travels.
         expect(event.headers['x-custom']).toBe('kept');
+        expect(event.requestContext.apiId).toBe(LAMBDER_INVOKE_API_ID);
+    });
 
-        // And a browser-shaped event cannot be made to claim it is an invoke.
+    it('hands a callee that reads x-forwarded-for on any event no forwarded address, from api() or request()', async () => {
+        // Regression: a gateway lambda forwarding a browser's headers passed
+        // its x-forwarded-for on, and a callee on Lambder 7.x trusting that
+        // header reads it whatever the event is, so the browser chose its
+        // ctx.ip. This handler reads the header the way such a callee does.
+        const forwardedSeen: (string | undefined)[] = [];
+        const readsForwardedFor = async (event: APIGatewayProxyEventV2) => {
+            forwardedSeen.push(event.headers['x-forwarded-for']);
+            return { statusCode: 200, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ apiVersion: null, payload: null }) };
+        };
+        const caller = new LambderInvokeCaller<Contract>({ functionName: 'old-callee', transport: LambderInvokeCaller.localTransport(readsForwardedFor) });
+        const browserHeaders = { 'X-Forwarded-For': '6.6.6.6', 'User-Agent': 'a browser' };
+
+        await caller.apiOutcome('nullAnswer', {}, { clientIp: '198.51.100.9', headers: browserHeaders });
+        await caller.request({ path: '/hello', clientIp: '198.51.100.9', headers: browserHeaders });
+
+        expect(forwardedSeen).toEqual([undefined, undefined]);
+    });
+
+    it('passes every header of a browser-shaped request on as it came, a forwarded address included, but never the invoke markers', () => {
+        // A browser-shaped request stands for what a gateway delivered, so a
+        // test that writes a forwarding header on one exercises the app's own
+        // trustedClientIpHeaders. It cannot be made to claim it is an invoke.
         const browserShaped = synthesizeLambdaHttpEvent({
             method: 'POST', path: '/api', host: 'localhost',
             headers: { [LAMBDER_INVOKE_HEADER]: '1', [LAMBDER_INVOKED_BY_HEADER]: 'caller-fn', 'X-Forwarded-For': '198.51.100.9' },
         }, { invoke: false });
+        expect(browserShaped.headers['x-forwarded-for']).toBe('198.51.100.9');
         expect(browserShaped.headers[LAMBDER_INVOKE_HEADER]).toBeUndefined();
         expect(browserShaped.headers[LAMBDER_INVOKED_BY_HEADER]).toBeUndefined();
-        expect(browserShaped.headers['x-forwarded-for']).toBeUndefined();
+        expect(browserShaped.requestContext.apiId).toBe(LAMBDER_LOCAL_API_ID);
     });
 
     it('synthesizes the REST API shape on request, with the same ownership of headers and address', () => {
@@ -222,8 +248,9 @@ describe('LambderInvokeCaller - the synthesized event', () => {
         expect(event.multiValueHeaders.cookie).toEqual(['a=1; b=2']);
         expect(event.headers.host).toBe('shop.test');
         expect(event.headers['x-custom']).toBe('kept');
-        // The asserted address is the gateway's observation here too, never a header.
-        expect(event.headers['x-forwarded-for']).toBeUndefined();
+        // The asserted address is the gateway's observation here too; the
+        // caller's forwarding header stands for one a proxy delivered.
+        expect(event.headers['x-forwarded-for']).toBe('198.51.100.9');
         expect(event.requestContext.identity.sourceIp).toBe('203.0.113.7');
         expect(event.body).toBe('{"sku":"kettle"}');
         expect(event.isBase64Encoded).toBe(false);
@@ -232,6 +259,16 @@ describe('LambderInvokeCaller - the synthesized event', () => {
         expect(bare.queryStringParameters).toBeNull();
         expect(bare.body).toBeNull();
         expect(bare.headers.cookie).toBeUndefined();
+    });
+
+    it('sends an API call as JSON whatever Content-Type a caller forwards', async () => {
+        // A gateway lambda forwarding a form post's headers: the envelope is
+        // still JSON, and a server reads a POST to its API path as an API
+        // call only when it says so.
+        const app = initLambder().create({ apiPath: '/api' })
+            .addApi('echo', { input: z.object({ text: z.string() }), output: z.object({ text: z.string() }) }, async (ctx, res) => res.api({ text: ctx.apiPayload.text }));
+        const caller = new LambderInvokeCaller<typeof app.ApiContract>({ functionName: 'callee', transport: LambderInvokeCaller.localTransport(app.getHandler()) });
+        expect(await caller.api('echo', { text: 'hi' }, { headers: { 'content-type': 'application/x-www-form-urlencoded' } })).toEqual({ text: 'hi' });
     });
 
     it('names the invoking function when it runs in Lambda', () => {
@@ -262,6 +299,58 @@ describe('LambderInvokeCaller - round trips through a real Lambder app', () => {
         const callee = createCallee();
         expect((await callerFor(callee, { host: 'ig.internal' }).api('echo', { text: 'x' }))?.host).toBe('ig.internal');
         expect((await callerFor(callee).api('echo', { text: 'x' }))?.host).toBe('callee-fn');
+    });
+
+    it('reads ctx.ip and ctx.host from clientIp and host alone, whatever forwarding headers the callee trusts', async () => {
+        // Regression: a gateway lambda forwarding a browser's headers let the
+        // browser choose ctx.ip ("6.6.6.6") and ctx.host ("evil.example") on
+        // a callee that trusts those headers behind its own CloudFront: a
+        // per-IP limit, an IP allowlist, the cookie domain and host routing
+        // all became the end user's to pick. A header is trusted because a
+        // proxy in front of the function writes it, and an invoke has none.
+        const callee = initLambder().create({
+            trustedClientIpHeaders: ['x-real-ip'],
+            trustedHostHeaders: ['x-forwarded-host'],
+        }).addApi('whereFrom', { input: z.object({}), output: z.object({ ip: z.string(), host: z.string() }) },
+            (ctx, res) => res.api({ ip: ctx.ip, host: ctx.host }))
+            .addRoute('/where-from', (ctx, res) => res.json({ ip: ctx.ip, host: ctx.host }));
+        const caller = new LambderInvokeCaller<typeof callee.ApiContract>({
+            functionName: 'callee-fn',
+            host: 'shop.internal',
+            transport: LambderInvokeCaller.localTransport(callee.getHandler()),
+        });
+        const forwarded = { 'X-Real-IP': '6.6.6.6', 'X-Forwarded-Host': 'evil.example', 'X-Forwarded-For': '6.6.6.6' };
+
+        expect(await caller.api('whereFrom', {}, { clientIp: '198.51.100.9', headers: forwarded }))
+            .toEqual({ ip: '198.51.100.9', host: 'shop.internal' });
+        const route = await caller.request({ path: '/where-from', clientIp: '198.51.100.9', headers: forwarded });
+        expect(route.json()).toEqual({ ip: '198.51.100.9', host: 'shop.internal' });
+
+        // The same headers on a request that came through a gateway are read,
+        // as the callee asked.
+        const throughGateway = await callee.render(
+            synthesizeLambdaHttpEvent({ method: 'GET', path: '/where-from', host: 'abc.lambda-url.us-east-1.on.aws', clientIp: '198.51.100.9', headers: forwarded }, { invoke: false }),
+            createMockContext(),
+        );
+        expect(JSON.parse(decodeBody(throughGateway))).toEqual({ ip: '6.6.6.6', host: 'evil.example' });
+    });
+
+    it('decodes the path once whatever host the invoke names, a Function URL\'s included', async () => {
+        // Regression: the event arrives with its path decoded, and a callee
+        // told a Function URL's event (which carries the path encoded) by its
+        // domain alone decoded it again when the invoke named a lambda-url
+        // host: `/%2561dmin`, decoded to `/%61dmin`, reached `/admin`.
+        const seenPaths: string[] = [];
+        const callee = initLambder().create({})
+            .addRoute('/admin', (ctx, res) => res.text('admin'))
+            .setRouteFallbackHandler((ctx, res) => { seenPaths.push(ctx.path); return res.text('other', { statusCode: 404 }); });
+        for (const host of ['abc.lambda-url.us-east-1.on.aws', 'shop.internal']) {
+            const caller = new LambderInvokeCaller({ functionName: 'callee-fn', host, transport: LambderInvokeCaller.localTransport(callee.getHandler()) });
+            const answer = await caller.request({ path: '/%2561dmin' });
+            expect(answer.statusCode).toBe(404);
+            expect(answer.text()).toBe('other');
+        }
+        expect(seenPaths).toEqual(['/%2561dmin', '/%2561dmin']);
     });
 
     it('the contract makes a wrong name or payload a compile error', async () => {
@@ -337,7 +426,7 @@ describe('LambderInvokeCaller - round trips through a real Lambder app', () => {
         expect(thrown.reason).toBe('errorMessage');
         expect(thrown.apiName).toBe('refuse');
         expect(thrown.functionName).toBe('callee-fn');
-        expect(thrown.errorMessage.code).toBe('app/no');
+        expect(thrown.errorMessage?.code).toBe('app/no');
     });
 
     it('a rejected input is reason validation with the zod issues', async () => {
@@ -357,7 +446,7 @@ describe('LambderInvokeCaller - round trips through a real Lambder app', () => {
         expect(outcome.ok).toBe(false);
         if(outcome.ok || outcome.reason !== 'server') throw new Error('unreachable');
         expect(outcome.status).toBe(500);
-        expect(outcome.errorMessage).toBe('Internal server error.');
+        expect(outcome.errorMessage).toEqual({ type: 'error', content: 'Internal server error.' });
         // The detail the callee's global error handler described.
         expect(outcome.crash?.name).toBe('Error');
         expect(outcome.crash?.message).toBe('boom');
@@ -395,7 +484,7 @@ describe('LambderInvokeCaller - round trips through a real Lambder app', () => {
         expect(outcome.ok).toBe(false);
         if(outcome.ok) throw new Error('unreachable');
         expect(outcome.reason).toBe('errorMessage');
-        expect(outcome.errorMessage.code).toBe(LAMBDER_REFUSAL_CODES.apiNotFound);
+        expect(outcome.errorMessage?.code).toBe(LAMBDER_REFUSAL_CODES.apiNotFound);
     });
 
     it('an apiPath mismatch names the likely cause', async () => {
@@ -578,9 +667,9 @@ describe('LambderInvokeCaller - request() for routes', () => {
     });
 
     it('refuses an event over the invoke cap, as an API call does: the cap is on the delivery path', async () => {
-        // request() serialized its event and sent whatever it got, so a large
-        // body came back as the SDK's RequestEntityTooLargeException
-        // classified `protocol`, which is the outcome the cap exists to avoid.
+        // Sent unchecked, a large body would come back as the SDK's
+        // RequestEntityTooLargeException classified `protocol`, which is the
+        // outcome the cap exists to avoid.
         let transportCalls = 0;
         const caller = new LambderInvokeCaller<Contract>({
             functionName: 'callee-fn',
@@ -691,8 +780,8 @@ describe('LambderInvokeCaller - the transport\'s own failures', () => {
     it('a service exception is reason protocol, not network: the invoke was answered, by the service', async () => {
         // AccessDenied and ResourceNotFound are a missing IAM grant and a
         // wrong function name, which are wiring faults to go and fix.
-        // Reported as `network`, they sent whoever read them to look at their
-        // connection instead.
+        // Reported as `network`, they would send whoever reads them to look
+        // at their connection instead.
         for(const [name, message] of [
             ['AccessDeniedException', 'User is not authorized to perform: lambda:InvokeFunction'],
             ['ResourceNotFoundException', 'Function not found'],
@@ -1035,9 +1124,9 @@ describe('LambderInvokeCaller - an external abort signal is not accumulated on',
     });
 
     it('leaves no pending timer once a call settles, so a timeoutMs does not outlive its call', async () => {
-        // detach() clears the timeout as well as releasing the signal, and
-        // only the listener half was pinned: deleting the clearTimeout left
-        // the suite green and a timer per call behind it.
+        // detach() clears the timeout as well as releasing the signal. The
+        // test above pins only the listener half; this one catches a missing
+        // clearTimeout, which would leave a timer per call behind.
         vi.useFakeTimers();
         try {
             const caller = new LambderInvokeCaller<Contract>({
@@ -1079,11 +1168,10 @@ describe('LambderInvokeCaller - an external abort signal is not accumulated on',
 
 describe('LambderInvokeCaller - an answer that arrives after the call was given up on', () => {
     it('reports timeout rather than a success, through localTransport and through a custom transport', async () => {
-        // The browser caller learned this and the invoke caller did not, so a
-        // 20ms timeoutMs reported ok: true at 300ms and the call site acted on
-        // data it had already abandoned. localTransport was the easiest way
-        // to reach it: it ran the handler to completion and ignored the
-        // signal entirely, which made timeoutMs a no-op there.
+        // As in the browser caller: otherwise a 20ms timeoutMs would report
+        // ok: true at 300ms, and the call site would act on data it had
+        // already abandoned. localTransport runs the handler to completion
+        // whatever the signal says, so the caller enforces timeoutMs itself.
         // Set when the 300ms handler finishes: the caller must have answered
         // before that.
         let slowHandlerFinished = false;
@@ -1225,8 +1313,13 @@ describe('LambderInvokeCaller - a failure narrows to what its reason carries', (
         }else if(failure.reason === 'payloadTooLarge'){
             expectTypeOf(failure.bytes).toEqualTypeOf<number>();
         }else if(failure.reason === 'errorMessage'){
-            // An envelope refusal always came with the envelope.
+            // An envelope refusal always comes with the envelope, and this
+            // one with the message it is about.
             expectTypeOf(failure.response).toEqualTypeOf<LambderApiEnvelopeBody<any>>();
+            expectTypeOf(failure.errorMessage).toEqualTypeOf<LambderAppRefusalMessage>();
+        }else if(failure.reason === 'notAuthorized'){
+            expectTypeOf(failure.response).toEqualTypeOf<LambderApiEnvelopeBody<any>>();
+            expectTypeOf(failure.errorMessage).toEqualTypeOf<LambderAppRefusalMessage | undefined>();
         }else{
             // A delivery failure may or may not have got an answer at all.
             expectTypeOf(failure.response).toEqualTypeOf<LambderApiEnvelopeBody<any> | undefined>();
@@ -1303,8 +1396,8 @@ describe('LambderInvokeCaller - what the contract decides at the call site', () 
 describe('decodeLambdaHttpResult', () => {
     it('accepts Content-Encoding: identity as no encoding', async () => {
         // A legal value meaning "not encoded", which a hook or a proxy may
-        // set; reading it as an unsupported encoding turned the whole invoke
-        // into a protocol failure.
+        // set; reading it as an unsupported encoding would turn the whole
+        // invoke into a protocol failure.
         const decoded = await decodeLambdaHttpResult({
             statusCode: 200,
             headers: { 'content-type': 'application/json', 'content-encoding': 'identity' },

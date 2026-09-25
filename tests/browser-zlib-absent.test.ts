@@ -1,16 +1,14 @@
 /**
  * What a bundled browser build actually sees. package.json maps fs, path,
  * zlib and crypto to `false` for the browser, and webpack, Vite and esbuild
- * each honour that by resolving the import to a STUB MODULE rather than by
- * rejecting it. A stub is an object, so "did the import work" cannot be
- * answered by truthiness: the module has to be asked for a function it would
- * really export.
+ * resolve such an import to a STUB MODULE rather than rejecting it. A stub is
+ * an object, so truthiness cannot say whether the import worked: the module
+ * has to be asked for a function it would really export.
  *
- * Mocking the zlib specifier reproduces the bundler exactly, which a test
- * that only forces the import to reject does not. Without the probe, the mock
- * runtime restoring a gzipped request payload in a browser dies with
- * "zlib.gunzip is not a function", surfacing to the caller as a 400
- * invalid-request-payload.
+ * Mocking the zlib specifier reproduces the bundler exactly, where forcing the
+ * import to reject would not. Without the probe, the mock runtime restoring a
+ * gzipped request payload in a browser dies with "zlib.gunzip is not a
+ * function", which the caller sees as a 400 invalid-request-payload.
  */
 
 import { describe, it, expect, vi } from 'vitest';

@@ -6,9 +6,10 @@ import type { LambderApiIdempotencyOption, LambderGuardsOptionValue, LambderRate
  * addApi/addSessionApi options carry, minus the handler, in a shape the mock
  * runtime can restate from a type-only contract. The schemas are optional
  * because the mock has none; when input is present, validation runs and the
- * handler sees the parsed payload. Output is read by nothing at request
- * time: it is part of the endpoint's signature (apiSignatureOf), which is
- * what a client's build is checked against.
+ * handler sees the parsed payload. Output is part of the endpoint's
+ * signature (apiSignatureOf), which is what a client's build is checked
+ * against; the server's resolver also parses every payload a handler
+ * answers through it before it is sent.
  */
 export type LambderApiDefinition = {
     name: string;

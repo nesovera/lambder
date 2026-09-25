@@ -1,16 +1,14 @@
 /**
  * A crash, described for a caller that is allowed to see it.
  *
- * A global error handler decides what a failed request learns about the
- * failure. A browser gets a generic message; a trusted caller (another
- * lambda invoking this one, a developer holding a debug cookie) can be
- * handed the whole thing: the error's name, message and stack, its cause
- * chain, and where it happened, so the caller can store it in its own
- * error log and point at the right CloudWatch stream. The envelope carries
- * it in the `crash` field beside errorMessage; LambderInvokeCaller reads it
- * back and rebuilds an Error from it as the `cause` of the error it throws,
- * so an error reporter that walks causes sees the callee's stack without
- * being taught anything.
+ * A global error handler decides what a failed request learns. A browser
+ * gets a generic message; a trusted caller (another lambda invoking this
+ * one, a developer holding a debug cookie) can get the error's name, message,
+ * stack, cause chain and where it happened, to store in its own error log
+ * and find the right CloudWatch stream. The envelope carries it in `crash`
+ * beside errorMessage; LambderInvokeCaller rebuilds an Error from it as the
+ * `cause` of the error it throws, so a reporter that walks causes sees the
+ * callee's stack unaided.
  *
  * Dependency-free and isomorphic: the type is part of the envelope both
  * entries export, and describeCrash needs nothing from Node.
@@ -79,11 +77,10 @@ export const errorFromCrashDetail = (crash) => {
 /**
  * A thrown value as an Error, so a reporter or a `cause` chain always holds
  * one. An Error passes through; anything else becomes an Error whose message
- * describes the value the way describeCrash does, JSON where String() cannot
- * (a null-prototype object or a throwing toString must not make the
- * coercion itself throw). One implementation, rather than
- * `err instanceof Error ? err : new Error(...)` spelled at every site with a
- * fallback of its own.
+ * describes the value as describeCrash does, JSON before String() (a
+ * null-prototype object or a throwing toString must not make the coercion
+ * itself throw). Use it instead of spelling
+ * `err instanceof Error ? err : new Error(...)` with a fallback per site.
  */
 export const coerceToError = (value, fallbackMessage = "Unknown error") => {
     if (value instanceof Error)

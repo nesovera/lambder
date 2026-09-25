@@ -17,6 +17,7 @@ import { LambderMemoryRateLimiter } from '../src/stores/LambderMemoryRateLimiter
 import type { LambderRateLimiter, LambderRateLimitPolicy } from '../src/shared/contracts/LambderRateLimiter.js';
 import { lambderGuard, lambderRateLimitKey } from '../src/core/LambderPolicyBuilders.js';
 import { LambderResponse } from '../src/core/LambderResponse.js';
+import { canonicalJson } from '../src/shared/util/canonicalJson.js';
 import { createApiEvent as createEnvelopeEvent, createMockContext, MemoryDdb, testPublicFiles } from './helpers.js';
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
@@ -84,10 +85,9 @@ describe('API policies - registration assertions', () => {
     });
 
     it('rejects an empty rateLimit option, the way it rejects an empty guards option', () => {
-        // Declaring the option is declaring a limit. These three forms used to
-        // register an API that announces a rate limit and enforces none, which
-        // is the one shape that quietly turns a mandatory declaration back into
-        // an optional one.
+        // Declaring the option is declaring a limit. Registered, these three
+        // forms would announce a rate limit and enforce none, the one shape
+        // that quietly turns a mandatory declaration back into an optional one.
         const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: { limiter: makeLimiter(new MemoryDdb()), policies: { real: { perMin: 5, per: 'ip', budget: 'perApi' } } } });
         for(const [index, rateLimit] of [{}, [], { real: undefined }].entries()){
             expect(() => lambder.addApi(`empty.${index}`, { ...testSchema, rateLimit } as any, async (ctx, res) => res.api(null)))
@@ -101,14 +101,14 @@ describe('API policies - registration assertions', () => {
     it('rejects an override that takes away the policy last enforced window', () => {
         // A policy must declare a window; an override may not undo that. Zero
         // is a legal window value (it leaves that one unenforced), so zeroing
-        // the only one passed every check and disabled the policy in silence.
+        // the only one would pass every check and disable the policy silently.
         const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: { limiter: makeLimiter(new MemoryDdb()), policies: { real: { perMin: 5, per: 'ip', budget: 'perApi' } } } });
         expect(() => lambder.addApi('zeroed', { ...testSchema, rateLimit: { real: { perMin: 0 } } } as any, async (ctx, res) => res.api(null)))
             .toThrow(/down to no enforced window/);
     });
 
     it('rejects a replay window a store cannot act on', () => {
-        // NaN was the one that mattered: it survives every comparison an
+        // NaN is the one that matters: it survives every comparison an
         // expiry test makes, so an in-memory record with a NaN expiry outlives
         // every sweep, while DynamoDB rejects the same number outright.
         const create = (defaultTtlSeconds: number) => initLambder().create({
@@ -133,8 +133,8 @@ describe('API policies - registration assertions', () => {
 
     it('keeps a completed answer when the store cannot record it, rather than 500ing the caller', async () => {
         // Settling happens AFTER the handler ran, so failing closed there
-        // cannot prevent anything: it turned a completed operation into a 500
-        // and handed the retry a released claim, which is exactly the double
+        // cannot prevent anything: it would turn a completed operation into a
+        // 500 and hand the retry a released claim, which is exactly the double
         // execution idempotency exists to prevent.
         const store = new LambderMemoryIdempotencyStore();
         store.complete = async () => { throw new Error('store unavailable'); };
@@ -155,11 +155,47 @@ describe('API policies - registration assertions', () => {
         expect(String(first.body)).toContain('charged');
     });
 
+    it('replays an answer whose store write landed though complete() reported a failure, rather than charging twice', async () => {
+        // Regression: after a complete() that threw, the engine releases the
+        // claim, and abandon() deleted on the owner token alone, which the
+        // stored record still carries. A write that landed and whose response
+        // was then lost (a timeout on the SDK's last attempt) lost its record
+        // too, and the client's retry placed the charge again.
+        const store = new LambderMemoryIdempotencyStore();
+        const storeRecord = store.complete.bind(store);
+        store.complete = async (...args) => {
+            await storeRecord(...args);
+            throw new Error('socket timed out after the write was applied');
+        };
+        const warned = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        let runs = 0;
+        const lambder = initLambder().create({
+            files: testPublicFiles(), apiPath: '/api',
+            idempotency: { store },
+        }).addApi('charge', { ...testSchema, idempotency: true } as any, async (ctx, res) => {
+            runs += 1;
+            return res.api({ result: `charge-${runs}` });
+        });
+
+        const call = () => lambder.render(createApiEvent('charge', { value: 'v' }, { idempotencyKey: 'key-abcdefabcdefabcd' }), createMockContext());
+        try {
+            const first = await call();
+            const retry = await call();
+
+            expect(runs).toBe(1);
+            expect(retry.body).toBe(first.body);
+            expect(String(retry.body)).toContain('charge-1');
+            expect(warned).toHaveBeenCalledOnce();
+        } finally {
+            warned.mockRestore();
+        }
+    });
+
     it('scopes a public API replay by callerIdentity, so a key is not a bearer token for its answer', async () => {
         // The replay is served BEFORE guards run, so on a public API whose
         // authorization is a guard, a second caller presenting a known key
-        // used to get the first caller's response body without the guard
-        // being consulted at all.
+        // would get the first caller's response body without the guard being
+        // consulted at all.
         const store = new LambderMemoryIdempotencyStore();
         const lambder = initLambder().create({
             files: testPublicFiles(), apiPath: '/api',
@@ -255,10 +291,10 @@ describe('API policies - registration assertions', () => {
     it('hands a guard named after an inherited property nothing when the client sent nothing', async () => {
         // guardInputs is client data, so a guard may be named for anything
         // Object.prototype carries. Read with a plain property access, a guard
-        // named "toString" received the INHERITED FUNCTION where the client
-        // sent no value at all, so a check for "no token was presented" saw a
-        // truthy value and never fired. The name is the client's to choose, so
-        // this is the read's problem rather than the name's.
+        // named "toString" would receive the INHERITED FUNCTION where the
+        // client sent no value at all, so a check for "no token was presented"
+        // would see a truthy value and never fire. The name is the client's to
+        // choose, so this is the read's problem rather than the name's.
         const seen: unknown[] = [];
         const lambder = initLambder().create({
             files: testPublicFiles(), apiPath: '/api',
@@ -298,12 +334,19 @@ describe('API policies - registration assertions', () => {
             .toThrow(/no idempotency store was configured/);
     });
 
-    it('rejects policies with no window or no per', () => {
+    it('rejects policies with no window or a per it cannot key by', () => {
         const client = new MemoryDdb();
         expect(() => initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: { limiter: makeLimiter(client), policies: { bad: { per: 'ip' } as any } } }))
             .toThrow(/declares no window/);
-        expect(() => initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: { limiter: makeLimiter(client), policies: { bad: { perMin: 1 } as any } } }))
-            .toThrow(/needs per/);
+        expect(() => initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: { limiter: makeLimiter(client), policies: { bad: { perMin: 1, per: 'email' } as any } } }))
+            .toThrow(/has a per that is not "ip", "session", or a \{ apiInput\?, handler \} key/);
+    });
+
+    it('takes a policy without per, and refuses an API that names it, since only a handler knows its key', () => {
+        const client = new MemoryDdb();
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: { limiter: makeLimiter(client), policies: { invitesPerRecipient: { perMonth: 3 } } } });
+        expect(() => lambder.addApi('invite', { ...testSchema, rateLimit: 'invitesPerRecipient' } as any, async (ctx, res) => res.api(null)))
+            .toThrow(/declares no per: its key is the one a handler passes to ctx.rateLimit\("invitesPerRecipient", key\)/);
     });
 
     it('rejects an unknown budget value', () => {
@@ -376,10 +419,10 @@ describe('API policies - rate limiting', () => {
 
     it('bounds an over-long custom key, so a store with a key limit still meters it', async () => {
         // A store refuses a key it cannot take by throwing, and a throw is
-        // what failOpen swallows: a 3,000-character payload field used to turn
-        // the whole policy off in silence, every window of it, with the
-        // request going through unmetered. The bound folds the variable half
-        // into its own digest instead, so the counters stay distinct.
+        // what failOpen swallows: unbounded, a 3,000-character payload field
+        // would turn the whole policy off in silence, every window of it, with
+        // the request going through unmetered. The bound folds the variable
+        // half into its own digest instead, so the counters stay distinct.
         const trackerKeys: string[] = [];
         const counters = new LambderMemoryRateLimiter();
         const recording: LambderRateLimiter = {
@@ -419,6 +462,36 @@ describe('API policies - rate limiting', () => {
         expect(Math.max(...trackerKeys.map((key) => key.length))).toBeLessThan(1024);
     });
 
+    it('bounds a custom key by its escaped length, so one made of separators still fits the table', async () => {
+        // The key is joined into the tracker key with its separators escaped,
+        // which doubles each one: 1,000 of them are 2,000 bytes in the key.
+        // Measured unescaped, it would stay under the bound, the partition key
+        // would pass DynamoDB's limit, and the limiter's throw would have
+        // failOpen let every attempt through unmetered.
+        const client = new MemoryDdb();
+        const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+        try {
+            const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: {
+                    limiter: makeLimiter(client),
+                    policies: {
+                        perEmail: {
+                            perMin: 1, budget: 'perApi',
+                            per: lambderRateLimitKey({ apiInput: z.object({ email: z.string() }), handler: (_ctx, { email }) => email }),
+                        },
+                    },
+                } })
+                .addApi('code', { input: z.object({ value: z.string(), email: z.string() }), output: testSchema.output, rateLimit: 'perEmail' }, async (ctx, res) => res.api({ result: 'ok' }));
+            const call = () => lambder.render(createApiEvent('code', { value: 'x', email: '|'.repeat(1000) }), createMockContext());
+
+            expect((await call()).statusCode).toBe(200);
+            expect((await call()).statusCode).toBe(429);
+            expect(errors).not.toHaveBeenCalled();
+            expect([...client.items.values()].map((item) => item.pk?.S)).toEqual([expect.stringMatching(/^RL#api\|code\|perEmail\|custom:h:[0-9a-f]{64}$/)]);
+        } finally {
+            errors.mockRestore();
+        }
+    });
+
     it('a policy message with its own code keeps it (fill, not override)', async () => {
         const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: {
                 limiter: makeLimiter(new MemoryDdb()),
@@ -449,11 +522,10 @@ describe('API policies - rate limiting', () => {
     });
 
     it('fails open by default when the limiter is down, says so once, and never prints the tracker key', async () => {
-        // Fail-open is the engine's decision, not an implementation's: a
-        // custom limiter used to have none at all, and two limiters could
-        // answer one outage differently. Silence was the other half of the
-        // defect: a missing IAM action is permanent, and an app can run for
-        // months unmetered with nothing in its logs.
+        // Fail-open is the engine's decision, not an implementation's, so a
+        // custom limiter gets it too and no two limiters answer one outage
+        // differently. It is logged because a missing IAM action is permanent,
+        // and an app could run for months unmetered with nothing in its logs.
         const client = new MemoryDdb();
         client.failAll = true;
         const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -486,6 +558,95 @@ describe('API policies - rate limiting', () => {
         const result = await lambder.render(createApiEvent('closed', { value: 'x' }), createMockContext());
         expect(result.statusCode).toBe(500);
         expect(String(result.body)).not.toContain('through');
+    });
+
+    it('refuses the key flooding a throttled partition with a Retry-After, and lets failOpen decide for its neighbours', async () => {
+        // A key-range throttle falls on a whole partition. The flooding key
+        // is at its limit and is refused; a caller beside it, under its own
+        // limit, gets the throttle as a store failure, which fails open here
+        // (the default) rather than a 429 it did nothing to earn.
+        const table = new MemoryDdb();
+        let throttled = false;
+        const client = {
+            send: async (command: any) => {
+                if(throttled && command?.constructor?.name === 'UpdateItemCommand'){
+                    throw Object.assign(new Error('slow down'), { name: 'ProvisionedThroughputExceededException', ThrottlingReasons: [{ reason: 'TableWriteKeyRangeThroughputExceeded' }] });
+                }
+                return await table.send(command);
+            },
+        };
+        const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+        try {
+            const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: {
+                    limiter: new LambderDdbRateLimiter({ tableName: 'test-table', client: client as never }),
+                    policies: { p: { perMin: 1, per: 'ip', budget: 'perApi' } },
+                } })
+                .addApi('open', { ...testSchema, rateLimit: 'p' }, async (ctx, res) => res.api({ result: 'through' }));
+            const callFrom = (sourceIp: string) => lambder.render(createEnvelopeEvent({ apiName: 'open', payload: { value: 'x' } }, { sourceIp }), createMockContext());
+
+            expect((await callFrom('198.51.100.1')).statusCode).toBe(200);
+            throttled = true;
+
+            const flood = await callFrom('198.51.100.1');
+            expect(flood.statusCode).toBe(429);
+            // Five seconds, give or take the second boundary between the
+            // limiter's clock read and the engine's.
+            expect(Number(flood.multiValueHeaders?.['Retry-After']?.[0])).toBeGreaterThanOrEqual(4);
+            expect(Number(flood.multiValueHeaders?.['Retry-After']?.[0])).toBeLessThanOrEqual(5);
+
+            const neighbour = await callFrom('198.51.100.2');
+            expect(neighbour.statusCode).toBe(200);
+            expect(errors).toHaveBeenCalledTimes(1);
+        } finally {
+            errors.mockRestore();
+        }
+    });
+
+    it('logs a flood it cannot size once, not once per request, and still lets failOpen decide each one', async () => {
+        // Writes and reads both throttled on the key's partition: whether the
+        // key is the flood cannot be told, so each request fails open. The
+        // limiter throws the same error for the repeats, and a log line per
+        // request of a flood of thousands a second says nothing the first
+        // one did not.
+        const throttle = (reason: string) => Object.assign(new Error('slow down'), { name: 'ProvisionedThroughputExceededException', ThrottlingReasons: [{ reason }] });
+        const client = {
+            send: async (command: any) => {
+                throw throttle(command?.constructor?.name === 'UpdateItemCommand' ? 'TableWriteKeyRangeThroughputExceeded' : 'TableReadKeyRangeThroughputExceeded');
+            },
+        };
+        const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+        try {
+            const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: {
+                    limiter: new LambderDdbRateLimiter({ tableName: 'test-table', client: client as never }),
+                    policies: { p: { perMin: 1, per: 'ip', budget: 'perApi' } },
+                } })
+                .addApi('open', { ...testSchema, rateLimit: 'p' }, async (ctx, res) => res.api({ result: 'through' }));
+
+            for(let attempt = 0; attempt < 3; attempt++){
+                expect((await lambder.render(createApiEvent('open', { value: 'x' }), createMockContext())).statusCode).toBe(200);
+            }
+            expect(errors).toHaveBeenCalledTimes(1);
+        } finally {
+            errors.mockRestore();
+        }
+    });
+
+    it('measures Retry-After on the limiter\'s own clock', async () => {
+        // resetAt is a second on the clock the windows were counted against.
+        // Read against the wall clock instead, a limiter under a test clock
+        // three years back answers Retry-After: 1 whatever the window says.
+        const START = 1_700_000_000_000;
+        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api', rateLimits: {
+                limiter: new LambderDdbRateLimiter({ tableName: 'test-table', client: new MemoryDdb(), now: () => START }),
+                policies: { p: { perMin: 1, per: 'ip', budget: 'perApi' } },
+            } })
+            .addApi('limited', { ...testSchema, rateLimit: 'p' }, async (ctx, res) => res.api({ result: 'through' }));
+
+        expect((await lambder.render(createApiEvent('limited', { value: 'x' }), createMockContext())).statusCode).toBe(200);
+        const refused = await lambder.render(createApiEvent('limited', { value: 'x' }), createMockContext());
+        expect(refused.statusCode).toBe(429);
+        const minuteEnd = (Math.floor(START / 1000 / 60) + 1) * 60;
+        expect(refused.multiValueHeaders?.['Retry-After']).toEqual([String(minuteEnd - START / 1000)]);
     });
 
     it('budget "perApi" (the default) gives each API its own counter', async () => {
@@ -746,8 +907,8 @@ describe('API policies - an empty guards option declares nothing', () => {
 
     it('rejects a guard that answers instead of authorizing, at build and at runtime', async () => {
         // A guard that hands back a response denies nothing: the value would
-        // become ctx.guardData[name] and the call would carry on. This was the
-        // shape that survived removing the resolver argument, so both halves
+        // become ctx.guardData[name] and the call would carry on. A guard gets
+        // no resolver but can still build a response itself, so both halves
         // are pinned here.
         // @ts-expect-error a guard authorizes, it does not answer
         const answering = lambderGuard({ handler: () => new LambderResponse({ statusCode: 403, body: 'denied' }) });
@@ -1081,10 +1242,11 @@ describe('API policies - idempotency', () => {
         expect(runs).toBe(1);
     });
 
-    it('scopes a session API replay per session, so one key in two sessions does not cross', async () => {
-        // The line that makes "even a leaked key cannot cross users" true.
-        // Replacing the scope's session branch with the public, key-only form
-        // left every other test in the suite green.
+    it('scopes a session API replay per user, so one key from two users does not cross', async () => {
+        // The line that makes "even a leaked key cannot cross users" true, and
+        // the only test that fails if a session API's scope falls back to the
+        // public, key-only form. The scope is the sessionKey, so every session
+        // of one user shares it.
         const ran: string[] = [];
         const lambder = initLambder<{ role: string }>().create({
             files: testPublicFiles(), apiPath: '/api',
@@ -1108,6 +1270,10 @@ describe('API policies - idempotency', () => {
         expect(JSON.parse((await call(b)).body || '{}').payload.result).toBe('ran:B1');
         // A retries: A's own answer, replayed, with no third run.
         expect(JSON.parse((await call(a)).body || '{}').payload.result).toBe('ran:A1');
+        // A retries from another session (a second tab, a new sign-in): the
+        // same user, so the same scope and the same answer.
+        const aElsewhere = await manager.createSession('A1', { role: 'user' });
+        expect(JSON.parse((await call(aElsewhere)).body || '{}').payload.result).toBe('ran:A1');
         expect(ran).toEqual(['A1', 'B1']);
     });
 
@@ -1228,19 +1394,19 @@ describe('API policies - idempotency', () => {
     it('a slow original that lost its claim cannot clobber the new owner', async () => {
         const client = new MemoryDdb();
         const store = makeStore(client);
-        const original = await store.begin('scope-x', { pendingTtlSeconds: 300 });
+        const original = await store.begin('scope-x', { pendingTtlSeconds: 300, fingerprint: 'request-1' });
         expect(original.state).toBe('new');
         if(original.state !== 'new') return;
 
         // The original stalls past its pending TTL; a retry claims the scope.
         const k = 'IDEM#scope-x|idem';
         client.items.get(k)!.expiresAt = { N: String(Math.floor(Date.now() / 1000) - 10) };
-        const retry = await store.begin('scope-x', { pendingTtlSeconds: 300 });
+        const retry = await store.begin('scope-x', { pendingTtlSeconds: 300, fingerprint: 'request-1' });
         expect(retry.state).toBe('new');
         if(retry.state !== 'new') return;
 
         // The stalled original settles late: both paths must be silent no-ops.
-        const staleBody = { statusCode: 200, headers: {}, body: 'stale', ttlSeconds: 60 };
+        const staleBody = { statusCode: 200, headers: {}, body: 'stale', fingerprint: 'request-1', ttlSeconds: 60 };
         expect(await store.complete('scope-x', original.ownerToken, staleBody)).toBe('lost');
         await store.abandon('scope-x', original.ownerToken);
         expect(client.items.get(k)?.state?.S).toBe('pending');
@@ -1253,9 +1419,9 @@ describe('API policies - idempotency', () => {
     it('compression: false stores every body plain, { minBytes } moves the threshold, and either shape reads back', async () => {
         const big = JSON.stringify({ payload: { rows: Array.from({ length: 200 }, (_, i) => ({ i, name: `row-${i}` })) } });
         const settle = async (store: LambderDdbIdempotencyStore, scope: string, body: string) => {
-            const claim = await store.begin(scope, { pendingTtlSeconds: 300 });
+            const claim = await store.begin(scope, { pendingTtlSeconds: 300, fingerprint: 'request-1' });
             if(claim.state !== 'new') throw new Error('expected fresh claim');
-            expect(await store.complete(scope, claim.ownerToken, { statusCode: 200, headers: {}, body, ttlSeconds: 60 })).toBe('stored');
+            expect(await store.complete(scope, claim.ownerToken, { statusCode: 200, headers: {}, body, fingerprint: 'request-1', ttlSeconds: 60 })).toBe('stored');
         };
 
         const offClient = new MemoryDdb();
@@ -1282,9 +1448,9 @@ describe('API policies - idempotency', () => {
 
         const big = JSON.stringify({ payload: { rows: Array.from({ length: 200 }, (_, i) => ({ i, name: `row-${i}` })) } });
         expect(Buffer.byteLength(big)).toBeGreaterThan(1024);
-        const claim = await store.begin('scope-br', { pendingTtlSeconds: 300 });
+        const claim = await store.begin('scope-br', { pendingTtlSeconds: 300, fingerprint: 'request-1' });
         if(claim.state !== 'new') throw new Error('expected fresh claim');
-        expect(await store.complete('scope-br', claim.ownerToken, { statusCode: 200, headers: {}, body: big, ttlSeconds: 60 })).toBe('stored');
+        expect(await store.complete('scope-br', claim.ownerToken, { statusCode: 200, headers: {}, body: big, fingerprint: 'request-1', ttlSeconds: 60 })).toBe('stored');
 
         const item = client.items.get(k)!;
         expect(item.body).toBe(undefined);
@@ -1294,9 +1460,9 @@ describe('API policies - idempotency', () => {
         expect((await store.peek('scope-br'))?.body).toBe(big);
 
         // Below the threshold: plain string attribute, no compression.
-        const claim2 = await store.begin('scope-plain', { pendingTtlSeconds: 300 });
+        const claim2 = await store.begin('scope-plain', { pendingTtlSeconds: 300, fingerprint: 'request-1' });
         if(claim2.state !== 'new') throw new Error('expected fresh claim');
-        await store.complete('scope-plain', claim2.ownerToken, { statusCode: 200, headers: {}, body: 'tiny', ttlSeconds: 60 });
+        await store.complete('scope-plain', claim2.ownerToken, { statusCode: 200, headers: {}, body: 'tiny', fingerprint: 'request-1', ttlSeconds: 60 });
         expect(client.items.get('IDEM#scope-plain|idem')?.body?.S).toBe('tiny');
         expect((await store.peek('scope-plain'))?.body).toBe('tiny');
     });
@@ -1305,15 +1471,41 @@ describe('API policies - idempotency', () => {
         const client = new MemoryDdb();
         const lambder = build(client);
         const now = Math.floor(Date.now() / 1000);
-        // Pre-seed an unexpired pending claim for this scope (public scope: key-only).
+        // Pre-seed an unexpired pending claim for this scope (public scope:
+        // key-only), taken by this same request: its payload's fingerprint.
         client.items.set(`IDEM#k|op|${KEY_BUSY}|idem`, {
             pk: { S: `IDEM#k|op|${KEY_BUSY}` }, sk: { S: 'idem' },
             state: { S: 'pending' }, expiresAt: { N: String(now + 100) },
+            fingerprint: { S: nodeCrypto.createHash('sha256').update(canonicalJson({ value: 'a' })).digest('hex') },
         });
 
         const result = await lambder.render(createApiEvent('op', { value: 'a' }, { idempotencyKey: KEY_BUSY }), createMockContext());
         expect(result.statusCode).toBe(409);
         expect(JSON.parse(result.body || '{}').errorMessage).toEqual({ type: 'warning', code: 'lambder/duplicate-in-flight', content: 'This request is already being processed.' });
+    });
+
+    it('refuses a key whose record keeps no fingerprint as reused, rather than replaying it or running over it', async () => {
+        // An item another writer left in the table (a custom store, a script)
+        // cannot be tied to this request, pending or settled. The key-reused
+        // 409 is the answer a key scope moves past; replaying would hand an
+        // unknown answer to whoever holds the key, and running would ignore
+        // an original that may be in flight.
+        let runs = 0;
+        const client = new MemoryDdb();
+        const lambder = build(client, () => { runs += 1; });
+        const now = Math.floor(Date.now() / 1000);
+        const plantWithoutFingerprint = (key: string, attributes: Record<string, { S: string } | { N: string }>) => client.items.set(`IDEM#k|op|${key}|idem`, {
+            pk: { S: `IDEM#k|op|${key}` }, sk: { S: 'idem' }, expiresAt: { N: String(now + 100) }, ...attributes,
+        });
+        plantWithoutFingerprint(KEY_1, { state: { S: 'done' }, statusCode: { N: '200' }, body: { S: '{"foreign":true}' } });
+        plantWithoutFingerprint(KEY_BUSY, { state: { S: 'pending' }, ownerToken: { S: 'someone-else' } });
+
+        for(const key of [KEY_1, KEY_BUSY]){
+            const result = await lambder.render(createApiEvent('op', { value: 'a' }, { idempotencyKey: key }), createMockContext());
+            expect(result.statusCode).toBe(409);
+            expect(JSON.parse(result.body || '{}').errorMessage).toMatchObject({ code: LAMBDER_REFUSAL_CODES.idempotencyKeyReused });
+        }
+        expect(runs).toBe(0);
     });
 
     it('releases the claim when the handler crashes, so a retry re-executes', async () => {

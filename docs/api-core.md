@@ -21,13 +21,14 @@ between runs once, in one place, on Node and in the browser.
                      ▼                  ▼
             ══════════ LambderApiPipeline (isomorphic core) ══════════
             version floor → signature gate → payload restore → ip-keyed rate limits → session
-            → replay → the remaining rate limits → guards → input validation
-            → exec → answer
+            → replay → session-keyed rate limits (and custom keys charged beforeGuards)
+            → guards → input validation → guards placed after it
+            → custom-key rate limits → exec → answer
 ```
 
 The core lives in `src/api/` and reaches into `core/` nowhere at all, at
-runtime or in the types: the cookie serializer it used to import lives in
-`shared/`, and the two builders bound to the server's render contexts
+runtime or in the types: the cookie serializer lives in `shared/`, and the
+two builders bound to the server's render contexts
 (`lambderGuard`, `lambderRateLimitKey`) live in `core/LambderPolicyBuilders.ts`
 and are built from the generic `lambderGuardBuilder` /
 `lambderRateLimitKeyBuilder` the core exports. That is what keeps
@@ -55,8 +56,9 @@ Directories are layers, and imports only ever point down. From the bottom:
 
 1. `shared/`: isomorphic utilities, vocabularies and store interfaces.
    Depends on nothing in `src/` but itself.
-2. `stores/`: implementations of the interfaces in `shared/`. Only a
-   `LambderDdb*` or `LambderS3*` store may name an AWS SDK, and then lazily.
+2. `stores/`: implementations of the interfaces in `shared/`, and the
+   helpers the two caches share. Only a `LambderDdb*` or `LambderS3*` store
+   may name an AWS SDK, and then lazily.
 3. `session/`: the session model and the per-request controller over a
    `LambderSessionStore`.
 4. `api/`: this core, over `shared/` and `session/`.
@@ -69,8 +71,11 @@ Directories are layers, and imports only ever point down. From the bottom:
 7. `testing/`: the test app, on top of the server. It puts a built instance
    under test through the typed caller and the in-process transport, over the
    memory stores, and nothing imports it back, so no deployment carries it.
-8. `index.ts`, `client.ts`, `mock.ts`, `testing.ts`: the four entries, each
-   reaching only the layers its consumers may have.
+   `build/`: what a generator script runs at build time, over `shared/` and
+   `api/`; it takes an instance structurally, so it names nothing in
+   `core/`, and nothing imports it back either.
+8. `index.ts`, `client.ts`, `mock.ts`, `testing.ts`, `build.ts`: the five
+   entries, each reaching only the layers its consumers may have.
 
 A type-only import obeys the same rule as a value import. A type edge is still
 a dependency: it binds every consumer's typecheck, it is where the next value
@@ -150,7 +155,7 @@ answer is the shape the idempotency store persists and replays;
 | `apiNotFoundAnswer(apiVersion, logList?)` | The `lambder/api-not-found` refusal |
 | `sessionExpiredAnswer(apiVersion, logList?)`, `versionExpiredAnswer(apiVersion)` | The protocol flags |
 | `invalidPayloadAnswer(apiVersion, message)` | A compressed payload that could not be restored (400) |
-| `crashAnswer(apiVersion)` | The last-resort 500, still an envelope |
+| `crashAnswer(apiVersion, revealed?)` | The last-resort 500, still an envelope; `revealed` (the crash in full, with the call's logList) only for a caller `crashes.reveal` trusts |
 
 The server's `res.api()` builds through `buildApiEnvelope`, and the mock wraps
 a handler's return with it, so the two sides cannot drift on a byte.
@@ -174,7 +179,7 @@ const pipeline = new LambderApiPipeline<Ctx, SessionData>({
     // handler written for another adapter is a compile error here. A guard is
     // bound on both contexts it may run on: TCtx, and TCtx with the session
     // narrowed to a record, which is what an adapter's session context is.
-    rateLimits?: { limiter: LambderRateLimiter, policies, failOpen? },
+    rateLimits?: { limiter: LambderRateLimiter, policies, failOpen?, ipv6PrefixLength? },
     guards?: Record<string, LambderApiGuard<any, any, any, Ctx, Ctx & { session: LambderSessionRecord<SessionData> }>>,
     idempotency?: { store: LambderIdempotencyStore, defaultTtlSeconds?, defaultPendingTtlSeconds?, failOpen?, callerIdentity? },
 });
@@ -196,7 +201,10 @@ unmetered or undeduplicated request is worse than a refused one.
 
 `definition` is a `LambderApiDefinition`: `{ name, mode, guards?, rateLimit?,
 idempotency?, input?, output? }`. The schemas are optional because the mock has
-none; `output` is read by the signature digest alone.
+none. On the server, `output` is what every payload a handler answers is
+parsed through before it is sent (the parse belongs to the server's resolver,
+so the mock, which has no schemas, sends payloads as given), and it is part of
+the endpoint's signature digest.
 `exec(ctx)` is the adapter's step: on the server it calls the app handler and
 converts its `LambderResponse` to an answer; in the mock it calls the mock
 handler and wraps the return in the envelope.
@@ -215,18 +223,23 @@ The steps, in the order `run` executes them:
 3. **Rate limits whose key needs no session** (`per: "ip"`), in declared
    order. They run here because the session read below is one of the things
    they exist to bound: a request carrying a bogus session cookie costs a
-   store scan plus a read per candidate, and it used to be answered
-   `sessionExpired` without the limiter ever running. A replay costs those
-   same reads, so an ip-keyed limit is charged to a replay too.
+   store scan plus a read per candidate, and answered `sessionExpired` first
+   it would never meet the limiter. A replay costs those same reads, so an
+   ip-keyed limit is charged to a replay too.
 4. **Session** (session mode): the session controller reads the session the
    request's cookies name, checked against the posted CSRF token; none
    answers `sessionExpired`.
 5. **Idempotency replay**: a completed record answers its stored answer
    without burning the remaining rate-limit quota or re-running guards.
-6. **The remaining rate limits** (`per: "session"` and custom key handlers,
-   which may read `ctx.session`), then **guards**, in declared order; a
-   guard's return lands on `ctx.guardData`.
-7. **Input validation**, when the definition carries a schema.
+6. **The session-keyed rate limits** (`per: "session"`), with the custom-key
+   limits whose policy says `chargeAt: "beforeGuards"`, then **guards**, in
+   declared order; a guard's return lands on `ctx.guardData`.
+7. **Input validation**, when the definition carries a schema, then the
+   guards placed after it (`runAt: "afterInputValidation"`, for a guard that
+   spends something such as a captcha token), then the **custom-key rate
+   limits** (by default), which may read `ctx.session` and are charged only
+   once everything that refuses for free has passed. The handler gets the parsed
+   input after these, which read their slices from the payload as sent.
 8. **exec**, inside the idempotency claim; the headers the handler itself
    wrote are drained onto the answer before the engine decides whether to
    store it. The engine hands the store a copy, so applying the call's own
@@ -277,6 +290,7 @@ engine calls, with a DynamoDB implementation and an in-memory one:
 | `LambderRateLimiter` | `LambderDdbRateLimiter` | `LambderMemoryRateLimiter` |
 | `LambderIdempotencyStore` | `LambderDdbIdempotencyStore` | `LambderMemoryIdempotencyStore` |
 | `LambderSessionStore` | `LambderDdbSessionStore` | `LambderMemorySessionStore` |
+| `LambderCache` | `LambderDdbCache` | `LambderMemoryCache` |
 
 The memory stores keep the same semantics (fixed windows and attempt counting,
 owner-checked claims and expiry, session records under the two hashes) with a

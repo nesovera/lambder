@@ -26,21 +26,23 @@ policy types; the curried creator is the canonical entry.
 | `minApiVersion` | none | The oldest client build still served: a call naming a lower `version` answers `versionExpired` whatever its signature says. Dotted numbers compared segment by segment; a floor above `apiVersion` is taken as `apiVersion` |
 | `apiSignatures` | none | The generated signature map (`lambder.apiSignatures()`), the same file the frontend ships with; enables the signature gate. See [APIs](./apis.md#signatures-when-a-client-must-update) |
 | `files` | none | Where the app's files come from, for `servePublicFiles`, `serveIndexHtml`, `res.file` and `res.templateFile`. See [Frontend hosting](./frontend-hosting.md) |
-| `compression` | `true` | Automatic response compression. `true` is `{ minBytes: 860, encodings: ["br", "gzip"], quality: 5 }`; `false` disables it. See [Responses](./responses.md#compression) |
+| `compression` | `true` (off on a REST API unless given) | Automatic response compression. `true` is `{ minBytes: 860, encodings: ["br", "gzip"], quality: 5 }`; `false` disables it. See [Responses](./responses.md#compression) |
 | `etag` | `true` | Automatic ETag and `If-None-Match` 304 handling on GET/HEAD 200 responses |
 | `maxResponseBytes` | `5_500_000` | Guard threshold for Lambda's ~6MB response cap; a positive integer |
 | `maxRequestPayloadBytes` | `20_000_000` | Ceiling on what a compressed request payload may restore to. See [Frontend client](./client.md#compressed-request-payloads) |
 | `cors` | off | `true` allows any origin, or a `LambderCorsConfig` (below) |
 | `trustedClientIpHeaders` | none | Headers that may name the caller's own address, in order of preference. Empty means `ctx.ip` is the address the gateway observed (below) |
+| `trustedHostHeaders` | none | Headers that may name the host the viewer asked for, in order of preference. Empty means `ctx.host` is the Host the gateway received (below) |
 | `session` | none | Sessions over a store of your choosing; `addSessionApi` and `addSessionRoute` are compile errors without it. See [Sessions](./sessions.md) |
 | `rateLimits` | none | A limiter (`LambderRateLimiter`: DynamoDB, memory, or your own) plus named policies APIs reference by name. See [API policies](./api-policies.md#rate-limits) |
-| `guards` | none | Named guards APIs reference by name; build each with `lambderGuard()`. See [API policies](./api-policies.md#guards) |
+| `guards` | none | Named guards APIs reference by name; build each with `initLambder<SessionData>().guard()` (typed to the app's session) or `lambderGuard()`. See [API policies](./api-policies.md#guards) |
 | `idempotency` | none | An idempotency store (`LambderIdempotencyStore`: DynamoDB, memory, or your own) plus replay defaults. See [API policies](./api-policies.md#idempotency) |
 | `requireSessionApiGuards` | `false` | Make `guards` a required field of every `addSessionApi` |
 | `requirePublicApiGuards` | `false` | Make `guards` a required field of every `addApi` |
+| `crashes` | none | `{ report, reportTimeoutMs, reveal }`: a reporter told every crash on every path (API, route, event, startup) and waited for up to `reportTimeoutMs` (default 3000, a positive integer), and who may read a crash in the framework's 500. Without a reporter, a crash nothing answered is logged to the console. See [Routing](./routing.md#crashes) |
 
 A key the options type does not have is a compile error, one level down as
-well: `session` (and `session.cookie`), `idempotency`, `rateLimits` and each
+well: `session` (and `session.cookie`), `idempotency`, `crashes`, `rateLimits` and each
 of its `policies`, each guard in `guards`, the object form of `files`, and
 `cors` and `compression` when either is written as an object. Inferring the
 options as a `const` generic is what makes an app's declaration typed, and it
@@ -111,8 +113,8 @@ the serving slots in full.
 
 | Field | Default | Description |
 | --- | --- | --- |
-| `origins` | `"*"` | `"*"`, an allowlist array, or `(origin, ctx) => boolean`. With `credentials`, the origin is echoed rather than `"*"` |
-| `credentials` | `false` | Allow credentialed requests (cookies) |
+| `origins` | `"*"` | `"*"`, an allowlist array, or `(origin, ctx) => boolean`. An allowed origin is echoed; under an allowlist or a predicate every answer carries `Vary: Origin`, so a cache never serves one origin's answer to another. A predicate is asked once per request, before any hook or handler runs, and its answer holds for every answer the request ends in, a crash's included. One that throws (`new URL(origin)` on the `Origin: null` a sandboxed frame sends) counts as refused and is logged; the request is answered as usual |
+| `credentials` | `false` | Allow credentialed requests (cookies). Needs an allowlist or a predicate in `origins`: create() refuses it with every origin allowed, since any website could then read a signed-in user's answers |
 | `methods` | framework default | Methods advertised on preflight |
 | `allowHeaders` | framework default | Request headers advertised on preflight |
 | `exposeHeaders` | `["Retry-After"]` | Response headers a cross-origin browser caller may read. `Retry-After` is not on the CORS safelist, and a hidden header reads as `null` rather than as an error, so rate-limit refusals stay readable by default |
@@ -137,19 +139,55 @@ Behind API Gateway alone, leave this unset. API Gateway APPENDS to
 `x-forwarded-for` rather than replacing it, so the leftmost entry is whatever
 the client sent.
 
-There is no exception for a [lambda-to-lambda invoke](./invoke.md). The
-marker header that would have identified one is an ordinary request header
-that any HTTP caller can set, so honouring it would hand every caller the
-value again. An invoke needs no exception anyway: the event it synthesizes
-carries the caller's `clientIp` in `requestContext.http.sourceIp`, which is
-where `ctx.ip` reads the gateway address from in the first place.
+A [lambda-to-lambda invoke](./invoke.md) reads none of these headers. No
+proxy in front of the function wrote its headers: they are whatever the
+invoking code passed on, a browser's own included when a gateway lambda
+forwards them. So on an invoke `ctx.ip` is the invoker's `clientIp`, which
+its event carries in `requestContext.http.sourceIp`, and nothing else. The
+server tells an invoke by the event's `requestContext.apiId`, which a gateway
+writes itself, and never by the `x-lambder-invoke` marker, an ordinary header
+any HTTP caller can send.
+
+## `trustedHostHeaders`
+
+`ctx.host` is the Host header the gateway received unless this option names a
+header to prefer. A Function URL behind CloudFront needs it: CloudFront sends
+an origin the origin's own Host, so the function sees its lambda-url domain,
+and cookie domains and host-matched routes would work on that. Have the
+distribution write the viewer's host into a header itself, and name it: a
+viewer-request CloudFront Function that sets `x-forwarded-host` from the
+viewer's Host, overwriting whatever the viewer sent. An origin request policy
+cannot do this: it only forwards headers the viewer sent, so a policy that
+forwards `x-forwarded-host` (the managed AllViewerExceptHostHeader does) hands
+the function a host the client chose.
+
+```typescript
+trustedHostHeaders: ["x-forwarded-host"],   // a Function URL behind CloudFront
+```
+
+The first listed header carrying a well-formed host wins (a name or an
+address, and an optional port), leftmost entry. The rule is the one above for
+addresses: only list a header something in front of this app always
+overwrites, because a host a client can pick decides which cookie domain and
+which tenant's routes it gets.
+
+That holds only while the distribution is the one way in. A Function URL with
+auth type `NONE` answers anyone who has its lambda-url address, so a client can
+call it directly, bypassing CloudFront, with any `x-forwarded-host` it likes.
+Trust the header only when the function is reachable solely through the
+distribution: the Function URL on `AWS_IAM` auth with a CloudFront origin
+access control signing the distribution's requests, or an equivalent that
+refuses every request the distribution did not send.
+
+As with addresses, an [invoke](./invoke.md) reads none of these headers:
+`ctx.host` there is the invoker's `host`.
 
 ## `session`
 
 | Field | Default | Description |
 | --- | --- | --- |
 | `store` | required | `LambderDdbSessionStore`, `LambderMemorySessionStore`, or your own `LambderSessionStore` |
-| `sessionSalt` | required | Peppers the identity-to-partition-key mapping. Treat as a secret |
+| `sessionSalt` | required | The HMAC key that turns a sessionKey into the store's partition key. Treat as a secret |
 | `enableSlidingExpiration` | `true` | Extend the session on each access |
 | `slidingWriteIntervalSeconds` | `max(60, 5% of TTL)` | Minimum seconds between sliding-expiration writes |
 | `cookie` | see [Sessions](./sessions.md#cookie-scope) | Cookie scope: `domain`, `path`, `sameSite`, `secure` |
@@ -175,7 +213,7 @@ rateLimits: {
     limiter: new LambderDdbRateLimiter({ tableName, region }),
     policies: { /* name: { perMin, perHour, per, budget, errorMessage } */ },
 },
-guards: { /* name: lambderGuard({ ... }) */ },
+guards: { /* name: initLambder<SessionData>().guard({ ... }) */ },
 idempotency: {
     store: new LambderDdbIdempotencyStore({ tableName, region }),
     defaultTtlSeconds: 24 * 3600,
@@ -227,8 +265,8 @@ Everything below chains off the created instance and returns `this`.
 | `setRouteFallbackHandler(handler)` | Response for unmatched routes |
 | `setApiFallbackHandler(handler)` | Response for unmatched API names |
 | `setApiInputValidationErrorHandler(handler)` | Response for a rejected Zod input |
-| `setSessionExpiredRouteHandler(handler)` | Response for session routes with no session. Default 401 |
+| `setSessionExpiredRouteHandler(handler)` | Response for session routes with no session, and for a route or hook that meets `LambderSessionNotFoundError`. Default 401 |
 | `setGlobalErrorHandler(handler)` | Last-resort error response |
-| `getSessionController(ctx)` | The session controller for a request |
+| `getSessionController(ctx)` | The session controller for a request; a handler, guard or hook has it as `ctx.sessionController` |
 | `getResponseBuilder(ctx?)` | A response builder outside a handler (no `res.die.*`) |
 | `getHandler()` | The Lambda entry point |

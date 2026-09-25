@@ -15,16 +15,16 @@ export class LambderTransportFailure extends Error {
 /** Brand-based type guard, so a duplicate install of the package still matches. */
 export const isLambderTransportFailure = (err) => err instanceof Error && err.isLambderTransportFailure === true;
 /**
- * The fields of the request envelope, in the order they go on the wire: the
- * one statement of what a call sends, for every sender there is.
+ * The fields of the request envelope, in wire order: the one statement of
+ * what a call sends, for every sender.
  *
  * Two senders write it. A transport hands the payload over as a value
  * (buildTransportEnvelope, below); LambderInvokeCaller has already serialized
- * its payload to decide whether to compress it, and splices that JSON onto the
- * end rather than parsing and stringifying it a second time
- * (buildEnvelopeJson, in invoke/LambderLambdaEvent.ts). The splice sits on top
- * of this function precisely so that a new envelope field cannot be added to
- * one sender and missed by the other, which nothing on the wire would catch.
+ * its payload to decide on compression, and splices that JSON onto the end
+ * rather than parsing and stringifying it again (buildEnvelopeJson, in
+ * invoke/LambderLambdaEvent.ts). The splice builds on this function so a new
+ * envelope field cannot reach one sender and miss the other, which nothing on
+ * the wire would catch.
  */
 export const buildEnvelopeFields = (fields) => ({
     apiName: fields.apiName,

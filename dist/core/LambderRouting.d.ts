@@ -24,9 +24,8 @@ export type CompiledMatcher = (ctx: LambderRenderContext) => false | Record<stri
  * unless the list names HEAD itself: a HEAD is a GET whose body finalization
  * strips, so an app that narrowed a slot to ["GET"] did not mean to 404 it.
  *
- * The three places that gate on a method (a route matcher's `method`,
- * servePublicFiles and serveIndexHtml) share this one rule, so neighbouring
- * slots cannot disagree about what a method means.
+ * A route matcher's `method`, servePublicFiles and serveIndexHtml all use
+ * this rule, so neighbouring slots cannot disagree about what a method means.
  */
 export declare const allowsRequestMethod: (methods: ReadonlySet<string>, requestMethod: string) => boolean;
 /** Compile a route condition once at registration time. */

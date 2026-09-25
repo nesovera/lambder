@@ -11,6 +11,7 @@ import { apiNameKeyOf, type LambderApiSignatureMap } from '../src/shared/wire/La
 import { LambderMockTransportError } from '../src/mock/LambderMockFailureInjector.js';
 import { z } from 'zod';
 import LambderCaller from '../src/client/LambderCaller.js';
+import { createIdempotencyKey } from '../src/shared/wire/LambderIdempotencyKeyScope.js';
 import { initLambderMock } from '../src/mock/LambderMockApp.js';
 import { lambderMockMswHandler } from '../src/mock/lambderMockMswHandler.js';
 import { lambderMockInvokeTransport } from '../src/mock/lambderMockInvokeTransport.js';
@@ -20,6 +21,7 @@ import { refuse, LAMBDER_REFUSAL_CODES } from '../src/shared/wire/LambderApiRefu
 import { LambderPlainSessionCrypto } from '../src/session/LambderSessionCrypto.js';
 import { LambderMemorySessionStore } from '../src/stores/LambderMemorySessionStore.js';
 import type { LambderSessionStore } from '../src/shared/contracts/LambderSessionStore.js';
+import type { LambderApiTransport } from '../src/shared/transport/LambderApiTransport.js';
 import { assertApiSuccess, assertApiFailure } from '../src/shared/wire/LambderOutcomeAssertions.js';
 
 type SessionData = { userId: string; tenants: { tenantId: string; role: 'reader' | 'writer' }[] };
@@ -98,11 +100,11 @@ const createMockApp = (options: { apiVersion?: string; latency?: number } = {}) 
     mockApp.register(
         mockApp.apiSlice(
             mockApp.publicApi('user.get', async ({ payload }) => ({ id: payload.userId, name: 'Ada' })),
-            mockApp.publicApi('login', async ({ payload, sessions }) => {
-                await sessions.createSession(payload.user, { userId: payload.user, tenants: [{ tenantId: 't1', role: payload.user === 'ada' ? 'writer' : 'reader' }] });
+            mockApp.publicApi('login', async ({ payload, sessionController }) => {
+                await sessionController.createSession(payload.user, { userId: payload.user, tenants: [{ tenantId: 't1', role: payload.user === 'ada' ? 'writer' : 'reader' }] });
                 return { ok: true };
             }),
-            mockApp.sessionApi('logout', async ({ sessions }) => { await sessions.endSession(); return { ok: true }; }),
+            mockApp.sessionApi('logout', async ({ sessionController }) => { await sessionController.endSession(); return { ok: true }; }),
             mockApp.sessionApi('me', async ({ session }) => ({ userId: session.data.userId })),
             mockApp.sessionApi('order.create', {
                 guards: { tenant: 'writer' },
@@ -160,10 +162,10 @@ describe('LambderMockApp - answers', () => {
     });
 
     it('a registration that throws leaves nothing registered, so the retry sees the real problem', async () => {
-        // Slices were added one entry at a time, so a later slice failing a
-        // check left the earlier ones registered. A caller that caught the
-        // error, fixed its slices and called again then hit a duplicate-name
-        // error from its own first attempt instead of the problem it fixed.
+        // Adding slices one entry at a time would leave the earlier ones
+        // registered when a later one fails a check, and a caller that fixed
+        // its slices and called again would hit a duplicate-name error from
+        // its own first attempt instead of the problem it fixed.
         const bare = mock.create({ ...requiredOptions });
         const good = bare.apiSlice(bare.publicApi('echo', async ({ payload }) => ({ count: payload.notes.length })));
         const clashing = bare.apiSlice(bare.publicApi('echo', async ({ payload }) => ({ count: payload.notes.length })));
@@ -178,8 +180,8 @@ describe('LambderMockApp - answers', () => {
     it('a session endpoint left unmocked is still refused for having no session', async () => {
         // The refusal runs through the pipeline so the steps before dispatch
         // still happen, and the session read is one of them. Declaring every
-        // not-mocked endpoint public switched that step off, so this answered
-        // "not mocked" where the server answers sessionExpired, which is a
+        // not-mocked endpoint public would switch that step off, and this would
+        // answer "not mocked" where the server answers sessionExpired, a
         // different bug to go looking for.
         const { mockApp } = createMockApp();
 
@@ -254,7 +256,7 @@ describe('LambderMockApp - answers', () => {
 });
 
 describe('LambderMockApp - sessions', () => {
-    it('a login handler creates a session through ctx.sessions and the jar carries it into the next call', async () => {
+    it('a login handler creates a session through ctx.sessionController and the jar carries it into the next call', async () => {
         const { mockApp } = createMockApp();
         const caller = callerFor(mockApp);
         expect((await callerFor(mockApp).apiOutcome('me', {})).ok).toBe(false);
@@ -307,7 +309,7 @@ describe('LambderMockApp - sessions', () => {
     it('signIn plants a cookie carrying a Domain, so an app with a cookie domain still signs in', async () => {
         // A jar checks every Domain against the host that sent it and refuses
         // one it cannot check, so cookies planted without naming that host
-        // were dropped and the session never carried.
+        // would be dropped and the session would never carry.
         const domained = mock.create({ ...requiredOptions, cookieHost: 'app.example.com', sessions: { cookieOptions: { domain: 'example.com' } } });
         domained.registerPartial(domained.apiSlice(
             domained.sessionApi('me', async ({ session }) => ({ userId: session.data.userId })),
@@ -323,10 +325,9 @@ describe('LambderMockApp - sessions', () => {
     });
 
     it('every session member names the mock\'s own sessions option when it is off', async () => {
-        // The four reached the pipeline's guard and threw its message, which
-        // names the SERVER's option ("the session option"). The mock's option
-        // is `sessions`, and a reader who goes looking for `session` on
-        // create() does not find it.
+        // The pipeline's own message names the SERVER's option ("the session
+        // option"). The mock's option is `sessions`, and a reader who goes
+        // looking for `session` on create() would not find it.
         // @ts-expect-error the contract has session endpoints; built without sessions on purpose, as a plain-JS caller could
         const bare = mock.create({ ...requiredOptions, sessions: false });
 
@@ -341,11 +342,11 @@ describe('LambderMockApp - sessions', () => {
     });
 
     it('picks the plain crypto for a memory-only store the app supplied, not only for one it created', async () => {
-        // The condition read "did this runtime create the store", so an app
-        // passing its own memory store on a plain-http page (device testing on
-        // a LAN, no crypto.subtle) got WebCrypto and threw on its first
-        // session call, where the default path degrades. The store's own
-        // isMemoryOnly is the declaration that answers the question.
+        // The store's own isMemoryOnly decides, not whether this runtime
+        // created the store. Otherwise an app passing its own memory store on
+        // a plain-http page (device testing on a LAN, no crypto.subtle) would
+        // get WebCrypto and throw on its first session call, where the
+        // default path degrades.
         const globals = globalThis as unknown as { crypto?: unknown };
         const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
         Object.defineProperty(globalThis, 'crypto', { value: { getRandomValues: undefined }, configurable: true, writable: true });
@@ -362,7 +363,7 @@ describe('LambderMockApp - sessions', () => {
         // which is what makes "this store is nothing anyone can leak" the
         // precondition for using it at all.
         const [sessionKeyHash] = created.sessionToken.split(':');
-        expect(Buffer.from(sessionKeyHash!, 'hex').toString('utf8')).toBe('adalambder-mock');
+        expect(Buffer.from(sessionKeyHash!, 'hex').toString('utf8')).toBe('["lambder-mock","ada"]');
     });
 
     it('a session endpoint on a mock without sessions is refused at registration', () => {
@@ -374,7 +375,7 @@ describe('LambderMockApp - sessions', () => {
     it('runs on the plain crypto stand-in where asked to', async () => {
         const plain = mock.create({ ...requiredOptions, sessions: { crypto: new LambderPlainSessionCrypto() } });
         plain.registerPartial(plain.apiSlice(
-            plain.publicApi('login', async ({ payload, sessions }) => { await sessions.createSession(payload.user, { userId: payload.user, tenants: [] }); return { ok: true }; }),
+            plain.publicApi('login', async ({ payload, sessionController }) => { await sessionController.createSession(payload.user, { userId: payload.user, tenants: [] }); return { ok: true }; }),
             plain.sessionApi('me', async ({ session }) => ({ userId: session.data.userId })),
         ));
         const caller = callerFor(plain);
@@ -413,6 +414,20 @@ describe('LambderMockApp - guards, rate limits, idempotency, version', () => {
         expect(orderRuns()).toBe(1);
     });
 
+    it('charges a policy from a handler through ctx.rateLimit, as a server handler does', async () => {
+        const mockApp = mock.create({ ...requiredOptions, rateLimits: { policies: { tight: { perMin: 2, per: 'ip' }, perUser: { perMin: 1 } } } });
+        mockApp.registerPartial(mockApp.apiSlice(
+            mockApp.publicApi('user.get', async (ctx) => {
+                await ctx.rateLimit('perUser', ctx.payload.userId);
+                return { id: ctx.payload.userId, name: 'Ada' };
+            }),
+        ));
+        const caller = callerFor(mockApp);
+        expect(await caller.api('user.get', { userId: 'u1' })).toEqual({ id: 'u1', name: 'Ada' });
+        assertApiFailure(await caller.apiOutcome('user.get', { userId: 'u1' }), 'errorMessage', { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
+        expect(await caller.api('user.get', { userId: 'u2' })).toEqual({ id: 'u2', name: 'Ada' });
+    });
+
     it('rate limits through the memory limiter, with Retry-After on the refusal', async () => {
         const { mockApp } = createMockApp();
         const caller = callerFor(mockApp);
@@ -432,7 +447,7 @@ describe('LambderMockApp - guards, rate limits, idempotency, version', () => {
         const { mockApp, orderRuns } = createMockApp();
         const caller = callerFor(mockApp);
         await caller.api('login', { user: 'ada' });
-        const key = LambderCaller.createIdempotencyKey();
+        const key = createIdempotencyKey();
         const first = await caller.api('order.create', { qty: 5 }, { guardInputs: { tenant: { tenantId: 't1' } }, idempotencyKey: key });
         const second = await caller.api('order.create', { qty: 5 }, { guardInputs: { tenant: { tenantId: 't1' } }, idempotencyKey: key });
         expect(second).toEqual(first);
@@ -442,27 +457,31 @@ describe('LambderMockApp - guards, rate limits, idempotency, version', () => {
     });
 
     it('an endpoint the contract declares no guards for still carries its idempotency restatement', async () => {
-        // The bare handler form was gated on guards alone, and these two
-        // endpoints declare none, so they could be mocked with no restatement
-        // at all: the handler ran twice for one key where the server replays,
-        // and a rate-limited endpoint never answered 429. The options form is
-        // now the only form they have.
+        // These two endpoints declare no guards, but a bare handler would still
+        // leave them with no restatement: the handler would run twice for one
+        // key where the server replays, and a rate-limited endpoint would
+        // never answer 429. So the options form is the only form they have.
         const { mockApp } = createMockApp();
         const caller = callerFor(mockApp);
-        const key = LambderCaller.createIdempotencyKey();
+        const key = createIdempotencyKey();
 
         const first = await caller.api('ticket.buy', { seat: 'A1' }, { idempotencyKey: key });
-        const replay = await caller.api('ticket.buy', { seat: 'A2' }, { idempotencyKey: key });
+        const replay = await caller.api('ticket.buy', { seat: 'A1' }, { idempotencyKey: key });
 
         expect(replay).toEqual(first);
         expect(mockApp.calls.at(-1)?.outcome).toBe('replayed');
+
+        // The same key for a different seat is another request, refused
+        // rather than handed the first seat's ticket.
+        const other = await caller.apiOutcome('ticket.buy', { seat: 'A2' }, { idempotencyKey: key });
+        assertApiFailure(other, 'errorMessage', { code: LAMBDER_REFUSAL_CODES.idempotencyKeyReused, status: 409 });
     });
 
     it('carries rateLimits.failOpen to the engine, so a limiter that throws can refuse the call', async () => {
-        // The mock was always fail-open, whatever the server it stands in for
-        // was configured with, so a limiter of the app's own that fails
-        // answered 200 here and 500 there. Inert with the memory limiter,
-        // which never throws, and only observable with one that does.
+        // A mock that failed open whatever the server it stands in for is
+        // configured with would answer 200 here and 500 there for a failing
+        // limiter of the app's own. Only observable with a limiter that
+        // throws, which the memory limiter never does.
         const failingLimiter = { isRateLimited: async () => { throw new Error('the limiter is down'); } };
         const build = (failOpen?: boolean) => {
             const app = mock.create({
@@ -540,9 +559,9 @@ describe('LambderMockApp - failure injection and latency', () => {
     });
 
     it('a queued failNext survives a call that never reached the handler', async () => {
-        // The failure used to be dequeued before the latency wait and the
-        // offline check, so the call that was arranged to fail answered
-        // normally and an earlier, unrelated call swallowed the failure.
+        // Dequeued before the latency wait and the offline check, the failure
+        // would be swallowed by an earlier, unrelated call, and the call that
+        // was arranged to fail would answer normally.
         const { mockApp } = createMockApp();
         const caller = callerFor(mockApp);
         mockApp.failNext('user.get', { reason: 'refusal', message: 'Queued.' });
@@ -599,9 +618,8 @@ describe('LambderMockApp - overrides, reset, observation', () => {
         const { mockApp } = createMockApp();
         const caller = callerFor(mockApp);
         const stub = mockApp.override('user.get', async () => ({ id: 'x', name: 'Stub' }));
-        // Restore and nothing else: the handle carried a [Symbol.dispose]
-        // member too, and that member made the published .d.ts fail to compile
-        // for a consumer on lib: ES2022.
+        // Restore and nothing else: a [Symbol.dispose] member would make the
+        // published .d.ts fail to compile for a consumer on lib: ES2022.
         expect(Object.keys(stub)).toEqual(['restore']);
         expect(await caller.api('user.get', { userId: '1' })).toEqual({ id: 'x', name: 'Stub' });
         stub.restore();
@@ -622,8 +640,8 @@ describe('LambderMockApp - overrides, reset, observation', () => {
         } finally {
             inner.restore();
         }
-        // The inner override restored at the end of its scope, which used to
-        // take the outer one with it: a describe-scope stub silently gone
+        // The inner override restored at the end of its scope must not take
+        // the outer one with it, or a describe-scope stub silently vanishes
         // from the `it` after the one that scoped its own.
         expect(await caller.api('user.get', { userId: '1' })).toEqual({ id: 'outer', name: 'Outer' });
 
@@ -672,8 +690,8 @@ describe('LambderMockApp - overrides, reset, observation', () => {
 
         mockApp.reset();
 
-        // Sessions without their cookies is the half-rewind that made the
-        // next call look signed in until the answer said otherwise.
+        // Rewinding sessions without their cookies would make the next call
+        // look signed in until the answer said otherwise.
         expect(transport.cookieJar?.size).toBe(0);
         const after = await caller.apiOutcome('me', {});
         assertApiFailure(after, 'sessionExpired');
@@ -686,7 +704,7 @@ describe('LambderMockApp - overrides, reset, observation', () => {
         const mockApp = mock.create({ ...requiredOptions, sessions: true, rateLimits: { policies: { tight: { perMin: 1, per: 'ip' } } }, onReset });
         mockApp.registerPartial(mockApp.apiSlice(
             mockApp.publicApi('limited', { rateLimit: 'tight', handler: async () => ({ n: 1 }) }),
-            mockApp.publicApi('login', async ({ payload, sessions }) => { await sessions.createSession(payload.user, { userId: payload.user, tenants: [] }); return { ok: true }; }),
+            mockApp.publicApi('login', async ({ payload, sessionController }) => { await sessionController.createSession(payload.user, { userId: payload.user, tenants: [] }); return { ok: true }; }),
         ));
         const caller = callerFor(mockApp);
         await caller.api('login', { user: 'ada' });
@@ -707,7 +725,7 @@ describe('LambderMockApp - overrides, reset, observation', () => {
     it('validates the payload against an entry\'s own schema, answering 422 as the server does', async () => {
         // The contract is a type, so the server's schemas do not exist here.
         // An entry may restate the shape for the endpoints whose rejection
-        // path a test needs, and endpoints without one behave as before.
+        // path a test needs, and endpoints without one take whatever arrives.
         const mockApp = mock.create({ ...requiredOptions });
         mockApp.registerPartial(mockApp.apiSlice(
             mockApp.publicApi('user.get', { input: z.object({ userId: z.string() }), handler: async ({ payload }) => ({ id: payload.userId, name: 'Ada' }) }),
@@ -721,6 +739,50 @@ describe('LambderMockApp - overrides, reset, observation', () => {
         assertApiFailure(refused, 'validation');
         // An endpoint with no schema still takes whatever arrives.
         expect(await caller.api('echo', { notes: ['a', 'b'] })).toEqual({ count: 2 });
+    });
+
+    it('answers a bad input as the server app\'s own validation handler does, once the mock states it', async () => {
+        // A server app with setApiInputValidationErrorHandler answers 200 with
+        // an errorMessage; a mock that always answered 422 would test the
+        // form's error path against an answer production never gives.
+        const mockApp = mock.create({
+            ...requiredOptions,
+            onInvalidInput: (zodError) => ({ payload: null, config: { errorMessage: `Check ${zodError.issues[0]?.path.join('.')}.` } }),
+        });
+        mockApp.registerPartial(mockApp.apiSlice(
+            mockApp.publicApi('user.get', { input: z.object({ userId: z.string() }), handler: async ({ payload }) => ({ id: payload.userId, name: 'Ada' }) }),
+        ));
+        const outcome = await callerFor(mockApp).apiOutcome('user.get', { userId: 42 } as never);
+
+        assertApiFailure(outcome, 'errorMessage');
+        expect(outcome.errorMessage?.content).toBe('Check userId.');
+        expect(outcome.status).toBe(200);
+
+        // null asks for the standard answer.
+        const standard = mock.create({ ...requiredOptions, onInvalidInput: () => null });
+        standard.registerPartial(standard.apiSlice(
+            standard.publicApi('user.get', { input: z.object({ userId: z.string() }), handler: async ({ payload }) => ({ id: payload.userId, name: 'Ada' }) }),
+        ));
+        assertApiFailure(await callerFor(standard).apiOutcome('user.get', { userId: 42 } as never), 'validation');
+    });
+
+    it('hands a handler a parse of the JSON, never the object the page sent', async () => {
+        // By reference, a handler that stored the payload would share it with
+        // the page's form, and a Date or an undefined key would reach it as no
+        // server ever sees one.
+        const mockApp = mock.create({ ...requiredOptions });
+        const seen: unknown[] = [];
+        mockApp.registerPartial(mockApp.apiSlice(
+            mockApp.publicApi('echo', async ({ payload }) => { seen.push(payload); return { count: payload.notes.length }; }),
+        ));
+        const form = { notes: ['a'], at: new Date('2026-01-02T03:04:05.000Z'), draft: undefined };
+        await callerFor(mockApp).api('echo', form as never);
+
+        expect(seen[0]).not.toBe(form);
+        expect(seen[0]).toEqual({ notes: ['a'], at: '2026-01-02T03:04:05.000Z' });
+        expect(Object.keys(seen[0] as object)).not.toContain('draft');
+        (seen[0] as { notes: string[] }).notes.push('edited by the handler');
+        expect(form.notes).toEqual(['a']);
     });
 
     it('carries the envelope message a handler set, beside its payload', async () => {
@@ -746,18 +808,18 @@ describe('LambderMockApp - overrides, reset, observation', () => {
         const build = (revealHandlerErrors?: boolean) => {
             const mockApp = mock.create(revealHandlerErrors === undefined ? requiredOptions : { ...requiredOptions, revealHandlerErrors });
             mockApp.registerPartial(mockApp.apiSlice(
-                mockApp.publicApi('echo', async () => { throw new Error('Translations not found for "pledge"'); }),
+                mockApp.publicApi('echo', async () => { throw new Error('Translations not found for "checkout"'); }),
             ));
             return callerFor(mockApp);
         };
 
         const revealed = await build().apiOutcome('echo', { notes: [] });
         assertApiFailure(revealed);
-        expect(revealed.errorMessage).toBe('Translations not found for "pledge"');
+        expect(revealed.errorMessage?.content).toBe('Translations not found for "checkout"');
 
         const hidden = await build(false).apiOutcome('echo', { notes: [] });
         assertApiFailure(hidden);
-        expect(hidden.errorMessage).toBe('Internal server error.');
+        expect(hidden.errorMessage?.content).toBe('Internal server error.');
     });
 
     it('reset also puts back the configured latency and restarts the call numbering', async () => {
@@ -857,8 +919,8 @@ describe('LambderMockApp - overrides, reset, observation', () => {
 
         await callerFor(mockApp).api('user.get', { userId: '1' });
         await callerFor(mockApp).api('user.get', { userId: '2' });
-        // One call, not four: the message said the listener was ignored from
-        // now on while the loop kept calling it on every phase of every call.
+        // One call, not four: the message says the listener is ignored from
+        // then on, so the loop must stop calling it.
         expect(seen).toBe(1);
         expect(error).toHaveBeenCalledTimes(1);
 
@@ -891,8 +953,8 @@ describe('LambderMockApp - overrides, reset, observation', () => {
  * A stand-in for the msw module: the adapter needs a post() to register a
  * resolver and a Response constructor.
  *
- * Deliberately not annotated as LambderMswModule. Annotated, the fake was
- * checked against the adapter's own declaration and proved only that the
+ * Deliberately not annotated as LambderMswModule. Annotated, the fake would be
+ * checked against the adapter's own declaration and prove only that the
  * declaration describes the fake; whether the real package fits it is pinned
  * in tests/mock-types.test.ts against a replica of msw 2's own signature.
  */
@@ -902,8 +964,9 @@ const fakeMswModule = () => {
         http: { post: (_path: string, given: typeof resolver) => { resolver = given; return null; } },
         HttpResponse: Response,
     };
+    // JSON, as every Lambder caller posts it; a test passes its own Content-Type to see another.
     const post = async (body: unknown, headers: Record<string, string> = {}) => await resolver!({
-        request: new Request('http://localhost/api', { method: 'POST', body: JSON.stringify(body), headers }),
+        request: new Request('http://localhost/api', { method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json', ...headers } }),
     });
     return { msw, post };
 };
@@ -1014,12 +1077,12 @@ describe('LambderMockApp - the MSW adapter and the document mirror', () => {
 
     it('signs a browser in behind the adapter: the jar carries the session and the page holds the CSRF cookie', async () => {
         // The documented browser path, and the one a frontend plants its dev
-        // session on. Two things kept it from working: the adapter scoped its
-        // jar by the request URL host rather than the app's cookieHost, so an
-        // app whose cookieHost is not the page's held the session at a host it
-        // never sent it to; and signIn was the one cookie writer that skipped
-        // the document mirror, so the page had no CSRF token to post and every
-        // session call answered sessionExpired.
+        // session on. The adapter scopes its jar by the app's cookieHost, not
+        // the request URL host, or an app whose cookieHost is not the page's
+        // would hold the session at a host it never sends it to. And signIn
+        // writes through the document mirror like every cookie writer, or the
+        // page would have no CSRF token to post and every session call would
+        // answer sessionExpired.
         const page = fakeDocumentCookies();
         await withFakePage(page, async () => {
             const app = mock.create({ ...requiredOptions, sessions: true, cookieHost: 'api.example.com' });
@@ -1048,11 +1111,70 @@ describe('LambderMockApp - the MSW adapter and the document mirror', () => {
         });
     });
 
+    it('keeps a memory-mode page signed in after a logout and a login, whatever signIn left in document.cookie', async () => {
+        // signIn mirrors the CSRF cookie into document.cookie for the MSW
+        // adapter, and a page's caller reads its token from there. A memory
+        // transport that never wrote there again would land the next login's
+        // answer in the jar only, and the caller would keep posting the demo
+        // user's token, failing the pairing and signing the new user out.
+        const page = fakeDocumentCookies();
+        await withFakePage(page, async () => {
+            const { mockApp } = createMockApp();
+            const jar = new LambderCookieJar();
+            await mockApp.signIn('demo', { userId: 'demo', tenants: [] }, { jar });
+            expect(page.read(mockApp.csrfCookieKey)).toBeTruthy();
+            const caller = callerFor(mockApp, { jar });
+            expect(await caller.api('me', {})).toEqual({ userId: 'demo' });
+
+            await caller.api('logout', {});
+            await caller.api('login', { user: 'bea' });
+            expect(await caller.api('me', {})).toEqual({ userId: 'bea' });
+        });
+    });
+
+    it('leaves a memory-mode page signed in when a call sent before a login answers sessionExpired after it', async () => {
+        // The session lives in the transport's jar, where document.cookie
+        // never sees it, so the caller judges the answer by the jar's token:
+        // the poll went out signed out, and the page now holds a session.
+        const { mockApp } = createMockApp();
+        const memory = mockApp.transport();
+        let releasePollAnswer = () => {};
+        const pollAnswerHeld = new Promise<void>((resolve) => { releasePollAnswer = resolve; });
+        const answerInTransit: LambderApiTransport = async (request) => {
+            const answer = await memory(request);
+            if(request.apiName === 'me') await pollAnswerHeld;
+            return answer;
+        };
+        const sessionExpiredHandler = vi.fn();
+        const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false, sessionExpiredHandler, transport: answerInTransit });
+        await caller.api('login', { user: 'ada' });
+        await caller.api('logout', {});
+
+        const poll = caller.apiOutcome('me', {});
+        await caller.api('login', { user: 'bea' });
+        releasePollAnswer();
+
+        assertApiFailure(await poll, 'sessionExpired');
+        expect(sessionExpiredHandler).not.toHaveBeenCalled();
+        expect(await caller.api('me', {})).toEqual({ userId: 'bea' });
+    });
+
+    it('still calls the sessionExpired handler in memory mode when the answer is about the session the jar holds', async () => {
+        const { mockApp } = createMockApp();
+        const sessionExpiredHandler = vi.fn();
+        const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false, sessionExpiredHandler, transport: mockApp.transport() });
+        await caller.api('login', { user: 'ada' });
+        await mockApp.signOut('ada');
+
+        assertApiFailure(await caller.apiOutcome('me', {}), 'sessionExpired');
+        expect(sessionExpiredHandler).toHaveBeenCalledOnce();
+    });
+
     it('reads its calls from the same client address the direct transport does', async () => {
-        // The adapter hardcoded 127.0.0.1, so an app that set defaultClientIp
-        // saw its own address through the transport and the loopback through
-        // the service worker: two clients where there is one, and a per-IP
-        // rate limit counting them apart.
+        // Were the adapter to pin 127.0.0.1, an app that set
+        // defaultClientIp would see its own address through the transport and
+        // the loopback through the service worker: two clients where there is
+        // one, and a per-IP rate limit counting them apart.
         const app = mock.create({ ...requiredOptions, defaultClientIp: '10.1.2.3' });
         app.registerPartial(app.apiSlice(
             app.publicApi('user.get', async ({ request }) => ({ id: request.ip, name: 'ip' })),
@@ -1097,10 +1219,10 @@ describe('LambderMockApp - the rest entry', () => {
         const store: LambderSessionStore<SessionData> = {
             isMemoryOnly: true,
             get: async (sessionKeyHash, secretHash) => { reads += 1; return await inner.get(sessionKeyHash, secretHash); },
-            put: async (record) => await inner.put(record),
+            create: async (record) => await inner.create(record),
+            update: async (...args) => await inner.update(...args),
             delete: async (sessionKeyHash, secretHash) => await inner.delete(sessionKeyHash, secretHash),
             listSecretHashes: async (sessionKeyHash) => await inner.listSecretHashes(sessionKeyHash),
-            markDataExpired: async (sessionKeyHash, secretHash, at) => await inner.markDataExpired(sessionKeyHash, secretHash, at),
         };
         return { store, reads: () => reads, forgetReads: () => { reads = 0; } };
     };
@@ -1226,20 +1348,37 @@ describe('LambderMockApp - the invoke transport', () => {
 
         const answer = await transport({
             body: JSON.stringify({ apiName: 'user.get', payload: { userId: 'x' }, token: '', siteHost: '' }),
-            headers: { 'x-forwarded-for': '9.9.9.9' },
+            headers: { 'x-forwarded-for': '9.9.9.9', 'content-type': 'application/json' },
             requestContext: { http: { sourceIp: '10.0.0.7' } },
         }, {});
 
         expect(JSON.parse(answer.result.body)).toMatchObject({ payload: { id: '10.0.0.7' } });
     });
+
+    it('answers a POST of another type as no API call, as the server does', async () => {
+        const app = mock.create({ ...requiredOptions });
+        app.registerPartial(app.apiSlice(
+            app.publicApi('user.get', async () => ({ id: 'u1', name: 'Ada' })),
+        ));
+        const answer = await lambderMockInvokeTransport(app)({
+            body: JSON.stringify({ apiName: 'user.get', payload: { userId: 'x' }, token: '', siteHost: '' }),
+            headers: { 'content-type': 'text/plain' },
+            requestContext: { http: { sourceIp: '10.0.0.7' } },
+        }, {});
+        expect(answer.result.statusCode).toBe(404);
+
+        const { msw, post } = fakeMswModule();
+        lambderMockMswHandler(app, { apiPath: '/api', msw });
+        expect(await post({ apiName: 'user.get', payload: { userId: 'x' }, token: '', siteHost: '' }, { 'Content-Type': 'text/plain' })).toBeUndefined();
+    });
 });
 
 describe('LambderMockApp - registration, cookies and the call log', () => {
     it('refuses a not-mocked SESSION endpoint on a mock without sessions, where sessionApi already refused one', async () => {
-        // sessionNotMocked ran neither check, so it registered in silence and
-        // the first call to it answered 500 from inside the pipeline with a
-        // message naming the server's option, for a mistake whose fix is one
-        // option at create().
+        // Unchecked, sessionNotMocked would register in silence and the first
+        // call to it would answer 500 from inside the pipeline with a message
+        // naming the server's option, for a mistake whose fix is one option
+        // at create().
         // @ts-expect-error the contract has session endpoints; built without sessions on purpose, as a plain-JS caller could
         const bare = mock.create({ ...requiredOptions, sessions: false });
         expect(() => bare.sessionNotMocked('admin.audit', 'operator endpoint, no client calls it'))
@@ -1249,17 +1388,17 @@ describe('LambderMockApp - registration, cookies and the call log', () => {
     });
 
     it('carries its cookies at the app\'s own host, so a page served from anything but plain localhost stays signed in', async () => {
-        // signIn planted at "localhost" and the transport's jar scoped by the
-        // caller's siteHost, so on transit.localhost:5173 the jar answered with
-        // nothing and every session call came back sessionExpired with a full
-        // jar and no explanation.
-        const app = mock.create({ ...requiredOptions, sessions: true, cookieHost: 'transit.localhost:5173' });
+        // Were signIn to plant at "localhost" while the transport's jar scoped
+        // by the caller's siteHost, on shop.localhost:5173 the jar would
+        // answer with nothing and every session call would come back
+        // sessionExpired with a full jar and no explanation.
+        const app = mock.create({ ...requiredOptions, sessions: true, cookieHost: 'shop.localhost:5173' });
         app.registerPartial(app.apiSlice(app.sessionApi('me', async ({ session }) => ({ userId: session.data.userId }))));
         const jar = new LambderCookieJar();
         await app.signIn('ada', { userId: 'ada', tenants: [] }, { jar });
 
         const answer = await app.transport({ cookies: jar })({
-            apiPath: '/api', apiName: 'me', token: '', siteHost: 'transit.localhost:5173', payload: {},
+            apiPath: '/api', apiName: 'me', token: '', siteHost: 'shop.localhost:5173', payload: {},
         });
         expect(await answer.json()).toMatchObject({ payload: { userId: 'ada' } });
     });
@@ -1277,9 +1416,10 @@ describe('LambderMockApp - registration, cookies and the call log', () => {
     });
 
     it('reports the guards a crashed call had already run', async () => {
-        // The pipeline rethrows a crash, so reading the trace off what run()
-        // returned left guardsRun empty on exactly the calls a developer opens
-        // the log for. The trace is handed in now, and survives the throw.
+        // The pipeline rethrows a crash, so a trace read off what run()
+        // returned would leave guardsRun empty on exactly the calls a
+        // developer opens the log for. The trace is handed in, and survives
+        // the throw.
         const { mockApp } = createMockApp();
         const caller = callerFor(mockApp);
         await caller.api('login', { user: 'ada' });
@@ -1300,8 +1440,8 @@ describe('LambderMockApp - idempotency carries the server\'s own options', () =>
     it('scopes a public replay per caller when the app names a callerIdentity', async () => {
         // Without an identity the scope of a PUBLIC endpoint is the posted key
         // alone, which makes that key a bearer token for its own stored
-        // answer. The mock could not express the option at all, so a mock of a
-        // server configured with one replayed where the server misses.
+        // answer. A mock that could not express the option would replay where
+        // a server configured with one misses.
         let runs = 0;
         const app = mock.create({
             ...requiredOptions,
@@ -1313,7 +1453,7 @@ describe('LambderMockApp - idempotency carries the server\'s own options', () =>
         const callerFrom = (clientIp: string) => new LambderCaller<Contract>({
             apiPath: '/api', isCorsEnabled: false, transport: app.transport({ clientIp }),
         });
-        const key = LambderCaller.createIdempotencyKey();
+        const key = createIdempotencyKey();
 
         const first = await callerFrom('10.0.0.1').api('ticket.buy', { seat: 'A1' }, { idempotencyKey: key });
         const replay = await callerFrom('10.0.0.1').api('ticket.buy', { seat: 'A1' }, { idempotencyKey: key });

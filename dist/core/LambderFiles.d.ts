@@ -1,10 +1,20 @@
 import { LambderTemplatingEngine } from "./LambderTemplatingEngine.js";
 import type { LambderFileSource } from "../shared/contracts/LambderFileSource.js";
 import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
-/** In-memory cache of files for warm invocations. Default: { maxBytes: 32MB, maxFileBytes: 2MB }. false disables it. */
+/**
+ * In-memory cache of files for warm invocations. Default: { maxBytes: 32MB,
+ * maxFileBytes: 2MB, missTtlSeconds: 60 }. false disables it, misses
+ * included.
+ */
 export type LambderFileMemoryCacheOption = false | {
     maxBytes?: number;
     maxFileBytes?: number;
+    /**
+     * How long a path the source had no file for is answered as missing
+     * without asking the source again; 0 asks every time. A file uploaded
+     * under such a path is served once this runs out.
+     */
+    missTtlSeconds?: number;
 };
 /** The `files` option at creation: a source, or a source with its memory cache tuned or off. */
 export type LambderFilesOption = LambderFileSource | {
@@ -25,10 +35,16 @@ export type LambderReadFile = {
  */
 export declare class LambderFiles {
     private source;
-    private cache;
-    private cacheBytes;
-    private maxBytes;
-    private maxFileBytes;
+    /** The files read, least recently served evicted first once the byte budget is spent. */
+    private readonly cache;
+    private readonly maxFileBytes;
+    /**
+     * Paths the source had no file for, until their TTL. An SPA asks for a
+     * file before it serves the shell for every page route, so without this
+     * each navigation would cost a source round trip (an S3 GetObject
+     * answering NoSuchKey) in warm containers too.
+     */
+    private readonly misses;
     private templates;
     constructor(option: LambderFilesOption);
     /**
@@ -50,6 +66,4 @@ export declare class LambderFiles {
     template(path: string, options?: {
         htmlVirtualSlots?: boolean;
     }): Promise<LambderTemplatingEngine>;
-    /** Cache small files within the byte budget, evicting the oldest entries first. */
-    private remember;
 }

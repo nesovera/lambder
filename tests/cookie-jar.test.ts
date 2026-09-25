@@ -5,9 +5,8 @@
  * in transports.test.ts; this is the storage itself.
  *
  * Domain matching is the part worth a table. A jar that believes a Domain
- * attribute is a jar that hands one host's session to another, which is a
- * cross-host leak in the one component whose header comment sells it as the
- * thing that prevents cross-host leaks.
+ * attribute hands one host's session to another: a cross-host leak in the
+ * component whose job is to prevent them.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -124,10 +123,10 @@ describe('Where an accepted cookie then travels', () => {
     });
 
     it('refuses a Secure cookie from a plain-http answer, rather than keeping one it will never send', () => {
-        // The set used to be judged as https whatever the target said, so a
-        // Secure cookie from an http answer was stored and then withheld from
-        // every call: the jar held a session it could not use, silently. Both
-        // halves now read the target's own scheme.
+        // Storing and sending both read the target's own scheme. Judging the
+        // set as https whatever the target said would store a Secure cookie
+        // from an http answer and then withhold it from every call: a session
+        // the jar holds but can never use, silently.
         const jar = new LambderCookieJar();
         jar.storeSetCookies(['sid=1; Path=/; Secure', 'plain=1; Path=/'], { host: 'localhost', secure: false });
         expect(jar.list().map((cookie) => cookie.name)).toEqual(['plain']);
@@ -174,9 +173,8 @@ describe('The attributes a browser enforces on the way in', () => {
         // Max-Age wins over Expires, and it is counted from the moment the
         // header arrived. Reading the Expires field alone would call a
         // Max-Age=0 deletion immortal and a Max-Age refresh already dead.
-        // Based on the real clock, then moved forward: tough-cookie's own
-        // expiry check reads the real one, so the injected clock is what
-        // carries a test past an expiry without any real time passing.
+        // The clock starts at the real time because tough-cookie's own expiry
+        // check reads the real clock.
         let now = Date.now();
         const jar = new LambderCookieJar({ now: () => now, host: 'app.test' });
         const longAgo = new Date(now - 60_000).toUTCString();
@@ -185,8 +183,8 @@ describe('The attributes a browser enforces on the way in', () => {
         expect(jar.cookiePairs()).toEqual(['sid=1']);
         expect(parseSetCookie(`sid=1; Path=/; Max-Age=60; Expires=${longAgo}`, now)?.expires).toBe(now + 60_000);
 
-        // The injected clock is the only clock: moving it past the Max-Age
-        // expires the cookie without any real time passing.
+        // Moving the injected clock past the Max-Age expires the cookie
+        // without any real time passing.
         now += 59_000;
         expect(jar.cookiePairs()).toEqual(['sid=1']);
         now += 2_000;
@@ -197,9 +195,9 @@ describe('The attributes a browser enforces on the way in', () => {
 
 describe('What tells two stored cookies apart', () => {
     it('keeps two hosts\' host-only cookies of the same name apart', () => {
-        // Keyed on name, domain and path alone, b.test's login overwrote
-        // a.test's: a.test was signed out, and its one jar entry held another
-        // host's session under its name.
+        // Keyed on name, domain and path alone, b.test's login would
+        // overwrite a.test's, signing a.test out and leaving its one jar
+        // entry holding another host's session.
         const jar = new LambderCookieJar();
         jar.storeSetCookies(['sid=a; Path=/'], { host: 'a.test' });
         jar.storeSetCookies(['sid=b; Path=/'], { host: 'b.test' });

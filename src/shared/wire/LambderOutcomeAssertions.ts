@@ -1,13 +1,12 @@
 /**
  * Two assertions over a call's outcome, for tests.
  *
- * An outcome is a discriminated union, so a test that expects a refusal has
- * to narrow before it can read what the refusal carries, and the narrowing is
- * the same three lines every time: check `ok`, branch on it, check `reason`.
- * Written by hand, the failing case prints "expected false to be true" and
- * says nothing about what actually came back, which is the one thing worth
- * knowing when a call that should have been refused went through, or crashed
- * instead.
+ * An outcome is a discriminated union, so a test that expects a refusal must
+ * narrow before it can read what the refusal carries: check `ok`, branch on
+ * it, check `reason`. Written by hand, the failing case prints "expected
+ * false to be true" and says nothing about what came back, the one thing
+ * worth knowing when a call that should have been refused went through, or
+ * crashed instead.
  *
  * These narrow through an `asserts` signature, so the lines after one read
  * the arm it proved, and they throw a plain Error naming what the outcome

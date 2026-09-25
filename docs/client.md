@@ -17,7 +17,6 @@ import type { ApiContractType } from "./backend/handler";   // type-only import
 
 const caller = new LambderCaller<ApiContractType>({
     apiPath: "/api",
-    isCorsEnabled: false,
     timeoutMs: 30_000,
     fetchStartedHandler: ({ fetchParams, activeFetchList }) => {
         console.log("API called:", fetchParams.apiName);
@@ -40,16 +39,16 @@ const user = await caller.api("getCompanyPage", { companyName: "Acme" });
 | `apiPath` | `"/api"` | Must match the server's `apiPath` |
 | `apiVersion` | none | Sent with each call as `version`; informational, the server stamps its own on every answer |
 | `apiSignatures` | none | The server's generated signature map. Every call carries its endpoint's signature, and a stale one answers `versionExpired`. See [The signature map](#the-signature-map) |
-| `isCorsEnabled` | `false` | Send credentialed cross-origin requests |
+| `isCorsEnabled` | cross-origin `apiPath` | Send credentialed cross-origin requests (fetch's `cors` mode, cookies included). By default on exactly when `apiPath` is an absolute URL on another origin than the page's, which is when a browser needs it; an explicit value wins. Ignored when `transport` is passed |
 | `timeoutMs` | none | Default per-request timeout. API Gateway caps around 29s, so ~30000 is sensible. Overridable per call |
 | `sessionCookieDomain` | none | Must mirror the server's session cookie `Domain`, otherwise expired cookies cannot be cleared |
 | `requestCompression` | `false` | Gzip large payloads. `true` is `{ minBytes: 4096 }` |
 | `guardInputsProvider` | none | Supply guardInput-mode guard values for every call from one place |
 | `transport` | fetch | How a call reaches the server; see [Transports](#transports) |
-| `versionExpiredHandler` | none | The server answered `versionExpired`: this build's signature for the endpoint is not the server's. Usually reloads. Not called again for a repeat, see [The signature map](#the-signature-map) |
-| `sessionExpiredHandler` | none | The session is missing or expired |
+| `versionExpiredHandler` | none | The server answered `versionExpired`: this build's signature for the endpoint is not the server's. Usually reloads. Asked one at a time per page, whichever of the page's callers hears it: a refusal heard while it runs calls nothing, and one heard after it returned with the page still here asks again. Not called for a bundle the reload brought back, see [The signature map](#the-signature-map) |
+| `sessionExpiredHandler` | none | The session is missing or expired. Called, and the CSRF cookie cleared, only while that cookie is still the one the call sent or is gone: a call sent before a login that answers after it comes back as its `sessionExpired` outcome, with no handler called and nothing touched. Over a cookie jar (the mock's memory mode, `lambder/testing`, `lambderCookieJarTransport`) the jar's CSRF cookie is the one compared, since that session never reaches `document.cookie` |
 | `messageHandler` | none | The envelope carried a `message` |
-| `errorMessageHandler` | none | The envelope carried an `errorMessage` (a refusal) |
+| `errorMessageHandler` | none | The envelope carried an `errorMessage` (a refusal), handed over as the message object |
 | `notAuthorizedHandler` | none | The envelope carried `notAuthorized` |
 | `errorHandler` | none | Network, timeout, server or unknown failure |
 | `apiInputValidationErrorHandler` | none | The server rejected the input (422), with the Zod issues |
@@ -73,7 +72,6 @@ import { apiSignatures } from "../shared/generated/apiSignatures.generated.js";
 
 const caller = new LambderCaller<ApiContractType>({
     apiPath: "/api",
-    isCorsEnabled: false,
     apiSignatures,
     versionExpiredHandler: () => window.location.reload(),
 });
@@ -88,17 +86,32 @@ regenerate the map: the file predates the endpoint.
 **The reload loop.** A bundle shipped with a stale map (a generator that did
 not run, a cached bundle, a server deploy that failed behind a fresh frontend)
 would answer `versionExpired`, reload, get the same bundle back, and repeat.
-The caller keeps the last `versionExpired` it saw, per tab in `sessionStorage`,
-and when the same endpoint fails with the same signature within
-`RELOAD_LOOP_WINDOW_MS` (five minutes), it does not call
-`versionExpiredHandler` again: a bundle that had actually changed the endpoint
-would carry a different signature. The failure is reported through
-`errorHandler` instead, and the outcome still says `versionExpired`. Once a
-repeat is confirmed, every `versionExpired` within the window from the first
-one counts, whichever endpoint it names; after the window a reload is allowed
-again, so a stuck client retries a few times an hour and recovers once the
-deploy is fixed. Without `sessionStorage` the record is kept in memory for
-the page's lifetime.
+The caller asks for one reload at a time per page: a `versionExpired` calls
+`versionExpiredHandler`, and the rest the page hears while that handler runs
+(the other stale endpoints it boots with, another caller's) are only
+recorded; every caller a page builds shares the one ask. A handler that
+returns without reloading (a per-call handler that does something else, a
+reload cancelled at a `beforeunload` prompt) is asked again on the next
+refusal. The caller keeps every call refused within `RELOAD_LOOP_WINDOW_MS`
+(five minutes), by endpoint, signature and version, with the time it was
+refused, in `sessionStorage`, so per tab and per origin. When a call an
+earlier load recorded is refused again, the reload brought the same bundle
+back (a bundle that had actually changed the endpoint would carry a different
+signature, and a rebuilt one a different version), so it does not call
+`versionExpiredHandler`: the failure is reported through `errorHandler`
+instead, and the outcome still says `versionExpired`. A call refused again by
+the page that recorded it is no such evidence, since no reload came between.
+Once a repeat is confirmed, every `versionExpired` within the window from the
+first one counts, whichever endpoint it names; after the window a reload is
+allowed again, so a stuck client retries a few times an hour and recovers
+once the deploy is fixed. Without `sessionStorage` (storage blocked, a
+runtime with no page) the protection lasts for the page only: nothing
+survives a reload, so every load asks. The ask in progress is module state of
+`lambder/client`, and a load's time is the document's
+(`performance.timeOrigin`), so a test that loads the page more than once
+evaluates the client's modules afresh for each load (`vi.resetModules()` and
+a dynamic import) and moves `performance.timeOrigin` past what the last load
+recorded, as a reload does.
 
 ## Per-call options
 
@@ -141,7 +154,7 @@ if (outcome.ok) {
 | --- | --- |
 | `network` | The request never completed |
 | `timeout` | `timeoutMs` elapsed and the fetch was aborted |
-| `server` | 5xx, a body that is not a Lambder envelope, or a transport failure naming `protocol` |
+| `server` | 5xx, a body that is not a Lambder envelope (API Gateway's own `{"message": ...}` errors included, on a 5xx too: an object is an envelope only when it carries `apiVersion`), a non-2xx envelope that names no reason, or a transport failure naming `protocol` |
 | `validation` | 422; `zodError` carries the issue detail |
 | `versionExpired` | This build's signature for the endpoint is not the server's, its version is below the server's `minApiVersion`, or the app answered `res.versionExpired` |
 | `sessionExpired` | No valid session |
@@ -149,14 +162,17 @@ if (outcome.ok) {
 | `errorMessage` | A structured refusal; `errorMessage` carries it |
 | `unknown` | Anything else |
 
-Failure outcomes also carry `retryAfterSeconds` (from a 429's `Retry-After`),
+Failure outcomes also carry `retryAfterSeconds` (from the answer's
+`Retry-After`: a 429's, or a 503 that says when to come back),
 and the rest by reason, because the failure side is a discriminated union
 rather than one arm of optional fields: `network`, `timeout`, `server` and
 `unknown` always carry `error`; `validation` always carries `zodError`; and
 `versionExpired`, `sessionExpired`, `notAuthorized` and `errorMessage` always
 carry `response`, the parsed envelope (a `server` failure carries it too when
 the server answered with Lambder's own 500 body, which is how `crash` and
-`logList` arrive). So narrowing on `reason` narrows to what that reason
+`logList` arrive; a gateway's or a proxy's JSON on a 5xx is not that body, so
+none of its fields reach `response`, `errorMessage` or `logList`). So
+narrowing on `reason` narrows to what that reason
 actually has, with no optional reads and no `!`.
 
 Every configured handler still fires on the matching failure, so global UX
@@ -165,15 +181,19 @@ branch on the outcome. An answer's `logList` reaches `logListHandler` whatever
 the outcome, a 5xx and a 422 included, which is where a crashed call's log
 trail arrives.
 
-`errorMessage` is `LambderAppRefusalMessage | string`, because
-`refuse("Denied.")` and `new LambderApiRefusal("Denied.")` both put the plain
-message there, while `refuse("Denied.", { code })` and
-`res.api(null, { errorMessage: { type, code, content } })` put the object.
-Narrow before reading a refusal's fields:
+A refusal's `errorMessage` always reaches a reader as the message object,
+`{ type, code?, title?, content }`, on the outcome and in
+`errorMessageHandler` alike. A handler may write a plain string
+(`new LambderApiRefusal("Denied.")`, `res.api(null, { errorMessage: "Denied." })`),
+and the server sends it as `{ type: "error", content: "Denied." }`. The
+caller still reads whatever arrives that way before anything sees it, since a
+body no Lambder server wrote (a hand-built mock answer, a proxy) can carry a
+string or no message at all, so no reader narrows.
+`refusalMessageOf(value)` is that reading, for code that holds a raw envelope
+(`outcome.response.errorMessage` is the wire value, left as it came):
 
 ```typescript
-const showRefusal = (message: LambderAppRefusalMessage | string) => {
-    if (typeof message === "string") return showToast(message);
+const showRefusal = (message: LambderAppRefusalMessage) => {
     if (message.code === LAMBDER_REFUSAL_CODES.rateLimited) return showRetryLater(message.content);
     showToast(message.content, { type: message.type, title: message.title });
 };
@@ -199,7 +219,6 @@ covers in the caller's second type parameter:
 ```typescript
 const caller = new LambderCaller<ApiContractType, "orgPermission">({
     apiPath: "/api",
-    isCorsEnabled: false,
     guardInputsProvider: () => ({ orgPermission: { orgSlug } }),
 });
 ```
@@ -212,23 +231,44 @@ guards in the type parameter makes the provider itself mandatory.
 
 For APIs declared idempotent on the server (see
 [API policies](./api-policies.md#idempotency)), pass `idempotencyKey` per call.
-Generate it once per logical operation with
-`LambderCaller.createIdempotencyKey()` (safe in insecure contexts where
-`crypto.randomUUID` is missing) and send the same key on retries; rotate after
-a confirmed success.
-
-`LambderCaller.createIdempotencyKeyScope()` packages that pattern for a
-component performing one operation repeatedly:
+The easy form is a key scope, one per component that performs the operation:
 
 ```typescript
-const submitKey = LambderCaller.createIdempotencyKeyScope();
+const submitKey = createIdempotencyKeyScope();
 
-await caller.api("order.create", payload, { idempotencyKey: submitKey.current });
-submitKey.rotate();   // after a confirmed success
+await caller.api("order.create", payload, { idempotencyKey: submitKey });
 ```
 
-Read `scope.current` on every attempt (first try, retry after a failure,
-double-tap) so the server collapses them into one operation. Keys must be
+Every attempt of one operation (a retry after a dropped connection, a
+double-tap) sends the scope's current key, so the server collapses them, and
+the caller moves the scope to a new key once an answer settles the
+operation:
+
+- A success settles it, and so does `lambder/idempotency-key-reused`: the
+  server refuses a key reused for a different payload, so that key can never
+  carry the person's new request.
+- A refusal of this request (an `errorMessage`, a rejected input, not
+  authorized) settles it too, so the person's next attempt, a corrected form
+  included, is a new operation. The exception is a key an earlier attempt
+  may have used: after a timeout, a network failure, a 5xx or a duplicate of
+  an original still in flight, the operation may have run under that key,
+  and guards, validation and rate limits refuse before the replay record is
+  claimed. The key is kept, so the next attempt replays the original's
+  answer rather than running it again. A double-tap is the one duplicate the
+  scope can see the original of: while the first tap still waits for its
+  answer, the second tap's duplicate refusal leaves the key to that answer,
+  so a first tap refused ("only 5 in stock") still moves the scope on and the
+  corrected order goes under a new key.
+- A rate limit (a 429), an expired session and a stale version keep the key.
+
+An answer that arrives for a key the scope has already moved past changes
+nothing, so a slow first attempt cannot rotate away the key a later one is
+using.
+
+A plain string works too, for a site that manages keys itself: generate one
+per logical operation with `createIdempotencyKey()` (safe in
+insecure contexts where `crypto.randomUUID` is missing), send it on every
+retry, and replace it after an answer that settles the operation. Keys must be
 unguessable random and 16-200 characters, because they scope the replay record
 for logged-out clients; the server refuses shorter keys with a 400.
 
@@ -242,7 +282,6 @@ threshold, so that budget holds the compressed bytes instead of the raw ones:
 ```typescript
 const caller = new LambderCaller<ApiContractType>({
     apiPath: "/api",
-    isCorsEnabled: false,
     requestCompression: true,                    // { minBytes: 4096 }
     // requestCompression: { minBytes: 64_000 }, // only genuinely large calls
 });
@@ -304,7 +343,9 @@ a better codec.
 Every call is one transport call: the envelope in, the answer out in the
 accessor form `resolveApiOutcome()` reads. The default is
 `lambderFetchTransport`, one POST to `apiPath` over fetch with the CORS
-behaviour `isCorsEnabled` selects. Pass `transport` at construction, or
+behaviour `isCorsEnabled` selects (its `cors` option, when built by hand: left
+out, credentialed cross-origin mode applies exactly when the call's `apiPath`
+is on another origin than the page's). Pass `transport` at construction, or
 `setTransport()` later, to route calls elsewhere:
 
 | Transport | Use |
@@ -314,7 +355,7 @@ behaviour `isCorsEnabled` selects. Pass `transport` at construction, or
 | `lambderCookieJarTransport(inner, { jar })` | Any transport carrying a `LambderCookieJar`, so a session survives between calls where there is no browser |
 
 ```typescript
-const caller = new LambderCaller<ApiContractType>({ apiPath: "/api", isCorsEnabled: false, transport: mockApp.transport() });
+const caller = new LambderCaller<ApiContractType>({ apiPath: "/api", transport: mockApp.transport() });
 ```
 
 What a transport owes the caller, whether it ships here or you write one:
@@ -335,6 +376,13 @@ What a transport owes the caller, whether it ships here or you write one:
   own abort fired is reported as `timeout` (or `network`), never as a success.
 - **Timeouts and retries belong to the caller**, so one call is one delivery
   attempt and an idempotency key means what it says.
+- **A transport that keeps the session's cookies itself says which CSRF
+  token it posted**, as the answer's `csrfTokens: { posted, held() }`, `held()`
+  reading the one it holds now. The caller compares the two to tell a
+  `sessionExpired` about an older session (a poll sent before a login) from
+  one about the session the page holds; without them it compares
+  `document.cookie` before and after the call, which such a transport never
+  writes. `lambderCookieJarTransport` reports them for whatever it wraps.
 
 A jar over `lambderFetchTransport` works outside a browser: the transport
 sends the jar's cookies as one `Cookie` header, which undici does send. In a

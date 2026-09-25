@@ -6,11 +6,11 @@
  * tests/ddb-session-store.test.ts.
  *
  * The last groups drive session routes and session APIs through a real
- * Lambder instance with the memory store, which is the first time the
- * session layer has been testable end to end without the AWS SDK mocked.
+ * Lambder instance with the memory store, testing the session layer end to
+ * end without the AWS SDK mocked.
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { z } from 'zod';
 import type { APIGatewayProxyEvent, Context } from 'aws-lambda';
 import { decodeBody, testPublicFiles } from './helpers.js';
@@ -64,9 +64,10 @@ const plantRecord = async (store: LambderSessionStore<any>, overrides: Partial<L
         expiresAt: nowSec() + 3600,
         lastAccessedAt: nowSec(),
         ttlInSeconds: 3600,
+        dataVersion: 0,
         ...rest,
     };
-    await store.put(record);
+    await store.create(record);
     return { record, token: `${record.sessionKeyHash}:${secret}`, csrf };
 };
 
@@ -96,6 +97,7 @@ describe('Session Type Safety', () => {
             expiresAt: Date.now() + 3600000,
             lastAccessedAt: Date.now(),
             ttlInSeconds: 3600,
+            dataVersion: 0,
         };
         expect(session.data.userId).toBe('123');
         expect(session.data.role).toBe('user');
@@ -103,18 +105,19 @@ describe('Session Type Safety', () => {
 
     it('LambderSessionRenderContext is the render context with a present session', () => {
         const sessionCtx = {
-            host: 'localhost', path: '/test', pathParams: {}, method: 'GET',
+            host: 'localhost', path: '/test', rawPath: '/test', pathParams: {}, method: 'GET',
             get: {}, post: {}, cookie: {}, cookieList: {},
             session: {
                 sessionKeyHash: 'hash', secretHash: 'secret-hash', csrfTokenHash: 'csrf-token-hash',
                 sessionKey: 'user-123',
                 data: { userId: '123', username: 'testuser', role: 'admin' as const, permissions: ['read', 'write'] },
-                createdAt: Date.now(), expiresAt: Date.now() + 3600000, lastAccessedAt: Date.now(), ttlInSeconds: 3600,
+                createdAt: Date.now(), expiresAt: Date.now() + 3600000, lastAccessedAt: Date.now(), ttlInSeconds: 3600, dataVersion: 0,
             },
             api: null, apiName: null, apiPayload: {},
             guardData: {}, headers: {}, rawBody: '', ip: '', header: () => undefined,
             event: {} as any, lambdaContext: {} as any, eventFormat: 'v1' as const,
             responseHeaders: new LambderAnswerHeaders(), logList: [],
+            sessionController: {} as any, rateLimit: async () => {}, isRateLimited: async () => false as const,
         } satisfies LambderRenderContext | LambderSessionRenderContext<any, UserSessionData & { permissions: string[] }>;
         expect(sessionCtx.session.data.permissions).toContain('read');
     });
@@ -140,6 +143,7 @@ describe('LambderSessionManager over the memory store', () => {
             expect(session.data).toEqual(data);
             expect(session.ttlInSeconds).toBe(3600);
             expect(session.expiresAt).toBe(session.createdAt + 3600);
+            expect(session.dataVersion).toBe(0);
             expect(store.size).toBe(1);
         });
 
@@ -149,12 +153,29 @@ describe('LambderSessionManager over the memory store', () => {
             const [stored] = store.list();
 
             expect(stored!.sessionKeyHash).toBe(sessionKeyHash);
-            expect(stored!.sessionKeyHash).toBe(await sha256(`user-123${SALT}`));
+            expect(stored!.sessionKeyHash).toBe(await webCrypto.hmacSha256Hex(SALT, 'user-123'));
             expect(stored!.secretHash).toBe(await sha256(secret));
             expect(stored!.csrfTokenHash).toBe(await sha256(csrfToken));
             const serialized = JSON.stringify(stored);
             expect(serialized).not.toContain(secret);
             expect(serialized).not.toContain(csrfToken);
+        });
+
+        it('keeps two deployments sharing one store apart when a sessionKey could absorb the difference of their salts', async () => {
+            // Regression: the partition hash was sha256(sessionKey + salt),
+            // which hashes "ab" + "cd" and "a" + "bcd" alike, so the second
+            // deployment's "log out everywhere" for subject "a" reached the
+            // first deployment's subject "ab". Keyed by the salt, the two
+            // inputs never meet in one string.
+            const shared = new LambderMemorySessionStore<UserSessionData>();
+            const first = new LambderSessionManager<UserSessionData>({ store: shared, sessionSalt: 'cd' });
+            const second = new LambderSessionManager<UserSessionData>({ store: shared, sessionSalt: 'bcd' });
+            const kept = await first.createSession('ab', {} as UserSessionData);
+            const other = await second.createSession('a', {} as UserSessionData);
+
+            expect(kept.session.sessionKeyHash).not.toBe(other.session.sessionKeyHash);
+            await second.deleteSessionAllByKey('a');
+            expect(await first.lookupSession(kept.sessionToken)).not.toBeNull();
         });
 
         it('defaults the TTL to thirty days', async () => {
@@ -195,8 +216,8 @@ describe('LambderSessionManager over the memory store', () => {
             const failing: LambderSessionStore<UserSessionData> = {
                 isMemoryOnly: true,
                 get: async () => { throw new Error('store down'); },
-                put: store.put.bind(store), delete: store.delete.bind(store),
-                listSecretHashes: store.listSecretHashes.bind(store), markDataExpired: store.markDataExpired.bind(store),
+                create: store.create.bind(store), update: store.update.bind(store), delete: store.delete.bind(store),
+                listSecretHashes: store.listSecretHashes.bind(store),
             };
             const broken = new LambderSessionManager({ store: failing, sessionSalt: SALT });
             await expect(readSession(broken, 'deadbeef:facade')).rejects.toBeInstanceOf(LambderSessionReadError);
@@ -211,7 +232,7 @@ describe('LambderSessionManager over the memory store', () => {
 
         it('skips the sliding write when the session was accessed recently', async () => {
             const { token, record } = await plantRecord(store, { lastAccessedAt: nowSec() - 10 });
-            const put = vi.spyOn(store, 'put');
+            const put = vi.spyOn(store, 'update');
             const session = await readSession(manager, token);
             expect(session?.expiresAt).toBe(record.expiresAt);
             expect(put).not.toHaveBeenCalled();
@@ -227,24 +248,41 @@ describe('LambderSessionManager over the memory store', () => {
                 get: async () => ({
                     sessionKeyHash: 'deadbeef', secretHash: await sha256('facade'), csrfTokenHash: await sha256('csrf-token'),
                     sessionKey: 'user-123', data: { role: 'user' },
-                    createdAt: nowSec() - 7200, expiresAt: nowSec() - 3600, lastAccessedAt: nowSec() - 7200, ttlInSeconds: 3600,
+                    createdAt: nowSec() - 7200, expiresAt: nowSec() - 3600, lastAccessedAt: nowSec() - 7200, ttlInSeconds: 3600, dataVersion: 0,
                 }),
-                put: async () => {}, delete: async () => {},
-                listSecretHashes: async () => [], markDataExpired: async () => {},
+                create: async () => {}, update: async () => 'missing', delete: async () => null,
+                listSecretHashes: async () => [],
             };
             const overExpired = new LambderSessionManager({ store: expiredStore, sessionSalt: SALT });
 
             expect(await overExpired.lookupSession('deadbeef:facade')).toBeNull();
         });
 
+        it('reads a record a custom store handed back without its dataVersion as no session', async () => {
+            // Every conditioned write names the version and renewal adds to it,
+            // so a record without one would carry NaN into every later write.
+            const { record } = await plantRecord(store);
+            const { dataVersion: _dropped, ...withoutVersion } = record;
+            const droppingStore: LambderSessionStore<any> = {
+                isMemoryOnly: true,
+                get: async () => withoutVersion as LambderSessionRecord<any>,
+                create: async () => {}, update: async () => 'missing', delete: async () => null,
+                listSecretHashes: async () => [],
+            };
+            const reading = new LambderSessionManager({ store: droppingStore, sessionSalt: SALT });
+
+            expect(await reading.lookupSession('deadbeef:facade')).toBeNull();
+            expect(await manager.lookupSession('deadbeef:facade')).not.toBeNull();
+        });
+
         it('logs a failed renewal write instead of swallowing it, and still serves the session', async () => {
             // A store failing every renewal means sliding expiration has
-            // quietly stopped working and every session now ends at its
-            // creation TTL, which otherwise shows up only as users being
-            // signed out sooner than the app promises.
+            // quietly stopped working and every session ends at its creation
+            // TTL, which otherwise shows up only as users being signed out
+            // sooner than the app promises.
             const error = vi.spyOn(console, 'error').mockImplementation(() => {});
             const { token } = await plantRecord(store, { lastAccessedAt: nowSec() - 3600, expiresAt: nowSec() + 1800 });
-            vi.spyOn(store, 'put').mockRejectedValue(new Error('ddb down'));
+            vi.spyOn(store, 'update').mockRejectedValue(new Error('ddb down'));
 
             expect((await readSession(manager, token))?.sessionKey).toBe('user-123');
 
@@ -275,7 +313,7 @@ describe('LambderSessionManager over the memory store', () => {
         it('honours slidingWriteIntervalSeconds', async () => {
             const eager = new LambderSessionManager({ store, sessionSalt: SALT, slidingWriteIntervalSeconds: 5 });
             const { token } = await plantRecord(store, { lastAccessedAt: nowSec() - 10 });
-            const put = vi.spyOn(store, 'put');
+            const put = vi.spyOn(store, 'update');
             await readSession(eager, token);
             expect(put).toHaveBeenCalledOnce();
         });
@@ -289,7 +327,7 @@ describe('LambderSessionManager over the memory store', () => {
             vi.spyOn(console, 'warn').mockImplementation(() => {});
             const eager = new LambderSessionManager<UserSessionData>({ store, sessionSalt: SALT, slidingWriteIntervalSeconds: 5 });
             const live = await plantRecord(store, { lastAccessedAt: nowSec() - 10 });
-            const put = vi.spyOn(store, 'put');
+            const put = vi.spyOn(store, 'update');
             const controllerOn = (cookies: Record<string, string[]>) => new LambderSessionController<UserSessionData>({
                 manager: eager, tokenCookieKey: 'sessionToken', csrfCookieKey: 'csrfToken', ctx: createApiCallContext<UserSessionData>(),
                 request: { host: 'localhost', cookies, csrfToken: 'csrf-token' },
@@ -313,7 +351,7 @@ describe('LambderSessionManager over the memory store', () => {
         it('accept the matching token and CSRF token, and reject any mismatch or expiry', async () => {
             // Two named methods rather than one with a trailing boolean: a
             // route asks the first alone, an API call asks both, and a flag at
-            // the call site said neither.
+            // the call site would say neither.
             const { record } = await plantRecord(store);
             expect(await manager.isSessionTokenValid(record, 'deadbeef:facade')).toBe(true);
             expect(await manager.isSessionTokenValid(record, 'feed:babe')).toBe(false);
@@ -330,13 +368,24 @@ describe('LambderSessionManager over the memory store', () => {
     });
 
     describe('updateSessionData', () => {
-        it('writes the new data, stamps lastAccessedAt and slides the expiry', async () => {
+        it('writes the new data and leaves the expiry to renewSession, which also re-issues the cookies', async () => {
+            // A data write that slid the record's expiry would leave the
+            // cookies at the earlier one, so an app writing session data would
+            // often sign its users out at createdAt + ttl.
             const { record } = await plantRecord(store, { lastAccessedAt: nowSec() - 1800, expiresAt: nowSec() + 1800 });
-            const before = record.expiresAt;
             const updated = await manager.updateSessionData(record, { ...record.data, preferences: { theme: 'dark', language: 'en' } });
-            expect(updated.data.preferences?.theme).toBe('dark');
-            expect(updated.expiresAt).toBeGreaterThan(before);
+            expect(updated?.data.preferences?.theme).toBe('dark');
+            expect(updated?.expiresAt).toBe(record.expiresAt);
+            expect(updated?.lastAccessedAt).toBe(record.lastAccessedAt);
             expect(store.list()[0]!.data.preferences?.theme).toBe('dark');
+            expect(store.list()[0]!.expiresAt).toBe(record.expiresAt);
+        });
+
+        it('does not bring back a session deleted while the request held it', async () => {
+            const { record } = await plantRecord(store);
+            await manager.deleteSession(record);
+            expect(await manager.updateSessionData(record, { ...record.data, role: 'admin' })).toBeNull();
+            expect(store.size).toBe(0);
         });
     });
 
@@ -363,7 +412,7 @@ describe('LambderSessionManager over the memory store', () => {
     describe('regenerateSession', () => {
         it('rotates both secrets and keeps the subject, data and TTL', async () => {
             const original = await manager.createSession('user-123', { userId: '123', username: 'testuser', role: 'user' }, 3600);
-            const { session, sessionToken, csrfToken } = await manager.regenerateSession(original.session);
+            const { session, sessionToken, csrfToken } = (await manager.regenerateSession(original.session))!;
 
             expect(sessionToken).not.toBe(original.sessionToken);
             expect(csrfToken).not.toBe(original.csrfToken);
@@ -373,7 +422,7 @@ describe('LambderSessionManager over the memory store', () => {
             expect(session.sessionKey).toBe('user-123');
             expect(session.data).toEqual(original.session.data);
             expect(session.ttlInSeconds).toBe(3600);
-            // The old record is gone; only the new token finds a session.
+            // The rotated-out record is gone; only the new token finds a session.
             expect(store.size).toBe(1);
             expect(await readSession(manager, original.sessionToken)).toBeNull();
             expect(await readSession(manager, sessionToken)).not.toBeNull();
@@ -412,7 +461,7 @@ describe('LambderSessionManager over the memory store', () => {
 
     describe('the memory store key', () => {
         it('escapes the separator, so two records cannot collapse into one', async () => {
-            // Both halves are hex today, but a custom LambderSessionCrypto
+            // Both halves are hex by default, but a custom LambderSessionCrypto
             // writes whatever it likes into them, and a plain `a|b` join makes
             // ('x|a', 'b') and ('x', 'a|b') one key: one record would silently
             // overwrite the other, which is one visitor reading another's
@@ -421,10 +470,10 @@ describe('LambderSessionManager over the memory store', () => {
             const record = (sessionKeyHash: string, secretHash: string, sessionKey: string): LambderSessionRecord => ({
                 sessionKeyHash, secretHash, sessionKey,
                 csrfTokenHash: 'csrf-hash', data: {},
-                createdAt: nowSec(), expiresAt: nowSec() + 3600, lastAccessedAt: nowSec(), ttlInSeconds: 3600,
+                createdAt: nowSec(), expiresAt: nowSec() + 3600, lastAccessedAt: nowSec(), ttlInSeconds: 3600, dataVersion: 0,
             });
-            await keyed.put(record('part|a', 'b', 'straddling'));
-            await keyed.put(record('part', 'a|b', 'neighbour'));
+            await keyed.create(record('part|a', 'b', 'straddling'));
+            await keyed.create(record('part', 'a|b', 'neighbour'));
 
             expect((await keyed.get('part|a', 'b'))?.sessionKey).toBe('straddling');
             expect((await keyed.get('part', 'a|b'))?.sessionKey).toBe('neighbour');
@@ -439,9 +488,9 @@ describe('LambderSessionManager over the memory store', () => {
 
     describe('the memory store ceiling', () => {
         it('maxEntries bounds the sessions held, and the evicted one is a logout', async () => {
-            // The ceiling is reachable through the store's own options now, and
-            // what it costs is worth saying out loud: the soonest to expire is
-            // dropped, and whoever held that session is signed out.
+            // The ceiling is set through the store's own options, and what it
+            // costs is worth saying out loud: the soonest to expire is dropped,
+            // and whoever held that session is signed out.
             const bounded = new LambderMemorySessionStore({ maxEntries: 2 });
             const overBounded = new LambderSessionManager({ store: bounded, sessionSalt: SALT });
             const shortest = await overBounded.createSession('user-1', {}, 60);
@@ -480,8 +529,8 @@ describe('LambderSessionController over the memory store', () => {
         expect(ctx.session).toBe(session);
         const cookies = setCookiesOf(ctx);
         expect(cookies.length).toBe(2);
-        expect(cookies[0]).toMatch(/^sessionToken=[0-9a-f]{64}:[0-9a-f]{64}; Path=\/; Expires=.*; HttpOnly; Secure; SameSite=Lax$/);
-        expect(cookies[1]).toMatch(/^csrfToken=[0-9a-f]{64}; Path=\/; Expires=.*; Secure; SameSite=Lax$/);
+        expect(cookies[0]).toMatch(/^sessionToken=[0-9a-f]{64}:[0-9a-f]{64}; Max-Age=\d+; Path=\/; Expires=.*; HttpOnly; Secure; SameSite=Lax$/);
+        expect(cookies[1]).toMatch(/^csrfToken=[0-9a-f]{64}; Max-Age=\d+; Path=\/; Expires=.*; Secure; SameSite=Lax$/);
         // The cookie carries the raw secret whose hash is the record's range key.
         const rawSecret = cookies[0]!.split(';')[0]!.split(':')[1]!;
         expect(await sha256(rawSecret)).toBe(session.secretHash);
@@ -617,15 +666,21 @@ describe('LambderSessionController over the memory store', () => {
 
         const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
         const manyCopies = Array.from({ length: 6 }, (_, index) => `deadbeef:0a${index}`);
-        await expect(controllerFor({ sessionToken: manyCopies }).fetchSession()).rejects.toBeInstanceOf(LambderSessionAmbiguousError);
+        const ambiguous = await controllerFor({ sessionToken: manyCopies }).fetchSession().then(() => null, (err: unknown) => err);
+        expect(ambiguous).toBeInstanceOf(LambderSessionAmbiguousError);
+        // A request with no usable session, so every place that answers a
+        // missing session answers this one too.
+        expect(ambiguous).toBeInstanceOf(LambderSessionNotFoundError);
+        expect((ambiguous as Error).name).toBe('LambderSessionAmbiguousError');
+        expect(await controllerFor({ sessionToken: manyCopies }).fetchSessionIfExists()).toBeNull();
         warn.mockRestore();
     });
 
     it('a crash inside the manager surfaces as a crash, not as a logout', async () => {
         // The reason the exits are typed at all. Returning null for anything
-        // thrown made a TypeError in a custom store, or a bug in this layer,
-        // answer sessionExpired: the client then clears its cookies, so the
-        // defect presented as the user being signed out and nothing was logged.
+        // thrown would make a TypeError in a custom store, or a bug in this
+        // layer, answer sessionExpired: the client clears its cookies, and the
+        // defect presents as the user being signed out, with nothing logged.
         const { token } = await plantRecord(store);
         vi.spyOn(manager, 'renewSession').mockRejectedValue(new TypeError('cannot read properties of undefined'));
 
@@ -634,10 +689,10 @@ describe('LambderSessionController over the memory store', () => {
     });
 
     it('re-issues both cookies when a sliding write moved the expiry, and stays silent when it did not', async () => {
-        // Sliding expiration moved the record and left the browser holding a
-        // cookie that still expires at createdAt + ttl, so a visitor who never
-        // stopped using the app was signed out anyway, on the one deadline
-        // sliding expiration exists to push back.
+        // Sliding expiration moves the record. Without fresh cookies the
+        // browser holds one that still expires at createdAt + ttl, and a
+        // visitor who never stopped using the app is signed out anyway, on the
+        // one deadline sliding expiration exists to push back.
         const fresh = await plantRecord(store, { lastAccessedAt: nowSec() });
         await controllerFor({ sessionToken: [fresh.token] }).fetchSession();
         expect(setCookiesOf(ctx)).toEqual([]);
@@ -650,7 +705,7 @@ describe('LambderSessionController over the memory store', () => {
         expect(cookies.length).toBe(2);
         expect(cookies[0]).toContain(`sessionToken=${slid.token};`);
         expect(cookies[1]).toContain('csrfToken=csrf-token;');
-        // Both carry the renewed expiry, which is what the browser was missing.
+        // Both carry the renewed expiry, which is what the browser needs.
         expect(cookies[0]).toContain(`Expires=${new Date(session.expiresAt * 1000).toUTCString()}`);
         expect(cookies[1]).toContain(`Expires=${new Date(session.expiresAt * 1000).toUTCString()}`);
     });
@@ -680,22 +735,22 @@ describe('LambderSessionController over the memory store', () => {
     });
 });
 
-describe('The session option after the store moved out of it', () => {
-    it('refuses a table field that now belongs to the store, instead of ignoring it', () => {
-        // create() is generic over `const TOptions`, which switches
-        // excess-property checking off, so these compile. Silently dropping
-        // them would point the app at pk/sk on a table keyed otherwise, and
-        // the first sign would be that nobody can log in.
-        const withMovedField = (extra: Record<string, unknown>) => () => new Lambder({
-            files: testPublicFiles(),
-            apiPath: '/api',
-            session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt', ...extra },
-        } as never);
-
-        expect(withMovedField({ partitionKey: 'myPk' })).toThrow(/no longer takes partitionKey/);
-        expect(withMovedField({ tableName: 't', tableRegion: 'us-east-1' })).toThrow(/no longer takes tableName, tableRegion/);
-        expect(withMovedField({ sortKey: 'mySk' })).toThrow(/LambderDdbSessionStore/);
-        expect(withMovedField({ compression: false })).toThrow(/no longer takes compression/);
+describe('The session option takes a store, not table fields', () => {
+    it('refuses a table field that belongs to the store at compile time, instead of ignoring it', () => {
+        // Silently dropped, a table field would point the app at pk/sk on a
+        // table keyed otherwise, and the first sign would be that nobody can
+        // log in. The surplus-key check on the session option makes each one
+        // a compile error on the key itself.
+        const store = new LambderMemorySessionStore();
+        const build = () => {
+            // @ts-expect-error partitionKey belongs to LambderDdbSessionStore
+            initLambder().create({ apiPath: '/api', session: { store, sessionSalt: 'salt', partitionKey: 'myPk' } });
+            // @ts-expect-error tableName belongs to LambderDdbSessionStore
+            initLambder().create({ apiPath: '/api', session: { store, sessionSalt: 'salt', tableName: 't' } });
+            // @ts-expect-error compression belongs to LambderDdbSessionStore
+            initLambder().create({ apiPath: '/api', session: { store, sessionSalt: 'salt', compression: false } });
+        };
+        expect(build).toBeTypeOf('function');
     });
 
     it('takes a current session option without complaint', () => {
@@ -722,7 +777,7 @@ describe('Session Endpoint Protection', () => {
 
     const createMockEvent = (path: string, method: string, sessionToken?: string, apiName?: string, payload?: any, csrfToken?: string): APIGatewayProxyEvent => ({
         body: apiName ? JSON.stringify({ apiName, payload: payload || {}, token: csrfToken ?? 'csrf-token' }) : null,
-        headers: { Host: 'localhost', Cookie: sessionToken ? `LMDRSESSIONTKID=${sessionToken}` : '' },
+        headers: { Host: 'localhost', 'Content-Type': 'application/json', Cookie: sessionToken ? `LMDRSESSIONTKID=${sessionToken}` : '' },
         multiValueHeaders: {},
         httpMethod: method,
         isBase64Encoded: false,
@@ -862,6 +917,33 @@ describe('Session Endpoint Protection', () => {
             expect(cookies[1]).toMatch(/^LMDRSESSIONCSTK=/);
             expect(store.size).toBe(1);
         });
+
+        it('answers sessionExpired, not a crash, when the session ends while the handler holds it', async () => {
+            const { token } = await plantRecord(store);
+            lambder.addSessionApi('user.rename', { input: z.any(), output: z.any() }, async (ctx, resolver) => {
+                // A logout in another tab lands mid-request.
+                await store.delete(ctx.session.sessionKeyHash, ctx.session.secretHash);
+                await ctx.sessionController.updateSessionData({ ...ctx.session.data, username: 'renamed' });
+                return resolver.api({ renamed: true });
+            });
+            const response = await lambder.render(createMockEvent('/api', 'POST', token, 'user.rename'), createMockContext());
+            expect(JSON.parse(decodeBody(response) || '{}').sessionExpired).toBe(true);
+            expect(response.multiValueHeaders?.['Set-Cookie'] ?? []).toEqual([]);
+            expect(store.size).toBe(0);
+        });
+
+        it('a rotation after the session ended mints nothing and sets no cookies', async () => {
+            const { token } = await plantRecord(store);
+            lambder.addSessionApi('org.switch', { input: z.any(), output: z.any() }, async (ctx, resolver) => {
+                await store.delete(ctx.session.sessionKeyHash, ctx.session.secretHash);
+                await ctx.sessionController.regenerateSession();
+                return resolver.api({ switched: true });
+            });
+            const response = await lambder.render(createMockEvent('/api', 'POST', token, 'org.switch'), createMockContext());
+            expect(JSON.parse(decodeBody(response) || '{}').sessionExpired).toBe(true);
+            expect(response.multiValueHeaders?.['Set-Cookie'] ?? []).toEqual([]);
+            expect(store.size).toBe(0);
+        });
     });
 
     describe('addSessionApi with dataRefresh', () => {
@@ -919,7 +1001,7 @@ describe('LambderSessionManager dataRefresh', () => {
     it('renews stale data and shares one write with the sliding-expiration write', async () => {
         const refresh = vi.fn(async () => ({ role: 'admin' }));
         const { token } = await plantRecord(store, { data: { role: 'user' }, dataExpiresAt: nowSec() - 10, lastAccessedAt: nowSec() - 3000 });
-        const put = vi.spyOn(store, 'put');
+        const put = vi.spyOn(store, 'update');
 
         const session = await readSession(makeManager(refresh), token);
 
@@ -950,10 +1032,94 @@ describe('LambderSessionManager dataRefresh', () => {
         expect(store.size).toBe(1);
     });
 
-    it('updateSessionData re-stamps dataExpiresAt', async () => {
-        const { record } = await plantRecord(store, { dataExpiresAt: nowSec() - 10 });
-        const updated = await makeManager(async (s) => s.data).updateSessionData(record, { role: 'editor' });
-        expect(updated.dataExpiresAt).toBeGreaterThanOrEqual(nowSec() + 599);
+    it('updateSessionData leaves the refresh deadline where it is, due or not', async () => {
+        const manager = makeManager(async (s) => s.data);
+        const now = nowSec();
+        const fresh = await plantRecord(store, { dataExpiresAt: now + 100 });
+        const due = await plantRecord(store, { secret: 'b0b', dataExpiresAt: now - 10 });
+
+        expect((await manager.updateSessionData(fresh.record, { role: 'editor' }))?.dataExpiresAt).toBe(now + 100);
+        expect((await manager.updateSessionData(due.record, { role: 'editor' }))?.dataExpiresAt).toBe(now - 10);
+        expect(store.list().map((record) => record.dataExpiresAt).sort()).toEqual([now - 10, now + 100]);
+    });
+
+    it('still refreshes the data of an app that writes it more often than ttlSeconds', async () => {
+        // Regression: a data write stamped the deadline now + ttlSeconds. The
+        // data an app writes is almost always the session's own with a field
+        // changed, still carrying the role cached at login, so an app writing
+        // every five minutes against a ten-minute ttl never ran refresh(), and
+        // a demotion never reached the session.
+        vi.useFakeTimers({ toFake: ['Date'] });
+        const start = 1_700_000_000_000;
+        vi.setSystemTime(start);
+        try {
+            let role = 'admin';
+            const refresh = vi.fn(async () => ({ role }));
+            const manager = makeManager(refresh);
+            const { sessionToken } = await manager.createSession('user-123', { role: 'admin' }, 86_400);
+            role = 'user';
+
+            for(let minute = 5; minute <= 20; minute += 5){
+                vi.setSystemTime(start + minute * 60_000);
+                const read = await readSession(manager, sessionToken);
+                await manager.updateSessionData(read!, { ...read!.data as object, seenAt: minute });
+            }
+
+            expect(refresh).toHaveBeenCalled();
+            expect(store.list()[0]!.data).toEqual({ role: 'user', seenAt: 20 });
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('carries the version a landed refresh produced, so a data write later in the same request lands in one write', async () => {
+        const manager = makeManager(async () => ({ role: 'user' }));
+        const { token } = await plantRecord(store, { data: { role: 'admin' }, dataExpiresAt: nowSec() - 10 });
+        const read = (await readSession(manager, token))!;
+        expect(read.dataVersion).toBe(1);
+
+        const update = vi.spyOn(store, 'update');
+        await manager.updateSessionData(read, { ...read.data as object, theme: 'dark' });
+
+        expect(update).toHaveBeenCalledOnce();
+        expect(store.list()[0]).toMatchObject({ data: { role: 'user', theme: 'dark' }, dataVersion: 2, dataExpiresAt: read.dataExpiresAt });
+        vi.restoreAllMocks();
+    });
+
+    it('keeps a revocation that landed while updateSessionData was in flight', async () => {
+        // The record was read fresh, expireSessionDataAllByKey marked it
+        // stale, and then this request wrote data derived from its old read.
+        // The write lands, and the mark still makes the next read renew, so
+        // the revoked role does not survive a data TTL.
+        const manager = makeManager(async () => ({ role: 'user' }));
+        const { record, token } = await plantRecord(store, { data: { role: 'admin' }, dataExpiresAt: nowSec() + 600 });
+        // What expireSessionDataAllByKey writes, on the record plantRecord
+        // put under its own fixed partition.
+        await store.update(record.sessionKeyHash, record.secretHash, { dataExpiresAt: nowSec() });
+
+        const updated = await manager.updateSessionData(record, { role: 'admin', theme: 'dark' });
+
+        expect(updated?.data).toEqual({ role: 'admin', theme: 'dark' });
+        expect(store.list()[0]!.dataExpiresAt).toBeLessThanOrEqual(nowSec());
+        expect((await readSession(manager, token))?.data).toEqual({ role: 'user' });
+    });
+
+    it('does not write a refresh over data another write changed while it ran', async () => {
+        let release: () => void = () => {};
+        let refreshStarted: () => void = () => {};
+        const gate = new Promise<void>((resolve) => { release = resolve; });
+        const started = new Promise<void>((resolve) => { refreshStarted = resolve; });
+        const manager = makeManager(async () => { refreshStarted(); await gate; return { role: 'from-refresh' }; });
+        const { record, token } = await plantRecord(store, { data: { role: 'user' }, dataExpiresAt: nowSec() - 10 });
+
+        const reading = readSession(manager, token);
+        await started;
+        await manager.updateSessionData(record, { role: 'chosen-by-the-app' });
+        release();
+
+        // The read serves what it refreshed; the app's write is what stays.
+        expect((await reading)?.data).toEqual({ role: 'from-refresh' });
+        expect(store.list()[0]!.data).toEqual({ role: 'chosen-by-the-app' });
     });
 
     it('refreshSessionData forces a renewal even when data is fresh', async () => {
@@ -970,11 +1136,139 @@ describe('LambderSessionManager dataRefresh', () => {
         await expect(makePlainManager().refreshSessionData(record)).rejects.toThrow('dataRefresh is not configured');
     });
 
-    it('regenerateSession carries dataExpiresAt over instead of extending it', async () => {
-        const oldStamp = nowSec() + 120;
-        const { record } = await plantRecord(store, { dataExpiresAt: oldStamp });
-        const regenerated = await makeManager(async (s) => s.data).regenerateSession(record);
-        expect(regenerated.session.dataExpiresAt).toBe(oldStamp);
+    it('regenerateSession starts the new session with its data due, so its next read renews it', async () => {
+        // A revocation marked between the rotation's delete and its create
+        // never sees the new record; due, its next read renews the data anyway.
+        const { record } = await plantRecord(store, { data: { role: 'admin' }, dataExpiresAt: nowSec() + 600 });
+        const manager = makeManager(async () => ({ role: 'user' }));
+        const regenerated = await manager.regenerateSession(record);
+        expect(regenerated?.session.dataExpiresAt).toBeLessThanOrEqual(nowSec());
+        expect((await readSession(manager, regenerated!.sessionToken))?.data).toEqual({ role: 'user' });
+    });
+
+    it('keeps a revocation that landed after a data write had already been refreshed over', async () => {
+        // A read data {role: admin}; the role was revoked and marked; a poll
+        // refreshed the record to {role: user}; then A wrote its data derived
+        // from the old read. That write lands, marked due, so the next read
+        // refreshes it again rather than serving admin for a data TTL.
+        const manager = makeManager(async () => ({ role: 'user' }));
+        const { record, token } = await plantRecord(store, { data: { role: 'admin' }, dataExpiresAt: nowSec() + 600 });
+        await store.update(record.sessionKeyHash, record.secretHash, { data: { role: 'user' }, dataExpiresAt: nowSec() + 601 });
+
+        const updated = await manager.updateSessionData(record, { role: 'admin', cart: ['x'] });
+
+        expect(updated?.data).toEqual({ role: 'admin', cart: ['x'] });
+        expect((await readSession(manager, token))?.data).toEqual({ role: 'user' });
+    });
+
+    describe('a revocation marked in the second the deadline already reads', () => {
+        // Regression: the conditions compared dataExpiresAt, which is whole
+        // seconds. A mark writes "now", so when the stored deadline already
+        // read this second the mark changed nothing a condition could see,
+        // and a refresh computed before the revocation landed over it and
+        // stood for a whole data TTL. Each case gates the refresh after it
+        // has read the source of truth, and marks while it waits.
+        let role: string;
+        let releaseRefresh: () => void;
+        let refreshStarted: Promise<void>;
+        const gatedManager = () => {
+            const gate = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+            let started!: () => void;
+            refreshStarted = new Promise<void>((resolve) => { started = resolve; });
+            return makeManager(async () => { const seen = role; started(); await gate; return { role: seen }; });
+        };
+
+        beforeEach(() => { vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(1_700_000_000_000); });
+        afterEach(() => { vi.useRealTimers(); });
+
+        it('keeps a mark that wrote the deadline a rotated session already started with', async () => {
+            role = 'admin';
+            const manager = gatedManager();
+            const created = await manager.createSession('user-123', { role: 'admin' });
+            // A rotation starts its data due this second.
+            const rotated = (await manager.regenerateSession(created.session))!;
+
+            const reading = readSession(manager, rotated.sessionToken);
+            await refreshStarted;
+            role = 'user';
+            await manager.expireSessionDataAllByKey('user-123');
+            releaseRefresh();
+            expect((await reading)?.data).toEqual({ role: 'admin' });
+
+            expect((await readSession(manager, rotated.sessionToken))?.data).toEqual({ role: 'user' });
+        });
+
+        it('keeps the second of two marks in one second, which the refresh of the first did not see', async () => {
+            role = 'admin';
+            const manager = gatedManager();
+            const { sessionToken } = await manager.createSession('user-123', { role: 'admin' });
+            role = 'editor';
+            await manager.expireSessionDataAllByKey('user-123');
+
+            const reading = readSession(manager, sessionToken);
+            await refreshStarted;
+            role = 'user';
+            await manager.expireSessionDataAllByKey('user-123');
+            releaseRefresh();
+            expect((await reading)?.data).toEqual({ role: 'editor' });
+
+            expect((await readSession(manager, sessionToken))?.data).toEqual({ role: 'user' });
+        });
+    });
+
+    it('serves the refreshed data when the renewal write fails', async () => {
+        const manager = makeManager(async () => ({ role: 'user' }));
+        const { token } = await plantRecord(store, { data: { role: 'admin' }, dataExpiresAt: nowSec() - 10 });
+        vi.spyOn(store, 'update').mockRejectedValueOnce(new Error('throttled'));
+        const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+        expect((await readSession(manager, token))?.data).toEqual({ role: 'user' });
+        expect(error).toHaveBeenCalledOnce();
+        vi.restoreAllMocks();
+    });
+
+    it('regenerateSession carries the record as stored, another request\'s write included', async () => {
+        const manager = makeManager(async () => ({ role: 'user' }));
+        const { record, token } = await plantRecord(store, { data: { role: 'admin', theme: 'light' }, dataExpiresAt: nowSec() + 600 });
+        await store.update(record.sessionKeyHash, record.secretHash, { data: { role: 'admin', theme: 'dark' }, dataExpiresAt: nowSec() });
+
+        const regenerated = await manager.regenerateSession(record);
+
+        expect(regenerated?.session.data).toEqual({ role: 'admin', theme: 'dark' });
+        expect(await readSession(manager, token)).toBeNull();
+        expect((await readSession(manager, regenerated!.sessionToken))?.data).toEqual({ role: 'user' });
+    });
+
+    it('regenerateSession hands back the dataVersion its carried-over write left, so a data write after it lands in one write', async () => {
+        // Regression: the record handed back said 0 where the store held 1,
+        // so the handler's data write right after the rotation answered stale
+        // and took a second write, marked due.
+        const manager = makeManager(async (s) => s.data);
+        const { record } = await plantRecord(store, { data: { role: 'admin', theme: 'light' }, dataExpiresAt: nowSec() + 600 });
+        await store.update(record.sessionKeyHash, record.secretHash, { data: { role: 'admin', theme: 'dark' } });
+
+        const regenerated = (await manager.regenerateSession(record))!;
+        const stored = store.list()[0]!;
+        expect(regenerated.session.dataVersion).toBe(stored.dataVersion);
+
+        const update = vi.spyOn(store, 'update');
+        const written = await manager.updateSessionData(regenerated.session, { role: 'admin', theme: 'blue' });
+        expect(update).toHaveBeenCalledOnce();
+        expect(written?.dataVersion).toBe(stored.dataVersion + 1);
+        expect(store.list()[0]).toMatchObject({ data: { role: 'admin', theme: 'blue' }, dataVersion: stored.dataVersion + 1 });
+        vi.restoreAllMocks();
+    });
+
+    it('regenerateSession mints nothing for a session ended while the request held it', async () => {
+        // A thief's request read the session; the owner then changed their
+        // password, which ends every session of theirs. The thief's rotation
+        // must not hand back a live session.
+        const manager = makeManager(async (s) => s.data);
+        const { record } = await plantRecord(store, { dataExpiresAt: nowSec() + 600 });
+        await manager.deleteSessionAll(record);
+
+        expect(await manager.regenerateSession(record)).toBeNull();
+        expect(store.size).toBe(0);
     });
 
     it('deleteSessionAllByKey derives the partition hash internally', async () => {
@@ -1010,14 +1304,26 @@ describe('LambderSessionController dataRefresh', () => {
         expect(ctx.session?.data).toEqual({ role: 'admin' });
     });
 
-    it('refreshSessionData ending the session clears cookies and nulls ctx.session', async () => {
+    it('refreshSessionData ending the session answers no session, and leaves the cookies to whatever set them last', async () => {
         const { token } = await plantRecord(store, { dataExpiresAt: nowSec() + 600 });
         const { controller, ctx } = makeController(async () => null, token);
         await controller.fetchSession();
-        const refreshed = await controller.refreshSessionData();
-        expect(refreshed).toBeNull();
+        const writtenByRead = setCookiesOf(ctx).length;
+        await expect(controller.refreshSessionData()).rejects.toBeInstanceOf(LambderSessionNotFoundError);
         expect(ctx.session).toBeNull();
-        expect(setCookiesOf(ctx).length).toBe(2);
+        expect(store.size).toBe(0);
+        // A deletion matches a cookie by name, so clearing here could delete a
+        // session another response had just set.
+        expect(setCookiesOf(ctx).length).toBe(writtenByRead);
+    });
+
+    it('refreshSessionData on a session ended while the request held it answers no session', async () => {
+        const { token } = await plantRecord(store, { dataExpiresAt: nowSec() + 600 });
+        const { controller, ctx } = makeController(async (s) => s.data, token);
+        const session = await controller.fetchSession();
+        await store.delete(session.sessionKeyHash, session.secretHash);
+        await expect(controller.refreshSessionData()).rejects.toBeInstanceOf(LambderSessionNotFoundError);
+        expect(ctx.session).toBeNull();
     });
 
     it('fetchSessionIfExists rethrows dataRefresh failures instead of reporting no session', async () => {
@@ -1065,7 +1371,7 @@ describe('LambderSessionManager expireSessionDataAllByKey', () => {
         vi.spyOn(store, 'listSecretHashes').mockImplementation(async (hash) => { const hashes = await listed(hash); store.reset(); return hashes; });
         await expect(manager.expireSessionDataAllByKey('user-123')).resolves.toBe(true);
 
-        vi.spyOn(store, 'markDataExpired').mockRejectedValue(new Error('store down'));
+        vi.spyOn(store, 'update').mockRejectedValue(new Error('store down'));
         vi.spyOn(store, 'listSecretHashes').mockResolvedValue(['x']);
         await expect(manager.expireSessionDataAllByKey('user-123')).rejects.toThrow('store down');
     });
@@ -1084,5 +1390,93 @@ describe('LambderSessionManager expireSessionDataAllByKey', () => {
         const session = await readSession(manager, sessionToken);
         expect(refresh).toHaveBeenCalledOnce();
         expect(session?.data).toEqual({ role: 'admin' });
+    });
+});
+
+describe('Rotation racing "log out everywhere"', () => {
+    type RaceData = { userId: string };
+
+    /** A memory store that can hold the next delete before it runs, and run a step right after a listing. */
+    class InterleavingStore extends LambderMemorySessionStore<RaceData> {
+        holdNextDelete: Promise<void> | null = null;
+        afterNextList: (() => Promise<void>) | null = null;
+        override async delete(sessionKeyHash: string, secretHash: string) {
+            const hold = this.holdNextDelete;
+            this.holdNextDelete = null;
+            if(hold) await hold;
+            return await super.delete(sessionKeyHash, secretHash);
+        }
+        override async listSecretHashes(sessionKeyHash: string) {
+            const listed = await super.listSecretHashes(sessionKeyHash);
+            const step = this.afterNextList;
+            this.afterNextList = null;
+            if(step) await step();
+            return listed;
+        }
+    }
+
+    it('leaves no session when the owner deletes everything between the rotation\'s new record and its delete of the old', async () => {
+        const store = new InterleavingStore();
+        const manager = new LambderSessionManager<RaceData>({ store, sessionSalt: SALT });
+        const stolen = await manager.createSession('user-1', { userId: 'user-1' });
+
+        let release!: () => void;
+        store.holdNextDelete = new Promise<void>((resolve) => { release = resolve; });
+        const rotation = manager.regenerateSession(stolen.session);
+        // The rotation has written its new record and waits to delete the old one.
+        while(store.size < 2) await new Promise((resolve) => setTimeout(resolve, 1));
+
+        await manager.deleteSessionAllByKey('user-1');
+        release();
+
+        expect(await rotation).toBeNull();
+        expect(store.size).toBe(0);
+    });
+
+    it('leaves no session when a whole rotation runs between the owner\'s listing and its deletes', async () => {
+        const store = new InterleavingStore();
+        const manager = new LambderSessionManager<RaceData>({ store, sessionSalt: SALT });
+        const stolen = await manager.createSession('user-1', { userId: 'user-1' });
+
+        let rotated: Awaited<ReturnType<typeof manager.regenerateSession>> = null;
+        store.afterNextList = async () => { rotated = await manager.regenerateSession(stolen.session); };
+        await manager.deleteSessionAllByKey('user-1');
+
+        // The rotation went through, but its session did not outlive the password change.
+        expect(rotated).not.toBeNull();
+        expect(await readSession(manager, rotated!.sessionToken)).toBeNull();
+        expect(store.size).toBe(0);
+    });
+
+    it('answers false and logs when a rotation completes inside every pass, rather than claim nothing is left', async () => {
+        // Regression: after its bounded passes the delete gave up silently and
+        // answered true, while the session the last rotation wrote stood.
+        const store = new InterleavingStore();
+        const manager = new LambderSessionManager<RaceData>({ store, sessionSalt: SALT });
+        let current = (await manager.createSession('user-1', { userId: 'user-1' })).session;
+        const rotateAfterEveryList = async () => {
+            const rotated = await manager.regenerateSession(current);
+            if(rotated) current = rotated.session;
+            store.afterNextList = rotateAfterEveryList;
+        };
+        store.afterNextList = rotateAfterEveryList;
+        const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+        const deletedAll = await manager.deleteSessionAllByKey('user-1');
+        store.afterNextList = null;
+
+        expect(deletedAll).toBe(false);
+        expect(store.size).toBe(1);
+        expect(error).toHaveBeenCalledOnce();
+        const logged = String(error.mock.calls[0]![0]);
+        expect(logged).toContain('4 passes');
+        // The count, never the subject.
+        expect(logged).not.toContain('user-1');
+        expect(logged).not.toContain(current.sessionKeyHash);
+
+        // Run again once the rotations stop, it clears what was left.
+        expect(await manager.deleteSessionAll(current)).toBe(true);
+        expect(store.size).toBe(0);
+        vi.restoreAllMocks();
     });
 });

@@ -50,6 +50,14 @@ export declare class LambderResponse {
     compress: boolean | "auto";
     etag: boolean | "auto";
     constructor(init: LambderResponseInit);
+    /**
+     * A copy with its own header lists, for a request to write into. A
+     * handler may answer with an object it keeps between requests (a
+     * module-level 404), and everything downstream adds headers (cookies,
+     * CORS, Vary, Content-Encoding, ETag), which would carry one caller's
+     * Set-Cookie to the next. The body is shared: nothing writes into it.
+     */
+    copy(): LambderResponse;
     getHeader(key: string): string[] | undefined;
     setHeader(key: string, value: string | string[]): this;
     addHeader(key: string, value: string): this;
@@ -74,8 +82,14 @@ export type LambderResponseCompressionSettings = LambderCompressionSettingsBase 
 /** The `compression` option at creation: `true` for the defaults, `false` for off, or overrides. */
 export type LambderResponseCompressionOption = LambderCompressionOption<LambderResponseCompressionSettings>;
 export type LambderFinalizeOptions = {
-    /** Resolved settings, or null when compression is off: the same `Settings | null` contract the stores hold. */
-    compression: LambderResponseCompressionSettings | null;
+    /**
+     * Resolved settings per event format, or null where compression is off:
+     * the same `Settings | null` contract the stores hold. Per format because
+     * a REST API (v1) hands a compressed body on to the browser only when its
+     * binaryMediaTypes match, which in practice means `*\/*`: compressing
+     * there by default would send most answers as base64 text.
+     */
+    compression: Record<LambderHttpEventFormat, LambderResponseCompressionSettings | null>;
     etag: boolean;
     /** Guard against Lambda's ~6MB response cap with a clear error. */
     maxResponseBytes: number;
@@ -93,15 +107,22 @@ export declare const DEFAULT_FINALIZE_OPTIONS: LambderFinalizeOptions;
 /**
  * Emit the format-specific Lambda response shape. Exported because the
  * last-resort crash path has to emit without finalizing (finalization may be
- * what failed) and must still get the shape right; hand-writing it there left
- * the v1/v2 split in four places.
+ * what failed) and must still get the shape right, so the v1/v2 split lives
+ * in this one place. Being the one exit every answer leaves through (each of
+ * finalization's, the 304 included, and the crash path's), it is also where
+ * an answer that sets a cookie is made private (privateWhenSettingCookies).
  */
 export declare const emitResponse: (format: LambderHttpEventFormat, statusCode: number, headers: Record<string, string[]>, body: string, isBase64Encoded: boolean) => LambderHttpResponse;
 /**
  * Convert an intermediate LambderResponse into the final Lambda response:
- * gzip negotiation (Accept-Encoding), ETag + If-None-Match 304, base64
+ * compression negotiation (Accept-Encoding), ETag + If-None-Match 304, base64
  * encoding, HEAD body stripping, and Lambda payload size guard. Emits the v1
  * (REST API) or v2 (HTTP API / Function URL) response shape.
+ *
+ * Text goes out as text and only bytes as base64: a REST API decodes base64
+ * only for its binaryMediaTypes, so a stylesheet sent as base64 would reach
+ * the browser as base64. The ETag is settled before anything is compressed, so
+ * a revalidation that ends in a 304 compresses nothing.
  */
 export declare const finalizeResponse: (ctx: Pick<LambderRenderContext, "method" | "header"> | null, response: LambderResponse, options: LambderFinalizeOptions, format?: LambderHttpEventFormat) => Promise<LambderHttpResponse>;
 export {};

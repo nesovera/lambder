@@ -1,36 +1,29 @@
 import { assertPositiveInteger } from "../shared/util/LambderOptionChecks.js";
 /**
- * The session fields that moved onto LambderDdbSessionStore in 7.0.0, refused
- * at creation. They are the one break the compiler cannot find: create() is
- * generic over `const TOptions`, which switches excess-property checking off
- * for the whole options object, so a leftover `partitionKey` compiles and
- * would be dropped in silence while the store fell back to its own table
- * defaults. A wrong table key is not something to discover from nobody being
- * able to log in.
- */
-const MOVED_SESSION_OPTIONS = ["tableName", "tableRegion", "partitionKey", "sortKey", "compression"];
-/**
- * Everything create() refuses before an instance exists.
- *
- * One place rather than five checks spread through the constructor's wiring:
- * a value that cannot work is a startup error naming the option, not a 404 on
- * every API call (an apiPath with no leading slash) or a 500 on every response
- * (maxResponseBytes: 0) that an app discovers in production.
+ * Everything create() refuses before an instance exists, in one place: a
+ * value that cannot work is a startup error naming the option, not a 404 on
+ * every API call (an apiPath with no leading slash) or a 500 on every
+ * response (maxResponseBytes: 0) that an app discovers in production.
  */
 export const assertCreateOptions = (options) => {
     // The path is compared to ctx.path, which always starts with a slash, so
-    // apiPath: "api" made every API call a 404 and nothing said why.
+    // apiPath: "api" would make every API call a 404 with no reason given.
     if (options.apiPath !== undefined && (options.apiPath === "" || !options.apiPath.startsWith("/"))) {
         throw new Error(`Lambder: apiPath must be a path starting with "/", got ${JSON.stringify(options.apiPath)}.`);
     }
-    // 0 or a negative ceiling turned every response into the size guard's own 500.
+    // 0 or a negative ceiling would turn every response into the size guard's own 500.
     if (options.maxResponseBytes !== undefined)
         assertPositiveInteger(options.maxResponseBytes, "maxResponseBytes");
-    const session = options.session;
-    const movedOptions = session ? MOVED_SESSION_OPTIONS.filter((key) => key in session) : [];
-    if (movedOptions.length) {
-        throw new Error(`Lambder: the session option no longer takes ${movedOptions.join(", ")}. `
-            + "They belong to the store now: session: { store: new LambderDdbSessionStore({ tableName, region, partitionKey, sortKey, compression }), sessionSalt }.");
+    // 0 or a negative bound would give up on every report before it started.
+    if (options.crashes?.reportTimeoutMs !== undefined)
+        assertPositiveInteger(options.crashes.reportTimeoutMs, "crashes.reportTimeoutMs");
+    // Credentials with every origin allowed would echo whatever Origin asked,
+    // so any website could read a signed-in user's session routes. The usual
+    // reason to turn credentials on (SameSite=None cookies) is exactly the
+    // setting in which that is reachable.
+    const cors = options.cors;
+    if (typeof cors === "object" && cors.credentials && (cors.origins === undefined || cors.origins === "*")) {
+        throw new Error('Lambder: cors.credentials needs cors.origins to be an allowlist or a predicate. With every origin allowed, any website could make credentialed calls and read the answers.');
     }
     if ((options.requireSessionApiGuards || options.requirePublicApiGuards) && !options.guards) {
         const requireFlag = options.requireSessionApiGuards ? "requireSessionApiGuards" : "requirePublicApiGuards";

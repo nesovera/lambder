@@ -32,9 +32,9 @@ describe('A null API answer names a reason', () => {
 
 describe('The exported pipeline binds its guards to its own context', () => {
     it('refuses a guard whose handler reads a context the pipeline does not run on', () => {
-        // The rate-limit binding already had this rule; a guard built for the
-        // server read ctx.ip as undefined on a bare context and then refused
-        // or authorized everything.
+        // The same rule as the rate-limit binding: a guard built for the
+        // server would read ctx.ip as undefined on a bare context, and then
+        // refuse or authorize everything.
         type BareContext = LambderApiCallContext<{ role: string }>;
         new LambderApiPipeline<BareContext, { role: string }>({
             // @ts-expect-error the guard wants the server's render context, which this pipeline does not run on

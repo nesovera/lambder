@@ -1,6 +1,6 @@
 {
   "name": "lambder",
-  "version": "7.3.1",
+  "version": "8.0.2",
   "sideEffects": false,
   "description": "Opinionated serverless web framework for TypeScript on AWS Lambda: type-safe APIs from Zod schemas, DynamoDB sessions, and declarative rate limits, authorization guards and idempotency.",
   "keywords": [
@@ -53,6 +53,10 @@
       "types": "./dist/testing.d.ts",
       "default": "./dist/testing.js"
     },
+    "./build": {
+      "types": "./dist/build.d.ts",
+      "default": "./dist/build.js"
+    },
     "./package.json": "./package.json"
   },
   "typesVersions": {
@@ -65,15 +69,20 @@
       ],
       "testing": [
         "./dist/testing.d.ts"
+      ],
+      "build": [
+        "./dist/build.d.ts"
       ]
     }
   },
   "browser": {
     "async_hooks": false,
+    "child_process": false,
     "fs": false,
     "path": false,
     "zlib": false,
-    "crypto": false
+    "crypto": false,
+    "url": false
   },
   "files": [
     "dist",
@@ -101,7 +110,7 @@
     "tough-cookie": "^6.0.2"
   },
   "peerDependencies": {
-    "@aws-sdk/client-dynamodb": "^3.574.0",
+    "@aws-sdk/client-dynamodb": "^3.868.0",
     "@aws-sdk/client-lambda": "^3.574.0",
     "@aws-sdk/client-s3": "^3.574.0",
     "@aws-sdk/lib-dynamodb": "^3.574.0",

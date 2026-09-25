@@ -19,6 +19,24 @@ describe('Redirect Response', () => {
         expect(result.headers.location).toBe('/new-path');
     });
 
+    it('keeps a path on this origin, and sends a URL with a scheme as it is', async () => {
+        const lambder = new Lambder({
+            files: testPublicFiles(),
+            apiPath: '/api'
+        })
+            .addRoute('/slashes', (ctx, res) => res.redirect('//evil.example/x'))
+            .addRoute('/backslash', (ctx, res) => res.redirect('/\\evil.example'))
+            .addRoute('/mixed', (ctx, res) => res.redirect('\\/\\evil.example/y'))
+            .addRoute('/absolute', (ctx, res) => res.redirect('https://example.com//x'));
+
+        const visitor = browse(lambder);
+        // A browser reads `//host` as another host and a backslash as a slash.
+        expect((await visitor.request('GET', '/slashes')).headers.location).toBe('/evil.example/x');
+        expect((await visitor.request('GET', '/backslash')).headers.location).toBe('/evil.example');
+        expect((await visitor.request('GET', '/mixed')).headers.location).toBe('/evil.example/y');
+        expect((await visitor.request('GET', '/absolute')).headers.location).toBe('https://example.com//x');
+    });
+
     it('should redirect with custom status code', async () => {
         const lambder = new Lambder({
             files: testPublicFiles(),

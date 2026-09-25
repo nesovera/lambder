@@ -1,24 +1,43 @@
-/** Mutate the response with the CORS headers the config allows for this request. */
-export const applyCorsHeaders = (config, ctx, response, isPreflight) => {
+/**
+ * The Access-Control-Allow-Origin this request earns: "*", the echoed origin,
+ * or null for a refused or absent one.
+ *
+ * Settled once per request, before anything can crash, and handed to every
+ * answer the request ends in: the crash path then applies a verdict already
+ * reached and runs no app code of its own. A predicate that throws counts as
+ * refused and is logged. `new URL(origin)` throws on the `Origin: null` a
+ * sandboxed frame or a cross-origin redirect sends, and a CORS header is no
+ * reason to fail the request it decorates.
+ */
+export const allowedCorsOriginOf = (config, ctx) => {
+    const origins = config.origins ?? "*";
+    if (origins === "*")
+        return "*";
+    const origin = ctx.header("origin");
+    if (!origin)
+        return null;
+    if (Array.isArray(origins))
+        return origins.includes(origin) ? origin : null;
+    try {
+        return origins(origin, ctx) ? origin : null;
+    }
+    catch (predicateErr) {
+        console.error("Lambder: cors.origins threw; the origin was refused.", predicateErr);
+        return null;
+    }
+};
+/** Mutate the response with the CORS headers the config allows, for the origin verdict allowedCorsOriginOf settled for this request. */
+export const applyCorsHeaders = (config, allowedOrigin, response, isPreflight) => {
     if (!config)
         return;
-    const origin = ctx.header("origin") ?? "";
-    const origins = config.origins ?? "*";
-    let allowOrigin = null;
-    if (origins === "*") {
-        allowOrigin = config.credentials ? (origin || null) : "*";
-    }
-    else if (Array.isArray(origins)) {
-        allowOrigin = origin && origins.includes(origin) ? origin : null;
-    }
-    else {
-        allowOrigin = origin && origins(origin, ctx) ? origin : null;
-    }
-    if (!allowOrigin)
-        return;
-    response.setHeader("Access-Control-Allow-Origin", allowOrigin);
-    if (allowOrigin !== "*")
+    // Under an allowlist or a predicate the answer depends on Origin even when
+    // this one was refused: a cache must not serve the answer to a refused or
+    // absent Origin to an allowed one, which would read it as a CORS failure.
+    if ((config.origins ?? "*") !== "*")
         response.addHeader("Vary", "Origin");
+    if (!allowedOrigin)
+        return;
+    response.setHeader("Access-Control-Allow-Origin", allowedOrigin);
     if (config.credentials)
         response.setHeader("Access-Control-Allow-Credentials", "true");
     if (isPreflight) {

@@ -1,5 +1,6 @@
 import { isV2HttpEvent } from "./LambderContext.js";
 import { allowsRequestMethod } from "./LambderRouting.js";
+import { encodePathForLocation } from "./LambderRequestPath.js";
 /**
  * Serves the app shell for page requests that nothing else handled,
  * registered via lambder.serveIndexHtml(). Runs after servePublicFiles in the
@@ -26,7 +27,7 @@ export class LambderIndexHtmlHandler {
         if (options.redirectTrailingSlash && ctx.path.length > 1 && ctx.path.endsWith("/")) {
             const target = sameOriginRedirectTarget(ctx.path);
             if (target !== null)
-                return resolver.redirect(target + buildQueryString(ctx), 301);
+                return resolver.redirect(encodePathForLocation(target) + buildQueryString(ctx), 301);
         }
         const response = handler
             ? await handler(ctx, resolver)
@@ -42,13 +43,14 @@ export class LambderIndexHtmlHandler {
  * cannot leave this origin, or null when no such form exists.
  *
  * `Location: //evil.example` is a protocol-relative URL, so a browser
- * navigates to that host; every browser normalizes backslashes into slashes
- * first, so `/\evil.example` is the same thing. This header is built from the
- * request path, which the caller writes, so redirectTrailingSlash was an open
- * redirect for anyone who asked for `GET //evil.example/`. The leading run of
- * slashes and backslashes collapses to the single slash a path may have, and
- * the result is then checked rather than assumed: the check is what the
- * header's safety rests on, and it costs one comparison.
+ * navigates to that host, and browsers normalize backslashes into slashes, so
+ * `/\evil.example` is the same thing. The header is built from the request
+ * path, which the caller writes, so without this `GET //evil.example/` would
+ * make redirectTrailingSlash an open redirect. The leading run of slashes and
+ * backslashes collapses to one slash, and the result is then checked rather
+ * than assumed, since the header's safety rests on that check. The caller
+ * then percent-encodes it (encodePathForLocation), so a TAB or line break,
+ * which a browser drops, cannot make a second slash out of it.
  */
 const sameOriginRedirectTarget = (path) => {
     const target = path.replace(/^[/\\]+/, "/").replace(/[/\\]+$/, "") || "/";
@@ -59,9 +61,8 @@ const sameOriginRedirectTarget = (path) => {
 /**
  * Rebuild the query string from the API Gateway event for redirects.
  *
- * From the raw event rather than from ctx.get, which has flattened repeated
- * keys to one value each and lost the order they arrived in; a redirect has
- * to hand back the query it was given.
+ * From the raw event rather than ctx.get, which keeps one value per key and
+ * loses their order; a redirect has to hand back the query it was given.
  */
 const buildQueryString = (ctx) => {
     if (isV2HttpEvent(ctx.event)) {

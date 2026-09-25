@@ -2,6 +2,7 @@ import type { LambderRenderContext } from "./LambderContext.js";
 import type { LambderFiles } from "./LambderFiles.js";
 import { LambderResponse } from "./LambderResponse.js";
 import { allowsRequestMethod } from "./LambderRouting.js";
+import { filePathOf } from "./LambderRequestPath.js";
 
 /** Per-registration policy of servePublicFiles: how a request maps to a file and how the response is cached. */
 export type LambderPublicFilesOptions = {
@@ -9,15 +10,21 @@ export type LambderPublicFilesOptions = {
     methods?: string[];
     /**
      * Map the request to a file path (app-owned logic, e.g. per-tenant
-     * roots: (ctx) => `${brand(ctx.host)}${ctx.path}`). Return
-     * null/undefined to skip. Default: (ctx) => ctx.path.
+     * roots: (ctx, filePath) => `${brand(ctx.host)}${filePath}`). `filePath`
+     * is the file ctx.path names, its kept `%25` read as `%`; a path with an
+     * encoded slash inside a segment names no file and never reaches the
+     * mapper. Return null/undefined to skip. Default: the file path as it is.
      */
-    path?: (ctx: LambderRenderContext) => string | null | undefined;
+    path?: (ctx: LambderRenderContext, filePath: string) => string | null | undefined;
     /** Cache-Control for served files; the function receives the relative file path. Default: "public, max-age=3600". */
     cacheControl?: string | ((ctx: LambderRenderContext, relativePath: string) => string);
-    /** Filenames matching this get immutableCacheControl. Default: content-hash heuristic. Set false to disable. */
+    /** Relative paths matching this get immutableCacheControl. Default: content-hashed names in a bundler's output folder (assets/, static/, _next/static/). Set false to disable. */
     immutablePattern?: RegExp | false;
-    /** Default: "public, max-age=31536000, immutable". */
+    /**
+     * Default: "public, max-age=31536000, immutable". Like any Cache-Control,
+     * it goes out private, without `immutable`, on an answer that also sets a
+     * cookie (a hook's guest session, a slid session cookie): see emitResponse.
+     */
     immutableCacheControl?: string;
     /**
      * Compression per file: "auto" (default: compressible mime + size threshold),
@@ -26,9 +33,35 @@ export type LambderPublicFilesOptions = {
     compress?: boolean | "auto" | ((ctx: LambderRenderContext) => boolean | "auto");
 };
 
-// Content-hashed build outputs (Vite/webpack/Rollup): a [-.] separated run of
-// 8+ hash chars containing at least one digit, before the extension.
-const DEFAULT_IMMUTABLE_PATTERN = /[-.](?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{8,}\.[A-Za-z0-9]+$/;
+/*
+ * Build outputs whose names carry a content hash, so a changed file gets a
+ * new name and the old one may be cached for good. Only what a bundler wrote:
+ *   - everything under Next.js's _next/static/;
+ *   - under assets/ or static/ (Vite, Rollup, esbuild, webpack and CRA, a
+ *     Django manifest), a name ending in its hash, then an optional `.chunk`
+ *     and the extension. The hash is either exactly 8 base64url characters
+ *     after a hyphen (Vite, Rollup, esbuild), or 8 or more letters and
+ *     digits with both kinds among them (webpack's contenthash, after a dot
+ *     or a hyphen).
+ * The 8-character form has to look random, since a hand-named file's last
+ * word is often 8 characters too: a capital, a lowercase letter and a digit,
+ * or, with no digit, at least three capitals and a lowercase letter. A word
+ * in PascalCase (Inter-SemiBold.woff2, icon-Settings.svg) has fewer capitals
+ * than that, and lowercase words around a version (og-image-v2-final.png)
+ * have none. A hyphen may sit inside the 8, as Rollup's hashes put one
+ * there. The lookaheads cannot read past the 8, since a dot follows them.
+ * About one real hash in twenty fails the test (one without a digit and
+ * with fewer than three capitals) and is served with the ordinary
+ * Cache-Control: a revalidation, never a stale file.
+ * A hand-named file (android-chrome-192x192.png, team-photo-2023.jpg,
+ * privacy-policy-v2.html) keeps the ordinary Cache-Control: marked immutable,
+ * a replaced copy would never reach a browser that already had it.
+ */
+const EXACT_BUNDLER_HASH = "-(?=[\\w-]{0,7}[a-z])(?:(?=[\\w-]{0,7}[A-Z])(?=[\\w-]{0,7}[0-9])|(?=(?:[a-z0-9_-]*[A-Z]){3}))[\\w-]{8}";
+const LONG_BUNDLER_HASH = "[-.](?=\\w*[A-Za-z])(?=\\w*\\d)\\w{8,}";
+const DEFAULT_IMMUTABLE_PATTERN = new RegExp(
+    `(?:^|/)_next/static/|(?:^|/)(?:assets|static)/(?:[^/]+/)*[^/]*(?:${EXACT_BUNDLER_HASH}|${LONG_BUNDLER_HASH})(?:\\.chunk)?\\.[A-Za-z0-9]+$`,
+);
 const DEFAULT_IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
 const DEFAULT_CACHE_CONTROL = "public, max-age=3600";
 
@@ -55,7 +88,9 @@ export class LambderPublicFilesHandler {
     async handle(ctx: LambderRenderContext): Promise<LambderResponse | null> {
         if(!allowsRequestMethod(this.methods, ctx.method)) return null;
 
-        const mappedPath = this.options.path ? this.options.path(ctx) : ctx.path;
+        const filePath = filePathOf(ctx.path);
+        if(filePath === null) return null;
+        const mappedPath = this.options.path ? this.options.path(ctx, filePath) : filePath;
         if(!mappedPath) return null;
 
         const file = await this.files.read(mappedPath);

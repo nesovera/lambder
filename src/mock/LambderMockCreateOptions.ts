@@ -1,4 +1,8 @@
+import type { z } from "zod";
 import type { LambderApiSignatureMap } from "../shared/wire/LambderApiSignature.js";
+import type { LambderApiResponseConfig } from "../shared/wire/LambderApiContract.js";
+import type { LambderHttpStatusCode } from "../shared/wire/LambderHttpStatus.js";
+import type { MaybePromise } from "../shared/util/LambderTypeUtilities.js";
 
 /*
  * What a mock runtime is configured with, and the shapes of what a mock
@@ -60,9 +64,9 @@ export type LambderMockSessionsOptions<S> = {
  *
  * `callerIdentity` and `defaultPendingTtlSeconds` are here because a mock
  * that cannot express them answers differently from the server on exactly the
- * calls idempotency exists for: without an identity a public endpoint's stored
- * answer replays to whoever presents the key, so a mock replayed where the
- * server, configured with one, misses.
+ * calls idempotency exists for: without an identity, a public endpoint's
+ * stored answer replays to whoever presents the key, where a server
+ * configured with one misses.
  */
 export type LambderMockIdempotencyOptions<S = any> = {
     /** Seconds a stored answer replays for. Default: 86400 (24h). Per-endpoint override: `idempotency: { ttlSeconds }`. */
@@ -75,13 +79,12 @@ export type LambderMockIdempotencyOptions<S = any> = {
     store?: LambderIdempotencyStore;
     /**
      * Who a call is acting as, for scoping a PUBLIC endpoint's stored answer;
-     * session endpoints already scope per session. The server's option word
+     * session endpoints already scope per user. The server's option word
      * for word (see LambderApiIdempotencyConfig), bound to the mock's own call
      * context, because that is the context the engine hands it here.
      *
      * Without the session, as on the server: this runs on public endpoints
-     * alone, where the session is always null, so offering it would be
-     * offering a field that answers nothing.
+     * alone, where the session is always null.
      */
     callerIdentity?: (ctx: Omit<LambderMockCallContext<S>, "session">, request: LambderApiRequest) => string | null | Promise<string | null>;
 };
@@ -102,19 +105,18 @@ type LambderContractIdempotentKeys<C> =
  * The rate limits option: the policies endpoints may restate, the limiter
  * they are counted on, and what happens when that limiter throws.
  *
- * The policies are held to what the server's own policies were held to when
- * it registered the same endpoints, because an entry the mock's copy does not
- * fit cannot be registered, and this makes that an error at the option rather
- * than a throw when the registry loads. So the map names every policy the
- * contract references, a policy a public endpoint names is not keyed per
- * session, and a policy whose windows an endpoint overrides keeps a per-API
- * budget. Policies the contract does not reference may be added freely.
+ * The policies must meet the rules the server's policies met when it
+ * registered the same endpoints: an entry the mock's copy does not fit cannot
+ * be registered, and this makes that an error at the option rather than a
+ * throw when the registry loads. So the map names every policy the contract
+ * references, a policy a public endpoint names is not keyed per session, and
+ * a policy whose windows an endpoint overrides keeps a per-API budget.
+ * Policies the contract does not reference may be added freely.
  *
- * `failOpen` is the server's own option (see LambderApiRateLimitsConfig) and
- * is here for the reason the idempotency option's twin is: with a limiter of
- * the app's own that fails, a mock that cannot express it always lets the
- * call through, so it answers 200 where a server configured to refuse answers
- * 429.
+ * `failOpen` is the server's own option (see LambderApiRateLimitsConfig),
+ * here for the idempotency option's reason: with a failing limiter of the
+ * app's own, a mock that cannot express it always lets the call through,
+ * answering 200 where a server configured to refuse answers 429.
  */
 type LambderMockRateLimitsOptions<C, S, P extends LambderMockRateLimitPolicies<S>> = {
     policies: P
@@ -135,9 +137,9 @@ type LambderMockRateLimitsOptions<C, S, P extends LambderMockRateLimitPolicies<S
  * omittable only for a contract that declares none.
  *
  * The same reasoning the entry's own guards field carries: a guard the mock
- * does not declare cannot run, and a call the server answers notAuthorized
- * then answers 200 here. Optional, it was the droppable half of exactly the
- * check it exists for.
+ * does not declare cannot run, so a call the server answers notAuthorized
+ * would answer 200 here. Optional, it would be the droppable half of exactly
+ * the check it exists for.
  */
 type LambderMockGuardsOption<C, S, G> =
     [LambderContractGuardNames<C>] extends [never]
@@ -215,9 +217,8 @@ export type LambderMockAppOptions<
      *
      * One host per app, because a jar checks a cookie's scope the way a
      * browser does: planted at "localhost" and read back on
-     * "transit.localhost:5173", the session cookie is simply not sent, and
-     * every session call in a browser served from anything but plain
-     * localhost answered sessionExpired.
+     * "shop.localhost:5173", the session cookie is not sent, and every
+     * session call would answer sessionExpired.
      */
     cookieHost?: string;
     /** Ceiling on what a compressed request payload may restore to. Default: 20,000,000. */
@@ -239,6 +240,24 @@ export type LambderMockAppOptions<
     revealHandlerErrors?: boolean;
     /** Called at the end of reset(), so the app can rewind its own data. */
     onReset?: () => void;
+    /**
+     * The answer to an input that fails its schema, where the server app
+     * sets setApiInputValidationErrorHandler: the same answer, stated as
+     * data. Return null for the standard 422 `validation` refusal, which is
+     * also what an app that sets neither gets.
+     */
+    onInvalidInput?: (zodError: z.ZodError, ctx: LambderMockCallContext<S>) => MaybePromise<LambderMockInvalidInputAnswer | null>;
+};
+
+/**
+ * What the server's input validation handler answers, as a mock states it:
+ * `res.api(payload, config)` as data, with the status it went out with (200
+ * unless named).
+ */
+export type LambderMockInvalidInputAnswer = {
+    payload?: unknown;
+    config?: LambderApiResponseConfig;
+    statusCode?: LambderHttpStatusCode;
 };
 
 /** How the mock transport carries cookies: a fresh memory jar (default), a jar of yours, the memory jar mirrored into document.cookie, or none. */

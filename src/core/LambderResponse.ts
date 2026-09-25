@@ -78,11 +78,27 @@ export class LambderResponse {
         this.etag = init.etag ?? "auto";
     }
 
-    // The three header methods are the core's own header helpers over this
-    // response's map: the case-insensitive lookup, the replace-under-any-casing
-    // and the append-under-the-existing-casing rules are one implementation,
-    // not a copy per class, so an answer and a response can never disagree
-    // about what setting a header means.
+    /**
+     * A copy with its own header lists, for a request to write into. A
+     * handler may answer with an object it keeps between requests (a
+     * module-level 404), and everything downstream adds headers (cookies,
+     * CORS, Vary, Content-Encoding, ETag), which would carry one caller's
+     * Set-Cookie to the next. The body is shared: nothing writes into it.
+     */
+    copy(): LambderResponse {
+        return new LambderResponse({
+            statusCode: this.statusCode,
+            headers: this.headers,
+            body: this.body,
+            isBodyBase64: this.isBodyBase64,
+            compress: this.compress,
+            etag: this.etag,
+        });
+    }
+
+    // The header methods delegate to the core's header helpers, so an answer
+    // and a response share one implementation of the case-insensitive lookup,
+    // replace and append rules and can never disagree about what they mean.
     getHeader(key: string): string[] | undefined {
         return getAnswerHeader(this.headers, key);
     }
@@ -120,13 +136,12 @@ export const answerFromResponse = (response: LambderResponse): LambderApiAnswer 
 /**
  * An answer's status as the response model spells statuses.
  *
- * LambderHttpStatusCode is an authoring surface: it exists so `res.status(...)`
- * offers the codes an app writes and catches the typo'd one. An answer is
- * plain data that already left that surface (a replay the idempotency store
- * persisted, a mock's answer, a third adapter's), so its status is a number
- * and a code outside the union is not a reason to refuse a request the app
- * has already answered. Stated once here rather than as a bare cast at the
- * call site, so the widening is a decision a reader can see.
+ * LambderHttpStatusCode is an authoring surface: it lets `res.status(...)`
+ * offer the codes an app writes and catch a typo. An answer is plain data
+ * that has already left that surface (a persisted replay, a mock's answer),
+ * so a code outside the union is no reason to refuse a request the app has
+ * already answered. A named function rather than a bare cast at the call
+ * site, so the widening is visible to a reader.
  */
 const httpStatusOfAnswer = (statusCode: number): LambderHttpStatusCode => statusCode as LambderHttpStatusCode;
 
@@ -140,9 +155,12 @@ export const responseFromAnswer = (answer: LambderApiAnswer): LambderResponse =>
     etag: answer.etag ?? "auto",
 });
 
-const isCompressibleContentType = (contentType: string | undefined): boolean => {
-    if(!contentType) return false;
-    const mime = (contentType.split(";")[0] ?? "").trim().toLowerCase();
+const mimeOf = (contentType: string | undefined): string =>
+    (contentType?.split(";")[0] ?? "").trim().toLowerCase();
+
+/** A content type whose body is text: sent as text when it is valid UTF-8 and not compressed. */
+const isTextContentType = (contentType: string | undefined): boolean => {
+    const mime = mimeOf(contentType);
     if(mime.startsWith("text/")) return true;
     if(mime.endsWith("+json") || mime.endsWith("+xml")) return true;
     return [
@@ -150,10 +168,19 @@ const isCompressibleContentType = (contentType: string | undefined): boolean => 
         "application/javascript",
         "application/x-javascript",
         "application/xml",
-        "application/wasm",
-        "image/svg+xml",
         "application/lambder-json-stream",
     ].includes(mime);
+};
+
+const isCompressibleContentType = (contentType: string | undefined): boolean =>
+    isTextContentType(contentType) || mimeOf(contentType) === "application/wasm";
+
+/** Strict, and keeping a byte-order mark, so a body that decodes is exactly its bytes as text. */
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
+/** The bytes as text when they are valid UTF-8, or null. */
+const utf8TextOf = (bytes: Buffer): string | null => {
+    try { return strictUtf8.decode(bytes); } catch { return null; }
 };
 
 const acceptsEncoding = (acceptEncoding: string | undefined | null, encoding: string): boolean => {
@@ -178,8 +205,14 @@ export type LambderResponseCompressionSettings = LambderCompressionSettingsBase 
 export type LambderResponseCompressionOption = LambderCompressionOption<LambderResponseCompressionSettings>;
 
 export type LambderFinalizeOptions = {
-    /** Resolved settings, or null when compression is off: the same `Settings | null` contract the stores hold. */
-    compression: LambderResponseCompressionSettings | null;
+    /**
+     * Resolved settings per event format, or null where compression is off:
+     * the same `Settings | null` contract the stores hold. Per format because
+     * a REST API (v1) hands a compressed body on to the browser only when its
+     * binaryMediaTypes match, which in practice means `*\/*`: compressing
+     * there by default would send most answers as base64 text.
+     */
+    compression: Record<LambderHttpEventFormat, LambderResponseCompressionSettings | null>;
     etag: boolean;
     /** Guard against Lambda's ~6MB response cap with a clear error. */
     maxResponseBytes: number;
@@ -200,7 +233,7 @@ export const DEFAULT_RESPONSE_COMPRESSION_SETTINGS: LambderResponseCompressionSe
 };
 
 export const DEFAULT_FINALIZE_OPTIONS: LambderFinalizeOptions = {
-    compression: DEFAULT_RESPONSE_COMPRESSION_SETTINGS,
+    compression: { v1: null, v2: DEFAULT_RESPONSE_COMPRESSION_SETTINGS },
     etag: true,
     maxResponseBytes: 5_500_000,
 };
@@ -209,20 +242,58 @@ export const DEFAULT_FINALIZE_OPTIONS: LambderFinalizeOptions = {
  * The headers a 304 leaves behind: they describe a body, and a 304 carries
  * none. Everything else goes with it.
  *
- * A keep-list of cache headers instead of this drop-list would quietly make a
- * revalidation the one exit of the request where the call's headers do not
- * belong to the call: a cacheable GET that also slides a session cookie would
- * stop refreshing it the moment the browser held the ETag, and a cross-origin
- * revalidation would lose Access-Control-Allow-Origin, so the browser would
- * refuse the 304 it had asked for.
+ * A keep-list of cache headers would make revalidation the one exit where the
+ * call's headers do not reach the client: a cacheable GET that slides a
+ * session cookie would stop refreshing it once the browser held the ETag, and
+ * a cross-origin revalidation would lose Access-Control-Allow-Origin, so the
+ * browser would refuse the 304 it asked for.
  */
 const HEADERS_DROPPED_ON_NOT_MODIFIED = ["content-type", "content-length", "content-encoding"];
+
+/** The hash an ETag is made from, or null where Node's crypto is not available. */
+const bodyHashOf = async (body: Buffer | string): Promise<string | null> => {
+    const crypto = await getCrypto();
+    if(!crypto) return null;
+    return crypto.createHash("sha256").update(body).digest("hex").slice(0, 32);
+};
+
+/** Cache-Control directives that offer a copy to shared caches, or describe that shared copy. */
+const SHARED_CACHE_DIRECTIVES = ["public", "s-maxage", "immutable"];
+/** Cache-Control directives that already keep a whole answer out of shared caches. */
+const PRIVATE_CACHE_DIRECTIVES = ["private", "no-store"];
+
+/**
+ * The headers with their Cache-Control made `private` when the answer sets a
+ * cookie. A cookie is one visitor's, and a shared cache (a CDN, a proxy)
+ * that stores an answer with its Set-Cookie hands that cookie to everyone it
+ * serves the copy to: a hook that issues a guest session, or a session read
+ * that slides the cookies, would otherwise send a visitor's session out on a
+ * content-hashed asset marked `public, max-age=31536000, immutable`. So
+ * `public` gives way to `private`, and `s-maxage` and `immutable` go with
+ * it: the first speaks only to shared caches, and the second promises a
+ * representation every visitor shares, which an answer carrying one
+ * visitor's cookie is not. The visitor's own cache keeps max-age. An answer
+ * that already says `private` or `no-store`, or says nothing about caching,
+ * is left as it is. Never mutates what it was given.
+ */
+const privateWhenSettingCookies = (headers: Record<string, string[]>): Record<string, string[]> => {
+    const cacheControl = getAnswerHeader(headers, "cache-control");
+    if(!cacheControl?.length || !getAnswerHeader(headers, "set-cookie")?.length) return headers;
+    const directives = cacheControl.flatMap((value) => value.split(",")).map((directive) => directive.trim()).filter(Boolean);
+    const nameOf = (directive: string) => (directive.split("=")[0] ?? "").trim().toLowerCase();
+    if(directives.some((directive) => PRIVATE_CACHE_DIRECTIVES.includes(nameOf(directive)))) return headers;
+    const privateHeaders = { ...headers };
+    setAnswerHeader(privateHeaders, "Cache-Control", ["private", ...directives.filter((directive) => !SHARED_CACHE_DIRECTIVES.includes(nameOf(directive)))].join(", "));
+    return privateHeaders;
+};
 
 /**
  * Emit the format-specific Lambda response shape. Exported because the
  * last-resort crash path has to emit without finalizing (finalization may be
- * what failed) and must still get the shape right; hand-writing it there left
- * the v1/v2 split in four places.
+ * what failed) and must still get the shape right, so the v1/v2 split lives
+ * in this one place. Being the one exit every answer leaves through (each of
+ * finalization's, the 304 included, and the crash path's), it is also where
+ * an answer that sets a cookie is made private (privateWhenSettingCookies).
  */
 export const emitResponse = (
     format: LambderHttpEventFormat,
@@ -231,30 +302,36 @@ export const emitResponse = (
     body: string,
     isBase64Encoded: boolean,
 ): LambderHttpResponse => {
+    const sentHeaders = privateWhenSettingCookies(headers);
     if(format === "v2"){
         // Payload v2 has no multiValueHeaders: multi-values are comma-joined,
         // except Set-Cookie which uses the dedicated cookies array.
         const singleHeaders: Record<string, string> = {};
         const cookies: string[] = [];
-        for(const [key, values] of Object.entries(headers)){
+        for(const [key, values] of Object.entries(sentHeaders)){
             if(key.toLowerCase() === "set-cookie") cookies.push(...values);
             else singleHeaders[key] = values.join(", ");
         }
         return { statusCode, headers: singleHeaders, cookies, body, isBase64Encoded };
     }
-    return { statusCode, multiValueHeaders: headers, body, isBase64Encoded };
+    return { statusCode, multiValueHeaders: sentHeaders, body, isBase64Encoded };
 };
 
 /**
  * Convert an intermediate LambderResponse into the final Lambda response:
- * gzip negotiation (Accept-Encoding), ETag + If-None-Match 304, base64
+ * compression negotiation (Accept-Encoding), ETag + If-None-Match 304, base64
  * encoding, HEAD body stripping, and Lambda payload size guard. Emits the v1
  * (REST API) or v2 (HTTP API / Function URL) response shape.
+ *
+ * Text goes out as text and only bytes as base64: a REST API decodes base64
+ * only for its binaryMediaTypes, so a stylesheet sent as base64 would reach
+ * the browser as base64. The ETag is settled before anything is compressed, so
+ * a revalidation that ends in a 304 compresses nothing.
  */
 export const finalizeResponse = async (
     // ctx.header rather than ctx.headers: the context already carries the
-    // case-insensitive lookup, and taking the raw map meant a second
-    // implementation of it lived here for the two headers this reads.
+    // case-insensitive lookup, and taking the raw map would need a second
+    // implementation of it here.
     ctx: Pick<LambderRenderContext, "method" | "header"> | null,
     response: LambderResponse,
     options: LambderFinalizeOptions,
@@ -266,6 +343,29 @@ export const finalizeResponse = async (
         return emitResponse(format, response.statusCode, response.headers, "", false);
     }
 
+    const etagEnabled = response.etag === true || (
+        response.etag === "auto" &&
+        options.etag &&
+        response.statusCode === 200 &&
+        (method === "GET" || method === "HEAD")
+    );
+    /** Tags the response, and answers the 304 when the client already holds this representation. */
+    const notModifiedFor = async (hashed: Buffer | string, encoding: string | null): Promise<LambderHttpResponse | null> => {
+        if(!etagEnabled) return null;
+        const hash = await bodyHashOf(hashed);
+        if(hash === null) return null;
+        // One tag per representation: the compressed bytes are not the identity ones.
+        const etagValue = encoding ? `"${hash}-${encoding}"` : `"${hash}"`;
+        response.setHeader("ETag", etagValue);
+        const ifNoneMatch = ctx?.header("if-none-match");
+        if(!ifNoneMatch || !ifNoneMatch.split(",").map((s) => s.trim()).includes(etagValue)) return null;
+        const notModifiedHeaders: Record<string, string[]> = {};
+        for(const [key, values] of Object.entries(response.headers)){
+            if(!HEADERS_DROPPED_ON_NOT_MODIFIED.includes(key.toLowerCase())) notModifiedHeaders[key] = values;
+        }
+        return emitResponse(format, 304, notModifiedHeaders, "", false);
+    };
+
     let outBody: string;
     let isBase64 = false;
 
@@ -273,63 +373,55 @@ export const finalizeResponse = async (
         // Pre-encoded binary content: passes through untouched (no compression).
         outBody = String(response.body);
         isBase64 = true;
+        const notModified = await notModifiedFor(outBody, null);
+        if(notModified) return notModified;
     }else{
-        let bodyBuffer = Buffer.isBuffer(response.body)
+        const identity = Buffer.isBuffer(response.body)
             ? response.body
             : Buffer.from(String(response.body), "utf8");
 
         const contentType = response.getHeader("Content-Type")?.[0];
         const alreadyEncoded = !!response.getHeader("Content-Encoding");
+        const formatCompression = options.compression[format];
         const eligibleForCompression = !alreadyEncoded && (
             response.compress === true ||
             (
                 response.compress === "auto" &&
-                options.compression !== null &&
-                bodyBuffer.length >= options.compression.minBytes &&
+                formatCompression !== null &&
+                identity.length >= formatCompression.minBytes &&
                 isCompressibleContentType(contentType)
             )
         );
+        // compress: true forces compression even with it off, so the
+        // settings fall back to the defaults rather than being absent.
+        const settings = formatCompression ?? DEFAULT_RESPONSE_COMPRESSION_SETTINGS;
+        let encoding: LambderEncoding | null = null;
         if(eligibleForCompression){
             // Vary even when this client didn't accept an encoding, to keep caches correct.
             response.addHeader("Vary", "Accept-Encoding");
-            // compress: true forces compression even with it globally off, so
-            // the settings fall back to the defaults rather than being absent.
-            const settings = options.compression ?? DEFAULT_RESPONSE_COMPRESSION_SETTINGS;
             const acceptEncoding = ctx?.header("accept-encoding");
-            const encoding = settings.encodings.find((candidate) => acceptsEncoding(acceptEncoding, candidate));
-            if(encoding){
-                // The same codec, quality and TEXT mode a stored record gets.
-                bodyBuffer = await compressText(bodyBuffer, encoding, settings.quality);
-                response.setHeader("Content-Encoding", encoding);
-            }
+            encoding = settings.encodings.find((candidate) => acceptsEncoding(acceptEncoding, candidate)) ?? null;
         }
 
-        if(Buffer.isBuffer(response.body) || response.getHeader("Content-Encoding")){
-            outBody = bytesToBase64(bodyBuffer);
+        const notModified = await notModifiedFor(identity, encoding);
+        if(notModified) return notModified;
+
+        if(encoding){
+            // The same codec, quality and TEXT mode a stored record gets.
+            outBody = bytesToBase64(await compressText(identity, encoding, settings.quality));
             isBase64 = true;
+            response.setHeader("Content-Encoding", encoding);
         }else{
-            outBody = bodyBuffer.toString("utf8");
-        }
-    }
-
-    const etagEnabled = response.etag === true || (
-        response.etag === "auto" &&
-        options.etag &&
-        response.statusCode === 200 &&
-        (method === "GET" || method === "HEAD")
-    );
-    if(etagEnabled){
-        const crypto = await getCrypto();
-        if(crypto){
-            const etagValue = `"${crypto.createHash("sha256").update(outBody).digest("hex").slice(0, 32)}"`;
-            response.setHeader("ETag", etagValue);
-            const ifNoneMatch = ctx?.header("if-none-match");
-            if(ifNoneMatch && ifNoneMatch.split(",").map((s) => s.trim()).includes(etagValue)){
-                const notModifiedHeaders: Record<string, string[]> = {};
-                for(const [key, values] of Object.entries(response.headers)){
-                    if(!HEADERS_DROPPED_ON_NOT_MODIFIED.includes(key.toLowerCase())) notModifiedHeaders[key] = values;
-                }
-                return emitResponse(format, 304, notModifiedHeaders, "", false);
+            const text = alreadyEncoded
+                ? null
+                : Buffer.isBuffer(response.body)
+                    ? (isTextContentType(contentType) ? utf8TextOf(identity) : null)
+                    : String(response.body);
+            if(text !== null){
+                outBody = text;
+            }else{
+                outBody = bytesToBase64(identity);
+                isBase64 = true;
             }
         }
     }
@@ -339,10 +431,9 @@ export const finalizeResponse = async (
     }
 
     // What Lambda weighs is bytes. A base64 body is ASCII, so its length is
-    // its byte count; a plain UTF-8 one is not, and counting its UTF-16 code
-    // units under-reported a non-ASCII response by up to 3x, which is the one
-    // way this guard could pass a body Lambda then refuses with an opaque
-    // payload-size error and no envelope.
+    // its byte count; a UTF-8 one is not, and counting UTF-16 code units would
+    // under-report a non-ASCII body by up to 3x, passing a body Lambda then
+    // refuses with an opaque payload-size error and no envelope.
     const outBytes = isBase64 ? outBody.length : Buffer.byteLength(outBody, "utf8");
     if(outBytes > options.maxResponseBytes){
         throw new Error(

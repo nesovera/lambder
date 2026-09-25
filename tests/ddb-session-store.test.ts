@@ -1,8 +1,8 @@
 /**
  * LambderDdbSessionStore: the session record mapped onto a DynamoDB item and
  * back (the table's own key names, session.data Brotli-compressed at rest),
- * the query behind listSecretHashes, and the conditional update behind
- * markDataExpired. The session model itself is tests/session.test.ts, over
+ * the query behind listSecretHashes, and the conditional create and update
+ * every write goes through. The session model itself is tests/session.test.ts, over
  * the memory store; this file is only the DynamoDB half.
  */
 
@@ -35,12 +35,13 @@ const record = (overrides: Partial<LambderSessionRecord> = {}): LambderSessionRe
     expiresAt: nowSec() + 3600,
     lastAccessedAt: nowSec(),
     ttlInSeconds: 3600,
+    dataVersion: 0,
     ...overrides,
 });
 
 const data = {
     userId: '3f1c2b6e-9d1a-4f7e-8c1b-2a9d7e6f5c4b',
-    permissions: ['TRANSIT.LINES.VIEW', 'TRANSIT.LINES.EDIT', 'TRANSIT.STOPS.VIEW', 'TRANSIT.STOPS.EDIT'],
+    permissions: ['ORDERS.VIEW', 'ORDERS.EDIT', 'INVOICES.VIEW', 'INVOICES.EDIT'],
 };
 const dataJsonBytes = Buffer.byteLength(JSON.stringify(data), 'utf8');
 
@@ -53,7 +54,7 @@ describe('LambderDdbSessionStore - items', () => {
     it('writes the record under the table key names with the data Brotli-compressed by default', async () => {
         ddbMock.on(PutCommand).resolves({});
 
-        await makeStore().put(record({ data }));
+        await makeStore().create(record({ data }));
 
         const item = ddbMock.commandCalls(PutCommand)[0]!.args[0].input.Item!;
         expect(item.pk).toBe('hashed-key');
@@ -74,7 +75,7 @@ describe('LambderDdbSessionStore - items', () => {
         ddbMock.on(GetCommand).resolves({ Item: { partition: 'hashed-key', sort: 'secret-hash', ...record(), data: { role: 'admin' } } });
         const store = makeStore({ partitionKey: 'partition', sortKey: 'sort' });
 
-        await store.put(record());
+        await store.create(record());
         const item = ddbMock.commandCalls(PutCommand)[0]!.args[0].input.Item!;
         expect(item.partition).toBe('hashed-key');
         expect(item.sort).toBe('secret-hash');
@@ -90,12 +91,12 @@ describe('LambderDdbSessionStore - items', () => {
         ddbMock.on(PutCommand).resolves({});
         const tiny = { role: 'user' };
 
-        await makeStore().put(record({ data: tiny }));
-        await makeStore({ compression: true }).put(record({ data: tiny }));
-        await makeStore({ compression: { minBytes: 0 } }).put(record({ data: tiny }));
-        await makeStore({ compression: false }).put(record({ data }));
-        await makeStore({ compression: { minBytes: dataJsonBytes } }).put(record({ data }));
-        await makeStore({ compression: { minBytes: dataJsonBytes } }).put(record({ data: tiny }));
+        await makeStore().create(record({ data: tiny }));
+        await makeStore({ compression: true }).create(record({ data: tiny }));
+        await makeStore({ compression: { minBytes: 0 } }).create(record({ data: tiny }));
+        await makeStore({ compression: false }).create(record({ data }));
+        await makeStore({ compression: { minBytes: dataJsonBytes } }).create(record({ data }));
+        await makeStore({ compression: { minBytes: dataJsonBytes } }).create(record({ data: tiny }));
 
         const items = ddbMock.commandCalls(PutCommand).map((call) => call.args[0].input.Item!);
         for(const item of items.slice(0, 3)){
@@ -122,12 +123,11 @@ describe('LambderDdbSessionStore - items', () => {
 
     it('a compressed item that fails to decode reads as no session, rather than failing the read', async () => {
         // A malformed record and a failed read must not answer alike. A read
-        // failure is transient infrastructure and has to surface as a 500,
-        // because signing somebody out over a DynamoDB blip is the worse
-        // answer. A record that will not decode is not transient: it will not
-        // decode on the next request either, so answering 500 leaves a session
-        // the visitor can neither use nor clear, on every request, until the
-        // TTL retires it. Ending it lets them log in again.
+        // failure is transient and surfaces as a 500, since signing somebody
+        // out over a DynamoDB blip is the worse answer. A record that will not
+        // decode never will, so a 500 would leave a session the visitor can
+        // neither use nor clear until the TTL retires it. Ending it lets them
+        // log in again.
         const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
         const { dataBr, dataBytes } = compressedItem(data);
 
@@ -154,16 +154,19 @@ describe('LambderDdbSessionStore - items', () => {
         // throws rather than answering false, and reads expiresAt as a number
         // to decide whether the session is over. An item written by hand, by an
         // older schema, or by another app sharing the table is not this store's
-        // record, and it will not become one later.
+        // record, and it will not become one later. Nothing is logged: a
+        // cookie naming such an item arrives on every request until it
+        // expires.
         const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
         const complete = { pk: 'hashed-key', sk: 'secret-hash', ...record() };
 
-        for(const missing of ['csrfTokenHash', 'sessionKey', 'createdAt', 'expiresAt', 'ttlInSeconds']){
+        for(const missing of ['csrfTokenHash', 'sessionKey', 'createdAt', 'expiresAt', 'ttlInSeconds', 'dataVersion']){
             ddbMock.on(GetCommand).resolves({ Item: { ...complete, [missing]: undefined } });
             expect(await makeStore().get('hashed-key', 'secret-hash')).toBeNull();
         }
         ddbMock.on(GetCommand).resolves({ Item: { ...complete, expiresAt: '2099' } });
         expect(await makeStore().get('hashed-key', 'secret-hash')).toBeNull();
+        expect(warn).not.toHaveBeenCalled();
 
         ddbMock.on(GetCommand).resolves({ Item: complete });
         expect(await makeStore().get('hashed-key', 'secret-hash')).not.toBeNull();
@@ -203,21 +206,69 @@ describe('LambderDdbSessionStore - the partition', () => {
         expect(second!.ExclusiveStartKey).toEqual({ pk: 'hashed-key', sk: 'a' });
     });
 
-    it('markDataExpired stamps dataExpiresAt conditionally on the record existing, and skips a vanished one', async () => {
+    it('creates a record only where none exists, so a session is never overwritten', async () => {
+        ddbMock.on(PutCommand).resolves({});
+        await makeStore().create(record());
+        const put = ddbMock.commandCalls(PutCommand)[0]!.args[0].input;
+        expect(put.ConditionExpression).toBe('attribute_not_exists(#sk)');
+        expect(put.ExpressionAttributeNames).toEqual({ '#sk': 'sk' });
+    });
+
+    it('updates only the named fields, only while the record exists, and moves dataVersion with the data or its deadline', async () => {
         ddbMock.on(UpdateCommand).resolves({});
-        await makeStore().markDataExpired('hashed-key', 'secret-hash', 1234);
+        expect(await makeStore().update('hashed-key', 'secret-hash', { dataExpiresAt: 1234 })).toBe('updated');
         const update = ddbMock.commandCalls(UpdateCommand)[0]!.args[0].input;
         expect(update.Key).toEqual({ pk: 'hashed-key', sk: 'secret-hash' });
-        expect(update.UpdateExpression).toBe('SET #dataExpiresAt = :at');
+        expect(update.UpdateExpression).toBe('SET #dataExpiresAt = :dataExpiresAt ADD #dataVersion :dataVersionStep');
         expect(update.ConditionExpression).toBe('attribute_exists(#sk)');
-        expect(update.ExpressionAttributeNames).toEqual({ '#dataExpiresAt': 'dataExpiresAt', '#sk': 'sk' });
-        expect(update.ExpressionAttributeValues?.[':at']).toBe(1234);
+        expect(update.ExpressionAttributeValues).toEqual({ ':dataExpiresAt': 1234, ':dataVersionStep': 1 });
 
-        ddbMock.on(UpdateCommand).rejects(Object.assign(new Error('gone'), { name: 'ConditionalCheckFailedException' }));
-        await expect(makeStore().markDataExpired('hashed-key', 'secret-hash', 1234)).resolves.toBeUndefined();
+        // Data in one form removes the other, and a condition names the version read.
+        ddbMock.reset();
+        ddbMock.on(UpdateCommand).resolves({});
+        await makeStore({ compression: false }).update('hashed-key', 'secret-hash', { data: { role: 'admin' } }, { dataVersion: 7 });
+        const conditioned = ddbMock.commandCalls(UpdateCommand)[0]!.args[0].input;
+        expect(conditioned.UpdateExpression).toBe('SET #data = :data ADD #dataVersion :dataVersionStep REMOVE #dataBr, #dataBytes');
+        expect(conditioned.ConditionExpression).toBe('attribute_exists(#sk) AND #dataVersion = :readDataVersion');
+        expect(conditioned.ExpressionAttributeValues?.[':readDataVersion']).toBe(7);
+
+        // A slide alone leaves the version where it is.
+        ddbMock.reset();
+        ddbMock.on(UpdateCommand).resolves({});
+        await makeStore().update('hashed-key', 'secret-hash', { lastAccessedAt: 5, expiresAt: 3605 });
+        expect(ddbMock.commandCalls(UpdateCommand)[0]!.args[0].input.UpdateExpression).toBe('SET #lastAccessedAt = :lastAccessedAt, #expiresAt = :expiresAt');
 
         ddbMock.on(UpdateCommand).rejects(new Error('ddb down'));
-        await expect(makeStore().markDataExpired('hashed-key', 'secret-hash', 1234)).rejects.toThrow('ddb down');
+        await expect(makeStore().update('hashed-key', 'secret-hash', { expiresAt: 1 })).rejects.toThrow('ddb down');
+    });
+
+    it('tells stale from missing by the item the refused update hands back, with no read after it', async () => {
+        // ALL_OLD on the condition failure answers "is the record still
+        // there" in the same call, so a refused conditioned write costs one
+        // round trip rather than two.
+        const refused = (item?: Record<string, unknown>) =>
+            Object.assign(new Error('condition failed'), { name: 'ConditionalCheckFailedException' }, item ? { Item: item } : {});
+
+        ddbMock.on(UpdateCommand).rejects(refused({ pk: { S: 'hashed-key' }, sk: { S: 'secret-hash' }, dataVersion: { N: '3' } }));
+        expect(await makeStore().update('hashed-key', 'secret-hash', { data: {} }, { dataVersion: 1 })).toBe('stale');
+        expect(ddbMock.commandCalls(UpdateCommand)[0]!.args[0].input.ReturnValuesOnConditionCheckFailure).toBe('ALL_OLD');
+
+        ddbMock.on(UpdateCommand).rejects(refused());
+        expect(await makeStore().update('hashed-key', 'secret-hash', { data: {} }, { dataVersion: 1 })).toBe('missing');
+        expect(await makeStore().update('hashed-key', 'secret-hash', { expiresAt: 1 })).toBe('missing');
+
+        expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
+    });
+
+    it('writes plain data through its JSON, so an undefined inside it does not fail the write', async () => {
+        // The document client refuses undefined values, so handing it the raw
+        // object would fail a login with a 500 when compression is off, while
+        // the memory store accepts the same data.
+        ddbMock.on(PutCommand).resolves({});
+        await makeStore({ compression: false }).create(record({ data: { role: 'user', nickname: undefined } as never }));
+        const item = ddbMock.commandCalls(PutCommand)[0]!.args[0].input.Item!;
+        expect(item.data).toEqual({ role: 'user' });
+        expect(Object.keys(item.data)).toEqual(['role']);
     });
 });
 
@@ -239,9 +290,9 @@ describe('LambderDdbSessionStore - through the manager', () => {
     });
 
     it('serializes session.data the way the memory store does, so a test over one holds for the other', async () => {
-        // The memory store used to copy with structuredClone, which keeps an
-        // undefined field and clones a cycle: both stores now go through JSON,
-        // so a test that passes over the Map passes over the table.
+        // Both stores copy through JSON (structuredClone would keep an
+        // undefined field and clone a cycle), so a test that passes over the
+        // Map passes over the table.
         ddbMock.on(PutCommand).resolves({});
         const memoryStore = new LambderMemorySessionStore();
         const withUndefined = { a: undefined, b: 1 };

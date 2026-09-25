@@ -31,10 +31,9 @@ export class LambderTestVisitor {
      * The full outcome, never throwing: LambderCaller.apiOutcome, through
      * this visitor. Pair it with assertApiSuccess / assertApiFailure.
      *
-     * One thing is added to what the caller hands back. When the app crashed
-     * answering the call, the outcome is the `server` failure any client
-     * would get, whose error says "Request failed: 500" and nothing else;
-     * here that error's `cause` is what the app actually threw, stack
+     * When the app crashed answering the call, the outcome is the `server`
+     * failure any client would get, whose error says only "Request failed:
+     * 500"; here that error's `cause` is what the app actually threw, stack
      * included, so a failing test points at the line in the handler.
      */
     apiOutcome;
@@ -53,17 +52,19 @@ export class LambderTestVisitor {
         const withVisitorHeaders = (request) => handlerTransport({ ...request, headers: { ...this.headers, ...request.headers } });
         this.caller = new LambderCaller({
             apiPath: wiring.apiPath,
-            isCorsEnabled: false,
             apiVersion: options.apiVersion,
             apiSignatures: options.apiSignatures,
             guardInputsProvider: options.guardInputsProvider,
             logListHandler: () => { },
             // The jar is read per call rather than captured, so a call made
             // after the test app was reset carries none of the old cookies.
-            transport: (request) => lambderCookieJarTransport(withVisitorHeaders, { jar: this.jar, host: this.host })(request),
+            // The visitor's session lives in that jar, so a CSRF token the
+            // caller read from a page's document.cookie (a test with a DOM)
+            // is dropped and the jar's own is posted.
+            transport: (request) => lambderCookieJarTransport(withVisitorHeaders, { jar: this.jar, host: this.host })({ ...request, token: "" }),
         });
         // The caller names the CSRF cookie the jar transport fills its token
-        // from, so an app that renamed its session cookies has to be matched
+        // from, so an app with custom session cookie names has to be matched
         // here or every session call would post an empty token.
         if (wiring.sessionCookieNames) {
             this.caller.setSessionCookieKey(wiring.sessionCookieNames.tokenCookieKey, wiring.sessionCookieNames.csrfCookieKey);
@@ -78,10 +79,9 @@ export class LambderTestVisitor {
     }
     /**
      * This visitor's cookies, to inspect or clear; every call and request
-     * reads and fills them. Emptied by the test app's reset(), which a
-     * visitor notices here, the next time anything asks for its cookies: a
-     * jar still holding the token of an emptied store would read as signed
-     * in until an answer said otherwise.
+     * reads and fills them. The test app's reset() empties them, noticed here
+     * the next time anything asks: a jar still holding the token of an
+     * emptied store would read as signed in until an answer said otherwise.
      */
     get jar() {
         const resetCount = this.wiring.resetCount();
@@ -134,10 +134,10 @@ export class LambderTestVisitor {
      * tokens too, as LambderMockApp.signIn does.
      *
      * Throws when the cookies do not stick. An app that scopes its session
-     * cookie to a domain (`cookie: { domain: ".example.com" }`) writes one
-     * this visitor's host is not under, a browser on that host would drop it,
-     * and so does the jar; left silent, every session call after it answers
-     * sessionExpired with nothing to say why.
+     * cookie to a domain (`cookie: { domain: ".example.com" }`) this visitor's
+     * host is not under writes a cookie a browser on that host would drop, and
+     * the jar drops it too; left silent, every later session call would
+     * answer sessionExpired with nothing to say why.
      */
     async signIn(sessionKey, data, options = {}) {
         if (!this.wiring.sessionCookieNames)

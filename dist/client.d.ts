@@ -20,10 +20,12 @@ export type { LambderApiSignatureMap } from "./shared/wire/LambderApiSignature.j
 export { RELOAD_LOOP_WINDOW_MS } from "./client/LambderReloadLoopBreaker.js";
 export { compareDottedVersions, isDottedVersion } from "./shared/wire/LambderVersionOrder.js";
 export type { LambderApiAnswerOutcome, LambderApiSuccessOutcome, LambderApiCallFailure, LambderApiValidationFailure, LambderApiEnvelopeFailure, LambderApiHttpAnswer, } from "./shared/wire/LambderApiOutcome.js";
-export type { LambderApiOutcome, LambderApiFailureReason, LambderValidationError, LambderCallOptions, LambderCallerOptions, LambderGuardInputsProvider, LambderProvidedGuardInputs, LambderIdempotencyKeyScope, LambderLogListHandler, } from "./client/LambderCaller.js";
-export { LambderApiRefusal, isLambderApiRefusal, refuse, LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";
+export type { LambderApiOutcome, LambderApiFailureReason, LambderValidationError, LambderCallOptions, LambderCallerOptions, LambderGuardInputsProvider, LambderProvidedGuardInputs, LambderLogListHandler, } from "./client/LambderCaller.js";
+export { createIdempotencyKey, createIdempotencyKeyScope } from "./shared/wire/LambderIdempotencyKeyScope.js";
+export type { LambderIdempotencyKeyScope } from "./shared/wire/LambderIdempotencyKeyScope.js";
+export { LambderApiRefusal, isLambderApiRefusal, refuse, refusalMessageOf, LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";
 export type { LambderApiRefusalOptions, LambderRefusalMessage, LambderAppRefusalMessage, LambderRefusalCode, LambderRefuseOptions } from "./shared/wire/LambderApiRefusal.js";
-export type { LambderApiContractShape, LambderApiMode, LambderApiEnvelopeBody, LambderApiResponseConfig, LambderGuardNamesIn, LambderContractMode, LambderContractKeysWithMode, LambderContractGuardsOf, LambderContractGuardNames, LambderContractGuardInputsOf, LambderContractGuardInput, LambderContractGuardInputNames, LambderContractRateLimitOf, LambderContractRateLimitNames, LambderContractIdempotencyOf, } from "./shared/wire/LambderApiContract.js";
+export type { LambderApiContractShape, LambderApiMode, LambderApiEnvelopeBody, LambderApiResponseConfig, LambderGuardNamesIn, LambderContractMode, LambderContractKeysWithMode, LambderContractKeysWithGuard, LambderJsonOf, LambderJsonOutputOf, LambderContractGuardsOf, LambderContractGuardNames, LambderContractGuardInputsOf, LambderContractGuardInput, LambderContractGuardInputNames, LambderContractRateLimitOf, LambderContractRateLimitNames, LambderContractIdempotencyOf, } from "./shared/wire/LambderApiContract.js";
 export { describeCrash, errorFromCrashDetail } from "./shared/wire/LambderCrashDetail.js";
 export type { LambderCrashDetail, LambderCrashCause } from "./shared/wire/LambderCrashDetail.js";
 export { compressPayloadGzip, isRequestCompressionAvailable, COMPRESSED_PAYLOAD_GZ_FIELD, COMPRESSED_PAYLOAD_BR_FIELD, COMPRESSED_PAYLOAD_BYTES_FIELD, DEFAULT_REQUEST_COMPRESSION_SETTINGS, } from "./shared/wire/LambderRequestPayload.js";

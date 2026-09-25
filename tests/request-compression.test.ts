@@ -141,9 +141,9 @@ describe('Request compression - the caller side', () => {
     });
 
     it('sends the payload plainly on a runtime without CompressionStream, rather than failing the call', async () => {
-        // The option is safe to leave on: an old browser, or any runtime
-        // without the web compression API, simply sends what it always sent,
-        // and the server understands both shapes regardless.
+        // The option is safe to leave on: a runtime without the web
+        // compression API sends the plain payload, and the server understands
+        // both shapes.
         const bodies = captureBody();
         vi.stubGlobal('CompressionStream', undefined);
         expect(isRequestCompressionAvailable()).toBe(false);
@@ -403,7 +403,7 @@ describe('Request compression - the server side', () => {
 });
 
 describe('Request compression - the deployment shape (HTTP API v2 + CORS)', () => {
-    /** What urbanly and any Function URL deployment actually delivers. */
+    /** What a Function URL deployment actually delivers. */
     const corsApi = () => initLambder().create({ apiPath: '/api', cors: true })
         .addApi('echo', {
             input: z.object({ notes: z.array(z.string()) }),

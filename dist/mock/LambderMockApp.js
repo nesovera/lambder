@@ -1,6 +1,6 @@
 import { LambderApiPipeline } from "../api/LambderApiPipeline.js";
 import { readApiEnvelope, cookieValuesByName, lowercaseHeaderNames } from "../api/LambderApiRequest.js";
-import { createApiCallContext } from "../api/LambderApiCallContext.js";
+import { bindCallTools, createApiCallContext } from "../api/LambderApiCallContext.js";
 import { toHttpAnswer } from "../api/LambderApiAnswer.js";
 import { getAnswerHeader } from "../shared/wire/LambderAnswerHeaders.js";
 import { buildApiEnvelope, envelopeAnswer, crashAnswer, } from "../api/LambderApiEnvelope.js";
@@ -37,13 +37,13 @@ const DEFAULT_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
 const defaultCookieHost = () => globalThis.location?.host || "localhost";
 /**
  * The mock runtime: the API core (LambderApiPipeline, the same class the
- * Lambda server runs) over memory stores, with a registry of typed mock
- * handlers where the server has app handlers, and mock guards where it has
- * app guards. Everything the protocol does (envelope, refusals, sessions
- * and their cookies, guards, rate limits, idempotency, the signature gate)
- * happens in the core; this class only resolves a name to an entry, wraps
- * the handler's return into the envelope, and adds what a mock needs on
- * top: failure injection, latency, a subscription, a call log, reset.
+ * Lambda server runs) over memory stores, with typed mock handlers and mock
+ * guards where the server has app handlers and guards. Every protocol step
+ * (envelope, refusals, sessions and their cookies, guards, rate limits,
+ * idempotency, the signature gate) happens in the core; this class resolves
+ * a name to an entry, wraps the handler's return into the envelope, and adds
+ * what a mock needs: failure injection, latency, a subscription, a call log,
+ * reset.
  *
  * Create one with initLambderMock<Contract, SessionData>().create(...),
  * which fixes the contract and session types first so everything else is
@@ -58,12 +58,11 @@ export class LambderMockApp {
     tokenCookieKey;
     csrfCookieKey;
     /**
-     * The client IP a transport request carrying none is read as. Public
-     * because an adapter has to read the same default the direct transport
-     * uses: the MSW adapter had a hardcoded "127.0.0.1" of its own, so an app
-     * that set defaultClientIp saw one address through the transport and
-     * another through the service worker, and a per-IP rate limit counted two
-     * clients where there was one.
+     * The client IP a transport request carrying none is read as. Public so
+     * every adapter reads the same default the direct transport uses: with a
+     * default of its own, an app that set defaultClientIp would show one
+     * address through the transport and another through the service worker,
+     * and a per-IP rate limit would count two clients where there is one.
      */
     defaultClientIp;
     /** The host this runtime's cookies belong to (see the cookieHost option). */
@@ -71,9 +70,8 @@ export class LambderMockApp {
     /**
      * The API core, every protocol step of it. Private: the mock's surface is
      * the app, and a consumer reaching past it would be configuring the
-     * server's pipeline through a development tool. The three adapters take
-     * what they need from the app's own methods (handleRequest,
-     * requestFromTransport), which is why none of them names this.
+     * server's pipeline through a development tool. The adapters use the
+     * app's own methods (handleRequest, requestFromTransport) instead.
      */
     pipeline;
     /** The cookie scope signIn plants under, so signOut can name the same one when it clears them. */
@@ -93,12 +91,11 @@ export class LambderMockApp {
         this.apiVersion = options.apiVersion ?? null;
         this.failures = new LambderMockFailureInjector({ apiVersion: this.apiVersion, latency: options.latency ?? 0 });
         this.recorder = new LambderMockCallRecorder({ callLogSize: options.callLogSize ?? DEFAULT_CALL_LOG_SIZE });
-        // The loopback address when nothing names a client, as a request from
-        // the page itself, and the same constant the in-process handler
-        // transport defaults to. Normalized here rather than at every reader:
-        // one textual form per address is what makes a per-IP rate limit's
-        // counter one counter, and this value is read by the direct transport,
-        // by the MSW adapter and by every request that names no client.
+        // The loopback address when nothing names a client, as for a request
+        // from the page itself (the in-process handler transport's default
+        // too). Normalized once here because the direct transport, the MSW
+        // adapter and every request naming no client all read it, and one
+        // textual form per address keeps a per-IP limit to one counter.
         this.defaultClientIp = normalizeClientIp(options.defaultClientIp ?? LOOPBACK_CLIENT_IP);
         this.cookieHost = options.cookieHost ?? defaultCookieHost();
         this.onReset = options.onReset ?? null;
@@ -121,6 +118,19 @@ export class LambderMockApp {
             minApiVersion: options.minApiVersion,
             apiSignatures: options.apiSignatures,
             maxRequestPayloadBytes: options.maxRequestPayloadBytes,
+            // The server app's own answer to a bad input, where it has one:
+            // without it the mock would answer 422 where the server answers,
+            // say, 200 with an errorMessage, and a form's error handling would
+            // be tested against an answer production never gives.
+            onInvalidInput: options.onInvalidInput
+                ? async (zodError, ctx) => {
+                    const answer = await options.onInvalidInput(zodError, ctx);
+                    if (!answer)
+                        return null;
+                    const config = answer.config ?? {};
+                    return envelopeAnswer(buildApiEnvelope(this.apiVersion, answer.payload ?? null, { ...config, logList: config.logList ?? ctx.logList }), { statusCode: answer.statusCode ?? 200 });
+                }
+                : undefined,
             sessions: sessionOptions
                 ? {
                     manager: new LambderSessionManager({
@@ -133,12 +143,11 @@ export class LambderMockApp {
                         // crypto.subtle, and a memory-only store is nothing
                         // anyone can leak, so hashing there protects nothing.
                         // Keyed on the store's own isMemoryOnly rather than on
-                        // "did this runtime create it": an app that passes its
-                        // own LambderMemorySessionStore got WebCrypto and threw
-                        // on the first session call where the default path
-                        // degrades, and a store that outlives the process still
-                        // gets real hashing, which is what the declaration is
-                        // there to say.
+                        // whether this runtime created it: an app passing its
+                        // own LambderMemorySessionStore degrades the same way
+                        // instead of throwing on the first session call, and a
+                        // store that outlives the process still gets real
+                        // hashing.
                         crypto: sessionOptions.crypto
                             ?? (!isWebCryptoAvailable() && (sessionOptions.store?.isMemoryOnly ?? true) ? new LambderPlainSessionCrypto() : undefined),
                     }),
@@ -157,13 +166,12 @@ export class LambderMockApp {
                     defaultTtlSeconds: idempotencyOptions.defaultTtlSeconds,
                     defaultPendingTtlSeconds: idempotencyOptions.defaultPendingTtlSeconds,
                     failOpen: idempotencyOptions.failOpen,
-                    // The engine's own option is typed for the base call
-                    // context, being the one thing every adapter shares; what
-                    // it actually hands the function is the context of the
-                    // adapter running it, which here is the mock's. So the
-                    // option is declared for the mock context, where a reader
-                    // can use ctx.request, and widened at the one place that
-                    // knows both sides.
+                    // The engine types this option for the base call context,
+                    // the one thing every adapter shares, but hands the
+                    // function the running adapter's context, here the mock's.
+                    // So it is declared for the mock context (ctx.request is
+                    // readable) and widened here, the one place that knows
+                    // both sides.
                     callerIdentity: idempotencyOptions.callerIdentity,
                 }
                 : undefined,
@@ -177,11 +185,10 @@ export class LambderMockApp {
      * the ones the server runs on a definition, and the mock's own "a session
      * endpoint needs the sessions option".
      *
-     * One place, so no registration path can skip either check. A session
-     * endpoint on a mock without sessions would otherwise register silently
-     * and answer the first call with a 500 from inside the pipeline, naming
-     * the SERVER's option name, for a mistake whose fix is one option at
-     * create().
+     * One place, so no registration path can skip either check. Without the
+     * second, a session endpoint on a mock without sessions would register
+     * silently and answer its first call with a 500 naming the SERVER's
+     * option, for a mistake fixed by one option at create().
      */
     assertEntryRegistration(definition) {
         this.pipeline.assertRegistration(definition);
@@ -219,14 +226,13 @@ export class LambderMockApp {
      * A public endpoint deliberately left without a mock; a call answers the
      * notMocked refusal carrying the reason.
      *
-     * Public and session have separate builders for the same reason publicApi
-     * and sessionApi do: the refusal runs through the pipeline so that the
-     * steps BEFORE dispatch still happen, and the session read is one of them.
-     * Declaring every not-mocked endpoint public switched that step off, so a
-     * session endpoint with no session answered "not mocked" where the server
-     * answers sessionExpired, and the mode on its events and call log was
-     * wrong too. The mode cannot be recovered at runtime, because the contract
-     * is a type, so the builder is where it has to be said.
+     * Public and session get separate builders, as publicApi and sessionApi
+     * do, because the refusal runs through the pipeline so the steps BEFORE
+     * dispatch still happen, and the session read is one of them. Were every
+     * not-mocked endpoint public, a session endpoint with no session would
+     * answer "not mocked" where the server answers sessionExpired, and its
+     * events and call log would carry the wrong mode. The contract is a type,
+     * so the mode cannot be recovered at runtime: the builder has to say it.
      */
     notMocked(name, reason) {
         return this.buildNotMockedEntry(name, "public", reason);
@@ -243,23 +249,21 @@ export class LambderMockApp {
      * mockApp.register(userMocks, billingMocks, mockApp.restNotMocked("not mocked yet"));
      * ```
      *
-     * What it buys is adoption over a contract the mocks do not cover yet:
-     * register() stays exhaustive by construction, and the endpoints nothing
-     * claims answer the notMocked refusal carrying this reason instead of
+     * It lets mocks be adopted over a contract they do not cover yet:
+     * register() stays exhaustive by construction, and endpoints nothing
+     * claims answer the notMocked refusal with this reason instead of
      * apiNotFound, so a screen that reaches one says "not mocked yet" rather
      * than "unknown error". Strays and duplicates in the explicit slices are
-     * refused exactly as they are without it, and an entry registered later
-     * (registerPartial, or a second register) takes the endpoint back from the
-     * rest.
+     * still refused, and an entry registered later (registerPartial, or a
+     * second register) takes its endpoint back from the rest.
      *
-     * The one thing it cannot do is the session read. A call it answers is
-     * processed as a public endpoint: the protocol's pre-pass still runs, so a
-     * stale client still hears versionExpired, but the mode of a name nothing
-     * registered is not knowable at runtime, the contract being a type. So a
-     * signed-out call to an unmocked session endpoint is answered "not mocked"
-     * where the server answers sessionExpired, and the endpoint whose
-     * signed-out path a test cares about is the one to declare with
-     * sessionNotMocked instead.
+     * What it cannot do is the session read. The mode of an unregistered name
+     * is not knowable at runtime (the contract is a type), so a call it
+     * answers is processed as public: the protocol's pre-pass still runs, so
+     * a stale client still hears versionExpired, but a signed-out call to an
+     * unmocked session endpoint answers "not mocked" where the server answers
+     * sessionExpired. Declare an endpoint whose signed-out path a test cares
+     * about with sessionNotMocked instead.
      */
     restNotMocked(reason) {
         return { restNotMockedReason: reason };
@@ -334,11 +338,10 @@ export class LambderMockApp {
      * Whether a call to this name would be answered from the registry, which
      * is what an adapter asks before passing one on.
      *
-     * True for every name once a rest entry is registered, because the rest
-     * entry is what answers the names nothing else claimed. That is what makes
-     * a rest entry and the MSW adapter's `onUnmocked: "passthrough"`
-     * alternatives rather than layers: with one registered, the runtime
-     * answers everything itself and nothing is handed on to the network.
+     * True for every name once a rest entry is registered, since it answers
+     * whatever nothing else claimed. That makes a rest entry and the MSW
+     * adapter's `onUnmocked: "passthrough"` alternatives rather than layers:
+     * with one registered, nothing is handed on to the network.
      */
     hasRegisteredEntry(apiName) {
         return this.entryFor(apiName) !== null || this.registry.restNotMockedReason !== null;
@@ -349,13 +352,10 @@ export class LambderMockApp {
     /**
      * The entry that answers a name nothing registered, when register() was
      * given a rest entry: the notMocked refusal carrying its reason, run
-     * through the pipeline as a public endpoint.
-     *
-     * Public because the mode of an unregistered name cannot be recovered at
-     * runtime, the contract being a type. Everything that precedes dispatch
-     * still runs (the signature gate, the payload restore); the session read is
-     * the one step this answer cannot have, which is the fidelity limit
-     * restNotMocked documents.
+     * through the pipeline as a public endpoint, since the mode of an
+     * unregistered name cannot be recovered at runtime. Everything before
+     * dispatch still runs (the signature gate, the payload restore); the
+     * missing session read is the fidelity limit restNotMocked documents.
      */
     restNotMockedEntry(apiName) {
         const reason = this.registry.restNotMockedReason;
@@ -387,20 +387,17 @@ export class LambderMockApp {
      * latency, the call log and its numbering, the cookies its own transports
      * hold, then onReset, so the app rewinds its own data too.
      *
-     * The cookies matter as much as the sessions do: emptying the session
-     * store while a jar still holds the token for one of them leaves the next
-     * call carrying a session that no longer exists, which reads as signed in
-     * until the answer says sessionExpired. So every jar transport() built
-     * for itself is emptied, and the cookies a "document" transport mirrored
-     * are expired again.
+     * The cookies matter as much as the sessions: a jar still holding the
+     * token of an emptied store's session reads as signed in until an answer
+     * says sessionExpired. So every jar transport() built for itself is
+     * emptied, and the cookies a "document" transport mirrored are expired.
      *
-     * The registry survives, being what the runtime was configured with
-     * rather than what it accumulated. Subscriptions survive too, because
-     * they are how a test watches the runtime rather than state it is
-     * testing; a listener muted for throwing is unmuted, so one bad call does
-     * not silence it for the rest of the run. A session store or a cookie jar
-     * the app supplied itself survives: the runtime did not create it and
-     * does not know what else holds it.
+     * The registry survives, being configuration rather than accumulated
+     * state. Subscriptions survive too, being how a test watches the runtime;
+     * a listener muted for throwing is unmuted, so one bad call does not
+     * silence it for the rest of the run. A session store or cookie jar the
+     * app supplied survives: the runtime did not create it and does not know
+     * what else holds it.
      */
     reset() {
         this.sessionStore?.reset();
@@ -417,12 +414,9 @@ export class LambderMockApp {
     // -----------------------------------------------------------------------
     /**
      * The four session members refuse in the mock's own words, naming the
-     * option a mock is created with.
-     *
-     * The pipeline's guard says "Configure the session option at creation",
-     * which is the SERVER's option name: the mock's is `sessions`, and a
-     * reader who goes looking for `session` on create() does not find it.
-     * The registration path was fixed for exactly this one method over.
+     * option a mock is created with. The pipeline's guard names the SERVER's
+     * option (`session`), which a reader does not find on the mock's create()
+     * (`sessions`); assertEntryRegistration does the same for registration.
      */
     assertSessionsConfigured(member) {
         if (!this.pipeline.hasSessions)
@@ -453,17 +447,16 @@ export class LambderMockApp {
         const headers = {};
         ctx.responseHeaders.applyInto(headers);
         const setCookies = getAnswerHeader(headers, "Set-Cookie") ?? [];
-        // The host these cookies came from, which is the same one the
-        // controller wrote them for. A jar checks every Domain against the
-        // sending host and refuses one it cannot check, so planting them
-        // unscoped dropped the session cookie of any app that configures a
-        // cookie domain, silently.
+        // Planted for the host the controller wrote them for: a jar checks
+        // every Domain against the sending host and refuses one it cannot
+        // check, so unscoped, the session cookie of an app that configures a
+        // cookie domain would be dropped silently.
         options.jar?.storeSetCookies(setCookies, { host });
         // Through the same mirror every other cookie writer uses. Behind the
-        // MSW adapter the jar is not where a page reads its CSRF token: the
-        // browser caller reads document.cookie and posts what it finds, so a
-        // signIn that only filled a jar left the token empty and every one of
-        // the session endpoints answered sessionExpired.
+        // MSW adapter the page's caller reads its CSRF token from
+        // document.cookie, not the jar, so a signIn that only filled a jar
+        // would leave the token empty and every session call would answer
+        // sessionExpired.
         this.browserCookies.mirrorSetCookies(setCookies);
         return created;
     }
@@ -532,16 +525,27 @@ export class LambderMockApp {
             // idempotency, and on one that does not it is a value nothing
             // reads, so handing it over typed as a string would be the lie.
             idempotencyKey: typeof request.idempotencyKey === "string" ? request.idempotencyKey : undefined,
-            sessions: undefined,
         });
-        // The controller reads and writes this very context, so it is built
-        // after it. Without sessions configured, touching it says why.
-        Object.defineProperty(ctx, "sessions", {
-            enumerable: true,
-            get() {
-                if (!pipeline.hasSessions)
-                    throw new Error(`LambderMockApp: ctx.sessions on "${request.apiName}" needs the sessions option at creation.`);
-                return pipeline.sessionController(ctx, LambderApiPipeline.sessionInfoOf(request));
+        // The controller reads and writes this very context, so it is bound
+        // after it, the way the server binds its own. Without sessions
+        // configured, touching it says why.
+        const chargeRateLimit = async (policy, key, refuse) => {
+            const { checkResult, refusal } = await pipeline.chargeRateLimit(policy, { apiName: request.apiName, ip: request.ip, session: ctx.session, key });
+            if (refuse && refusal)
+                throw refusal;
+            return checkResult;
+        };
+        bindCallTools(ctx, {
+            getters: {
+                sessionController: () => {
+                    if (!pipeline.hasSessions)
+                        throw new Error(`LambderMockApp: ctx.sessionController on "${request.apiName}" needs the sessions option at creation.`);
+                    return pipeline.sessionController(ctx, LambderApiPipeline.sessionInfoOf(request));
+                },
+            },
+            methods: {
+                rateLimit: async (policy, key) => { await chargeRateLimit(policy, key, true); },
+                isRateLimited: (policy, key) => chargeRateLimit(policy, key, false),
             },
         });
         return ctx;
@@ -595,24 +599,23 @@ export class LambderMockApp {
         let outcome;
         let error;
         try {
-            // The protocol's pre-pass, run before the name is resolved, which
-            // is where the server runs it. Two things depended on it: an
-            // unknown name reached the notFound refusal without the signature
-            // gate or the payload restore, so a stale client or a malformed
-            // compressed payload was answered differently here than on the
-            // server; and the request event carried the wire fields instead of
-            // the payload, so a dev panel watching calls in flight showed
-            // nothing for exactly the compressed calls someone opens a panel
-            // for. run() calls prepare again, which is safe by construction.
+            // The protocol's pre-pass, run before the name is resolved, as on
+            // the server. Otherwise an unknown name would reach the notFound
+            // refusal without the signature gate or the payload restore (a
+            // stale client or a malformed compressed payload answered unlike
+            // the server), and the request event would carry the wire fields
+            // instead of the payload, so a dev panel would show nothing for
+            // exactly the compressed calls. run() calls prepare again, which
+            // is safe by construction.
             const prepared = await this.pipeline.prepare(request);
             this.emit(this.requestEvent(id, request, mode, startedAt));
             await this.failures.wait(this.failures.latencyFor(request.apiName), request.signal);
             if (this.failures.offline)
                 throw new LambderMockTransportError("offline");
-            // After the wait and the offline check, both of which end the call
-            // before it reaches a handler: taking the failure first spent a
-            // queued failNext on a call that never got to be failed by it, and
-            // the next call, the one the test was arranging for, then answered
+            // Taken after the wait and the offline check, both of which end
+            // the call before it reaches a handler: taken first, a queued
+            // failNext would be spent on a call it never got to fail, and the
+            // next call, the one the test arranged it for, would answer
             // normally.
             const failure = this.failures.take(request.apiName);
             if (failure) {
@@ -623,7 +626,7 @@ export class LambderMockApp {
                 answer = prepared;
             }
             else if (!entry) {
-                answer = this.pipeline.answerUnknownApi(request, ctx);
+                answer = this.pipeline.answerUnknownApi(ctx);
                 outcome = "unknownApi";
             }
             else {
@@ -639,11 +642,10 @@ export class LambderMockApp {
                         }));
                     }
                     // A notMocked entry refuses where a handler would run, not
-                    // ahead of the pipeline: answering it directly skipped the
-                    // steps that precede dispatch, so a stale client heard
-                    // "not mocked" from a mock the server would have answered
-                    // versionExpired to, and a compressed payload never reached
-                    // the events at all.
+                    // ahead of the pipeline, so the steps that precede
+                    // dispatch still happen: a stale client hears
+                    // versionExpired as it would from the server, and a
+                    // compressed payload reaches the events.
                     : async () => {
                         throw new LambderApiRefusal(`Not mocked: ${entry.notMockedReason}`, {
                             errorMessage: { type: "warning", code: LAMBDER_REFUSAL_CODES.notMocked, content: `"${request.apiName}" is not mocked: ${entry.notMockedReason}` },
@@ -670,14 +672,12 @@ export class LambderMockApp {
                 : crashAnswer(this.apiVersion);
             outcome = "crash";
         }
-        // Every header written during the call belongs on the answer, whichever
-        // way the call ended. The pipeline does this for the answers it
-        // produces itself, but a crash unwinds past it and an injected failure
-        // never reaches it, and those are the two that hurt most in
-        // development: a handler that created a session and then threw would
-        // otherwise leave the jar with no cookie and nothing to explain it.
-        // applyInto is idempotent, so the answers the pipeline already handled
-        // are unaffected.
+        // Every header written during the call belongs on the answer, however
+        // the call ended. The pipeline applies them to the answers it produces,
+        // but a crash unwinds past it and an injected failure never reaches
+        // it: a handler that created a session and then threw would otherwise
+        // leave the jar with no cookie and nothing to explain it. applyInto is
+        // idempotent, so answers the pipeline already handled are unaffected.
         ctx.responseHeaders.applyInto(answer.headers);
         this.recorder.settle(facts, { answer, guardsRun: trace.guardsRun, ...(outcome ? { outcome } : {}), ...(error ? { error } : {}) });
         return answer;
@@ -699,7 +699,14 @@ export class LambderMockApp {
             host: transportRequest.siteHost || this.cookieHost,
             ...(transportRequest.signal ? { signal: transportRequest.signal } : {}),
         };
-        const request = readApiEnvelope(buildTransportEnvelope(transportRequest), info);
+        // Through the wire's own serialization, as every server-bound
+        // transport sends it: the handler gets a parse of the JSON, never the
+        // page's object. Handed over by reference, a handler that stores the
+        // payload would share it with the page's form (later edits changing
+        // the "saved" record with no call), a Date would stay a Date and a
+        // key set to undefined keep its place, none of which a server sees.
+        const envelope = JSON.parse(JSON.stringify(buildTransportEnvelope(transportRequest)));
+        const request = readApiEnvelope(envelope, info);
         if (!request)
             throw new Error("LambderMockApp: the transport request names no api.");
         return request;
@@ -732,12 +739,19 @@ export class LambderMockApp {
         if (jar !== cookies)
             this.browserCookies.adoptJar(jar);
         // The runtime's one cookie host, so the jar scopes what it sends the
-        // way the browser this transport stands in for would. Without it the
-        // scope was whatever host the caller happened to name, which is the
-        // page's, and cookies signIn planted went unsent.
+        // way the browser this transport stands in for would; scoped to
+        // whatever host a caller names, cookies signIn planted would go
+        // unsent.
         const withJar = lambderCookieJarTransport(direct, { jar, csrfCookieKey: this.csrfCookieKey, host: this.cookieHost });
+        // Where the page's readable cookies live, one answer per mode. In
+        // memory mode it is this jar alone, so the token the caller read is
+        // dropped and the jar fills in its own CSRF cookie. A page's caller
+        // reading document.cookie would find what signIn mirrors for the MSW
+        // adapter's sake and no later answer of this transport writes, so
+        // after a logout and a login it would post the first session's token
+        // and be signed out.
         if (cookies !== "document")
-            return transportCarrying(withJar, jar);
+            return transportCarrying(async (request) => await withJar({ ...request, token: "" }), jar);
         // The page's own cookie storage sees the non-HttpOnly cookies (the
         // CSRF token), so the caller's cookie read and clear paths run for
         // real; the HttpOnly session cookie stays in the jar, as a browser
@@ -760,9 +774,9 @@ export class LambderMockApp {
     /**
      * Takes a jar an adapter built for itself as the runtime's own, so reset()
      * empties it with the rest. The MSW adapter's jar holds the session
-     * cookies of calls that never touch transport(), and a reset that leaves
-     * it full is the same stale-session bug: the store is empty and the next
-     * request still carries a token for one of its sessions.
+     * cookies of calls that never touch transport(); left full after a reset,
+     * the next request would carry a token for a session the emptied store no
+     * longer has.
      */
     adoptCookieJar(jar) {
         this.browserCookies.adoptJar(jar);
@@ -804,12 +818,12 @@ export const initLambderMock = () => ({
      * The mock app, with the guard map and the rate-limit policies inferred
      * from the options.
      *
-     * `const` on each of them is what pins a restatement to the contract, and
-     * it has one cost: inferring a generic from an object literal switches
-     * excess-property checking off for the whole literal, nested objects
-     * included, so a typo inside `rateLimits.policies` or `idempotency`
-     * compiled and was dropped in silence. `I` exists for the same reason `P`
-     * does, and LambderMockSurplusKeys puts the error back on the key.
+     * `const` on each of them pins a restatement to the contract, at a cost:
+     * inferring a generic from an object literal switches excess-property
+     * checking off for the whole literal, nested objects included, so a typo
+     * inside `rateLimits.policies` or `idempotency` would compile and be
+     * dropped. `I` exists for the same reason `P` does, and
+     * LambderMockSurplusKeys puts the error back on the key.
      */
     create(options) {
         return new LambderMockApp(options);

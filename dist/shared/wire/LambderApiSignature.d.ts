@@ -6,9 +6,8 @@ import type { z } from "zod";
  * the digest of its client-facing shape (apiSignatureOf, computed on the
  * server side). A caller given the map sends the value with every call, and
  * the server answers versionExpired when it differs from the digest of what
- * it serves now. So a client built against an endpoint that has since
- * changed reloads, while one whose endpoint is unchanged keeps working
- * across deploys.
+ * it serves, so a client reloads only when an endpoint it calls has changed
+ * and otherwise keeps working across deploys.
  *
  * Keys are hashed so the map lists no endpoint names: the names a client
  * calls are in its own code already, and the rest of the surface stays out
@@ -26,14 +25,12 @@ export declare const API_SIGNATURE_HEX_LENGTH = 16;
  * name, cut to API_SIGNATURE_HEX_LENGTH hex characters. Async because
  * WebCrypto's digest is, and it is the only SHA-256 a browser has.
  *
- * Computed on the spot, every time, and nothing is kept. The digest that
- * actually describes an endpoint is the generator's, computed once at build
- * time; what is left here is one hash of a short name against a map already
- * in memory, which is nothing beside the request it belongs to. A cache of
- * it would have to be keyed by name, and on the server the name comes off
- * the wire before anything has checked that it is an endpoint at all, so it
- * would grow by an entry for every name a request cared to invent and never
- * shrink.
+ * Computed on the spot every time, with nothing kept. The digest that
+ * describes an endpoint is the generator's, computed once at build time;
+ * this is one hash of a short name, nothing beside the request it belongs
+ * to. A cache would be keyed by name, and on the server the name comes off
+ * the wire before anything checks that it is an endpoint, so the cache would
+ * gain an entry for every name a request cared to invent and never shrink.
  */
 export declare const apiNameKeyOf: (apiName: string) => Promise<string>;
 /** The map's signature for one endpoint, or null when the map holds none for it. */
@@ -59,23 +56,22 @@ export declare const EXTENSIBLE_ENUM_META_KEY = "x-lambder-extensible-enum";
  * widely returned payload (a session, a profile) then reloads only the
  * clients that send the list back, not every client that reads it.
  *
- * Where the enum is input its values still count: a value dropped from the
- * list is a request an older client may still send and the server now
- * refuses, so that endpoint's clients must reload. Everything else about the
- * schema is untouched: its type, its validation on both sides, and what it
- * is everywhere outside the digest.
+ * Where the enum is input its values still count: an older client may still
+ * send a value dropped from the list, which the server would refuse, so that
+ * endpoint's clients must reload. Everything else about the schema is
+ * untouched: its type, its validation on both sides, and what it is outside
+ * the digest.
  *
  * The mark is a promise the schema makes for its readers, and nothing checks
  * it. A client that switches over every value with no fallback, or indexes a
- * map by one, renders a value it does not know as nothing, or throws. Mark
- * only a list every reader handles that way on purpose.
+ * map by one, renders an unknown value as nothing, or throws. Mark only a
+ * list whose every reader handles an unknown value on purpose.
  *
  * It is zod metadata (`.meta()`), which zod keeps in one registry on
  * globalThis, so an enum marked in a shared package is read by the digest
- * even when the server resolves another copy of zod. A schema derived from a
- * marked enum by rebuilding it (`z.enum(marked.options)`, `.exclude()`)
- * carries no mark and counts in full, which costs a reload, never a missed
- * one.
+ * even when the server resolves another copy of zod. A schema rebuilt from a
+ * marked enum (`z.enum(marked.options)`, `.exclude()`) carries no mark and
+ * counts in full, which costs a reload, never a missed one.
  *
  * @example
  * export const RoleSchema = extensibleEnum(z.enum(["admin", "member"]));

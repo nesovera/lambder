@@ -9,6 +9,14 @@ export type LambderHttpFileSourceOptions = {
     headers?: Record<string, string>;
     /** How long one read may take before it fails. Default: 10000. */
     timeoutMs?: number;
+    /**
+     * The statuses that mean "no such file", read as null so the request
+     * falls through. Default: [403, 404, 410]. A private S3 bucket behind
+     * CloudFront answers a missing key 403, since its reader may not list the
+     * bucket; an origin whose 403 only ever means a refused credential passes
+     * [404, 410] so that failure surfaces as an error.
+     */
+    notFoundStatuses?: readonly number[];
 };
 /**
  * Files over HTTP(S) from any origin that serves them by path: a CDN, a
@@ -16,16 +24,17 @@ export type LambderHttpFileSourceOptions = {
  * endpoint) or another server. Reads with the runtime's fetch, so it needs
  * no SDK, and no credentials for a public origin; reads come out of the
  * origin's edge cache. Each path segment is percent-encoded, so a relative
- * path names the same object it would as an S3 key. A 404 or 410 reads as
- * null and the request falls through; any other failed status, a network
- * error or a timeout propagates as an error. The response's Content-Type is
- * used unless it is a generic octet-stream, in which case the extension
- * decides, as for local files.
+ * path names the same object it would as an S3 key. A missing file (see
+ * `notFoundStatuses`) reads as null and the request falls through; any other
+ * failed status, a network error or a timeout throws. The response's
+ * Content-Type is used unless it is a generic octet-stream, in which case
+ * the extension decides.
  */
 export declare class LambderHttpFileSource implements LambderFileSource {
     private readonly baseUrl;
     private readonly headers;
     private readonly timeoutMs;
-    constructor({ baseUrl, headers, timeoutMs }: LambderHttpFileSourceOptions);
+    private readonly notFoundStatuses;
+    constructor({ baseUrl, headers, timeoutMs, notFoundStatuses }: LambderHttpFileSourceOptions);
     read(relativePath: string): Promise<LambderFile | null>;
 }

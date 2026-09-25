@@ -2,19 +2,19 @@
  * The compression option every part of Lambder speaks, and the one function
  * that resolves it.
  *
- * Five places compress something: sessions, LambderDdbCache and
+ * Five places compress: sessions, LambderDdbCache and
  * LambderDdbIdempotencyStore (Brotli at rest in DynamoDB), HTTP responses
- * (Brotli/gzip on the wire) and request payloads (gzip on the wire). They
- * differ in what they can be tuned with, so each declares its own settings
- * type, but they share one vocabulary and one resolution: `true` is on with
- * that site's defaults, `false` is off, an object overrides individual
- * fields, and `minBytes` is always the size from which a value is
- * compressed (0: always). Resolved settings are `null` when off, so every
- * consumer holds `Settings | null` and reads `minBytes` the same way.
+ * (Brotli/gzip on the wire) and request payloads (gzip on the wire). Each
+ * declares its own settings type, since they tune differently, but all
+ * share one vocabulary and one resolution: `true` is on with that site's
+ * defaults, `false` is off, an object overrides individual fields, and
+ * `minBytes` is always the size from which a value is compressed (0:
+ * always). Resolved settings are `null` when off, so every consumer holds
+ * `Settings | null` and reads `minBytes` the same way.
  *
  * Nothing here touches zlib, so the browser entry can resolve the caller's
  * option without pulling Node built-ins into the bundle; the compression
- * primitives themselves live in LambderCompressionCodec, which does load zlib.
+ * primitives live in LambderCompressionCodec, which does load zlib.
  */
 /** Algorithms Lambder can produce. Brotli at rest and preferred on responses; gzip everywhere a browser has to do the compressing. */
 export declare const LAMBDER_ENCODINGS: readonly ["br", "gzip"];

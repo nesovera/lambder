@@ -1,13 +1,13 @@
-import { readApiEnvelope, cookieValuesByName, lowercaseHeaderNames } from "../api/LambderApiRequest.js";
+import { readApiEnvelope, cookieValuesByName, isApiCallContentType, lowercaseHeaderNames } from "../api/LambderApiRequest.js";
 import { getAnswerHeader } from "../shared/wire/LambderAnswerHeaders.js";
 import { base64ToText } from "../shared/util/LambderBase64.js";
 import { normalizeClientIp } from "../shared/util/LambderClientIp.js";
 /**
- * The mock app as the callee of a LambderInvokeCaller: the invoke's
- * synthesized event is read the way the callee's createContext would read
- * it, and the answer goes back as the Lambda response object the caller
- * decodes. So a server test can point its typed invoke caller at a mock of
- * the function it depends on, with the same registry a browser test uses.
+ * The mock app as the callee of a LambderInvokeCaller: the synthesized event
+ * is read the way the callee's createContext would read it, and the answer
+ * goes back as the Lambda response object the caller decodes. A server test
+ * can then point its typed invoke caller at a mock of the function it
+ * depends on, with the same registry a browser test uses.
  */
 export const lambderMockInvokeTransport = (mockApp) => async (event, { signal }) => {
     const rawBody = event.body ?? "";
@@ -21,10 +21,11 @@ export const lambderMockInvokeTransport = (mockApp) => async (event, { signal })
     }
     const headers = lowercaseHeaderNames(event.headers);
     const cookies = cookieValuesByName(event.cookies ?? []);
-    // The address the synthesized event carries in sourceIp, as the server's
-    // createContext reads it; no forwarding header is trusted here either,
-    // so a per-IP limit keys the same address under both adapters.
-    const request = readApiEnvelope(post, {
+    // A POST of another type is no API call on the server either. The
+    // address is the one the synthesized event carries in sourceIp, as the
+    // server's createContext reads it; no forwarding header is trusted here
+    // either, so a per-IP limit keys the same address under both adapters.
+    const request = isApiCallContentType(headers) && readApiEnvelope(post, {
         headers, cookies,
         ip: normalizeClientIp(event.requestContext?.http?.sourceIp ?? ""),
         host: headers.host || event.requestContext?.domainName || "lambder-invoke",

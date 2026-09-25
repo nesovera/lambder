@@ -68,10 +68,8 @@ describe('File Serving with Fallback', () => {
 
         expect(result.statusCode).toBe(200);
 
-        // Check content type is CSS
-        expect(result.multiValueHeaders?.['Content-Type']).toContain('text/css');
+        expect(result.multiValueHeaders?.['Content-Type']).toContain('text/css; charset=utf-8');
 
-        // Check body contains CSS content
         const body = decodeBody(result);
         expect(body).toContain('body { margin: 0; }');
         expect(body).not.toContain('<h1>Test HTML</h1>');
@@ -93,10 +91,8 @@ describe('File Serving with Fallback', () => {
 
         expect(result.statusCode).toBe(200);
 
-        // Check content type is HTML
-        expect(result.multiValueHeaders?.['Content-Type']).toContain('text/html');
+        expect(result.multiValueHeaders?.['Content-Type']).toContain('text/html; charset=utf-8');
 
-        // Check body contains HTML content from index.html
         const body = decodeBody(result);
         expect(body).toContain('<h1>Test HTML</h1>');
     });
@@ -117,10 +113,8 @@ describe('File Serving with Fallback', () => {
 
         expect(result.statusCode).toBe(200);
 
-        // Check content type is HTML
-        expect(result.multiValueHeaders?.['Content-Type']).toContain('text/html');
+        expect(result.multiValueHeaders?.['Content-Type']).toContain('text/html; charset=utf-8');
 
-        // Check body contains HTML content
         const body = decodeBody(result);
         expect(body).toContain('<h1>Test HTML</h1>');
     });
@@ -192,11 +186,9 @@ describe('File Serving with Fallback', () => {
 
         expect(result.statusCode).toBe(200);
 
-        // Verify Content-Type header is exactly text/css
         expect(result.multiValueHeaders?.['Content-Type']).toBeDefined();
-        expect(result.multiValueHeaders?.['Content-Type']?.[0]).toBe('text/css');
+        expect(result.multiValueHeaders?.['Content-Type']?.[0]).toBe('text/css; charset=utf-8');
 
-        // Verify body contains CSS content
         const body = decodeBody(result);
         expect(body).toContain('body { margin: 0; }');
     });
@@ -225,7 +217,7 @@ describe('Public file sources', () => {
 
         const css = await request(lambder, '/app.css');
         expect(css.statusCode).toBe(200);
-        expect(css.multiValueHeaders?.['Content-Type']).toContain('text/css');
+        expect(css.multiValueHeaders?.['Content-Type']).toContain('text/css; charset=utf-8');
         expect(decodeBody(css)).toBe('body { color: red; }');
         expect(read).toHaveBeenCalledWith('app.css'); // relative: no leading slash
 
@@ -252,6 +244,122 @@ describe('Public file sources', () => {
             expect(result.statusCode).toBe(404);
         }
         expect(read).not.toHaveBeenCalled();
+    });
+
+    it('remembers a miss for its TTL instead of asking the source on every page view', async () => {
+        // A real 50 ms TTL: the cache keeps its own clock, which fake timers do not move.
+        const { source, read } = makeSource();
+        const lambder = makeLambder({ source, memoryCache: { missTtlSeconds: 0.05 } });
+        await request(lambder, '/dashboard');
+        await request(lambder, '/dashboard');
+        expect(read).toHaveBeenCalledTimes(1);
+
+        // Uploaded meanwhile: served once the remembered miss runs out.
+        files.set('dashboard', { body: Buffer.from('now here') });
+        try {
+            await new Promise((resolve) => setTimeout(resolve, 80));
+            expect(decodeBody(await request(lambder, '/dashboard'))).toBe('now here');
+            expect(read).toHaveBeenCalledTimes(2);
+        } finally {
+            files.delete('dashboard');
+        }
+    });
+
+    it('evicts the least recently served file first, so a hot file outlives a cold one', async () => {
+        const hot = { body: Buffer.alloc(400, 1) };
+        const cold = { body: Buffer.alloc(400, 2) };
+        const late = { body: Buffer.alloc(400, 3) };
+        files.set('hot.bin', hot); files.set('cold.bin', cold); files.set('late.bin', late);
+        try {
+            const { source, read } = makeSource();
+            // Room for two of these with their keys and overhead, not three.
+            const lambder = makeLambder({ source, memoryCache: { maxBytes: 1_500 } });
+            await request(lambder, '/hot.bin');
+            await request(lambder, '/cold.bin');
+            await request(lambder, '/hot.bin');
+            await request(lambder, '/late.bin');
+            read.mockClear();
+            await request(lambder, '/hot.bin');
+            expect(read).not.toHaveBeenCalled();
+            await request(lambder, '/cold.bin');
+            expect(read).toHaveBeenCalledWith('cold.bin');
+        } finally {
+            files.delete('hot.bin'); files.delete('cold.bin'); files.delete('late.bin');
+        }
+    });
+
+    it('bounds the remembered misses by the bytes of their paths, which the caller chooses', async () => {
+        const { source, read } = makeSource();
+        const lambder = makeLambder({ source, memoryCache: { missTtlSeconds: 60 } });
+        const longPath = (index: number) => `/${String(index).padStart(8, '0')}${'x'.repeat(8_000)}`;
+        await request(lambder, longPath(0));
+        // Three hundred more 8 KB misses: past the misses' byte budget,
+        // though far under any count a bound by entries would have.
+        for (let index = 1; index <= 300; index += 1) await request(lambder, longPath(index));
+        read.mockClear();
+        await request(lambder, longPath(0));
+        expect(read).toHaveBeenCalledTimes(1);
+    });
+
+    it('asks the source every time with missTtlSeconds: 0 or the memory cache off', async () => {
+        for (const option of [{ missTtlSeconds: 0 }, false] as const) {
+            const { source, read } = makeSource();
+            const lambder = makeLambder({ source, memoryCache: option });
+            await request(lambder, '/dashboard');
+            await request(lambder, '/dashboard');
+            expect(read).toHaveBeenCalledTimes(2);
+        }
+    });
+
+    it('looks a file up by its decoded name, whichever gateway encoded the path', async () => {
+        const { source, read } = makeSource();
+        files.set('team photo.txt', { body: Buffer.from('team') });
+        files.set('hakkımızda.txt', { body: Buffer.from('hakkında') });
+        try {
+            const lambder = makeLambder(source);
+            expect(decodeBody(await request(lambder, '/team%20photo.txt'))).toBe('team');
+            expect(decodeBody(await request(lambder, '/hakk%C4%B1m%C4%B1zda.txt'))).toBe('hakkında');
+            expect(read).toHaveBeenCalledWith('team photo.txt');
+            // A percent sign in a name, and an encoded slash, which no name holds.
+            files.set('100%.txt', { body: Buffer.from('percent') });
+            expect(decodeBody(await request(lambder, '/100%25.txt'))).toBe('percent');
+            expect((await request(lambder, '/nested%2Fpage.txt')).statusCode).toBe(404);
+            expect(read).not.toHaveBeenCalledWith(expect.stringContaining('%2F'));
+            // An encoded ".." is refused as the ".." it decodes to.
+            expect((await request(lambder, '/nested/%2e%2e/%2e%2e/secret')).statusCode).toBe(404);
+            expect(read).not.toHaveBeenCalledWith(expect.stringContaining('..'));
+        } finally {
+            files.delete('team photo.txt');
+            files.delete('hakkımızda.txt');
+        }
+    });
+
+    it('marks only bundler output immutable, never a hand-named file', async () => {
+        const immutable = 'public, max-age=31536000, immutable';
+        const cacheControlOf = async (relativePath: string) => {
+            files.set(relativePath, { body: Buffer.from('x') });
+            try {
+                const result = await request(makeLambder(makeSource().source), `/${relativePath}`);
+                return result.multiValueHeaders?.['Cache-Control']?.[0];
+            } finally {
+                files.delete(relativePath);
+            }
+        };
+        for (const hashed of [
+            'assets/index-BHf9XZ2a.js', 'assets/index-D-2kQ_7a.js', 'assets/index-DfG3k9Q1.js', 'assets/index-BxQkLmPa.js',
+            'assets/vendor-a1b2c3d4.js', 'static/chunks/123-abc12345.js',
+            'static/js/main.3f2a1b9c.js', 'static/js/787.3f2a1b9c.chunk.js', '_next/static/chunks/app.js',
+        ]) {
+            expect(await cacheControlOf(hashed)).toBe(immutable);
+        }
+        for (const handNamed of [
+            'android-chrome-192x192.png', 'og-image-1200x630.png', 'privacy-policy-v2.html', 'team-photo-2023.jpg', 'inter-latin-400-normal.woff2',
+            'assets/team-photo-2023.jpg', 'assets/icon-settings.svg', 'assets/photo-20230615.jpg', 'app-4f8a1b2c.js',
+            // A last word of exactly 8 characters: PascalCase, or lowercase around a version.
+            'assets/Inter-SemiBold.woff2', 'assets/icon-Settings.svg', 'assets/og-image-v2-final.png',
+        ]) {
+            expect(await cacheControlOf(handNamed)).toBe('public, max-age=3600');
+        }
     });
 
     it('serves repeat requests from the memory cache, configured beside the source', async () => {
@@ -314,7 +422,7 @@ describe('Files option', () => {
 
         const terms = await handler(createMockEvent('/terms'), createMockContext());
         expect(terms.statusCode).toBe(200);
-        expect(terms.multiValueHeaders?.['Content-Type']).toContain('text/html');
+        expect(terms.multiValueHeaders?.['Content-Type']).toContain('text/html; charset=utf-8');
         expect(decodeBody(terms)).toBe('<h1>Terms</h1>');
         expect(read).toHaveBeenCalledWith('legal/terms.html'); // relative, no leading slash
 
@@ -346,11 +454,10 @@ describe('The reader path rule', () => {
 
     /**
      * Leading-slash runs a caller can write on any request. Each collapses to
-     * a plain relative path UNDER the source's own root. The old rule stripped
-     * exactly one slash, so "//x" reached a source as "/x", which is
-     * root-relative, and "///attacker.example/evil.html" as
-     * "//attacker.example/evil.html", which is protocol-relative and names a
-     * host of the caller's choosing.
+     * a plain relative path UNDER the source's own root. Stripping just one
+     * slash would hand a source "/x" (root-relative) for "//x", and
+     * "//attacker.example/evil.html" (protocol-relative, naming a host of the
+     * caller's choosing) for "///attacker.example/evil.html".
      */
     const collapsingPaths: [string, string][] = [
         ['//x', 'x'],

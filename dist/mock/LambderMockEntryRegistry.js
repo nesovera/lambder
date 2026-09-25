@@ -1,10 +1,9 @@
 /**
  * Which of register()'s arguments is the rest entry rather than a slice.
  *
- * Read off the one field restNotMocked() writes, which is also why that field
- * is named as it is: a slice is keyed by endpoint names holding entries, so
- * what tells the two apart has to be a key no endpoint name plausibly is,
- * carrying a value no entry is.
+ * Read off the one field restNotMocked() writes. A slice maps endpoint names
+ * to entries, so the marker has to be a key no endpoint name plausibly is,
+ * holding a value no entry is.
  */
 const isRestNotMockedEntry = (slice) => typeof slice.restNotMockedReason === "string";
 /**
@@ -12,14 +11,14 @@ const isRestNotMockedEntry = (slice) => typeof slice.restNotMockedReason === "st
  * standing over them.
  *
  * One of the four pieces of state LambderMockApp holds that nothing else
- * touches; it meets the rest of the runtime at one call, the lookup a request
- * makes. The app keeps the whole caller-facing surface (register,
- * registerPartial, override, restoreOverrides, registeredNames) as
- * delegations, because that surface is contract-typed and the checks that
- * make it safe are compile-time; what lives here is the bookkeeping.
+ * touches; the rest of the runtime reaches it only through a request's
+ * lookup. The app keeps the caller-facing surface (register, registerPartial,
+ * override, restoreOverrides, registeredNames) as delegations, because that
+ * surface is contract-typed and its safety checks are compile-time; this
+ * class holds the bookkeeping.
  *
- * Generic over the contract only so the entries keep their type through the
- * map; the registry itself never reads one.
+ * Generic over the contract only so entries keep their type through the map;
+ * the registry itself never reads one.
  */
 export class LambderMockEntryRegistry {
     entries = new Map();
@@ -42,21 +41,19 @@ export class LambderMockEntryRegistry {
     }
     /**
      * Adds every entry of every slice, and the rest entry where one is among
-     * them. Slices are staged and committed together, so a slice that fails a
-     * check leaves nothing behind: a caller that catches the error and retries
-     * sees the problem it is fixing rather than a duplicate-name error from
-     * its own first attempt. The rest entry is staged with them, for the same
-     * reason.
+     * them. Everything is staged and committed together, so a failed check
+     * leaves nothing behind: a caller that catches the error and retries sees
+     * the problem it is fixing, not a duplicate-name error from its own first
+     * attempt.
      */
     addSlices(slices) {
         const staged = new Map();
         let stagedRestReason = null;
         for (const slice of slices) {
             if (isRestNotMockedEntry(slice)) {
-                // Two of them answer the same calls with two different
-                // reasons, and which one a call would get is registration
-                // order, which is exactly what a duplicate name is refused
-                // for.
+                // Two rest entries would answer the same calls with different
+                // reasons, picked by registration order: the same ambiguity a
+                // duplicate name is refused for.
                 const registered = this.restReason ?? stagedRestReason;
                 if (registered !== null) {
                     throw new Error(`LambderMockApp: the rest of the contract is already registered as not mocked ("${registered}"). One restNotMocked entry covers every endpoint the slices leave out.`);
@@ -66,12 +63,11 @@ export class LambderMockEntryRegistry {
             }
             for (const [key, entry] of Object.entries(slice)) {
                 // The compile-time completeness check reads the slice's KEYS
-                // and registration reads entry.name, so the two have to agree
-                // or the check is checking something else than what runs. A
-                // hand-written slice is where they part: `{ ...userMocks,
-                // "user.list": someOtherEntry }` registers the other endpoint
-                // and leaves "user.list" unanswered, and the first symptom is
-                // an overlap error naming an endpoint nobody wrote twice.
+                // while registration reads entry.name, so they must agree. A
+                // hand-written `{ ...userMocks, "user.list": someOtherEntry }`
+                // would register the other endpoint, leave "user.list"
+                // unanswered, and surface as an overlap error naming an
+                // endpoint nobody wrote twice.
                 if (key !== entry.name) {
                     throw new Error(`LambderMockApp: slice key "${key}" holds the mock for "${entry.name}". Key every entry by its own endpoint name, or build the slice with mockApp.apiSlice(...).`);
                 }
@@ -97,9 +93,8 @@ export class LambderMockEntryRegistry {
         this.overrideStacks.set(name, stack);
         // Removes this override wherever it sits rather than popping the top:
         // scopes do not always unwind innermost first (an outer handle
-        // restored by hand while an inner one is still standing), and popping
-        // would then take down somebody else's override. Restoring twice is a
-        // no-op.
+        // restored by hand while an inner one stands), and popping would take
+        // down somebody else's override. Restoring twice is a no-op.
         const restore = () => {
             const current = this.overrideStacks.get(name);
             const at = current?.lastIndexOf(entry) ?? -1;

@@ -33,7 +33,7 @@ and it is worth writing for that alone:
 
 ```typescript
 // gateway-lambda/src/index.ts
-import { initLambder, lambderGuard, refuse, describeCrash, LAMBDER_INVOKE_HEADER, LAMBDER_INVOKE_PROTOCOL } from "lambder";
+import { initLambder, lambderGuard, refuse, LAMBDER_INVOKE_HEADER, LAMBDER_INVOKE_PROTOCOL } from "lambder";
 import { z } from "zod";
 
 const lambder = initLambder().create({
@@ -52,6 +52,9 @@ const lambder = initLambder().create({
         }),
     },
     requirePublicApiGuards: true,
+    // The only caller is our own code, so the framework's 500 carries the
+    // crash in full, with the call's logList beside it.
+    crashes: { reveal: () => true },
 });
 
 lambder.addApi("sendEmail", {
@@ -59,13 +62,6 @@ lambder.addApi("sendEmail", {
     output: z.object({ messageId: z.string() }),
     guards: "arrivedByInvoke",
 }, async (ctx, res) => res.api(await sendThroughSes(ctx.apiPayload)));
-
-// The only caller is our own code, so the crash detail crosses in full.
-lambder.setGlobalErrorHandler((err, ctx, res, logList) => res.api(null, {
-    errorMessage: "Internal server error.",
-    crash: describeCrash(err, ctx),
-    logList,
-}, { statusCode: 500 }));
 
 export type GatewayApiContract = typeof lambder.ApiContract;
 export const handler = lambder.getHandler();
@@ -122,8 +118,8 @@ callee's `apiPath`, so `createContext` builds an ordinary API context:
 | --- | --- |
 | `method`, `path` | `POST` and `apiPath`, which is what makes it an API call |
 | `apiName`, `apiPayload` | From the body envelope, after a compressed payload is restored |
-| `host` | The `host` option, defaulting to the callee's function name, so hooks that branch on host see a stable value |
-| `ip` | The per-call `clientIp`, which becomes the event's `requestContext.http.sourceIp`; empty when the call did not supply one. No IP header is trusted, here or on the server |
+| `host` | The `host` option, defaulting to the callee's function name, so hooks that branch on host see a stable value. The callee's `trustedHostHeaders` are not read on an invoke |
+| `ip` | The per-call `clientIp`, which becomes the event's `requestContext.http.sourceIp`; empty when the call did not supply one. The callee's `trustedClientIpHeaders` are not read on an invoke |
 | `header("x-lambder-invoke")` | `"1"` |
 | `header("x-lambder-invoked-by")` | The calling function's name, when the caller runs in Lambda (`AWS_LAMBDA_FUNCTION_NAME`) |
 | `cookie` | Empty, unless the call carries a session |
@@ -132,15 +128,22 @@ callee's `apiPath`, so `createContext` builds an ordinary API context:
 
 The body is the envelope `LambderCaller` sends: `apiName`, `version`, `token`,
 `siteHost`, `payload` (or `payloadBr` plus `payloadBytes`), `guardInputs` and
-`idempotencyKey`. Nothing in the callee can tell an invoke from a browser
-except the marker header, which is the point: every server feature applies
-unchanged.
+`idempotencyKey`. Nothing marks an invoke to the app but the marker header,
+which is the point: every server feature applies unchanged. The server itself
+tells the two apart in one place, the forwarding headers. An invoke's event
+carries `lambder-invoke` as its `requestContext.apiId`, a field a gateway
+writes itself and no HTTP client can set, and on such an event the callee
+takes `ctx.ip` and `ctx.host` from the caller's `clientIp` and `host` alone,
+whatever `trustedClientIpHeaders` and `trustedHostHeaders` it lists. Those
+headers are trusted because a proxy in front of the function writes them, and
+an invoke has no such proxy.
 
 The marker is a marker, never an authorization. On a function that is also
 reachable over HTTP it is a header any client can set, so what makes an invoke
 API safe is the IAM grant and, for a function with both roles, whatever guard
-the API declares. `ctx.ip` is likewise whatever the caller forwarded, so an
-IP-keyed rate limit on an invoke API limits per forwarded address, and a guard
+the API declares. `ctx.ip` is likewise whatever the caller names as
+`clientIp`, so an IP-keyed rate limit on an invoke API limits per named
+address, and a guard
 that assumes a browser (a cookie, a CSRF token) only applies when the call
 carries one. The event is a synthesis, and these two fields are where that
 shows.
@@ -150,11 +153,16 @@ channel for someone else's. Forwarding an incoming browser request's headers
 into them wholesale, which is an ordinary gateway-lambda reflex, hands the
 callee attacker-chosen values for everything it reads out of `ctx.headers`, so
 forward the few the callee actually needs and name the end user's address as
-`clientIp` instead. Three headers the event owns whatever the caller passes,
-and drops from `headers` if they are there: `x-forwarded-for` (the address
-travels in `requestContext.http.sourceIp`, which is the only channel the
-server trusts without configuration) and the two invoke markers, so a call can
-neither invent a forwarded address nor claim to be an invoke it is not.
+`clientIp` instead. Four headers the event owns whatever the caller passes:
+`content-type`, always `application/json` for an API call, which is what makes
+it one; the two invoke markers, so a call cannot claim to be an invoke it is
+not; and `x-forwarded-for`, which is dropped, so the end user's address reaches
+the callee as `clientIp` or not at all. A callee of this version reads no
+forwarding header on an invoke anyway, but a callee still on Lambder 7.x that
+trusts `x-forwarded-for` reads it on any event, and a forwarded one would hand
+it an address the browser chose. Any other forwarding header
+(`x-forwarded-host`, `x-real-ip`) travels as it is and sets nothing on a callee
+of this version.
 
 The constants are exported for guards and hooks that want to read them by name:
 `LAMBDER_INVOKE_HEADER`, `LAMBDER_INVOKED_BY_HEADER` and
@@ -219,10 +227,10 @@ finishes its work.
 | `timeoutMs` | Overrides the constructor default for this call |
 | `signal` | External `AbortSignal`, combined with the timeout when both are set |
 | `compressRequest` | `false` sends the payload plainly, `true` compresses regardless of the threshold |
-| `clientIp` | The address the callee reads as `ctx.ip`: it becomes the synthesized event's `requestContext.http.sourceIp`, the field a gateway fills in, since no IP header is trusted |
+| `clientIp` | The address the callee reads as `ctx.ip`: it becomes the synthesized event's `requestContext.http.sourceIp`, the field a gateway fills in, and the callee reads no forwarding header on an invoke, whatever its `trustedClientIpHeaders` |
 | `headers` | Extra request headers the callee sees |
 | `guardInputs` | Values for the API's guardInput-mode guards, keyed by guard name |
-| `idempotencyKey` | Replay-protection key for APIs declared idempotent on the callee |
+| `idempotencyKey` | Replay-protection key for APIs declared idempotent on the callee: a key string, or a key scope (`createIdempotencyKeyScope()`) |
 | `session` | `{ token, csrf }`, so a session API on the callee runs on a user's behalf |
 
 ## `api()` and `apiOutcome()`
@@ -383,14 +391,16 @@ failure inside the framework, its `logList` for whatever the handler logged,
 and Lambda's own `FunctionError` payload when the callee died outside the
 framework entirely.
 
-The callee's global error handler decides what a failed call learns.
-`describeCrash(err, ctx)` builds the envelope's `crash` field: the error's
-name, message and stack, its `cause` chain a few levels deep, and the request
-id and function name from `ctx.lambdaContext`, so a row in the caller's error
-table points at the right CloudWatch stream. A callee that only ever answers
-trusted callers includes it unconditionally; one that also faces browsers
-includes it for whoever it already trusts (a debug-cookie holder) and sends a
-generic message to everyone else. `LambderCaller` ignores the field, so it
+The callee's `crashes.reveal` decides what a failed call learns (see
+[Crashes](./routing.md#crashes)), or its global error handler does when it
+writes its own answer. `describeCrash(err, ctx)` builds the envelope's `crash`
+field: the error's name, message and stack, its `cause` chain a few levels
+deep, and the request id and function name from `ctx.lambdaContext`, so a row
+in the caller's error table points at the right CloudWatch stream. A callee
+that only ever answers trusted callers reveals it to everyone
+(`reveal: () => true`); one that also faces browsers reveals it to whoever it
+already trusts (a debug-cookie holder) and sends the generic 500 to everyone
+else. `LambderCaller` ignores the field, so it
 changes nothing a browser client does with the answer, but note what that does
 and does not mean: the field is still on the wire, and a browser receives
 whatever the handler put there. Attaching it unconditionally publishes your
@@ -432,8 +442,10 @@ const reportFailure: LambderInvokeFailureHandler =
     };
 ```
 
-An app that reports failures here should skip a `LambderInvokeError` in its own
-global error handler, so a thrown `api()` failure is not recorded twice.
+An app that reports failures here should skip a `LambderInvokeError` in its
+`crashes.report`, so a thrown `api()` failure is not recorded twice:
+`if (isLambderInvokeError(error)) return;`. The framework does not skip it for
+you, since a caller without an `onFailure` would then lose it.
 
 On the success path, anything the callee wrote with `res.logToApiResponse`
 arrives as the answer's `logList`. It is on the outcome, and it also goes to
@@ -476,13 +488,21 @@ and send the same key on retries; the same rules as the browser client apply
 (unguessable, 16 to 200 characters, one per logical operation). The contract
 makes it mandatory at the call site for exactly those APIs, the way it does
 `guardInputs`, so a declaration that reads as protection cannot quietly provide
-none. `LambderCaller.createIdempotencyKey()` generates one and is exported from
-the root entry too, so a server-side caller has the same generator without
+none. `createIdempotencyKey()` generates one, exported from the root entry as
+from `lambder/client`, so a server-side caller has the same generator without
 reaching for a UUID library.
 
-It matters more here than it looks: the SDK's own retries happen before the
-callee runs, so they do not double-execute anything, but an application-level
-retry after a timeout may well reach a callee that is still working.
+A key scope works here as it does in the browser
+([Idempotency keys](./client.md#idempotency-keys)): pass the scope from
+`createIdempotencyKeyScope()` as the call's `idempotencyKey`, and
+it sends its current key and moves to a new one once an answer settles the
+operation, so a corrected retry after a refusal goes out under a new key while a
+retry after a timeout replays the original.
+
+It matters more here than it looks. The SDK retries only what was answered
+before the callee ran, and with `maxAttempts: 1` (the default here) it retries
+nothing, but a response lost in transit, or an application-level retry after a
+timeout, may well reach a callee that has already run or is still working.
 
 ## Carrying a user's session
 
@@ -521,7 +541,7 @@ call was given: a rotation arrives as the answer's `Set-Cookie` values on
 `outcome.cookies`, and the next call carries the new pair only if the caller
 read them off and passed them. When the caller would rather be handed the two
 values than parse cookie headers, the callee can answer them directly:
-`getSessionController(ctx).reissueSession()` hands back the raw tokens for a
+`ctx.sessionController.reissueSession()` hands back the raw tokens for a
 client that holds its own CSRF token (see
 [Sessions](./sessions.md#session-controller)).
 
@@ -545,12 +565,16 @@ It takes `method` (default `GET`), `path`, `query`, `headers`, `body` (a string
 as-is, a `Buffer` base64-encoded as API Gateway would), `cookies`, `clientIp`,
 `timeoutMs` and `signal`, and resolves to `{ statusCode, headers, cookies,
 body, text(), json() }` with lowercased header names and the body already
-decompressed. It is untyped: the contract covers APIs, not routes. It throws a
-`LambderInvokeError` only when no HTTP answer came back at all (a rejected
-invoke, a `FunctionError`, a non-HTTP answer), and those go through `onFailure`
-like an API call's, named `GET /health`. The invoke cap applies here as it does
-to an API call: an event over `LAMBDER_INVOKE_MAX_EVENT_BYTES` is refused
-before it is sent, as a `payloadTooLarge` failure naming the size.
+decompressed. The path travels decoded, as an HTTP API delivers it, and the
+callee reads it that way whatever `host` the caller names, a Function URL's
+included, so an escape in it stays text: `/%2561dmin` is `ctx.path`
+`/%2561dmin`, never `/admin`. It is untyped: the contract covers APIs, not
+routes. It throws a `LambderInvokeError` only when no HTTP answer came back at
+all (a rejected invoke, a `FunctionError`, a non-HTTP answer), and those go
+through `onFailure` like an API call's, named `GET /health`. The invoke cap
+applies here as it does to an API call: an event over
+`LAMBDER_INVOKE_MAX_EVENT_BYTES` is refused before it is sent, as a
+`payloadTooLarge` failure naming the size.
 
 ## Testing and boot checks
 

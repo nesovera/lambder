@@ -1,8 +1,8 @@
 /**
- * Sessions end to end: signing in, reading a session, rotating it after a
- * password change, updating its data, signing out of one device or all of
- * them, and the two shapes a server-rendered page needs (an optional session,
- * and a form that posts back).
+ * Sessions end to end: signing in, reading a session, replacing every
+ * session after a password change, updating its data, signing out of one
+ * device or all of them, and the two shapes a server-rendered page needs (an
+ * optional session, and a form that posts back).
  *
  * The cookie names carry the `__Host-` prefix, which is what a browser
  * enforces on the app's behalf: it refuses such a cookie if it carries a
@@ -26,10 +26,8 @@ type SessionData = {
 const SESSION_COOKIE_NAME = "__Host-LMDRSESSIONTKID";
 const CSRF_COOKIE_NAME = "__Host-LMDRSESSIONCSTK";
 
-// The creation call is its own statement because the handlers below call back
-// into the instance (getSessionController), which a single self-referencing
-// declaration cannot type. It is also how an app splits its app.ts from its
-// api modules: this value is the one they import the type of.
+// The creation call is its own statement, which is how an app splits its
+// app.ts from its api modules: this value is the one they import the type of.
 const lambderApp = initLambder<SessionData>().create({
     apiPath: "/api",
     // Sessions over DynamoDB, with sliding expiration
@@ -83,7 +81,7 @@ const lambder = lambderApp
     // Create new session. issueSession is createSession plus the raw tokens:
     // the cookies are set either way, and the CSRF token is handed back so a
     // client that keeps it in memory rather than reading document.cookie can.
-    const sessionController = lambderApp.getSessionController(ctx);
+    const { sessionController } = ctx;
     const created = await sessionController.issueSession(user.id, {
         userId: user.id,
         username: user.username,
@@ -117,7 +115,7 @@ const lambder = lambderApp
     guards: "sessionOnly",
 }, async (ctx, resolver) => {
     const { oldPassword, newPassword } = ctx.apiPayload;
-    const sessionController = lambderApp.getSessionController(ctx);
+    const { sessionController } = ctx;
     const { userId, username, role } = ctx.session.data;
 
     // Validate old password
@@ -152,9 +150,10 @@ const lambder = lambderApp
     guards: "sessionOnly",
 }, async (ctx, resolver) => {
     const { theme, language } = ctx.apiPayload;
-    const sessionController = lambderApp.getSessionController(ctx);
+    const { sessionController } = ctx;
 
-    // Update session data (also extends expiration if sliding is enabled)
+    // Update session data. The expiry is left alone: sliding expiration
+    // moves it on a session read, which also re-issues the cookies.
     await sessionController.updateSessionData({
         ...ctx.session.data,
         preferences: { theme, language },
@@ -171,7 +170,7 @@ const lambder = lambderApp
     output: z.object({ success: z.boolean(), message: z.string() }),
     guards: "sessionOnly",
 }, async (ctx, resolver) => {
-    const sessionController = lambderApp.getSessionController(ctx);
+    const { sessionController } = ctx;
 
     // End current session
     await sessionController.endSession();
@@ -187,7 +186,7 @@ const lambder = lambderApp
     output: z.object({ success: z.boolean(), message: z.string() }),
     guards: "sessionOnly",
 }, async (ctx, resolver) => {
-    const sessionController = lambderApp.getSessionController(ctx);
+    const { sessionController } = ctx;
 
     // End all sessions for this user (same sessionKey)
     await sessionController.endSessionAll();
@@ -207,7 +206,7 @@ const lambder = lambderApp
     }),
     guards: { open: "reports whether the caller's own cookie names a live session, and nothing else" },
 }, async (ctx, resolver) => {
-    const sessionController = lambderApp.getSessionController(ctx);
+    const { sessionController } = ctx;
 
     // Try to fetch session without throwing error
     const session = await sessionController.fetchSessionIfExists();
@@ -258,13 +257,13 @@ const lambder = lambderApp
     }
 
     const displayName = typeof ctx.post.displayName === "string" ? ctx.post.displayName : ctx.session.data.username;
-    await lambderApp.getSessionController(ctx).updateSessionData({ ...ctx.session.data, username: displayName });
+    await ctx.sessionController.updateSessionData({ ...ctx.session.data, username: displayName });
 
     return resolver.redirect("/dashboard");
 })
 // Example: Route with optional session
 .addRoute("/", async (ctx, resolver) => {
-    const sessionController = lambderApp.getSessionController(ctx);
+    const { sessionController } = ctx;
     const session = await sessionController.fetchSessionIfExists();
 
     return resolver.html(html`

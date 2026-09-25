@@ -2,14 +2,11 @@
  * Where an app's files come from: the interface, and the one helper its
  * remote implementations share.
  *
- * Declared in shared/ beside LambderSessionStore, LambderRateLimiter and
- * LambderIdempotencyStore, so all four store families read the same way: the
- * interface here, the implementations in stores/ (LambderLocalFileSource,
- * LambderS3FileSource, LambderHttpFileSource). core/ names the interface and
- * nothing else of the family.
- *
- * What reads through a source is the instance's reader, LambderFiles: it owns
- * the path rule, the memory cache and the mime fallback.
+ * Laid out like the other store families (LambderSessionStore,
+ * LambderRateLimiter, LambderIdempotencyStore): the interface here, the
+ * implementations in stores/. core/ names only the interface. The instance's
+ * reader, LambderFiles, reads through a source and owns the path rule, the
+ * memory cache and the mime fallback.
  */
 
 /** A file a source serves: its bytes, and its mime type when the source knows it (otherwise resolved from the extension). */
@@ -17,12 +14,12 @@ export type LambderFile = { body: Buffer; mimeType?: string };
 
 /**
  * Where an app's files come from: the `files` option at creation, read by
- * servePublicFiles, serveIndexHtml, res.file and res.templateFile alike,
- * through the instance's one reader (LambderFiles). Implement `read` over
- * any backing store: LambderLocalFileSource (a folder), LambderS3FileSource
- * (S3, or R2 and other S3-compatible stores), LambderHttpFileSource (any
- * origin serving files by path), or your own. The reader does the rest for
- * every source: path rule, memory cache, mime fallback from the extension.
+ * servePublicFiles, serveIndexHtml, res.file and res.templateFile alike
+ * through the instance's one reader (LambderFiles), which adds the path rule,
+ * memory cache and mime fallback for every source. Implement `read` over any
+ * backing store, or use LambderLocalFileSource (a folder),
+ * LambderS3FileSource (S3, R2 and other S3-compatible stores) or
+ * LambderHttpFileSource (any origin serving files by path).
  */
 export interface LambderFileSource {
     /**

@@ -7,15 +7,21 @@ export type LambderPublicFilesOptions = {
     methods?: string[];
     /**
      * Map the request to a file path (app-owned logic, e.g. per-tenant
-     * roots: (ctx) => `${brand(ctx.host)}${ctx.path}`). Return
-     * null/undefined to skip. Default: (ctx) => ctx.path.
+     * roots: (ctx, filePath) => `${brand(ctx.host)}${filePath}`). `filePath`
+     * is the file ctx.path names, its kept `%25` read as `%`; a path with an
+     * encoded slash inside a segment names no file and never reaches the
+     * mapper. Return null/undefined to skip. Default: the file path as it is.
      */
-    path?: (ctx: LambderRenderContext) => string | null | undefined;
+    path?: (ctx: LambderRenderContext, filePath: string) => string | null | undefined;
     /** Cache-Control for served files; the function receives the relative file path. Default: "public, max-age=3600". */
     cacheControl?: string | ((ctx: LambderRenderContext, relativePath: string) => string);
-    /** Filenames matching this get immutableCacheControl. Default: content-hash heuristic. Set false to disable. */
+    /** Relative paths matching this get immutableCacheControl. Default: content-hashed names in a bundler's output folder (assets/, static/, _next/static/). Set false to disable. */
     immutablePattern?: RegExp | false;
-    /** Default: "public, max-age=31536000, immutable". */
+    /**
+     * Default: "public, max-age=31536000, immutable". Like any Cache-Control,
+     * it goes out private, without `immutable`, on an answer that also sets a
+     * cookie (a hook's guest session, a slid session cookie): see emitResponse.
+     */
     immutableCacheControl?: string;
     /**
      * Compression per file: "auto" (default: compressible mime + size threshold),

@@ -112,7 +112,7 @@ describe('The response envelope', () => {
         const lambder = app().addApi('boom', schema, async () => { throw new Error('the real reason'); });
 
         const body = await bodyOf(lambder, 'boom');
-        expect(body).toBe('{"apiVersion":"3","payload":null,"errorMessage":"Internal server error."}');
+        expect(body).toBe('{"apiVersion":"3","payload":null,"errorMessage":{"type":"error","content":"Internal server error."}}');
         expect(body).not.toContain('the real reason');
     });
 });
@@ -120,17 +120,17 @@ describe('The response envelope', () => {
 describe('The session hash construction', () => {
     const crypto = new LambderWebCrypto();
 
-    it('hashes the partition key as sha256 of the sessionKey followed by the salt', async () => {
+    it('hashes the partition key as HMAC-SHA256 of the sessionKey, keyed by the salt', async () => {
         // Frozen against node:crypto rather than against itself, which is the
         // whole point: computing the expectation with the code under test
         // would follow any change straight through.
         const sessionKey = 'user-123';
         const sessionSalt = 'a-salt-value';
 
-        const hashed = await crypto.sha256Hex(`${sessionKey}${sessionSalt}`);
+        const hashed = await crypto.hmacSha256Hex(sessionSalt, sessionKey);
 
-        expect(hashed).toBe(nodeCrypto.createHash('sha256').update(`${sessionKey}${sessionSalt}`).digest('hex'));
-        expect(hashed).toBe('eb0b6b18a0001a3b7591fa8042765c71e8234f9f6363164e32788d89df754e27');
+        expect(hashed).toBe(nodeCrypto.createHmac('sha256', sessionSalt).update(sessionKey).digest('hex'));
+        expect(hashed).toBe('1e5a075c96fcae8d5a7ea353750ceb12e1b8dc1a665ea90533061f89bc2979b2');
     });
 
     it('hashes a bearer secret unsalted, so a record is found by the token alone', async () => {
@@ -174,7 +174,7 @@ describe('The session hash construction', () => {
 
         const token = String(tokenCookie).split(';')[0]!.split('=')[1]!;
         const [partitionHash, secret] = token.split(':');
-        expect(partitionHash).toBe(nodeCrypto.createHash('sha256').update('user-123a-salt-value').digest('hex'));
+        expect(partitionHash).toBe(nodeCrypto.createHmac('sha256', 'a-salt-value').update('user-123').digest('hex'));
         expect(secret).toMatch(/^[0-9a-f]{64}$/);
 
         // And the stored record is keyed by that hash, with only hashes at rest.

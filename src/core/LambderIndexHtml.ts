@@ -3,14 +3,13 @@ import type LambderResolver from "./LambderResolver.js";
 import type { LambderResponse } from "./LambderResponse.js";
 import type { LambderFallbackHandler } from "./LambderCreateOptions.js";
 import { allowsRequestMethod } from "./LambderRouting.js";
+import { encodePathForLocation } from "./LambderRequestPath.js";
 
 /*
  * The app-shell layer of the fallback chain: what serveIndexHtml registers.
- *
- * Its own module beside LambderPublicFiles, which is the layer before it: the
- * two are the same kind of thing (a terminal handler with its own per-
- * registration options), and the index-HTML one lived inside the class as a
- * method plus a config field plus two file-local helpers.
+ * Its own module beside LambderPublicFiles, the layer before it, since both
+ * are the same kind of thing: a terminal handler with its own
+ * per-registration options.
  */
 
 export type LambderIndexHtmlOptions = {
@@ -60,7 +59,7 @@ export class LambderIndexHtmlHandler {
 
         if(options.redirectTrailingSlash && ctx.path.length > 1 && ctx.path.endsWith("/")){
             const target = sameOriginRedirectTarget(ctx.path);
-            if(target !== null) return resolver.redirect(target + buildQueryString(ctx), 301);
+            if(target !== null) return resolver.redirect(encodePathForLocation(target) + buildQueryString(ctx), 301);
         }
 
         const response = handler
@@ -82,13 +81,14 @@ export class LambderIndexHtmlHandler {
  * cannot leave this origin, or null when no such form exists.
  *
  * `Location: //evil.example` is a protocol-relative URL, so a browser
- * navigates to that host; every browser normalizes backslashes into slashes
- * first, so `/\evil.example` is the same thing. This header is built from the
- * request path, which the caller writes, so redirectTrailingSlash was an open
- * redirect for anyone who asked for `GET //evil.example/`. The leading run of
- * slashes and backslashes collapses to the single slash a path may have, and
- * the result is then checked rather than assumed: the check is what the
- * header's safety rests on, and it costs one comparison.
+ * navigates to that host, and browsers normalize backslashes into slashes, so
+ * `/\evil.example` is the same thing. The header is built from the request
+ * path, which the caller writes, so without this `GET //evil.example/` would
+ * make redirectTrailingSlash an open redirect. The leading run of slashes and
+ * backslashes collapses to one slash, and the result is then checked rather
+ * than assumed, since the header's safety rests on that check. The caller
+ * then percent-encodes it (encodePathForLocation), so a TAB or line break,
+ * which a browser drops, cannot make a second slash out of it.
  */
 const sameOriginRedirectTarget = (path: string): string | null => {
     const target = path.replace(/^[/\\]+/, "/").replace(/[/\\]+$/, "") || "/";
@@ -99,9 +99,8 @@ const sameOriginRedirectTarget = (path: string): string | null => {
 /**
  * Rebuild the query string from the API Gateway event for redirects.
  *
- * From the raw event rather than from ctx.get, which has flattened repeated
- * keys to one value each and lost the order they arrived in; a redirect has
- * to hand back the query it was given.
+ * From the raw event rather than ctx.get, which keeps one value per key and
+ * loses their order; a redirect has to hand back the query it was given.
  */
 const buildQueryString = (ctx: LambderRenderContext): string => {
     if(isV2HttpEvent(ctx.event)){

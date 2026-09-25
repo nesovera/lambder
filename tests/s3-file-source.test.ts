@@ -3,8 +3,10 @@
  *
  * - Keys are prefix + relative path; the object's Content-Type is used
  *   unless it is a generic octet-stream (then the extension decides).
- * - A missing object reads as null (the request falls through); other
- *   errors propagate.
+ * - A missing object reads as null (the request falls through), and so,
+ *   by default, do AccessDenied (a reader without s3:ListBucket) and a key
+ *   S3 refuses to look up; other errors propagate. notFoundErrorNames
+ *   narrows the list.
  * - Works with a supplied client or one built from clientConfig (R2 style).
  */
 
@@ -54,6 +56,44 @@ describe('LambderS3FileSource', () => {
         s3Mock.on(GetObjectCommand).rejects(s3Error('NotFound'));
         await expect(source.read('missing.css')).resolves.toBeNull();
 
+        for(const name of ['NoSuchBucket', 'InvalidAccessKeyId', 'SlowDown']){
+            s3Mock.on(GetObjectCommand).rejects(s3Error(name));
+            await expect(source.read('missing.css')).rejects.toThrow(name);
+        }
+    });
+
+    /**
+     * The same default the HTTP source has for a 403: a reader without
+     * s3:ListBucket gets AccessDenied for a missing key, and read as an error
+     * every SPA route would answer a 500 before the shell was served. A key
+     * S3 will not look up at all is a path the visitor chose, not a failure.
+     */
+    it('reads AccessDenied and a refused key as missing by default, so an SPA route still reaches the shell', async () => {
+        const source = new LambderS3FileSource({ bucket: 'web', client: new S3Client({}) });
+
+        for(const name of ['AccessDenied', 'KeyTooLongError', 'InvalidURI', 'InvalidObjectName']){
+            s3Mock.on(GetObjectCommand).rejects(s3Error(name));
+            await expect(source.read('dashboard/settings')).resolves.toBeNull();
+        }
+
+        s3Mock.on(GetObjectCommand, { Key: 'index.html' }).resolves({ Body: bodyOf('<h1>shell</h1>'), ContentType: 'text/html' });
+        s3Mock.on(GetObjectCommand, { Key: 'dashboard/settings' }).rejects(s3Error('AccessDenied'));
+        const handler = new Lambder({ files: source, apiPath: '/api' }).servePublicFiles().serveIndexHtml().getHandler();
+        const event: APIGatewayProxyEvent = {
+            body: null, headers: { Host: 'localhost' }, multiValueHeaders: {}, httpMethod: 'GET', isBase64Encoded: false,
+            path: '/dashboard/settings', pathParameters: null, queryStringParameters: null, multiValueQueryStringParameters: null,
+            stageVariables: null, requestContext: {} as any, resource: '',
+        };
+        const shell = await handler(event, {} as Context);
+        expect(shell.statusCode).toBe(200);
+        expect(decodeBody(shell)).toBe('<h1>shell</h1>');
+    });
+
+    it('makes AccessDenied an error again when notFoundErrorNames leaves it out', async () => {
+        const source = new LambderS3FileSource({ bucket: 'web', client: new S3Client({}), notFoundErrorNames: ['NoSuchKey'] });
+
+        s3Mock.on(GetObjectCommand).rejects(s3Error('NoSuchKey'));
+        await expect(source.read('missing.css')).resolves.toBeNull();
         s3Mock.on(GetObjectCommand).rejects(s3Error('AccessDenied'));
         await expect(source.read('missing.css')).rejects.toThrow('AccessDenied');
     });
@@ -107,7 +147,7 @@ describe('LambderS3FileSource', () => {
 
         const css = await handler(event('/app.css'), context);
         expect(css.statusCode).toBe(200);
-        expect(css.multiValueHeaders?.['Content-Type']).toContain('text/css');
+        expect(css.multiValueHeaders?.['Content-Type']).toContain('text/css; charset=utf-8');
         expect(decodeBody(css)).toBe('body {}');
 
         const missing = await handler(event('/missing.js'), context);

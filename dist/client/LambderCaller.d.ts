@@ -9,7 +9,7 @@ export type { LambderApiOutcome, LambderApiFailureReason, LambderValidationError
 export type { LambderProvidedGuardInputs, LambderGuardInputsProvider } from '../shared/wire/LambderCallOptions.js';
 /** A handler told that something happened, with nothing to hand it. */
 type NotifyHandler = () => void | Promise<void>;
-/** One call in flight: pushed when it starts, removed when it settles, so the list is the in-flight list rather than a log of every call ever made. */
+/** One call in flight: pushed when it starts, removed when it settles, so the list holds only calls in flight. */
 type FetchTracker = {
     apiName: string;
 };
@@ -30,15 +30,10 @@ type FetchEndEventHandler = (params: {
 type ErrorHandler = (err: Error) => void | Promise<void>;
 type ValidationErrorHandler = (zodError: LambderValidationError) => (void | false) | Promise<(void | false)>;
 type MessageHandler = (message: LambderAppRefusalMessage | string) => void | Promise<void>;
+/** Handed the refusal as its message object, a plain-string errorMessage having been read as one (refusalMessageOf). */
+type ErrorMessageHandler = (message: LambderAppRefusalMessage) => void | Promise<void>;
 /** The logListHandler option: an answer's logList, success or failure, when it has entries. The invoke caller's onLogList, for a browser. */
 export type LambderLogListHandler = (apiName: string, logList: unknown[]) => void | Promise<void>;
-/** One logical operation's rotating idempotency key: see LambderCaller.createIdempotencyKeyScope(). */
-export type LambderIdempotencyKeyScope = {
-    /** The key for the operation currently in progress. */
-    readonly current: string;
-    /** Call after a confirmed success: the next operation is a new intent. Returns the new key. */
-    rotate(): string;
-};
 /**
  * Per-call options: the request extras both callers share (see
  * LambderSharedCallOptions) plus an override for every constructor handler.
@@ -47,7 +42,7 @@ export type LambderCallOptions = LambderSharedCallOptions & {
     versionExpiredHandler?: NotifyHandler;
     sessionExpiredHandler?: NotifyHandler;
     messageHandler?: MessageHandler;
-    errorMessageHandler?: MessageHandler;
+    errorMessageHandler?: ErrorMessageHandler;
     apiInputValidationErrorHandler?: ValidationErrorHandler;
     notAuthorizedHandler?: NotifyHandler;
     errorHandler?: ErrorHandler;
@@ -67,13 +62,19 @@ type LambderCallerBaseOptions = {
      * it out and no call is gated.
      */
     apiSignatures?: LambderApiSignatureMap;
-    isCorsEnabled: boolean;
+    /**
+     * Send credentialed cross-origin requests (fetch's `cors` mode, cookies
+     * included). Default: exactly when apiPath is an absolute URL on another
+     * origin than the page's, which is when a browser needs it. Ignored when
+     * a transport is passed.
+     */
+    isCorsEnabled?: boolean;
     /** Default per-request timeout in ms (none unless set; API Gateway caps around 29s, so ~30000 is a sensible value). Overridable per call. */
     timeoutMs?: number;
     versionExpiredHandler?: NotifyHandler;
     sessionExpiredHandler?: NotifyHandler;
     messageHandler?: MessageHandler;
-    errorMessageHandler?: MessageHandler;
+    errorMessageHandler?: ErrorMessageHandler;
     notAuthorizedHandler?: NotifyHandler;
     errorHandler?: ErrorHandler;
     /** Receives each answer's logList, with the API name. Default: console.log with a `[lambder]` prefix, one line per entry. */
@@ -108,16 +109,13 @@ export type LambderCallerOptions<TContract, TProvided extends string = never> = 
  * @typeParam TProvidedGuards - Guard names guardInputsProvider covers; those APIs' options argument becomes optional.
  */
 export default class LambderCaller<TContract extends LambderApiContractShape = any, TProvidedGuards extends string = never> {
-    private isCorsEnabled;
     private apiPath;
     private apiVersion?;
     private apiSignatures?;
     private timeoutMs?;
-    /** What keeps a stale bundle from reloading itself forever; see the class. */
-    private readonly reloadLoopBreaker;
     /** The calls currently in flight, in the order they started. */
     fetchTrackerList: FetchTracker[];
-    /** Whether any call is in flight. Derived, so it cannot drift from the list the way a separate flag did. */
+    /** Whether any call is in flight. Derived from the list, so the two cannot drift apart. */
     get isLoading(): boolean;
     private versionExpiredHandler?;
     private sessionExpiredHandler?;
@@ -139,35 +137,6 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
     setSessionCookieKey(sessionTokenCookieKey: string, sessionCsrfCookieKey: string): void;
     /** Replaces how calls reach the server: a mock runtime, an in-process handler, a decorated transport. */
     setTransport(transport: LambderApiTransport): this;
-    /**
-     * A self-rotating idempotency key for a component or form that performs
-     * the same logical operation repeatedly. `current` is the key for the
-     * operation in progress: send it with every attempt (first try, retry
-     * after a failure, double-tap) so the server collapses them. Call
-     * `rotate()` after a confirmed success so the next operation is a new
-     * intent with its own key.
-     *
-     * ```typescript
-     * const submitKey = LambderCaller.createIdempotencyKeyScope();
-     * await caller.api("order.create", payload, { idempotencyKey: submitKey.current });
-     * submitKey.rotate();
-     * ```
-     */
-    static createIdempotencyKeyScope(): LambderIdempotencyKeyScope;
-    /**
-     * Generate an idempotency key for one logical operation. Create it when
-     * the operation begins (a form opens, a draft starts), send the same key
-     * on every attempt of that operation, and generate a new one after a
-     * confirmed success. Uses crypto.randomUUID when available and falls back
-     * to a v4 UUID from getRandomValues, because randomUUID only exists in
-     * secure contexts (plain-http LAN device testing lacks it).
-     *
-     * A runtime with neither throws rather than reaching for Math.random: the
-     * key must be UNGUESSABLE, since it is what scopes the replay record for a
-     * logged-out client, and a guessable one hands that client's stored
-     * response to whoever guesses it.
-     */
-    static createIdempotencyKey(): string;
     private clearSessionCookies;
     /** One call, one outcome. Never throws; every failure path resolves to { ok: false }. */
     private dispatch;

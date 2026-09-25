@@ -1,9 +1,9 @@
 /**
  * The checks every option that names a count, a size or a duration goes
- * through at creation, so a bad value is one wording and one predicate
- * everywhere rather than seven spellings of the same rule. `name` is the
- * option as the reader wrote it (`maxResponseBytes`, `session.ttlSeconds`),
- * so the error says which one to fix.
+ * through at creation, so a bad value meets one predicate and one wording
+ * everywhere. `name` is the option as the reader wrote it
+ * (`maxResponseBytes`, `session.ttlSeconds`), so the error says which one to
+ * fix.
  */
 
 const describe = (value: unknown): string => typeof value === "string" ? JSON.stringify(value) : String(value);

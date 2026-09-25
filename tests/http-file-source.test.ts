@@ -4,8 +4,8 @@
  *
  * - URLs are baseUrl + the relative path, each segment percent-encoded; the
  *   response's Content-Type is used unless it is a generic octet-stream.
- * - A 404 or 410 reads as null (the request falls through); other failed
- *   statuses and timeouts propagate.
+ * - A 403, 404 or 410 reads as null (the request falls through), as
+ *   `notFoundStatuses` sets; other failed statuses and timeouts propagate.
  * - As the files option it serves index.html from the origin too, fetched
  *   once per instance.
  */
@@ -80,12 +80,14 @@ describe('LambderHttpFileSource', () => {
         expect((await source.read('plain.js'))?.mimeType).toBeUndefined();
     });
 
-    it('a 404 or 410 reads as null; other failed statuses and timeouts propagate', async () => {
+    it('a 403, 404 or 410 reads as null; other failed statuses and timeouts propagate', async () => {
         const source = new LambderHttpFileSource({ baseUrl: `${origin}/v42/` });
 
         await expect(source.read('missing.js')).resolves.toBeNull();
         await expect(source.read('gone.js')).resolves.toBeNull();
-        await expect(source.read('denied.js')).rejects.toThrow('403');
+        // A private S3 bucket behind CloudFront answers a missing key 403.
+        await expect(source.read('denied.js')).resolves.toBeNull();
+        await expect(new LambderHttpFileSource({ baseUrl: `${origin}/v42/`, notFoundStatuses: [404, 410] }).read('denied.js')).rejects.toThrow('403');
         await expect(source.read('broken.js')).rejects.toThrow('500');
         await expect(new LambderHttpFileSource({ baseUrl: `${origin}/v42/`, timeoutMs: 50 }).read('slow.js')).rejects.toThrow();
     });
@@ -110,7 +112,8 @@ describe('LambderHttpFileSource', () => {
 
         const css = await handler(event('/app.css'), context);
         expect(css.statusCode).toBe(200);
-        expect(css.multiValueHeaders?.['Content-Type']).toContain('text/css');
+        // The origin's own type, as it gave it: the origin knows the encoding.
+        expect(css.multiValueHeaders?.['Content-Type']).toEqual(['text/css']);
         expect(decodeBody(css)).toBe('body {}');
 
         for(const page of ['/about', '/pricing']){

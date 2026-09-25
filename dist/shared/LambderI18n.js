@@ -9,9 +9,14 @@
 // ---------------------------------------------------------------------------
 // Implementation
 // ---------------------------------------------------------------------------
-/** Islamery-style browser detection: ordered prefs, full code then primary subtag. */
+/**
+ * Browser detection: ordered prefs, full code then primary subtag. Only in a
+ * page, where there is a document: Node 21 and later, Deno and Bun define
+ * `navigator.languages` too, from the process locale, and a server's locale
+ * is not its reader's.
+ */
 const detectBrowserLanguage = (isCode) => {
-    if (typeof navigator === "undefined")
+    if (typeof document === "undefined" || typeof navigator === "undefined")
         return null;
     const prefs = navigator.languages?.length ? navigator.languages : [navigator.language];
     for (const pref of prefs ?? []) {
@@ -30,33 +35,37 @@ class LanguageState {
     defaultLanguage;
     customDetect;
     override = null;
-    detected = null;
+    /** A throwing detector is reported once rather than on every t() call that runs it. */
+    detectorFailureReported = false;
     listeners = new Set();
     constructor(isCode, defaultLanguage, customDetect) {
         this.isCode = isCode;
         this.defaultLanguage = defaultLanguage;
         this.customDetect = customDetect;
     }
+    /**
+     * The active language: the one set, else detected afresh on every read.
+     * Detection is cheap, and what it reads lives outside this instance (the
+     * path an SPA navigates, the browser's languages), so remembering its
+     * first answer would keep a page on /en/ after it moved to /tr/.
+     */
     resolve() {
         if (this.override)
             return this.override;
-        if (this.detected)
-            return this.detected;
         // Fail-open: a broken app detector must not take down every t() call.
         let custom = null;
         try {
             custom = this.customDetect?.();
         }
         catch (err) {
-            console.error("LambderI18n: detectLanguage threw; continuing detection chain.", err);
+            if (!this.detectorFailureReported) {
+                this.detectorFailureReported = true;
+                console.error("LambderI18n: detectLanguage threw; continuing detection chain.", err);
+            }
         }
-        if (custom && this.isCode(custom)) {
-            this.detected = custom;
+        if (custom && this.isCode(custom))
             return custom;
-        }
-        const browser = detectBrowserLanguage(this.isCode);
-        this.detected = browser ?? this.defaultLanguage;
-        return this.detected;
+        return detectBrowserLanguage(this.isCode) ?? this.defaultLanguage;
     }
     set(code) {
         if (!this.isCode(code))
@@ -68,7 +77,6 @@ class LanguageState {
     }
     reset() {
         this.override = null;
-        this.detected = null;
         this.notify(this.resolve());
     }
     /** Re-notify listeners without a language change (e.g. dictionaries changed). */
@@ -91,14 +99,18 @@ class LanguageState {
         }
     }
 }
+/**
+ * Fills `{name}` tokens in one pass over the template, so a value is inserted
+ * as it is: a display name "Eve {org}" stays that, rather than having its own
+ * `{org}` filled by the next parameter. A token with no parameter stays.
+ * Own properties only, through Object.prototype.hasOwnProperty rather than
+ * Object.hasOwn: this runs in the browser bundle, and a browser without
+ * ES2022 (Safari before 15.4) would throw on the first parameterised text.
+ */
 const interpolate = (text, params) => {
     if (!params)
         return text;
-    let out = text;
-    for (const [token, value] of Object.entries(params)) {
-        out = out.split(`{${token}}`).join(String(value));
-    }
-    return out;
+    return text.replace(/\{([^{}]+)\}/g, (token, name) => Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : token);
 };
 const layerLookup = (layer, lang, key) => {
     for (let node = layer; node; node = node.parent) {
@@ -151,9 +163,9 @@ const startLayerLoad = (core, layer, lang, loader) => {
     const load = Promise.resolve()
         .then(loader)
         .then((loaded) => {
-        // A loader that answered is spent even when its answer is refused:
-        // running it again would fetch the same file and fail the same
-        // way. Only a loader that rejected stays, to be retried.
+        // A loader that answered is spent even when its answer is refused,
+        // since running it again would fail the same way. Only a loader
+        // that rejected stays, to be retried.
         layer.loaders.delete(lang);
         if (layer.loaders.size === 0)
             core.lazyLayers.delete(layer);

@@ -1,6 +1,7 @@
 import type { z } from "zod";
 import type { LambderApiEnvelopeBody, LambderApiResponseConfig } from "../shared/wire/LambderApiContract.js";
 import { type LambderApiRefusal } from "../shared/wire/LambderApiRefusal.js";
+import type { LambderCrashDetail } from "../shared/wire/LambderCrashDetail.js";
 import type { LambderApiAnswer } from "./LambderApiAnswer.js";
 export declare const API_ANSWER_CONTENT_TYPE = "application/json; charset=utf-8";
 /** The envelope's config plus the logList channel the call accumulated. */
@@ -40,14 +41,13 @@ export type LambderValidationAnswerBody = {
 };
 /**
  * The standard answer for a rejected input: a 422 whose body spells the
- * ZodError out. Spelled out rather than serialized as-is: zod 4 keeps
- * `issues` as a non-enumerable property, so JSON.stringify(zodError) would
- * carry the issues only inside the message string, and a client's
- * validation handler would receive a ZodError with nothing to branch on.
+ * ZodError out. Not serialized as-is: zod 4 keeps `issues` non-enumerable,
+ * so JSON.stringify(zodError) would carry the issues only inside the message
+ * string, leaving a client's validation handler nothing to branch on.
  *
- * zod's own `message` never ships: it is the whole issue tree re-serialized,
- * so carrying it would send every capped byte a second time. The generated
- * summary takes its place on every answer, trimmed or not.
+ * zod's own `message` never ships: it is the whole issue tree re-serialized
+ * and would send every capped byte a second time. A generated summary takes
+ * its place on every answer.
  */
 export declare const validationAnswer: (zodError: z.ZodError, logList?: unknown[]) => LambderApiAnswer;
 /** No API is registered under the requested name: a refusal, not a 404, so a typed caller reads it. */
@@ -62,6 +62,11 @@ export declare const invalidPayloadAnswer: (apiVersion: string | null | undefine
  * The last-resort answer when the call crashed and nothing else could
  * answer: a 500 that is still an envelope, so a caller reads a structured
  * failure rather than a text page. The server sends it only when its global
- * error handler is absent or itself failed.
+ * error handler is absent or itself failed. `revealed` (the crash in full,
+ * with the call's logList) is passed only for a caller the app's
+ * `crashes.reveal` trusts.
  */
-export declare const crashAnswer: (apiVersion: string | null | undefined) => LambderApiAnswer;
+export declare const crashAnswer: (apiVersion: string | null | undefined, revealed?: {
+    crash: LambderCrashDetail;
+    logList: unknown[];
+}) => LambderApiAnswer;

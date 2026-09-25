@@ -14,7 +14,7 @@ import { LambderMemorySessionStore } from '../src/stores/LambderMemorySessionSto
 import { lambderGuard } from '../src/core/LambderPolicyBuilders.js';
 import type { LambderGuardMetaMap } from '../src/api/LambderApiGuards.js';
 import LambderCaller from '../src/client/LambderCaller.js';
-import type { LambderApiContractShape, LambderFlattenContract } from '../src/shared/wire/LambderApiContract.js';
+import type { LambderApiContractShape, LambderContractKeysWithGuard, LambderFlattenContract, LambderJsonOf } from '../src/shared/wire/LambderApiContract.js';
 import { createApiEvent, createMockContext, testPublicFiles } from './helpers.js';
 
 type Permission = 'USERS.MANAGE' | 'USERS.VIEW' | 'BILLING.MANAGE';
@@ -34,6 +34,8 @@ const guards = {
     notBanned: lambderGuard({ handler: async () => {} }),
     /** Session-only no-op: the session itself is the whole authorization. */
     sessionOnly: lambderGuard({ session: true, handler: async () => {} }),
+    /** An apiInput slice over a field an API transforms: declared in the form a client posts. */
+    lowercaseOrg: lambderGuard({ apiInput: z.object({ org: z.string() }), handler: async () => {} }),
 } as const;
 
 const createApp = () => initLambder<{ userId: string }>().create({
@@ -65,6 +67,115 @@ describe('ApiContract - the guards option on the contract', () => {
 
         // The field exists for `typeof` only: it is declared, never assigned.
         expect(app.ApiContract).toBeUndefined();
+    });
+
+    it('lists the endpoints that declare one guard, in any of the three forms, beside other guards or alone', () => {
+        const _app = createApp()
+            .addApi('single', { ...testSchema, guards: 'notBanned' }, async (_ctx, res) => res.api({ result: 'ok' }))
+            .addApi('list', { ...testSchema, guards: ['notBanned', 'captcha'] }, async (_ctx, res) => res.api({ result: 'ok' }))
+            .addApi('map', { ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } }, async (_ctx, res) => res.api({ result: 'ok' }))
+            .addApi('open', testSchema, async (_ctx, res) => res.api({ result: 'ok' }));
+
+        type Contract = typeof _app.ApiContract;
+
+        expectTypeOf<LambderContractKeysWithGuard<Contract, 'notBanned'>>().toEqualTypeOf<'single' | 'list'>();
+        expectTypeOf<LambderContractKeysWithGuard<Contract, 'captcha'>>().toEqualTypeOf<'list'>();
+        expectTypeOf<LambderContractKeysWithGuard<Contract, 'orgPermission'>>().toEqualTypeOf<'map'>();
+        expectTypeOf<LambderContractKeysWithGuard<Contract, 'sessionOnly'>>().toEqualTypeOf<never>();
+
+        // A list held to exactly those endpoints, checked in both directions.
+        const _NOT_BANNED_APIS = ['single', 'list'] as const satisfies readonly LambderContractKeysWithGuard<Contract, 'notBanned'>[];
+        expectTypeOf<Exclude<LambderContractKeysWithGuard<Contract, 'notBanned'>, (typeof _NOT_BANNED_APIS)[number]>>().toEqualTypeOf<never>();
+        // @ts-expect-error 'map' does not declare notBanned
+        const _wrong = ['map'] as const satisfies readonly LambderContractKeysWithGuard<Contract, 'notBanned'>[];
+    });
+
+    it('records what a client sends (the input form) and what it receives (the JSON form), and hands the handler the parsed forms', () => {
+        const _app = createApp()
+            .addApi('typed', {
+                input: z.object({ page: z.number().default(1), id: z.string().transform(Number) }),
+                output: z.object({ at: z.date(), total: z.number(), tags: z.array(z.string()), note: z.string().optional() }),
+            }, async (ctx, res) => {
+                // The handler's side: parsed input, and the output as authored.
+                expectTypeOf(ctx.apiPayload).toEqualTypeOf<{ page: number; id: number }>();
+                return res.api({ at: new Date(), total: ctx.apiPayload.id, tags: [] });
+            })
+            .addApi('scoped', {
+                // Parsed, `org` is a number; posted, it is the string the guard reads.
+                input: z.object({ org: z.string().transform((value) => value.length), body: z.string() }),
+                output: z.object({}),
+                guards: 'lowercaseOrg',
+            }, async (_ctx, res) => res.api({}));
+
+        type Contract = typeof _app.ApiContract;
+
+        // A defaulted field is optional to send, and a transform's source is what is posted.
+        expectTypeOf<Contract['typed']['input']>().toEqualTypeOf<{ page?: number | undefined; id: string }>();
+        // A Date arrives as its string; nothing else changes.
+        expectTypeOf<Contract['typed']['output']>().toEqualTypeOf<{ at: string; total: number; tags: string[]; note?: string | undefined }>();
+        // A guard whose apiInput slice is a transformed field can be declared:
+        // the slice is compared in the form a client posts, not the parsed one.
+        expectTypeOf<Contract['scoped']['guards']>().toEqualTypeOf<'lowercaseOrg'>();
+    });
+
+    it('keeps unknown, records and recursive JSON as they are, and writes an array\'s undefined as null', () => {
+        const _app = createApp()
+            .addApi('loose', {
+                input: z.object({}),
+                output: z.object({ data: z.unknown(), meta: z.record(z.string(), z.unknown()), doc: z.json(), cells: z.array(z.string().optional()) }),
+            }, async (_ctx, res) => res.api({ data: 1, meta: {}, doc: null, cells: [] }))
+            .addApi('anything', { input: z.object({}), output: z.unknown() }, async (_ctx, res) => res.api(1));
+
+        type Contract = typeof _app.ApiContract;
+        type Loose = Contract['loose']['output'];
+        expectTypeOf<Loose['data']>().toEqualTypeOf<unknown>();
+        expectTypeOf<Loose['meta']>().toEqualTypeOf<Record<string, unknown>>();
+        expectTypeOf<Loose['cells']>().toEqualTypeOf<(string | null)[]>();
+        expectTypeOf<Contract['anything']['output']>().toEqualTypeOf<unknown>();
+
+        // A typed call over the recursive z.json() type resolves.
+        const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false });
+        const read = async () => (await caller.api('loose', {}))?.doc;
+        expectTypeOf(read).returns.resolves.not.toBeNever();
+    });
+
+    it('makes a key whose value may be undefined optional, as JSON leaves it out, and writes a Map or a Set as an empty object', async () => {
+        const app = createApp()
+            .addApi('profile', {
+                input: z.object({}),
+                output: z.object({
+                    name: z.string(),
+                    bio: z.string().optional().transform((text) => text?.trim()),
+                    nickname: z.string().nullable().transform((nick) => nick ?? undefined),
+                    visits: z.map(z.string(), z.number()),
+                    tags: z.set(z.string()),
+                }),
+            }, async (_ctx, res) => res.api({ name: 'Ada', nickname: null, visits: new Map([['home', 2]]), tags: new Set(['a']) }));
+
+        type Contract = typeof app.ApiContract;
+        expectTypeOf<Contract['profile']['output']>().toEqualTypeOf<{ name: string; bio?: string; nickname?: string; visits: {}; tags: {} }>();
+
+        // What the type says is what the wire carries.
+        const response = await app.render(createApiEvent({ apiName: 'profile', payload: {} }), createMockContext());
+        expect(JSON.parse(response.body || '{}').payload).toEqual({ name: 'Ada', visits: {}, tags: {} });
+    });
+
+    it('pins the rest of the JSON mapping: dates, array holes, tuples, records, brands, discriminated unions and z.json()', () => {
+        expectTypeOf<LambderJsonOf<{ at: Date; closedAt: Date | null }>>().toEqualTypeOf<{ at: string; closedAt: string | null }>();
+        expectTypeOf<LambderJsonOf<(string | undefined)[]>>().toEqualTypeOf<(string | null)[]>();
+        expectTypeOf<LambderJsonOf<[string, Date, undefined]>>().toEqualTypeOf<[string, string, null]>();
+        expectTypeOf<LambderJsonOf<Record<string, Date>>>().toEqualTypeOf<Record<string, string>>();
+        // A record's undefined entries are left out, which its value type says.
+        expectTypeOf<LambderJsonOf<Record<string, Date | undefined>>>().toEqualTypeOf<Record<string, string>>();
+        const _userIdSchema = z.string().brand<'UserId'>();
+        type UserId = z.output<typeof _userIdSchema>;
+        expectTypeOf<LambderJsonOf<{ id: UserId }>>().toEqualTypeOf<{ id: UserId }>();
+        expectTypeOf<LambderJsonOf<{ kind: 'card'; at: Date } | { kind: 'cash'; cents: number }>>()
+            .toEqualTypeOf<{ kind: 'card'; at: string } | { kind: 'cash'; cents: number }>();
+        const _documentSchema = z.json();
+        type JsonDocument = z.output<typeof _documentSchema>;
+        const _doc: LambderJsonOf<JsonDocument> = { nested: [1, 'two', null, { deeper: true }] } satisfies JsonDocument;
+        const _back: JsonDocument = _doc;
     });
 
     it('an API that declares no guards has no guards entry at all', () => {
@@ -218,7 +329,7 @@ describe('ApiContract - pinning a client-side needs map to the declarations', ()
     });
 });
 
-describe('ApiContract - the added guards entry changes nothing for consumers', () => {
+describe('ApiContract - a guards entry changes nothing for consumers', () => {
     const _app = createApp()
         .addApi('open', testSchema, async (_ctx, res) => res.api({ result: 'ok' }))
         .addApi('guarded', { ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } }, async (_ctx, res) => res.api({ result: 'ok' }))
@@ -242,10 +353,10 @@ describe('ApiContract - the added guards entry changes nothing for consumers', (
     });
 
     it('holds a hand-written contract to the real option shapes, so a typo in one is a compile error', () => {
-        // LambderApiContractShape typed mode, guards, rateLimit and idempotency as
-        // `any`, so a hand-written contract (what a client holds, and what
-        // the mock registry is checked against) could say mode: "sesion" and
-        // every mode-dependent check silently answered "either".
+        // With mode, guards, rateLimit and idempotency typed as `any`, a
+        // hand-written contract (what a client holds, and what the mock
+        // registry is checked against) could say mode: "sesion" and every
+        // mode-dependent check would silently answer "either".
         type Typo = { thing: { input: { value: string }; output: null; mode: 'sesion' } };
         // @ts-expect-error "sesion" is not a mode; the modes are "public" and "session"
         expectTypeOf<Typo>().toExtend<LambderApiContractShape>();

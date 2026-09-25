@@ -2,7 +2,7 @@
  * The cryptography the session model runs on, behind an interface so the
  * manager itself has no Node dependency: the bearer secrets are hashed at
  * rest, compared in constant time, and minted from a cryptographic random
- * source.
+ * source, and the sessionKey is hashed under the salt as its key.
  *
  * LambderWebCrypto is the default and runs on Node 20+, every browser on a
  * secure context, and edge runtimes. LambderPlainSessionCrypto is the
@@ -27,6 +27,8 @@ export interface LambderSessionCrypto {
      */
     readonly isCryptographic: boolean;
     sha256Hex(value: string): Promise<string>;
+    /** HMAC-SHA256 of `value` under `key` (both UTF-8), as hex: the salted partition hash of a sessionKey. */
+    hmacSha256Hex(key: string, value: string): Promise<string>;
     randomHex(bytes: number): Promise<string>;
     constantTimeEqual(a: string, b: string): boolean;
 }
@@ -43,7 +45,7 @@ const constantTimeEqual = (a: string, b: string): boolean => {
 export const isWebCryptoAvailable = (): boolean =>
     typeof globalThis.crypto?.subtle?.digest === "function" && typeof globalThis.crypto.getRandomValues === "function";
 
-/** sha256 through crypto.subtle and randomness through getRandomValues: the default. */
+/** sha256 and HMAC through crypto.subtle and randomness through getRandomValues: the default. */
 export class LambderWebCrypto implements LambderSessionCrypto {
     readonly isCryptographic = true;
 
@@ -59,11 +61,11 @@ export class LambderWebCrypto implements LambderSessionCrypto {
      * The runtime's WebCrypto, through the resolver every layer shares, with
      * Node's crypto warmed alongside it.
      *
-     * The availability question is asked here, before the shared resolver,
-     * only because of the answer a session has to it: a runtime with neither
-     * a global crypto nor Node's webcrypto can still run sessions over
-     * LambderPlainSessionCrypto and a memory store, which is this layer's own
-     * way out and not something the shared message can know about.
+     * Availability is checked here, before the shared resolver, so the error
+     * can name this layer's own way out: a runtime with neither a global
+     * crypto nor Node's webcrypto can still run sessions over
+     * LambderPlainSessionCrypto and a memory store, which the shared
+     * resolver's message cannot know about.
      */
     private ready(): Promise<Crypto> {
         this.cryptoPromise ??= (async () => {
@@ -79,10 +81,17 @@ export class LambderWebCrypto implements LambderSessionCrypto {
     }
 
     async sha256Hex(value: string): Promise<string> {
-        // ready() first, for the message above and for the warmed Node
-        // crypto; the digest itself is the one every layer shares.
+        // ready() first, for its error message and the warmed Node crypto;
+        // the digest itself is the one every layer shares.
         await this.ready();
         return await sha256HexOf(value);
+    }
+
+    async hmacSha256Hex(key: string, value: string): Promise<string> {
+        const webCrypto = await this.ready();
+        const encoder = new TextEncoder();
+        const hmacKey = await webCrypto.subtle.importKey("raw", encoder.encode(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+        return bytesToHexString(new Uint8Array(await webCrypto.subtle.sign("HMAC", hmacKey, encoder.encode(value))));
     }
 
     async randomHex(bytes: number): Promise<string> {
@@ -91,9 +100,9 @@ export class LambderWebCrypto implements LambderSessionCrypto {
     }
 
     constantTimeEqual(a: string, b: string): boolean {
-        // node's timingSafeEqual where the runtime has it: a primitive built
-        // for this beats a JS loop the engine is free to optimize. The loop is
-        // the fallback everywhere else, which is every browser.
+        // Node's timingSafeEqual where the runtime has it: a primitive built
+        // for this beats a JS loop the engine is free to optimize. Browsers
+        // fall back to the loop.
         const nodeCrypto = this.nodeCrypto;
         if(nodeCrypto && a.length === b.length){
             const left = Buffer.from(a, "utf8");
@@ -114,6 +123,15 @@ export class LambderPlainSessionCrypto implements LambderSessionCrypto {
 
     async sha256Hex(value: string): Promise<string> {
         return bytesToHexString(new TextEncoder().encode(value));
+    }
+
+    /**
+     * The key and the value hex-encoded as a JSON pair rather than run
+     * together, so the pair stays unambiguous the way a keyed hash keeps it:
+     * no key and value can pass for another split of the same text.
+     */
+    async hmacSha256Hex(key: string, value: string): Promise<string> {
+        return bytesToHexString(new TextEncoder().encode(JSON.stringify([key, value])));
     }
 
     async randomHex(bytes: number): Promise<string> {

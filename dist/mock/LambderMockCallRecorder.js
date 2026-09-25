@@ -1,9 +1,8 @@
 import { LAMBDER_REFUSAL_CODES } from "../shared/wire/LambderApiRefusal.js";
 /**
  * Set-Cookie values are redacted in the log: the name stays so a reader can
- * see that a session cookie was written, the value goes, because a live
- * session token in a panel a developer renders and a test snapshots is no
- * place to keep it.
+ * see a session cookie was written, the value goes, since a live session
+ * token does not belong in a panel a developer renders or a test snapshots.
  */
 const loggedHeaders = (headers) => {
     const copy = {};
@@ -16,10 +15,9 @@ const loggedHeaders = (headers) => {
 };
 /**
  * A logged value copied, so a reader that reaches into a record cannot edit
- * what the next reader sees. structuredClone is the platform's deep copy and
- * everything logged arrived as JSON; a value it refuses (a function on the
- * payload of a hand-built request) is handed over as it is rather than
- * failing the read.
+ * what the next reader sees. Everything logged arrived as JSON, so
+ * structuredClone fits; a value it refuses (a function on a hand-built
+ * request's payload) is handed over as is rather than failing the read.
  */
 const cloneLoggedValue = (value) => {
     if (value === null || typeof value !== "object")
@@ -73,20 +71,17 @@ const classifyAnswer = (answer, envelope) => {
  * emitted to, and the bounded log of completed calls.
  *
  * One of the four pieces of state LambderMockApp holds that nothing else
- * touches.
- * `subscribe` and `calls` stay on the app as one-line delegations, because
- * they are the surface a dev panel reads.
+ * touches. `subscribe` and `calls` are one-line delegations on the app,
+ * because they are the surface a dev panel reads.
  *
- * Ending a call is `settle`, one call for the whole of it: classification,
- * redaction, the event and the log row. A record literal built at each of the
- * three exits instead would drift between them, which is exactly what a log
- * is read to rule out.
+ * `settle` ends a call in one place: classification, redaction, the event and
+ * the log row. A record built separately at each of the three exits would
+ * drift between them, which is exactly what a log is read to rule out.
  *
- * `calls` hands out copies down to the values, so a reader that sorts
- * guardsRun or deletes a header is not editing what the next reader sees, and
- * the caller is free to edit what it got. The Error is the exception, passed
- * by reference: a clone of it would no longer be the class a test asserts on,
- * and an Error carries nothing worth protecting.
+ * `calls` hands out deep copies, so a reader that sorts guardsRun or deletes
+ * a header does not edit what the next reader sees. The Error is passed by
+ * reference: a clone would lose the class a test asserts on, and an Error
+ * carries nothing worth protecting.
  */
 export class LambderMockCallRecorder {
     listeners = new Map();
@@ -127,10 +122,9 @@ export class LambderMockCallRecorder {
                 listener(event);
             }
             catch (err) {
-                // Muted, not merely reported once: a listener that throws on
-                // one event throws on the next, so leaving it in the loop
-                // costs every remaining call a thrown error and a swallowed
-                // one, for a listener that is already known to be broken.
+                // Muted, not merely reported: a listener that throws on one
+                // event throws on the next, and keeping it would cost every
+                // later call a thrown and swallowed error for nothing.
                 this.mutedListeners.add(key);
                 console.error(`[lambder mock] listener "${key}" threw and is muted until it subscribes again or the mock is reset`, err);
             }
@@ -139,11 +133,8 @@ export class LambderMockCallRecorder {
     /**
      * Ends one call: reads how it went, redacts what a log has no business
      * keeping, and emits the response event and the log row from one object,
-     * so the two cannot say different things about the same call.
-     *
-     * The event and the row carry copies of their own, so a listener that
-     * edits the event it was handed is not editing the row the log keeps; the
-     * row is copied again on the way in and on the way out.
+     * so the two cannot disagree about the call. Each carries its own copies,
+     * so a listener editing its event does not edit the logged row.
      */
     settle(facts, ending) {
         const answer = ending.answer;
