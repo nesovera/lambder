@@ -27,12 +27,9 @@ export class LambderMockTransportError extends Error {
 /**
  * What a call fails with and how long it takes to do it: the queued and
  * standing failures per endpoint, the offline switch, and the configured
- * latency.
- *
- * One of the four pieces of state LambderMockApp holds that nothing else
- * touches, so it is its own object. The app keeps the whole surface
- * (failNext, setFailure, setOffline, setLatency) as one-line delegations,
- * which is what a caller reads; what moved is the bookkeeping behind them.
+ * latency. State nothing else in LambderMockApp touches, so it is its own
+ * object; the app's failNext, setFailure, setOffline and setLatency delegate
+ * here.
  *
  * Injected refusals are rendered through the real envelope helpers, never
  * hand-written: an injected 429 and an earned one have to be the same bytes,

@@ -8,7 +8,7 @@
  */
 export { LambderMockApp, initLambderMock } from "./mock/LambderMockApp.js";
 export { LambderMockTransportError } from "./mock/LambderMockFailureInjector.js";
-export type { LambderMockAppOptions, LambderMockSessionsOptions, LambderMockIdempotencyOptions, LambderMockTransport, LambderMockTransportOptions } from "./mock/LambderMockCreateOptions.js";
+export type { LambderMockAppOptions, LambderMockSessionsOptions, LambderMockIdempotencyOptions, LambderMockInvalidInputAnswer, LambderMockTransport, LambderMockTransportOptions } from "./mock/LambderMockCreateOptions.js";
 export type { LambderMockCallContext, LambderMockSessionCallContext, LambderMockContext, LambderMockGuards, LambderMockHandler, LambderMockEntry, LambderMockEntryOptions, LambderMockEntryInput, LambderMockSlice, LambderMockRestEntry, LambderMockRegistryCheck, LambderMockMissingNames, LambderMockStrayNames, LambderMockDuplicateNames, LambderMockPublicNames, LambderMockSessionNames, LambderMockLatency, LambderMockFailure, LambderMockFailureReason, LambderMockOutcome, LambderMockCallEvent, LambderMockRequestEvent, LambderMockResponseEvent, LambderMockCallRecord, LambderMockListener, LambderMockRateLimitPolicies, LambderMockInputOf, LambderMockOutputOf, LambderMockOverride, } from "./mock/LambderMockTypes.js";
 export { lambderMockConsoleLogger } from "./mock/lambderMockConsoleLogger.js";
 export type { LambderMockConsoleLoggerOptions } from "./mock/lambderMockConsoleLogger.js";

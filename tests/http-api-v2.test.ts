@@ -84,6 +84,7 @@ describe('HTTP API v2 events', () => {
             }, async (ctx, res) => res.api({ hello: ctx.apiPayload.name }));
 
         const event = createMockEventV2('/api', {
+            headers: { host: 'localhost', 'content-type': 'application/json' },
             body: JSON.stringify({ apiName: 'echo.name', payload: { name: 'v2' } }),
         });
         event.requestContext.http.method = 'POST';

@@ -65,11 +65,27 @@ describe('the client the loader makes', () => {
         expect(await client.config.region()).toBe('eu-west-1');
     });
 
+    it('is one client per region, shared by every store not given one', async () => {
+        const { createDynamoClientLoader, createDynamoDocumentClientLoader } = await import('../src/stores/LambderDdbSdk.js');
+        const [cache, limiter, other] = await Promise.all([
+            createDynamoClientLoader({ user: 'LambderDdbCache', region: 'eu-central-1' })(),
+            createDynamoClientLoader({ user: 'LambderDdbRateLimiter', region: 'eu-central-1' })(),
+            createDynamoClientLoader({ user: 'LambderDdbRateLimiter', region: 'eu-north-1' })(),
+        ]);
+        expect(limiter.client).toBe(cache.client);
+        expect(other.client).not.toBe(cache.client);
+
+        const [sessions, moreSessions] = await Promise.all([
+            createDynamoDocumentClientLoader({ user: 'LambderDdbSessionStore', region: 'eu-central-1' })(),
+            createDynamoDocumentClientLoader({ user: 'LambderDdbSessionStore', region: 'eu-central-1' })(),
+        ]);
+        expect(moreSessions.client).toBe(sessions.client);
+    });
+
     it('falls to the SDK default chain when the store was given none', async () => {
-        // The rule all four stores now share. LambderDdbCache used to default
-        // to "us-east-1" instead, so an app that deployed to another region
-        // and left the option out got a cache in Virginia, quietly, while its
-        // sibling stores followed the deployment.
+        // All four stores share this rule. A store with a fixed fallback region
+        // would quietly land there when an app deployed elsewhere and left the
+        // option out, while its sibling stores followed the deployment.
         const { createDynamoClientLoader } = await import('../src/stores/LambderDdbSdk.js');
         const before = process.env.AWS_REGION;
         process.env.AWS_REGION = 'ap-south-1';

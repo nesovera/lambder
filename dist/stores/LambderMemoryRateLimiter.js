@@ -1,6 +1,6 @@
 import { RATE_LIMIT_WINDOWS, } from "../shared/contracts/LambderRateLimiter.js";
 import { LambderExpiringMap } from "../shared/util/LambderExpiringMap.js";
-import { joinKeyFields } from "../shared/util/LambderKeyFields.js";
+import { joinKeyFields } from "../shared/util/joinKeyFields.js";
 /**
  * Fixed-window rate limiter held in memory: the same windows, the same
  * attempts-count semantics and the same evaluation order as
@@ -11,15 +11,13 @@ import { joinKeyFields } from "../shared/util/LambderKeyFields.js";
  * `now` is injectable so a test can move time forward and watch a window
  * reset without waiting for it.
  *
- * `maxEntries` is the ceiling on counters held at once, 100,000 by default,
- * and it is the one way this limiter differs from the table: a process cannot
- * hold counters without bound, so past the ceiling the counters closest to
- * their window's end are dropped and a key whose counter was dropped starts
- * that window again from zero. It takes one distinct key per counter to get
- * there (a limit keyed per IP under a flood from many of them), and the
- * counters with the most life left, which are the long-window ones, are the
- * last to go. A deployment where that matters wants LambderDdbRateLimiter,
- * whose counters are not held in the process at all.
+ * `maxEntries` (100,000 counters by default) is the one way this limiter
+ * differs from the table: past the ceiling, the counters closest to their
+ * window's end are dropped, and a key whose counter was dropped starts that
+ * window again from zero. Reaching it takes one distinct key per counter (a
+ * per-IP limit under a flood from many IPs), and the long-window counters,
+ * with the most life left, go last. Where that matters, use
+ * LambderDdbRateLimiter, whose counters live outside the process.
  */
 export class LambderMemoryRateLimiter {
     counters;
@@ -28,6 +26,9 @@ export class LambderMemoryRateLimiter {
         this.now = options.now ?? (() => Date.now());
         this.counters = new LambderExpiringMap({ now: this.now, maxEntries: options.maxEntries });
     }
+    clockMilliseconds() {
+        return this.now();
+    }
     async isRateLimited(trackerKey, policy) {
         const nowSeconds = Math.floor(this.now() / 1000);
         for (const { key, seconds } of RATE_LIMIT_WINDOWS) {
@@ -35,9 +36,9 @@ export class LambderMemoryRateLimiter {
             if (!limit)
                 continue;
             const windowStart = Math.floor(nowSeconds / seconds) * seconds;
-            // The table gives the tracker key and the window separate
-            // attributes; one string here has to keep them as distinct, so the
-            // fields are joined through the escaping join rather than glued.
+            // The table keeps the tracker key and the window in separate
+            // attributes; one string has to keep them as distinct, hence the
+            // escaping join.
             const counterKey = joinKeyFields(trackerKey, key, String(windowStart));
             const counter = this.counters.get(counterKey) ?? { count: 0 };
             // The DynamoDB limiter's conditional ADD: allowed while the count

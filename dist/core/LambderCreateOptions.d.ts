@@ -23,6 +23,68 @@ export type LambderBeforeRenderHook = (ctx: LambderRenderContext, resolver: Lamb
 export type LambderAfterRenderHook = (ctx: LambderRenderContext, resolver: LambderResolver, response: LambderResponse) => MaybePromise<LambderResponse | Error>;
 export type LambderFallbackHook = (ctx: LambderRenderContext, resolver: LambderResolver) => void | Promise<void>;
 export type LambderGlobalErrorHandler = (err: Error, ctx: LambderRenderContext | null, response: LambderResponseBuilder) => MaybePromise<LambderResponse>;
+/**
+ * Where a crash happened.
+ *
+ * - `api`: an API call, from its hooks, guards or handler.
+ * - `route`: any other HTTP request (a route, a served file or page, a
+ *   fallback). `ctx` is null when the request could not be read at all.
+ * - `event`: a non-HTTP invocation (a schedule, SNS, SQS) whose action threw,
+ *   or that no action matched. The error is rethrown to Lambda after the
+ *   report, so retries and dead-letter queues keep working.
+ * - `startup`: a `created` hook failed before the invocation could start.
+ */
+export type LambderCrashSite = {
+    kind: "api";
+    ctx: LambderRenderContext;
+    lambdaContext: Context;
+} | {
+    kind: "route";
+    ctx: LambderRenderContext | null;
+    lambdaContext: Context;
+} | {
+    kind: "event";
+    event: unknown;
+    lambdaContext: Context;
+} | {
+    kind: "startup";
+    lambdaContext: Context;
+};
+/**
+ * Told every crash, awaited before the answer goes out (a Lambda may be
+ * frozen the moment it answers, so a report left running might never land),
+ * for up to `reportTimeoutMs`. A refusal is never a crash and never reaches
+ * it. Anything it throws is logged and swallowed, so a broken reporter
+ * cannot turn one failure into two, and a stalled one cannot turn every
+ * crash into a function timeout.
+ *
+ * `site.ctx` is the request's context, the one a beforeRender hook handed
+ * back when one did, secrets included (the session cookie, a login's
+ * password in the body, the session record): forward the fields a crash
+ * needs rather than the whole context to an error tracker.
+ */
+export type LambderCrashReporter = (error: Error, site: LambderCrashSite) => MaybePromise<void>;
+/** The `crashes` option of create(). */
+export type LambderCrashOptions = {
+    /** Told every crash on every path; see LambderCrashReporter. Default: none, and the framework's own 500 logs the crash to the console instead. */
+    report?: LambderCrashReporter;
+    /**
+     * How long a crash's answer waits for the reporter, in milliseconds. A
+     * report still running then is logged, with the crash, as unfinished,
+     * and the request is answered. Default: 3000.
+     */
+    reportTimeoutMs?: number;
+    /**
+     * Whether the caller behind this request may read the crash: when true,
+     * the framework's 500 carries it in full (describeCrash on an API call's
+     * `crash` field, beside the call's logList; the stack as text on a
+     * route). For a developer's own browser or a trusted invoker. It governs
+     * the framework's answer only: an app that sets a global error handler
+     * writes its own answer, and describeCrash is there for it. A reveal
+     * that throws counts as no. Default: nobody.
+     */
+    reveal?: (ctx: LambderRenderContext) => MaybePromise<boolean>;
+};
 export type LambderFallbackHandler = (ctx: LambderRenderContext, resolver: LambderResolver) => MaybePromise<LambderResponse>;
 export type LambderInputValidationHandler = (ctx: LambderRenderContext, resolver: LambderResolver, zodError: z.ZodError) => MaybePromise<LambderResponse>;
 /**
@@ -52,15 +114,14 @@ export type LambderSessionOptions<TSessionData = any> = {
      * Where sessions rest: a LambderDdbSessionStore over your table, a
      * LambderMemorySessionStore in tests, or your own LambderSessionStore.
      *
-     * Typed over `any` rather than over TSessionData deliberately. The session
-     * data type is the app's declaration (initLambder<SessionData>()), and a
-     * store is a storage backend that holds whatever the app puts in it;
-     * naming TSessionData here would make `new Lambder({ session: { store } })`
-     * INFER the session data type from the store instead, so an app that never
-     * said otherwise would find ctx.session.data typed by its table.
+     * Deliberately typed over `any`, not TSessionData. The session data type
+     * is the app's declaration (initLambder<SessionData>()), and a store holds
+     * whatever the app puts in it; naming TSessionData here would make
+     * `new Lambder({ session: { store } })` INFER the session data type from
+     * the store, so ctx.session.data would be typed by the table.
      */
     store: LambderSessionStore<any>;
-    /** Salts the sessionKey hash that partitions the store. */
+    /** The HMAC key that turns a sessionKey into the store's partition key, so a table read does not reveal whose sessions it holds. Treat as a secret. */
     sessionSalt: string;
     enableSlidingExpiration?: boolean;
     /** Min seconds between sliding-expiration writes. Default: max(60, 5% of TTL). */
@@ -84,11 +145,10 @@ export type LambderSessionOptions<TSessionData = any> = {
 };
 /**
  * Everything an instance is configured with, in ONE declaration: base
- * serving options plus the type-affecting policy layer (rate limits,
- * guards, idempotency) and session/CORS config. There are no enable/define
- * chain methods; the instance is born fully configured and fully typed
- * (via initLambder), so no ordering rules exist and no partially-configured
- * instance type ever needs a name.
+ * serving options plus the type-affecting policy layer (rate limits, guards,
+ * idempotency) and session/CORS config. The instance is born fully
+ * configured and fully typed (via initLambder), so there are no ordering
+ * rules and no partially-configured instance type.
  */
 export type LambderCreateOptions<TSessionData = any> = {
     /**
@@ -102,11 +162,11 @@ export type LambderCreateOptions<TSessionData = any> = {
     apiPath?: string;
     /**
      * Stamped on every API answer's envelope as `apiVersion`, so a client can
-     * tell which build answered. Whether a client is stale is decided per
-     * endpoint by the signature it sends (see Lambder.apiSignatures()), not
-     * by this string; `minApiVersion` is the one thing that reads it. Dotted
-     * numbers ("1.2.10"), since that is how the floor compares it, so a
-     * commit sha or a build date is refused rather than read as zero.
+     * tell which build answered. Staleness is decided per endpoint by the
+     * signature a client sends (see Lambder.apiSignatures()); only
+     * `minApiVersion` reads this string. Dotted numbers ("1.2.10"), as the
+     * floor compares them, so a commit sha or a build date is refused rather
+     * than read as zero.
      */
     apiVersion?: string;
     /**
@@ -114,10 +174,9 @@ export type LambderCreateOptions<TSessionData = any> = {
      * it answers `versionExpired` whatever its signature says. The lever for
      * a change the signatures cannot see (a security fix, a field whose
      * meaning changed under the same shape). Dotted numbers ("1.2.10"),
-     * compared segment by segment; a call naming no version is not judged.
-     * A floor above `apiVersion` is taken as `apiVersion`, with a warning,
-     * so a mistaken floor cannot refuse this build's own clients. Default:
-     * none.
+     * compared segment by segment; a call naming no version is not judged. A
+     * floor above `apiVersion` is taken as `apiVersion`, with a warning, so a
+     * mistaken floor cannot refuse this build's own clients. Default: none.
      */
     minApiVersion?: string;
     /**
@@ -130,9 +189,11 @@ export type LambderCreateOptions<TSessionData = any> = {
      */
     apiSignatures?: LambderApiSignatureMap;
     /**
-     * Automatic compression for compressible responses. `true` (the default)
-     * is `{ minBytes: 860, encodings: ["br", "gzip"], quality: 5 }`; `false`
-     * disables it. `encodings` is a preference order, so `["gzip"]` opts out
+     * Automatic compression for compressible responses. `true` is
+     * `{ minBytes: 860, encodings: ["br", "gzip"], quality: 5 }`, the default
+     * behind an HTTP API or a Function URL; behind a REST API it is off unless
+     * named here, since a REST API decodes base64 only for its
+     * binaryMediaTypes. `false` disables it. `encodings` is a preference order, so `["gzip"]` opts out
      * of Brotli for a client or CDN that mishandles it, and `quality` is the
      * Brotli quality, the same field the at-rest stores take.
      */
@@ -155,58 +216,75 @@ export type LambderCreateOptions<TSessionData = any> = {
      * behind a proxy that rewrites it. Default: none, so ctx.ip is the address
      * the gateway observed.
      *
-     * Only list a header something in front of this app always overwrites. A
-     * header a client can set is a value a client can choose, and `per: "ip"`
-     * rate limits key off ctx.ip: one that a caller picks per request is not a
-     * limit. Note that API Gateway APPENDS to x-forwarded-for rather than
-     * replacing it, so behind API Gateway alone the leftmost entry is the
-     * client's own claim and the header should be left out.
+     * Only list a header something in front of this app always overwrites:
+     * `per: "ip"` rate limits key off ctx.ip, and an address the caller picks
+     * per request is not a limit. API Gateway APPENDS to x-forwarded-for, so
+     * behind API Gateway alone the leftmost entry is the client's own claim
+     * and the header should be left out. A direct invoke reads none of these:
+     * its ctx.ip is the invoker's `clientIp`.
      */
     trustedClientIpHeaders?: readonly string[];
+    /**
+     * Headers that may name the host the viewer asked for, in order of
+     * preference, e.g. ["x-forwarded-host"] for a Function URL behind
+     * CloudFront, which sends the origin its own lambda-url Host. Default:
+     * none, so ctx.host is the Host the gateway received.
+     *
+     * The same rule as trustedClientIpHeaders: ctx.host decides cookie
+     * domains and host-matched routes, and a host a client picks is a tenant
+     * a client picks. A direct invoke reads none of these: its ctx.host is the
+     * invoker's `host`.
+     */
+    trustedHostHeaders?: readonly string[];
     /** CORS: true allows any origin; or pass a LambderCorsConfig. Default: off. */
     cors?: boolean | LambderCorsConfig;
     /** Sessions over a store of your choosing; required for addSessionApi/addSessionRoute. */
     session?: LambderSessionOptions<TSessionData>;
     /** Declarative per-API rate limiting: your limiter plus named policies APIs reference (typed) via the `rateLimit` option. */
     rateLimits?: LambderApiRateLimitsConfig<Record<string, LambderApiRateLimitPolicyConfig<LambderRenderContext>>>;
-    /** Named guards APIs reference (typed) via the `guards` option; build each with lambderGuard(). Pinned to the render contexts, so a guard built for another adapter is rejected here rather than reading fields that are not on its context. */
-    guards?: Record<string, LambderApiGuard<any, any, any, LambderRenderContext, LambderSessionRenderContext<any, any>>>;
+    /**
+     * Named guards APIs reference (typed) via the `guards` option; build each
+     * with `initLambder<SessionData>().guard()`, whose handlers see the app's
+     * session type, or lambderGuard(). Pinned to the render contexts, so a
+     * guard built for another adapter, or for another session type, is
+     * rejected here rather than reading fields that are not on its context.
+     */
+    guards?: Record<string, LambderApiGuard<any, any, any, LambderRenderContext<any, Record<string, string>, {}, TSessionData>, LambderSessionRenderContext<any, TSessionData>>>;
     /**
      * Make an authorization declaration part of registering a session API:
-     * every addSessionApi must declare `guards`, at the type level (a
-     * missing `guards` is a compile error) and at registration (a plain-JS
-     * caller throws). An API that legitimately needs none, because the
-     * session itself is the whole authorization (the signed-in user's own
-     * account), declares a named no-op session guard, so every opt-out is
-     * explicit and one grep lists them all. Needs a guards map to pick
-     * from. Default: false.
+     * every addSessionApi must declare `guards`, at the type level (a missing
+     * `guards` is a compile error) and at registration (a plain-JS caller
+     * throws). An API whose session is the whole authorization (the
+     * signed-in user's own account) declares a named no-op session guard, so
+     * every opt-out is explicit and one grep lists them all. Needs a guards
+     * map to pick from. Default: false.
      */
     requireSessionApiGuards?: boolean;
     /**
      * The same for public APIs: every addApi must declare `guards`, at the
      * type level and at registration.
      *
-     * Public APIs are open by default and that is the right default, so this
-     * is off unless an app decides otherwise. What it buys an app that turns
-     * it on is that a public endpoint's openness becomes a written decision
-     * rather than an omission: the ones anybody may call declare a named no-op
-     * guard carrying the reason, and the ones that authorize their caller some
-     * other way (a signature, a device secret, a one-shot token) name where
-     * that happens. One grep over the guard names then lists every public
-     * door and why it is open, which is the review question a growing public
-     * surface makes expensive to answer any other way. Needs a guards map to
-     * pick from. Default: false.
+     * Public APIs are open by default, which is the right default, so this is
+     * off unless an app decides otherwise. Turned on, a public endpoint's
+     * openness becomes a written decision rather than an omission: the ones
+     * anybody may call declare a named no-op guard carrying the reason, and
+     * the ones that authorize their caller some other way (a signature, a
+     * device secret, a one-shot token) name where that happens. One grep over
+     * the guard names then lists every public door and why it is open. Needs
+     * a guards map to pick from. Default: false.
      */
     requirePublicApiGuards?: boolean;
     /** Declarative idempotency: your store plus replay defaults; APIs opt in via `idempotency: true | { ttlSeconds }`. */
     idempotency?: LambderApiIdempotencyConfig;
+    /** Crash reporting on every path, and who may read a crash in the answer. See LambderCrashOptions. */
+    crashes?: LambderCrashOptions;
 };
 /**
  * What the `guards` field asks for when an API on a require*ApiGuards
- * instance declares none. The inference parameter defaults to `never` with
- * nothing to infer from, and the resulting "Property 'guards' is missing ...
- * but required in type { guards: never }" read as though nothing could ever
- * be written there; the property name says what is actually wanted.
+ * instance declares none. With nothing to infer from, the inference parameter
+ * defaults to `never`, and "Property 'guards' is missing ... but required in
+ * type { guards: never }" would read as though nothing could be written
+ * there; the property name says what is wanted.
  */
 type LambderGuardsDeclarationRequired = {
     readonly "lambder: this instance requires every API of this kind to declare guards. Name the guard that authorizes this API, or the named no-op guard that records why anyone may call it.": never;
@@ -236,19 +314,19 @@ export type LambderSessionEnabledInstance<TSessionsEnabled extends boolean> = TS
  * only which flag switches it on differs.
  */
 export type LambderRequirableGuardsField<TRequired extends boolean, TGuardsOpt> = TRequired extends true ? {
-    /** Named guards, run in declared order before input validation: a name, a non-empty list of names, or a non-empty { name: param } map for parameterized guards. Required on this instance: an API that needs no authorization declares a named no-op guard, so every opt-out is explicit and one grep lists them all. Their input requirements merge into this API's contract input; their return values land typed on ctx.guardData. */
+    /** Named guards, run in declared order before input validation (after it for a guard declared runAt: "afterInputValidation"): a name, a non-empty list of names, or a non-empty { name: param } map for parameterized guards. Required on this instance: an API that needs no authorization declares a named no-op guard, so every opt-out is explicit and one grep lists them all. Their input requirements merge into this API's contract input; their return values land typed on ctx.guardData. */
     guards: [TGuardsOpt] extends [never] ? LambderGuardsDeclarationRequired : TGuardsOpt;
 } : {
-    /** Named guards, run in declared order before input validation: a name, a non-empty list of names, or a non-empty { name: param } map for parameterized guards. Their input requirements merge into this API's contract input; their return values land typed on ctx.guardData. */
+    /** Named guards, run in declared order before input validation (after it for a guard declared runAt: "afterInputValidation"): a name, a non-empty list of names, or a non-empty { name: param } map for parameterized guards. Their input requirements merge into this API's contract input; their return values land typed on ctx.guardData. */
     guards?: TGuardsOpt;
 };
 /**
  * Rejects a key the options type does not have, which `const TOptions` would
  * otherwise wave through: inferring a generic from an object literal switches
- * excess-property checking off for the whole literal, so `requireSessionApiGuard`
- * (no trailing "s") or `maxResponseByte` would compile, be dropped in silence,
- * and leave the app running with the default. That matters most for exactly
- * the two flags a typo is worst on, since both exist to make a missing
+ * excess-property checking off for the whole literal, so
+ * `requireSessionApiGuard` (no trailing "s") or `maxResponseByte` would
+ * compile, be dropped in silence, and leave the app on the default. That is
+ * worst for the two require*ApiGuards flags, which exist to make a missing
  * authorization declaration a compile error. Mapping every surplus key to
  * `never` puts the error back on the key itself.
  */
@@ -270,22 +348,22 @@ export type LambderGivenOption<TOptions, TKey extends PropertyKey> = TKey extend
 type LambderOptionShape<TSessionData, TKey extends keyof LambderCreateOptions<TSessionData>> = NonNullable<LambderCreateOptions<TSessionData>[TKey]>;
 /**
  * The surplus-key rule one level down, over the option objects a typo is
- * worst on.
- *
- * Excess-property checking is off for the WHOLE literal under `const
- * TOptions`, nested objects included, so the top-level rule caught nothing
- * where it mattered most: `idempotency: { failOpn: false }` left the engine
- * failing open, `callerIdentitiy` left every public replay key a bearer
- * token, `session: { tokenCookieKe }` left the session cookie under its
- * default name, and `guards: { g: { sesion: true } }` left a guard reading a
- * context with no session. Each nested object is checked against the shape
- * its own option declares, so the error lands on the misspelled key.
+ * worst on. Excess-property checking is off for the WHOLE literal under
+ * `const TOptions`, nested objects included, and the top-level rule does not
+ * reach inside them. Unchecked, `idempotency: { failOpn: false }` would leave
+ * the engine failing open, `callerIdentitiy` would leave every public replay
+ * key a bearer token, `session: { tokenCookieKe }` would leave the session
+ * cookie under its default name, and `guards: { g: { sesion: true } }` would
+ * leave a guard reading a context with no session. Each nested object is
+ * checked against its own option's shape, so the error lands on the
+ * misspelled key.
  */
 export type LambderNestedOptionChecks<TSessionData, TOptions extends LambderCreateOptions<TSessionData>> = {
     session?: LambderNoExtraKeys<NonNullable<TOptions["session"]>, LambderOptionShape<TSessionData, "session">> & {
         cookie?: LambderNoExtraKeys<NonNullable<NonNullable<TOptions["session"]>["cookie"]>, LambderSessionCookieOptions>;
     };
     idempotency?: LambderNoExtraKeys<NonNullable<TOptions["idempotency"]>, LambderOptionShape<TSessionData, "idempotency">>;
+    crashes?: LambderNoExtraKeys<NonNullable<TOptions["crashes"]>, LambderOptionShape<TSessionData, "crashes">>;
     rateLimits?: LambderNoExtraKeys<NonNullable<TOptions["rateLimits"]>, LambderOptionShape<TSessionData, "rateLimits">> & {
         policies?: {
             [TPolicy in keyof NonNullable<TOptions["rateLimits"]>["policies"]]: LambderNoExtraKeys<NonNullable<TOptions["rateLimits"]>["policies"][TPolicy], LambderApiRateLimitPolicyConfig<LambderRenderContext>>;
@@ -303,12 +381,10 @@ export type LambderNestedOptionChecks<TSessionData, TOptions extends LambderCrea
     compression?: TOptions["compression"] extends object ? LambderNoExtraKeys<TOptions["compression"], LambderResponseCompressionSettings> : unknown;
 };
 /**
- * Everything create() refuses before an instance exists.
- *
- * One place rather than five checks spread through the constructor's wiring:
- * a value that cannot work is a startup error naming the option, not a 404 on
- * every API call (an apiPath with no leading slash) or a 500 on every response
- * (maxResponseBytes: 0) that an app discovers in production.
+ * Everything create() refuses before an instance exists, in one place: a
+ * value that cannot work is a startup error naming the option, not a 404 on
+ * every API call (an apiPath with no leading slash) or a 500 on every
+ * response (maxResponseBytes: 0) that an app discovers in production.
  */
 export declare const assertCreateOptions: (options: LambderCreateOptions<any>) => void;
 export {};

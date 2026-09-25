@@ -8,14 +8,13 @@
  *
  * A failed import is only half of "no such thing". The other half is a
  * bundler: package.json maps fs, path, zlib and crypto to `false` for the
- * browser, and webpack, Vite and esbuild each honour that by resolving the
- * import to a stub module rather than by rejecting it. Those stubs are
- * objects, so a truthiness test calls them usable and the caller dies on the
- * first real function it reaches. `expect` names a function the genuine
- * module exports; a module that cannot answer it is not the module.
+ * browser, and webpack, Vite and esbuild resolve such an import to a stub
+ * object rather than rejecting it, so a truthiness test would call the stub
+ * usable and the caller would die on its first real call. `expect` names a
+ * function the genuine module exports; a module without it is not the module.
  *
- * The answer is memoized either way, absence included, so the probe runs once
- * per module however often a request asks for it.
+ * The answer, absence included, is memoized, so the probe runs once per
+ * module.
  */
 const loadNodeModule = (load, expect) => {
     let pending = null;

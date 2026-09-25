@@ -22,7 +22,6 @@ import LambderCaller from '../src/client/LambderCaller.js';
 
 describe('Plugin System - Basic Usage', () => {
     it('should allow adding APIs via plugin', async () => {
-        // Define a simple plugin
         const userPlugin = <T>(lambder: Lambder<T>) => {
             return lambder
                 .addApi('getUser', {
@@ -33,13 +32,11 @@ describe('Plugin System - Basic Usage', () => {
                 });
         };
 
-        // Use the plugin
         const lambder = new Lambder({
             files: testPublicFiles(),
             apiPath: '/api'
         }).use(userPlugin);
 
-        // Test runtime execution
         const visitor = browse(lambder);
         const result = await visitor.apiOutcome('getUser', { userId: '123' });
 
@@ -120,7 +117,6 @@ describe('Plugin System - Multiple Plugins', () => {
                 });
         };
 
-        // Chain multiple plugins
         const lambder = new Lambder({
             files: testPublicFiles(),
             apiPath: '/api'
@@ -129,20 +125,16 @@ describe('Plugin System - Multiple Plugins', () => {
             .use(productPlugin)
             .use(orderPlugin);
 
-        // Test each API works
         const visitor = browse(lambder);
 
-        // Test user API
         const userResult = await visitor.apiOutcome('getUser', { userId: '123' });
         assertApiSuccess(userResult);
         expect(userResult.payload?.name).toBe('John');
 
-        // Test product API
         const productResult = await visitor.apiOutcome('getProduct', { productId: 'prod-456' });
         assertApiSuccess(productResult);
         expect(productResult.payload?.title).toBe('Test Product');
 
-        // Test order API
         const orderResult = await visitor.apiOutcome('createOrder', { userId: '123', productId: 'prod-456' });
         assertApiSuccess(orderResult);
         expect(orderResult.payload?.orderId).toBe('order-123');
@@ -248,7 +240,7 @@ describe('Plugin System - Mixed Usage', () => {
 describe('Plugin System - Routes', () => {
     it('should allow plugins to add routes', async () => {
         const healthPlugin = <T>(lambder: Lambder<T>) => {
-            // Now addRoute is chainable!
+            // addRoute chains, so a plugin can return the whole chain.
             return lambder
                 .addRoute('/health', (ctx, res) => {
                     return res.json({ status: 'healthy' });
@@ -411,11 +403,11 @@ describe('Plugin System - Non-Generic Plugins', () => {
 
 describe('Plugin System - Policy generics survive use()', () => {
     // Every policy generic at a non-default value: rate-limit policies,
-    // guards, idempotency and requireSessionApiGuards. 4.7.1's use() listed
-    // one generic too few, so an instance created with
-    // requireSessionApiGuards: true was not assignable to a plugin typed
-    // with its own derived type. This block is checked by `npm run
-    // typecheck`; vitest alone would not see a regression here.
+    // guards, idempotency and requireSessionApiGuards. If use() dropped one,
+    // an instance created with requireSessionApiGuards: true would not be
+    // assignable to a plugin typed with its own derived type. This block is
+    // checked by `npm run typecheck`; vitest alone would not see a
+    // regression here.
     const guards = {
         orgPermission: lambderGuard({ session: true, handler: (_ctx, _payload, permission: string) => ({ permission }) }),
         sessionOnly: lambderGuard({ session: true, handler: () => {} }),

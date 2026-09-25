@@ -32,23 +32,23 @@ export interface LambderDdbIdempotencyStoreOptions {
  *
  * Every claim carries a random ownerToken, and complete()/abandon() are
  * conditional on still holding it: an original that outlives its pending TTL
- * and loses the scope to a retry can no longer overwrite or delete the
- * retry's claim (both settle calls become silent no-ops instead). complete()
- * also requires the claim to be unexpired, so an owner whose claim ran out
- * reports "lost" whether or not TTL deletion has caught up with it, which is
- * what the memory store has always reported.
+ * and loses the scope to a retry cannot overwrite or delete the retry's claim
+ * (both settle calls become silent no-ops). complete() also requires the
+ * claim to be unexpired, so an owner whose claim ran out reports "lost"
+ * whether or not TTL deletion has caught up with it, as the memory store
+ * does. abandon() also requires the claim to be pending, so it never deletes
+ * a stored answer.
  *
- * Stored bodies are Brotli-compressed from 1KB by default (same scheme as
- * LambderDdbCache, see the `compression` option): the bodies are JSON
- * envelopes that typically shrink 5-10x, which cuts DynamoDB write units
- * and lets large responses fit the item budget instead of skipping replay
- * storage.
+ * Stored bodies are Brotli-compressed from 1KB by default (the scheme
+ * LambderDdbCache uses, see the `compression` option): JSON envelopes
+ * typically shrink 5-10x, which cuts write units and lets large responses
+ * fit the item budget instead of skipping replay storage.
  *
  * The scope key carries caller data (the client's idempotency key, and an
- * identity when one is configured), so a scope whose partition key would pass
- * DynamoDB's 2048-byte limit is refused here with an error that names the
- * limit, rather than reaching the table and coming back as a
- * ValidationException that reads as "the table is broken".
+ * identity when one is configured), so a partition key past DynamoDB's
+ * 2048-byte limit is refused here with an error naming the limit, rather
+ * than coming back from the table as a ValidationException that reads as
+ * "the table is broken".
  *
  * Table shape: string hash key `pk`, string range key `sk`, TTL on
  * `expiresAt`. Items are prefixed `IDEM#` by default, so the table can be
@@ -81,6 +81,8 @@ export declare class LambderDdbIdempotencyStore implements LambderIdempotencySto
     private static readItemBody;
     /** A stored answer as the engine reads it, with every field of the record checked rather than cast. */
     private static answerOf;
+    /** The request fingerprint an item keeps; see UNKNOWN_REQUEST_FINGERPRINT for one that keeps none. */
+    private static fingerprintOf;
     /**
      * Read the scope without claiming it: the stored response when a
      * completed, unexpired record exists, null otherwise (absent, pending, or
@@ -93,17 +95,22 @@ export declare class LambderDdbIdempotencyStore implements LambderIdempotencySto
      * returned ownerToken) and must call complete() or abandon(); "pending"
      * means another request owns it right now; "done" carries the stored
      * response to replay.
+     *
+     * One write either way: a refused claim hands back the item that refused
+     * it (ALL_OLD), so there is no read after it. That item is also how a
+     * claim the SDK retried after it had already landed recognizes itself:
+     * the item carries this call's own ownerToken, so the scope is ours
+     * rather than somebody else's in-flight original.
      */
-    begin(scopeKey: string, { pendingTtlSeconds }: {
+    begin(scopeKey: string, { pendingTtlSeconds, fingerprint }: {
         pendingTtlSeconds: number;
+        fingerprint: string;
     }): Promise<LambderIdempotencyBeginResult>;
     /**
      * Store the response for replays, overwriting the pending claim. Bodies
-     * from the compression option's minBytes are stored Brotli-compressed
-     * (they are JSON envelopes, which typically shrink 5-10x), cutting
-     * DynamoDB write units and letting large responses fit the item budget;
-     * smaller bodies, or all of them with compression off, stay plain.
-     * Returns:
+     * from the compression option's minBytes up are stored Brotli-compressed
+     * (see the class comment); smaller bodies, or all of them with
+     * compression off, stay plain. Returns:
      *
      * - "stored": the record is in place and will replay.
      * - "too-large": even compressed, the body exceeds the item budget;
@@ -111,13 +118,17 @@ export declare class LambderDdbIdempotencyStore implements LambderIdempotencySto
      * - "lost": the ownerToken no longer matches, i.e. the claim expired and
      *   a retry took the scope over; nothing was written.
      */
-    complete(scopeKey: string, ownerToken: string, { statusCode, headers, body, ttlSeconds }: LambderIdempotencyDoneRecord & {
+    complete(scopeKey: string, ownerToken: string, { statusCode, headers, body, fingerprint, ttlSeconds }: LambderIdempotencyDoneRecord & {
         ttlSeconds: number;
     }): Promise<"stored" | "too-large" | "lost">;
     /**
      * Release the claim without storing a response (crash, uncacheable
      * response), so a retry can execute. Conditional on still holding the
-     * claim; a lost claim makes this a silent no-op.
+     * claim AND on its still being pending: a lost claim makes this a silent
+     * no-op, and so does a settled record, whose owner token is still the
+     * caller's. The engine abandons after a complete() that threw, and one
+     * whose response was lost may have landed; deleting its record would
+     * hand the retry a free scope, and the operation would run twice.
      */
     abandon(scopeKey: string, ownerToken: string): Promise<void>;
 }

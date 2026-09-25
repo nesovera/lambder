@@ -128,7 +128,7 @@ const createMock = (gate: ReturnType<typeof makeGate>) => {
         mockApp.publicApi('ok', { input: z.object({ n: z.number() }), handler: async ({ payload }) => ({ doubled: payload.n * 2 }) }),
         mockApp.publicApi('refuse', async () => refuse('Nope.', { code: 'app/nope', title: 'No' })),
         mockApp.publicApi('deny', async () => refuse('Denied.', { notAuthorized: true })),
-        mockApp.publicApi('login', async ({ payload, sessions }) => { await sessions.createSession(payload.user, { userId: payload.user, role: payload.role }); return { ok: true }; }),
+        mockApp.publicApi('login', async ({ payload, sessionController }) => { await sessionController.createSession(payload.user, { userId: payload.user, role: payload.role }); return { ok: true }; }),
         mockApp.sessionApi('me', async ({ session }) => ({ userId: session.data.userId })),
         mockApp.sessionApi('guarded', { guards: { role: true }, handler: async ({ guardData }) => ({ role: guardData.role.role }) }),
         mockApp.publicApi('limited', { rateLimit: 'tight', handler: async () => ({ n: 1 }) }),
@@ -145,8 +145,8 @@ const createMock = (gate: ReturnType<typeof makeGate>) => {
         mockApp.publicApi('once', { idempotency: true, handler: async () => { counter += 1; return { counter }; } }),
         mockApp.publicApi('slow', { idempotency: true, handler: async () => { gate.enter(); await gate.opened; return { done: true }; } }),
         mockApp.publicApi('crash', async () => { throw new Error('boom'); }),
-        mockApp.publicApi('crashAfterLogin', async ({ sessions }) => {
-            await sessions.createSession('ada', { userId: 'ada', role: 'admin' });
+        mockApp.publicApi('crashAfterLogin', async ({ sessionController }) => {
+            await sessionController.createSession('ada', { userId: 'ada', role: 'admin' });
             throw new Error('boom');
         }),
         mockApp.publicApi('echo', async ({ payload }) => ({ count: payload.notes.length })),
@@ -212,9 +212,8 @@ const same = async <K extends keyof Contract & string>(
     // string, which is a call the engine refuses on both sides.
     options?: { guardInputs?: Record<string, unknown>; idempotencyKey?: unknown; from?: 'stranger' },
 ) => {
-    // The key is client data, and the matrix posts one that is not a string,
-    // which the typed caller has no way to express: what the two sides are
-    // compared on there is the engine's answer to a bad key.
+    // The typed caller has no way to express a non-string key, hence the
+    // cast: the sides are compared there on the engine's answer to it.
     const { from, ...rest } = options ?? {};
     const callOptions = rest as { guardInputs?: Record<string, unknown>; idempotencyKey?: string };
     const [serverCaller, mockCaller] = from === 'stranger'
@@ -326,8 +325,8 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
 
     it("an entry's own input schema: the same 422 as the server's schema", async () => {
         // The mock's schema is the mock's, because the contract is a type and
-        // the server's schemas do not exist on this side. What it answers a
-        // bad payload with was only ever compared to itself.
+        // the server's schemas do not exist on this side. Without this cell,
+        // what it answers a bad payload with is only compared to itself.
         const { seen, mockOutcome } = await same(createSides(), 'ok', { n: 'not a number' } as never);
         expect(seen.status).toBe(422);
         expect(mockOutcome.ok ? '' : mockOutcome.reason).toBe('validation');
@@ -394,17 +393,17 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
     it('an unknown api from a signed caller: the signature gate answers first on both sides', async () => {
         // A caller whose map holds a name the server does not have was built
         // against another contract, so both sides say versionExpired rather
-        // than apiNotFound. The mock used to resolve the name first and
-        // answered apiNotFound where the server did not.
+        // than apiNotFound. A mock that resolved the name first would answer
+        // apiNotFound where the server does not.
         const withNope = { ...serverSignatures, [await apiNameKeyOf('nope')]: 'from-another-contract' };
         const { seen } = await same(createSides({ apiSignatures: withNope }), 'nope', {});
         expect(seen.envelope).toEqual({ apiVersion: '1', payload: null, versionExpired: true });
     });
 
     it('a malformed compressed payload on an unknown api: the same 400 on both sides', async () => {
-        // The other half of the same pre-pass. The mock reached apiNotFound
-        // without ever restoring the payload, so a request the server rejected
-        // as unreadable came back 200-with-a-refusal from the mock.
+        // The other half of the same pre-pass. A mock that reached apiNotFound
+        // without restoring the payload would answer a request the server
+        // rejects as unreadable with a 200 and a refusal.
         const sides = createSides();
         const call = (transport: LambderApiTransport) => transport({
             apiPath: '/api', apiName: 'nope', version: '1', token: '', siteHost: '',
@@ -421,7 +420,7 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
 
     it('a crash: the same 500 envelope', async () => {
         const { seen, mockOutcome } = await same(createSides(), 'crash', {});
-        expect(seen).toMatchObject({ status: 500, envelope: { apiVersion: '1', payload: null, errorMessage: 'Internal server error.' } });
+        expect(seen).toMatchObject({ status: 500, envelope: { apiVersion: '1', payload: null, errorMessage: { type: 'error', content: 'Internal server error.' } } });
         expect(mockOutcome.ok ? '' : mockOutcome.reason).toBe('server');
     });
 

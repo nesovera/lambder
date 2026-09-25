@@ -65,7 +65,7 @@ describe('lambderTestApp: what the instance types', () => {
         app.visitor<'tenant'>({ host: 'app.test' });
 
         const visitor = app.visitor<'tenant'>({ guardInputsProvider: () => ({ tenant: { tenantId: 'acme' } }) });
-        // The options argument is no longer needed for a covered guard.
+        // A guard the provider covers needs no options argument.
         expect(await visitor.api('tenant.name', {})).toEqual({ tenantId: 'acme' });
         const signedIn = await app.signIn<'tenant'>('ada', { userId: 'ada', role: 'member' }, { guardInputsProvider: () => ({ tenant: { tenantId: 'acme' } }) });
         expect(await signedIn.api('tenant.name', {})).toEqual({ tenantId: 'acme' });

@@ -3,3 +3,5 @@ node_modules
 .npmrc
 # Review notes written during a release; the changelog is what ships.
 REVIEW-*.md
+# Rules for the AI assistant working in this checkout.
+CLAUDE.local.md

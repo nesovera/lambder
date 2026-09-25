@@ -1,13 +1,12 @@
 /**
  * The HTTP status codes a Lambder response may carry.
  *
- * In `shared/` rather than beside LambderResponse because it is HTTP
- * vocabulary with no relationship to the server's response class, and the
- * places that need it include ones a browser bundle reaches
- * (LambderApiRefusal, the mock's contract types). Importing it from `core/`
- * pulled `core/LambderResponse.ts` into the type graph of `lambder/client`,
- * and with it `aws-lambda`, so a browser-only consumer needed
- * `@types/aws-lambda` resolvable to typecheck a status union.
+ * In `shared/` rather than beside LambderResponse: it is HTTP vocabulary, and
+ * code a browser bundle reaches needs it (LambderApiRefusal, the mock's
+ * contract types). Importing it from `core/` would pull
+ * `core/LambderResponse.ts`, and with it `aws-lambda`, into the type graph of
+ * `lambder/client`, so a browser-only consumer would need `@types/aws-lambda`
+ * to typecheck a status union.
  */
 export type LambderHttpStatusCode =
     | 100 | 101

@@ -20,14 +20,34 @@ const store = new LambderDdbIdempotencyStore({ tableName: "app-policies", region
 ```
 peek(scope)                        // optional cheap read: a completed record to replay
   ↓ miss
-begin(scope, { pendingTtlSeconds })
+begin(scope, { pendingTtlSeconds, fingerprint })
   ├─ "new"      → this request owns the scope (ownerToken proves it)
   │                 ... run the work ...
-  │                 complete(scope, ownerToken, { statusCode, headers, body, ttlSeconds })
+  │                 complete(scope, ownerToken, { statusCode, headers, body, fingerprint, ttlSeconds })
   │                 or abandon(scope, ownerToken) when there is nothing to store
-  ├─ "pending"  → another request owns it right now (answer 409)
-  └─ "done"     → the stored response; replay it verbatim
+  ├─ "pending"  → another request owns it right now (answer 409), with its fingerprint
+  └─ "done"     → the stored response and its fingerprint; replay it verbatim
 ```
+
+`fingerprint` is a digest of the request the scope was claimed for (its
+payload). The store keeps it on the claim and on the settled
+record and hands it back with `"pending"` and `"done"`, and the engine refuses
+a key that arrives with a different one (`lambder/idempotency-key-reused`)
+instead of replaying another request's answer.
+
+An item that keeps no `fingerprint` was not written by this store, so no
+request can be shown to be the one it belongs to. It reads as a different
+request's (the fingerprint comes back as `""`, which no request has): the
+engine answers the key-reused 409, which a key scope moves past, rather than
+replaying an answer it cannot tie to the request or running the request over
+a claim that may still be in flight.
+
+`begin` is one conditional write either way: a refused claim comes back with
+the item that refused it (`ReturnValuesOnConditionCheckFailure: "ALL_OLD"`),
+so there is no read after it. That item is also how a claim the SDK retried,
+after the first attempt had already landed, recognizes itself: the item
+carries this call's own `ownerToken`, and the claim is answered `"new"` rather
+than `"pending"`, which answered the original 409.
 
 The first request claims the scope as `pending`; concurrent duplicates see
 `pending`; once the response is stored via `complete()`, replays get it back
@@ -44,12 +64,16 @@ both settle calls become silent no-ops instead.
 
 `complete()` requires the claim to be BOTH still owned and still live: an owner
 whose claim ran out reports `"lost"` whether or not DynamoDB's TTL deletion has
-caught up with the expired item, which is what the in-memory store has always
-reported for the same call.
+caught up with the expired item, which is what the in-memory store reports for
+the same call.
 
-`abandon()` is owner-only too, and it deletes whatever the owner holds, a
-settled record included. So it means "I am finished with this scope and there
-is nothing to replay", never "clean up after storing".
+`abandon()` is owner-only too, and it releases only a claim that is still
+pending (`ownerToken = :owner AND #state = :pending`): a settled record stays,
+even when the owner that stored it asks. A `complete()` can fail after it
+landed (a timeout on the SDK's last attempt), and the engine releases the
+claim after any failed `complete()`; deleting the stored answer there would
+hand the client's retry a free scope, and the operation would run twice.
+Kept, the retry replays it.
 
 ## Options
 
@@ -59,7 +83,7 @@ is nothing to replay", never "clean up after storing".
 | `region` | SDK default | AWS region |
 | `keyPrefix` | `"IDEM"` | Partition key prefix, so records stay separate from other systems in a shared table |
 | `compression` | `true` (`{ minBytes: 1024, quality: 5 }`) | Brotli compression of stored bodies. `false` stores every body plain; an object overrides the defaults. Records of either shape read back, so it can be switched on a live table |
-| `client` | new client | Supply your own `DynamoDBClient` |
+| `client` | shared default | Supply your own `DynamoDBClient`. Left out, every DynamoDB store for one region shares one client, so one connection pool |
 | `now` | `Date.now` | The clock claims and records are expired against, for tests |
 
 ## Methods
@@ -67,9 +91,9 @@ is nothing to replay", never "clean up after storing".
 | Method | Returns | Description |
 | --- | --- | --- |
 | `peek(scopeKey)` | `LambderIdempotencyDoneRecord \| null` | The stored response when a completed, unexpired record exists. An eventually-consistent read: a miss only means the caller proceeds to `begin()`, whose read is authoritative |
-| `begin(scopeKey, { pendingTtlSeconds })` | `{ state: "new", ownerToken } \| { state: "pending" } \| { state: "done", ...record }` | Claim the scope |
-| `complete(scopeKey, ownerToken, { statusCode, headers, body, ttlSeconds })` | `"stored" \| "too-large" \| "lost"` | Store the response for replay |
-| `abandon(scopeKey, ownerToken)` | `void` | Release the claim without storing a response, so a retry can execute |
+| `begin(scopeKey, { pendingTtlSeconds, fingerprint })` | `{ state: "new", ownerToken } \| { state: "pending", fingerprint } \| { state: "done", ...record }` | Claim the scope, keeping the request's fingerprint |
+| `complete(scopeKey, ownerToken, { statusCode, headers, body, fingerprint, ttlSeconds })` | `"stored" \| "too-large" \| "lost"` | Store the response for replay |
+| `abandon(scopeKey, ownerToken)` | `void` | Release a claim that is still pending without storing a response, so a retry can execute. A settled record stays |
 
 `complete()`'s answers:
 
@@ -114,9 +138,19 @@ field lists can produce one string. There are three forms of the first field:
 
 | Form | When | Example |
 | --- | --- | --- |
-| `s:<sessionKey>` | A session API: the session is the identity | `s:user_123` |
+| `s:<sessionKey>` | A session API: the signed-in user is the identity, so every session of one user shares the scope | `s:user_123` |
 | `i:<identity>` | A public API with `idempotency.callerIdentity` configured, which returns who the caller is (an API key, a tenant, a verified email) | `i:tenant-42` |
 | `k` | A public API with no `callerIdentity`: the key alone is the scope | `k` |
+
+An identity or a sessionKey is caller data, so the engine bounds it before a
+store sees it: past 1024 UTF-8 bytes as written into the scope (where each
+`|` and `\` is escaped to two), it is replaced by its sha256, as
+`i:h:<sha256 hex>` or `s:h:<sha256 hex>`. A device token several kilobytes
+long, the kind of credential `callerIdentity` is documented to read, would
+otherwise push the partition key past DynamoDB's limit below, and the store's
+refusal is a throw that `failOpen` turns into no idempotency for that caller.
+The digest keeps distinct callers in distinct scopes and keeps a credential
+that long out of the table; an identity that fits stays readable.
 
 A `k` scope carries no identity, so its keys have to be unguessable: anyone who
 can present one replays the answer stored under it, and a replay happens before
@@ -124,9 +158,10 @@ guards run. `callerIdentity` is what turns that bearer token back into
 something scoped to one caller.
 
 The whole partition key, prefix included, has to fit DynamoDB's 2048-byte
-limit; a longer one is refused by every method that touches the table, with an
-error that names the limit, rather than reaching the table and coming back as a
-`ValidationException`.
+limit. Lambder's engine keeps its scopes inside it (see above); a longer key
+from a direct caller is refused by every method that touches the table, with
+an error that names the limit, rather than reaching the table and coming back
+as a `ValidationException`.
 
 The `IDEM#` prefix means the table can be shared with `LambderDdbCache`
 (`CACHE#`) and `LambderDdbRateLimiter` (`RL#`) without key collisions. Keep
@@ -156,5 +191,7 @@ the SETTLED records go, soonest expiry first: a retry whose record was dropped
 executes again instead of replaying. Pending claims are never dropped to make
 room, because losing one lets two concurrent retries execute at once, which is
 the thing idempotency exists to prevent. A claim that cannot be made room for
-is reported as `"pending"` instead, so the duplicate is refused rather than
-run, and the saturation is logged once.
+is reported as `"pending"` instead, with the caller's own fingerprint, so the
+engine answers the in-flight 409 (retried under the same key) rather than the
+key-reused one, the duplicate is refused rather than run, and the saturation
+is logged once.

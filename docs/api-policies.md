@@ -23,9 +23,12 @@ version floor → signature gate → payload restore
   → rate limits keyed on the request alone (per: "ip")
   → session (session APIs)
   → idempotency replay lookup
-  → the remaining rate limits (per: "session", custom keys)
+  → rate limits keyed per session (per: "session"), and custom keys
+    charged before the guards (chargeAt: "beforeGuards")
   → guards
   → zod validation
+  → guards placed after validation (runAt: "afterInputValidation")
+  → rate limits keyed by a custom key (a payload field), by default
   → idempotency claim
   → handler
   → idempotency store
@@ -39,9 +42,26 @@ idempotent request answers its stored response without burning that quota or
 re-running guards (the original already passed them, and no handler executes
 either way).
 
-An `ip`-keyed policy is the exception, and deliberately so: it is checked
-before the session read and before the replay lookup, because those reads are
-what it exists to bound. A request carrying a bogus session cookie costs a
+A custom-keyed policy runs after the guards by default. Its key is a value
+the caller chose (an email address in the payload), so charged before a
+captcha guard it would let somebody who never solves the captcha spend a
+victim's per-email budget and keep them locked out of reset, register and
+send-code; after the guards, only a caller they let through is counted.
+
+The other way round is the right one for a limit on guessing a secret that a
+guard or the input schema checks: a one-time code checked by a guard, keyed per
+email. Charged after the guard, every wrong guess is refused before it is ever
+counted, and the code can be guessed without limit. Such a policy says
+`chargeAt: "beforeGuards"`, which charges it with the session-keyed limits,
+before the guards and the input schema, so every attempt counts. Anyone may
+spend that budget, so pair it with an IP limit. Do not count the attempts a
+guard refuses by charging the policy from inside the guard: the right guess
+would never be checked against the budget, so guessing continues past the
+limit.
+
+An `ip`-keyed policy is the exception the other way, and deliberately so: it
+is checked before the session read and before the replay lookup, because
+those reads are what it exists to bound. A request carrying a bogus session cookie costs a
 store scan plus a read per candidate, and a replay costs a store read of its
 own, so **a retry does count against an `ip` budget**. Size those policies for
 the store traffic a caller may cause, not for the handler runs they allow.
@@ -69,10 +89,14 @@ rateLimits: {
     limiter: new LambderDdbRateLimiter({ tableName: "app-rate-limiter", region: "us-east-1" }),
     // or new LambderMemoryRateLimiter() in a test, or your own LambderRateLimiter
     // The limiter being down means allow the request through rather than
-    // refuse it, with a console.error naming the policy. Default: true. It
-    // lives here rather than on an implementation, so a limiter of your own
-    // gets the same behaviour.
+    // refuse it, with a console.error naming the policy (once per error: a
+    // limiter that throws the same one for a run of requests is logged
+    // once). Default: true. It lives here rather than on an implementation,
+    // so a limiter of your own gets the same behaviour.
     failOpen: true,
+    // How much of an IPv6 address one per: "ip" counter covers. Default 64:
+    // a subscriber holds at least a /64 and may use any address inside it.
+    ipv6PrefixLength: 64,
     policies: {
         authPerIp:    { perMin: 5, perHour: 30, per: "ip" },
         writePerUser: { perMin: 30, per: "session" },   // only referable from addSessionApi (enforced at compile time)
@@ -97,14 +121,22 @@ rateLimits: {
 | Policy field | Values | Meaning |
 | --- | --- | --- |
 | Window caps | `perMin`, `per10Min`, `perHour`, `perDay`, `perWeek`, `perMonth` | Fixed-window limits; an absent or zero window is not enforced |
-| `per` | `"ip"`, `"session"`, or `lambderRateLimitKey({...})` | What one counter tracks. `"session"` is only referable from `addSessionApi` |
+| `per` | `"ip"`, `"session"`, `lambderRateLimitKey({...})`, or left out | What one counter tracks. `"session"` is only referable from `addSessionApi`. Left out, the handler that charges the policy supplies the key (see [Charging a policy from code](#charging-a-policy-from-code)), and no API can declare it |
 | `budget` | `"perApi"` (default), `"perPolicy"` | Whether each referencing API gets its own counter or they share one |
+| `chargeAt` | `"afterGuards"` (default), `"beforeGuards"` | For a custom-keyed policy only: charged after the guards and the input schema passed, or before them, so an attempt they refuse is counted too (a limit on guessing a code a guard checks) |
 | `errorMessage` | `LambderAppRefusalMessage` | The refusal body; inherits code `lambder/rate-limited` unless it sets a code |
 
-A custom key is bounded before any limiter sees it: past 1024 UTF-8 bytes the
-value your handler returned is replaced by its sha256 (`custom:h:<hex>`, the
-api and policy names still readable around it), and `per: "session"` keys are
-bounded the same way. Distinct callers stay on distinct counters, and no store
+A `per: "ip"` counter keys an IPv6 caller by its /64 (`ipv6PrefixLength`),
+since a subscriber, a VPS included, holds at least that much and may rotate
+the address inside it on every request; an IPv4-mapped address
+(`::ffff:192.0.2.1`) counts as its IPv4 address. `ctx.ip` stays the exact
+address.
+
+A custom key is bounded before any limiter sees it: past 1024 UTF-8 bytes, as
+written into the key (where each `|` and `\` is escaped to two), the value
+your handler returned is replaced by its sha256 (`custom:h:<hex>`, the api and
+policy names still readable around it), and `per: "session"` keys are bounded
+the same way. Distinct callers stay on distinct counters, and no store
 is handed a key longer than its own limit. It is bounded in the engine rather
 than in a limiter because a store refuses an over-long key by throwing, and a
 throw is what `failOpen` swallows: a 3,000-character payload field would
@@ -131,12 +163,69 @@ rateLimit: ["authPerIp", "codePerEmail"],
 rateLimit: { writePerUser: { perMin: 10 } },
 ```
 
+### Charging a policy from code
+
+A declared limit knows its key from the request. Some keys only a handler
+knows: one recipient of an invitation, found after the refusals that mean
+nothing is sent; one resource the caller keeps touching, looked up in the
+handler. For those, the handler charges a named policy itself:
+
+```typescript
+policies: {
+    // No `per`: the code charging it passes the key.
+    invitesPerRecipient: { perMonth: 3, budget: "perPolicy", errorMessage: { type: "warning", content: "That address was invited too often." } },
+    pairPerIp: { perMin: 5, per: "ip" },
+},
+
+lambder.addSessionApi("org.invite", { input, output, guards }, async (ctx, res) => {
+    // ...the refusals that mean nothing goes out come first; then:
+    await ctx.rateLimit("invitesPerRecipient", `${orgId}:${email.toLowerCase()}`);
+    await sendInvitation(orgId, email);
+    return res.api({ sent: true });
+});
+
+// A handler whose output has its own way of saying "too many" asks instead:
+lambder.addApi("device.pair", { input, output }, async (ctx, res) => {
+    const limited = await ctx.isRateLimited("pairPerIp");
+    if (limited) return res.api({ error: "too-many-attempts", retryAfterSeconds: limited.retryAfterSeconds });
+    // ...
+});
+```
+
+`ctx.rateLimit(policy, key?)` counts one attempt and, when the policy is over,
+refuses the request exactly as a declared limit does: a 429 envelope with
+`Retry-After` and the policy's `errorMessage` on an API call, and a plain 429
+with the same header and text on a route. `ctx.isRateLimited(policy, key?)`
+counts the same way and answers `false`, or the window that refused with its
+`retryAfterSeconds`, without refusing anything.
+
+Both go through the instance's own limiter, so `failOpen`, the key bounding
+below and `lambder/testing`'s memory limiter all apply to them; calling a
+limiter's `isRateLimited` directly skips all three. The policy name is checked
+where it is charged: an unknown name is a compile error, a policy without
+`per` requires the key, and a `per: "ip"` or `per: "session"` one refuses one,
+since the request supplies it. Where the types cannot tell (a hook's or a
+guard's context, which does not know the app's policies, or a policy typed as
+the general `LambderApiRateLimitPolicyConfig`), the key is optional and the
+same rule is checked when the charge runs. A policy keyed by
+`lambderRateLimitKey()` is charged only by the APIs that declare it, because
+its key is a slice of their payload. The budget is the policy's own:
+`"perApi"` counts a charge under the API making it (so it shares the counter a
+declared use of the same policy on that API charges), `"perPolicy"` counts
+every charge on one counter, and a charge from a route, which has no API,
+counts on the policy's counter too. So does a charge from a hook or the API
+fallback on a call whose posted name matches no registered API: that name is
+the caller's choice, and a fresh one per request would otherwise be a fresh
+counter.
+
 ### Rate limits count attempts, not successes
 
 Each window is one atomic conditional increment, and a refused request keeps
 every increment made before the refusal: the smaller windows of the refusing
-policy, every policy listed before it, and all of them when a later guard or
-the input validation refuses. There is no compensating decrement (it would give
+policy, every policy listed before it, and the ip and session keyed ones when a
+guard or the input validation refuses. A custom key is charged last, once the
+guards and the input have passed, unless its policy says `chargeAt:
+"beforeGuards"`. There is no compensating decrement (it would give
 up the conditional-ADD atomicity and add a write per refusal).
 
 So order stacked policies by which counter you want charged on refusals:
@@ -144,12 +233,13 @@ So order stacked policies by which counter you want charged on refusals:
 refuses, which is the abuse-resistant direction.
 
 List order governs charging only among policies of the same phase, though.
-`per: "ip"` policies are checked in their own pass before the session read
-(see [Request flow](#request-flow)), so they are always charged first,
-whatever position they hold in the list: `["codePerEmail", "authPerIp"]`
-charges the IP counter before the per-email cap can refuse, exactly as the
-other order does. Declared order is kept inside each phase, which is where the
-choice is yours.
+Each kind of key has its own pass (see [Request flow](#request-flow)):
+`per: "ip"` before the session read, `per: "session"` after it (with a
+custom key charged `"beforeGuards"`), and any other custom key after the
+guards. So `["codePerEmail", "authPerIp"]` charges the IP
+counter before the per-email cap can refuse, exactly as the other order does,
+and a guard that refuses leaves the per-email counter untouched. Declared
+order is kept inside each phase, which is where the choice is yours.
 
 The DynamoDB limiter is documented in [Rate limiter](./ddb-rate-limiter.md);
 `LambderMemoryRateLimiter` keeps the same windows and semantics in a `Map`, for
@@ -158,13 +248,16 @@ method the engine calls, as may a limiter of your own.
 
 ## Guards
 
-A guard is a named authorization check that runs before input validation.
-Guards can take a per-API parameter, require a session, consume input, and
-RETURN a typed value the handler reads from `ctx.guardData[name]`.
+A guard is a named authorization check that runs before input validation, or
+after it when it says so (below). Guards can take a per-API parameter, require
+a session, consume input, and RETURN a typed value the handler reads from
+`ctx.guardData[name]`.
 
 ```typescript
 guards: {
     captcha: lambderGuard({
+        // A token is spent once verified: check the input first (see below).
+        runAt: "afterInputValidation",
         guardInput: z.object({ captchaToken: z.string() }),
         handler: async (ctx, { captchaToken }) => {
             if (!await verifyCaptcha(captchaToken, ctx.ip)) refuse("Verification failed, please retry.");
@@ -186,7 +279,55 @@ guards: {
 
 A guard's handler is `(ctx, input, param)`: the render context (session-typed
 when `session: true`), its validated input slice or `undefined`, and the
-per-API parameter. A guard says no by throwing, with `refuse()` or a
+per-API parameter. The context carries `ctx.sessionController` like a handler's, so a
+guard that has to rotate or expire a session reaches it without holding the
+instance.
+
+### Guards that spend something
+
+Where a guard runs is its `runAt`: `"beforeInputValidation"` (the default) or
+`"afterInputValidation"`. Before validation, a caller it refuses learns
+nothing about the input and no async refinement in the schema runs for it. A
+guard that spends something on the request, a single-use captcha token above
+all, is better placed after validation: verified first, the token is gone,
+and a request then refused for a mistyped field sends the user back to solve
+a new one. `runAt: "afterInputValidation"` runs it after the input schema
+passes, and the limits keyed by a custom key after it, so a refused request
+neither spends the token nor charges the per-email budget.
+
+The trade-off is the default's reason turned around: the input schema now runs
+for callers this guard would refuse. Keep lookups (an "email is free"
+refinement) out of that API's schema and in its handler, or the schema becomes
+an oracle nobody has to solve a captcha to ask.
+
+Guards run in declared order within each placement. A guard's own input slice
+(`apiInput`) is read from the payload as it was sent, before the schema's
+transforms, wherever it is placed.
+
+### Typed to the app's session
+
+`lambderGuard()` stands alone, so it cannot know the app's session type, and a
+session guard built with it reads `ctx.session.data` as `any`. The same builder
+on `initLambder` is bound to the session type the app fixed there:
+
+```typescript
+const lambderInit = initLambder<SessionData>();
+
+const orgPermission = lambderInit.guard({
+    session: true,
+    // ctx.session.data is SessionData, ctx.sessionController a LambderSessionController<SessionData>
+    handler: (ctx, _payload, permission: PermissionString) => requirePermissionOrRefuse(ctx.session.data, permission),
+});
+
+export const lambderApp = lambderInit.create({ apiPath: "/api", session, guards: { orgPermission } });
+```
+
+`lambderInit.rateLimitKey()` is the same for a rate-limit key. The `guards`
+option is typed to the app's session too, so a guard built for another session
+type is refused where it is put into the map. Guard modules import
+`lambderInit` rather than the created instance, which keeps them free of the
+import cycle a module that both declares guards and needs the instance would
+otherwise have. A guard says no by throwing, with `refuse()` or a
 `LambderApiRefusal`, which the pipeline renders as the structured refusal
 envelope; guards build no responses, which is what lets the same engine run
 them on the server and in the mock runtime.
@@ -304,6 +445,13 @@ An API opts in with `idempotency: true` or `{ ttlSeconds, pendingTtlSeconds }`.
 Declaring it is a type error unless the instance was created with an
 idempotency store.
 
+**A first call to an idempotent API costs three store operations**: the replay
+lookup (a read that misses), the claim, and the settle that stores the answer.
+The lookup runs before the guards and the input validation so that a replay
+costs neither, which is why it is not folded into the claim: claiming there
+would hold a scope for a request the guards or the schema are about to refuse.
+A replay costs one read, and a duplicate of an in-flight original two.
+
 **`pendingTtlSeconds` has to outlive the handler it protects.** A claim exists
 so a crashed original does not block retries forever, so it expires on its own,
 and the default is five minutes. A Lambda may run for fifteen. If a claim
@@ -320,20 +468,32 @@ lambder.addApi("orders.place", { input, output, idempotency: { pendingTtlSeconds
 
 The client sends an `idempotencyKey` per call (see
 [Frontend client](./client.md#idempotency-keys)); generate it once per logical
-operation with `LambderCaller.createIdempotencyKey()` and reuse it on retries.
+operation with `createIdempotencyKey()` and reuse it on retries.
 
 - **Keys must be 16-200 characters and UNGUESSABLE random**; shorter keys
-  refuse with 400. On session APIs the scope is session + API name + key; on
+  refuse with 400. On session APIs the scope is the user (the session's
+  `sessionKey`, which every session of one user shares) + API name + key; on
   public APIs it is the key itself + API name (plus `callerIdentity` when the
   app supplies one, see below), deliberately NOT the client IP, because the
   retry idempotency exists for (a timeout followed by a network switch)
   frequently arrives from a new IP. Every field is escaped before it is
   joined, so a key containing the separator cannot land in another scope.
-- **The key is the whole identity: the payload is not part of it.** Reusing one
-  key across two different requests to the same API replays the first answer
-  for the second, and never runs the second handler. That is what makes a
-  retry safe, and it is also why a key belongs to one logical operation and
-  must not be recycled.
+- **A key belongs to the request it was first sent with.** The claim keeps a
+  fingerprint of that request (its payload as posted, whatever order its
+  keys arrive in), and a retry of the same request replays its answer. Guard
+  inputs stay out of it: a captcha or proof token is single use, so a genuine
+  retry carries a new one. Such a token belongs in `guardInputs`: one carried
+  inside the payload (checked by an `apiInput` guard) is part of the
+  fingerprint, and a retry with a fresh one reads as another request. The
+  same key with another payload is refused with
+  `lambder/idempotency-key-reused` (409) rather than handed the first answer:
+  a corrected order after a refusal would otherwise get the stored refusal
+  for the whole replay window, and an edited retry after a timeout would be
+  told the first order went through while only the first was placed. A key
+  scope passed as the call's key (see [Frontend
+  client](./client.md#idempotency-keys)) moves on by itself once an answer
+  settles the operation, so a corrected request is sent under a new key, and
+  keeps its key whenever the operation may already have run.
 - **A replay answers before guards run**, which is what keeps a retry from
   burning rate-limit quota or re-running authorization. On a public API, where
   the scope carries no identity by default, that means **a key is a bearer
@@ -367,7 +527,13 @@ operation with `LambderCaller.createIdempotencyKey()` and reuse it on retries.
   retry a different scope and defeat the replay it needs, which is why this is
   a decision for the app rather than something the engine does on its own.
   It runs once per call, however many times the scope is needed.
-  Session APIs need none of this: they already scope per session.
+  Session APIs need none of this: they already scope per user.
+
+  The identity (and a session API's sessionKey) is bounded the way a custom
+  rate-limit key is: past 1024 UTF-8 bytes as written into the scope, it is
+  replaced by its sha256 (`i:h:<hex>`), so a long credential can neither push
+  the scope past a store's key limit (a throw, which `failOpen` would turn
+  into no idempotency for that caller) nor sit in the table as it is.
 - **Concurrent duplicates** of an in-flight request refuse with 409. A
   duplicate that arrives while the original is still running takes the full
   path (its rate limits are charged and its guards run) before the 409, since
@@ -376,6 +542,11 @@ operation with `LambderCaller.createIdempotencyKey()` and reuse it on retries.
   the TTL, response headers included, so headers set via `res.setHeader` and
   `res.addHeader` replay too.
 - **A crashed original** releases its claim, so a retry actually retries.
+  The exception is an answer its output schema rejects or throws on
+  (`LambderApiOutputValidationError`, an async output schema and a transform
+  that throws included): the handler ran to its answer, so the framework's
+  crash answer is stored as the key's answer and replayed to retries, rather
+  than the operation running again on each one.
 - **The replay rule for failures**: RESPONSES are stored and replayed, refusals
   returned as envelopes (`res.api(null, { errorMessage })`) and thrown
   responses (`res.die.*`) included; EXCEPTIONS are not, so a thrown
@@ -388,26 +559,38 @@ operation with `LambderCaller.createIdempotencyKey()` and reuse it on retries.
   envelopes typically shrink 5-10x, which cuts DynamoDB write cost, and the
   ~350KB item budget applies to the COMPRESSED bytes, so even large responses
   usually stay replayable.
-- **Never stored**: responses with status >= 500, bodies over the budget even
+- **Never stored**: responses with status >= 500 (bar the output-schema crash
+  above), bodies over the budget even
   compressed, binary bodies (a base64 answer from `res.file()` or `res.raw()`,
   which no store carries), and responses that set cookies (replaying one
   request's Set-Cookie, session tokens for instance, into another would be
   wrong; such APIs still get in-flight 409 dedupe, just not replays).
-- **The record is the engine's copy**: the headers handed to the store cannot
-  be changed by anything the call does afterwards, so a cookie written later
-  in the call never lands in a stored answer, whatever a custom store does
-  with the object it is given.
+- **The record is the engine's copy**, both ways: the headers handed to the
+  store cannot be changed by anything the call does afterwards, and a replay
+  is built from a copy of what the store hands back, so a cookie written
+  later in the call, or by the call replaying it, never lands in a stored
+  answer, whatever a custom store does with the objects it holds.
 - **A store failure is logged**, and `failOpen` (default true) decides what
   happens next: true executes the request as if it carried no key, false
   refuses. The log names the API, never the scope key, which carries the
   caller's identity and their posted key.
 - **Claims are owner-checked**, so an original that stalls past the pending
   window can no longer overwrite or delete the claim a retry has since taken.
+- **A stored answer is never released.** Storing the answer can fail after it
+  landed (a timeout on the write's last attempt), so the engine releases the
+  claim after any failed store, and a release lets go of a claim that is
+  still pending and nothing else. A store that never landed frees the key for
+  the retry; one that landed keeps its answer, and the retry replays it
+  rather than running the operation again.
 - Requests without a key execute normally.
 
 The DynamoDB store is documented in [Idempotency store](./ddb-idempotency.md);
 `LambderMemoryIdempotencyStore` keeps the same claims, owner tokens and expiry in
-a `Map`. Both implement `LambderIdempotencyStore`.
+a `Map`. Both implement `LambderIdempotencyStore`, as may a store of your own.
+Such a store keeps the `fingerprint` it is given on the claim and on the
+record and reports it back with `"pending"` and `"done"` (a record it cannot
+tie to a request reports `""`, which no request matches), and its `abandon()`
+releases only a claim that is still pending.
 
 ## What is checked, and when
 
@@ -421,7 +604,7 @@ these throw before a request is ever served:
 | `guards: {}` or `rateLimits: { policies: {} }` at creation | An option declared with nothing in it configures nothing, and every API that names a guard or a policy would then be told the option was never given. |
 | `rateLimit: {}`, `rateLimit: []`, `rateLimit: { policy: undefined }` | Same rule for limits: the API announced one and enforced none. All three are compile errors too, built from the same non-empty construction the guards option uses. |
 | A policy with no window | A limiter needs something to count against. |
-| A window capped at a negative, fractional, `NaN` or `Infinity` value | A limiter is handed only limits it can act on. This is where the two implementations used to disagree. |
+| A window capped at a negative, fractional, `NaN` or `Infinity` value | A limiter is handed only limits it can act on, so the memory and DynamoDB limiters cannot disagree about one. |
 | An override that zeroes the policy's last enforced window | A policy must declare a window; an override may not take it away. Zero is legal on one window of several, since it leaves that one unenforced. |
 | `defaultTtlSeconds` or `ttlSeconds` that is not a positive whole number | `NaN` survives every expiry comparison, so an in-memory record with a `NaN` expiry never expires, while DynamoDB rejects the same number outright. |
 | A guard whose handler returns a `LambderResponse`, on any branch | A guard authorizes, it does not answer. The returned value would land on `ctx.guardData` and the call would carry on. The builder rejects it at build time, a conditional `LambderResponse | undefined` included, and the engine throws if a cast smuggles one through. |

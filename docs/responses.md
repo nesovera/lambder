@@ -9,14 +9,15 @@ per call site.
 
 | Property | Description | Example |
 | --- | --- | --- |
-| `host` | Request host | `"www.example.com"` |
-| `path` | Request path | `"/api"` |
+| `host` | Request host: the Host the gateway received, or a header listed in [`trustedHostHeaders`](./configuration.md#trustedhostheaders) (never read on a direct invoke) | `"www.example.com"` |
+| `path` | Request path, decoded exactly once whatever gateway sent it, with two escapes kept: a slash inside a segment stays `%2F`, so it is never a separator, and a percent sign stays `%25`. What routes match and files are looked up by (see [Routing](./routing.md)) | `"/hakkımızda"` |
+| `rawPath` | The path as the gateway delivered it (stage stripped): percent-encoded from a REST API or a Function URL, decoded from an HTTP API | `"/hakk%C4%B1m%C4%B1zda"` |
 | `pathParams` | Path parameters (routes) | `{ userId: "123" }` |
 | `method` | HTTP method | `"GET"`, `"POST"` |
 | `get` | Query parameters | `{ page: "1" }` |
 | `post` | POST body, parsed as JSON with a urlencoded fallback (`Record<string, unknown>`) | `{ name: "John" }` |
 | `rawBody` | Decoded request body as received (webhook signatures) | `'{"a":1}'` |
-| `ip` | The address the gateway observed, or the leftmost entry of a header listed in [`trustedClientIpHeaders`](./configuration.md#trustedclientipheaders); no header is trusted by default | `"1.2.3.4"` |
+| `ip` | The address the gateway observed, or the leftmost entry of a header listed in [`trustedClientIpHeaders`](./configuration.md#trustedclientipheaders); no header is trusted by default, and none on a direct invoke | `"1.2.3.4"` |
 | `header(name)` | Case-insensitive request header lookup | `ctx.header("accept-language")` |
 | `headers` | Request headers | `{ "Content-Type": "..." }` |
 | `cookie` | Cookies (the first value when a name arrived more than once) | `{ rememberMe: "true" }` |
@@ -31,6 +32,8 @@ per call site.
 | `eventFormat` | Which payload format the event arrived in | `"v1"`, `"v2"` |
 | `responseHeaders` | Headers written during the call (`res.setHeader`, `res.addHeader`, session cookies), applied onto the response at the end | |
 | `logList` | Entries for the envelope's `logList` channel (`res.logToApiResponse`) | |
+| `sessionController` | The request's session controller: create, rotate, refresh and end sessions (see [Sessions](./sessions.md)) | `ctx.sessionController.createSession(userId, data)` |
+| `rateLimit(policy, key?)`, `isRateLimited(policy, key?)` | Charge a named rate-limit policy from code: refuse with a 429 when it is over, or answer the verdict (see [API policies](./api-policies.md#charging-a-policy-from-code)) | `await ctx.rateLimit("invitesPerRecipient", email)` |
 
 ## Response methods
 
@@ -44,7 +47,7 @@ All accept an options object: `{ statusCode?, headers?, cacheControl?, compress?
 | `res.xml(data, options?)` | XML response (accepts `xml` tagged templates) |
 | `res.html(data, options?)` | HTML response (accepts `html` tagged templates) |
 | `res.status(code, body?, options?)` | Response with any status code |
-| `res.redirect(url, statusCode?, options?)` | Redirect, default 302 |
+| `res.redirect(url, statusCode?, options?)` | Redirect, default 302. A path stays on this origin: a leading run of slashes and backslashes collapses to one slash (`//evil.example` is another host), so a Location built from the decoded `ctx.path` cannot leave the site; another host is named with its scheme. What a URL may not carry as it is (control characters, a space, a backslash, anything outside ASCII) is percent-encoded, so it cannot end the header either; `%` is left alone |
 | `res.status404(data, options?)` | 404 Not Found |
 | `res.versionExpired(options?)` | The stale-client refusal envelope, the one the signature gate answers: `res.api(null, { versionExpired: true })` |
 | `res.fileBase64(base64, mimeType, options?)` | File from base64 content |
@@ -64,13 +67,16 @@ hooks, `getResponseBuilder`) accept anything.
 `{ notAuthorized, message, errorMessage, versionExpired, sessionExpired, logList, crash }`.
 
 `crash` carries a failure described in full (name, message, stack, cause chain,
-and the request id it happened under), built with `describeCrash(err, ctx)` in
-a global error handler. `LambderInvokeCaller` reads it back as the cause of the
-error it throws.
+and the request id it happened under), built with `describeCrash(err, ctx)`.
+The framework's own 500 sets it for a caller the app's `crashes.reveal` trusts
+(see [Crashes](./routing.md#crashes)); a global error handler that writes its
+own answer sets it itself. `LambderCaller` leaves it on the outcome's
+`response`, and `LambderInvokeCaller` reads it back as the cause of the error
+it throws.
 
-Be deliberate about putting it on a response: the framework never sets `crash`
-itself and never withholds it. It goes to whoever the handler that set it
-answered, in the same JSON envelope as everything else, so a browser that asked
+Be deliberate about revealing it: the framework sets `crash` only where
+`crashes.reveal` said yes, and never withholds one a handler set. It goes to
+whoever the answer that carries it goes to, in the same JSON envelope as everything else, so a browser that asked
 receives the stack trace whether or not anything on the page displays it.
 `LambderCaller` not surfacing the field is a display choice in one client, not
 a gate. There is no trustworthy in-band signal to condition it on either: the
@@ -122,9 +128,22 @@ helpers that do not hold a resolver, use
 Responses are finalized once at the end of the request:
 
 - **Automatic compression** when the client accepts it, the body is
-  compressible and large enough.
+  compressible and large enough. On a REST API only when `compression` is
+  named at creation; see [Event formats](./routing.md#event-formats).
 - **Automatic ETag** plus `If-None-Match` 304 handling on GET/HEAD 200
-  responses.
+  responses. The tag is taken over the uncompressed body and names the
+  encoding (`"<hash>-br"`), so each representation has its own and a
+  revalidation that ends in a 304 compresses nothing.
+- **Text as text.** A text body (a string, or a text-typed Buffer that is
+  valid UTF-8) goes out as text when it is not compressed; only bytes and
+  compressed bodies are base64.
+- **No shared copy of a cookie.** An answer that carries a Set-Cookie and a
+  Cache-Control that is neither `private` nor `no-store` goes out `private`:
+  `public`, `s-maxage` and `immutable` are dropped and the rest is kept. A
+  shared cache that stores an answer with its Set-Cookie hands that cookie to
+  everyone, so a hook that sets a guest cookie on a content-hashed asset
+  would otherwise publish one visitor's session for a year. This applies to
+  every answer, the 304 and the crash answer included.
 - **A clear error** when the body would exceed Lambda's ~6MB cap
   (`maxResponseBytes`, default 5,500,000).
 
@@ -151,6 +170,13 @@ initLambder().create({
     // compression: false,  // no automatic compression at all
 });
 ```
+
+On a REST API (payload v1) compression is off unless `compression` is given
+at creation, `true` included: API Gateway passes a compressed body on only
+for the API's `binaryMediaTypes`, so turn it on together with
+`binaryMediaTypes: ["*/*"]`, or leave it to the REST API's own
+`minimumCompressionSize`. HTTP APIs and Function URLs pass base64 through
+and compress by default.
 
 `compression` is the same option vocabulary the DynamoDB stores, sessions and
 the request-payload path use: `true` for that site's defaults, `false` for off,

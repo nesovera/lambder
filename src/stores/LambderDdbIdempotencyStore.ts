@@ -24,15 +24,25 @@ const COMPRESSION_DEFAULTS: LambderCompressionSettings = { minBytes: 1024, quali
  */
 const MAX_STORED_BODY_BYTES = 350_000;
 /**
- * Ceiling on a stored body's declared length, which is the budget the restore
+ * Ceiling on a stored body's declared length, the budget the restore
  * decompresses under. The store's own writes stay far inside it (a response
- * that reaches a client at all is a few megabytes at most, and the compressed
- * bytes have to fit MAX_STORED_BODY_BYTES), so a record declaring more than
- * this is one this store did not write, and taking its word for it would let
- * a few hundred kilobytes of Brotli expand until the function dies. The
- * cache bounds the same number the same way, against its maxValueBytes.
+ * that reaches a client is a few megabytes at most, and the compressed bytes
+ * must fit MAX_STORED_BODY_BYTES), so a record declaring more is not this
+ * store's, and trusting it would let a few hundred kilobytes of Brotli expand
+ * until the function dies. The cache bounds the same number against its
+ * maxValueBytes.
  */
 const MAX_REPLAY_BODY_BYTES = 32 * 1024 * 1024;
+
+/**
+ * What an item that keeps no fingerprint reports: one no request matches,
+ * since the engine's fingerprints are never empty. Such an item was not
+ * written by this store (every claim and record it writes keeps one), so the
+ * engine refuses the key as reused, a 409 a key scope moves past, rather than
+ * replaying an answer it cannot tie to the request or reading the scope as
+ * free and running the request over it.
+ */
+const UNKNOWN_REQUEST_FINGERPRINT = "";
 
 /**
  * A stored item as this store writes it. Nothing validates what comes back
@@ -50,6 +60,7 @@ type LambderIdempotencyItem = {
     bodyBr?: { B?: Uint8Array };
     bodyBytes?: { N?: string };
     expiresAt?: { N?: string };
+    fingerprint?: { S?: string };
 };
 
 /**
@@ -102,23 +113,23 @@ export interface LambderDdbIdempotencyStoreOptions {
  *
  * Every claim carries a random ownerToken, and complete()/abandon() are
  * conditional on still holding it: an original that outlives its pending TTL
- * and loses the scope to a retry can no longer overwrite or delete the
- * retry's claim (both settle calls become silent no-ops instead). complete()
- * also requires the claim to be unexpired, so an owner whose claim ran out
- * reports "lost" whether or not TTL deletion has caught up with it, which is
- * what the memory store has always reported.
+ * and loses the scope to a retry cannot overwrite or delete the retry's claim
+ * (both settle calls become silent no-ops). complete() also requires the
+ * claim to be unexpired, so an owner whose claim ran out reports "lost"
+ * whether or not TTL deletion has caught up with it, as the memory store
+ * does. abandon() also requires the claim to be pending, so it never deletes
+ * a stored answer.
  *
- * Stored bodies are Brotli-compressed from 1KB by default (same scheme as
- * LambderDdbCache, see the `compression` option): the bodies are JSON
- * envelopes that typically shrink 5-10x, which cuts DynamoDB write units
- * and lets large responses fit the item budget instead of skipping replay
- * storage.
+ * Stored bodies are Brotli-compressed from 1KB by default (the scheme
+ * LambderDdbCache uses, see the `compression` option): JSON envelopes
+ * typically shrink 5-10x, which cuts write units and lets large responses
+ * fit the item budget instead of skipping replay storage.
  *
  * The scope key carries caller data (the client's idempotency key, and an
- * identity when one is configured), so a scope whose partition key would pass
- * DynamoDB's 2048-byte limit is refused here with an error that names the
- * limit, rather than reaching the table and coming back as a
- * ValidationException that reads as "the table is broken".
+ * identity when one is configured), so a partition key past DynamoDB's
+ * 2048-byte limit is refused here with an error naming the limit, rather
+ * than coming back from the table as a ValidationException that reads as
+ * "the table is broken".
  *
  * Table shape: string hash key `pk`, string range key `sk`, TTL on
  * `expiresAt`. Items are prefixed `IDEM#` by default, so the table can be
@@ -202,7 +213,13 @@ export class LambderDdbIdempotencyStore implements LambderIdempotencyStore {
             statusCode: storedNumber(item.statusCode?.N, 200),
             headers: LambderDdbIdempotencyStore.readItemHeaders(item),
             body: await LambderDdbIdempotencyStore.readItemBody(item),
+            fingerprint: LambderDdbIdempotencyStore.fingerprintOf(item),
         };
+    }
+
+    /** The request fingerprint an item keeps; see UNKNOWN_REQUEST_FINGERPRINT for one that keeps none. */
+    private static fingerprintOf(item: LambderIdempotencyItem): string {
+        return item.fingerprint?.S ?? UNKNOWN_REQUEST_FINGERPRINT;
     }
 
     /**
@@ -228,10 +245,17 @@ export class LambderDdbIdempotencyStore implements LambderIdempotencyStore {
      * returned ownerToken) and must call complete() or abandon(); "pending"
      * means another request owns it right now; "done" carries the stored
      * response to replay.
+     *
+     * One write either way: a refused claim hands back the item that refused
+     * it (ALL_OLD), so there is no read after it. That item is also how a
+     * claim the SDK retried after it had already landed recognizes itself:
+     * the item carries this call's own ownerToken, so the scope is ours
+     * rather than somebody else's in-flight original.
      */
-    async begin(scopeKey: string, { pendingTtlSeconds }: { pendingTtlSeconds: number }): Promise<LambderIdempotencyBeginResult> {
+    async begin(scopeKey: string, { pendingTtlSeconds, fingerprint }: { pendingTtlSeconds: number; fingerprint: string }): Promise<LambderIdempotencyBeginResult> {
         const nowSeconds = this.nowSeconds();
         const ownerToken = await newOwnerToken();
+        let item: LambderIdempotencyItem | undefined;
         try {
             const { client, sdk } = await this.ready();
             await client.send(new sdk.PutItemCommand({
@@ -240,31 +264,30 @@ export class LambderDdbIdempotencyStore implements LambderIdempotencyStore {
                     ...this.itemKey(scopeKey),
                     state: { S: "pending" },
                     ownerToken: { S: ownerToken },
+                    fingerprint: { S: fingerprint },
                     expiresAt: { N: String(nowSeconds + pendingTtlSeconds) },
                 },
                 // Every clause is one a missing attribute can satisfy rather
                 // than block: DynamoDB reads a comparison whose operand path
-                // is absent as FALSE, so a condition that only asked
-                // `expiresAt <= :now` refused an item carrying no expiry for
-                // ever, and a pending one of those deadlocked its scope with
-                // no TTL able to retire it.
+                // is absent as FALSE, so `expiresAt <= :now` alone would
+                // refuse an item carrying no expiry for ever, and a pending
+                // one would deadlock its scope with no TTL able to retire it.
                 ConditionExpression: "attribute_not_exists(pk) OR attribute_not_exists(expiresAt) OR expiresAt <= :now",
                 ExpressionAttributeValues: { ":now": { N: String(nowSeconds) } },
+                ReturnValuesOnConditionCheckFailure: "ALL_OLD",
             }));
             return { state: "new", ownerToken };
         } catch (error) {
             if(!isConditionalCheckFailure(error)) throw error;
+            item = (error as { Item?: LambderIdempotencyItem }).Item;
         }
 
-        const { client, sdk } = await this.ready();
-        const existing = await client.send(new sdk.GetItemCommand({
-            TableName: this.tableName,
-            Key: this.itemKey(scopeKey),
-            ConsistentRead: true,
-        }));
-        const item: LambderIdempotencyItem | undefined = existing.Item;
-        // Deleted between the put and the read: treat as in-flight, the retry resolves it.
-        if(!item) return { state: "pending" };
+        // Refused with no item to show for it: gone again by the time the
+        // condition was read, which the next retry resolves. The caller's own
+        // fingerprint keeps it the in-flight 409, which a client retries
+        // under the same key.
+        if(!item) return { state: "pending", fingerprint };
+        if(item.ownerToken?.S === ownerToken) return { state: "new", ownerToken };
         // The same expiry test peek runs, because the condition above cannot
         // make it: an item whose expiresAt is present but unreadable (a
         // partial write, another writer on a shared table) refuses the claim
@@ -273,16 +296,14 @@ export class LambderDdbIdempotencyStore implements LambderIdempotencyStore {
         // scope reads as pending rather than as done.
         const live = storedNumber(item.expiresAt?.N, 0) > nowSeconds;
         if(live && item.state?.S === "done") return { state: "done", ...await LambderDdbIdempotencyStore.answerOf(item) };
-        return { state: "pending" };
+        return { state: "pending", fingerprint: LambderDdbIdempotencyStore.fingerprintOf(item) };
     }
 
     /**
      * Store the response for replays, overwriting the pending claim. Bodies
-     * from the compression option's minBytes are stored Brotli-compressed
-     * (they are JSON envelopes, which typically shrink 5-10x), cutting
-     * DynamoDB write units and letting large responses fit the item budget;
-     * smaller bodies, or all of them with compression off, stay plain.
-     * Returns:
+     * from the compression option's minBytes up are stored Brotli-compressed
+     * (see the class comment); smaller bodies, or all of them with
+     * compression off, stay plain. Returns:
      *
      * - "stored": the record is in place and will replay.
      * - "too-large": even compressed, the body exceeds the item budget;
@@ -293,7 +314,7 @@ export class LambderDdbIdempotencyStore implements LambderIdempotencyStore {
     async complete(
         scopeKey: string,
         ownerToken: string,
-        { statusCode, headers, body, ttlSeconds }: LambderIdempotencyDoneRecord & { ttlSeconds: number },
+        { statusCode, headers, body, fingerprint, ttlSeconds }: LambderIdempotencyDoneRecord & { ttlSeconds: number },
     ): Promise<"stored" | "too-large" | "lost"> {
         const nowSeconds = this.nowSeconds();
 
@@ -330,15 +351,15 @@ export class LambderDdbIdempotencyStore implements LambderIdempotencyStore {
                     statusCode: { N: String(statusCode) },
                     headersJson: { S: JSON.stringify(headers) },
                     ...bodyAttributes,
+                    fingerprint: { S: fingerprint },
                     expiresAt: { N: String(nowSeconds + ttlSeconds) },
                 },
                 // The claim has to be BOTH still owned and still live. Owner
-                // alone let an owner whose claim had already expired store
-                // over it, because DynamoDB's TTL deletion is lazy and the
-                // expired item is usually still sitting there. The memory
-                // store drops an expired entry on read and answered "lost"
-                // for the same call, so the two disagreed, and DynamoDB's
-                // answer depended on whether AWS had got round to the sweep.
+                // alone would let an owner whose claim has expired store over
+                // it, since DynamoDB's TTL deletion is lazy and the expired
+                // item is usually still there; the memory store answers "lost"
+                // for the same call, and DynamoDB's answer would depend on
+                // whether AWS had run the sweep yet.
                 ConditionExpression: "ownerToken = :owner AND expiresAt > :now",
                 ExpressionAttributeValues: { ":owner": { S: ownerToken }, ":now": { N: String(nowSeconds) } },
             }));
@@ -352,7 +373,11 @@ export class LambderDdbIdempotencyStore implements LambderIdempotencyStore {
     /**
      * Release the claim without storing a response (crash, uncacheable
      * response), so a retry can execute. Conditional on still holding the
-     * claim; a lost claim makes this a silent no-op.
+     * claim AND on its still being pending: a lost claim makes this a silent
+     * no-op, and so does a settled record, whose owner token is still the
+     * caller's. The engine abandons after a complete() that threw, and one
+     * whose response was lost may have landed; deleting its record would
+     * hand the retry a free scope, and the operation would run twice.
      */
     async abandon(scopeKey: string, ownerToken: string): Promise<void> {
         try {
@@ -360,8 +385,10 @@ export class LambderDdbIdempotencyStore implements LambderIdempotencyStore {
             await client.send(new sdk.DeleteItemCommand({
                 TableName: this.tableName,
                 Key: this.itemKey(scopeKey),
-                ConditionExpression: "ownerToken = :owner",
-                ExpressionAttributeValues: { ":owner": { S: ownerToken } },
+                // `state` is a DynamoDB reserved word, hence the name placeholder.
+                ConditionExpression: "ownerToken = :owner AND #state = :pending",
+                ExpressionAttributeNames: { "#state": "state" },
+                ExpressionAttributeValues: { ":owner": { S: ownerToken }, ":pending": { S: "pending" } },
             }));
         } catch (error) {
             if(!isConditionalCheckFailure(error)) throw error;

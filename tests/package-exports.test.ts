@@ -3,9 +3,8 @@
  *
  * Every other test imports `../src/...` directly, which never touches
  * package.json's `exports` map, the `browser` field, or the built `dist`. So
- * a renamed subpath, a stale mapping or a missing build could ship and the
- * whole suite would stay green: exactly what happened to `./testing` when it
- * became `./mock`.
+ * a renamed subpath, a stale mapping or a missing build could ship with the
+ * rest of the suite green.
  *
  * These import by package name, which Node resolves through the package's own
  * exports map (self-reference), so what runs here is what a consumer gets.
@@ -28,11 +27,11 @@ const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.me
 /**
  * Every Node built-in, in both spellings a source file can write.
  *
- * Read from the runtime rather than listed by hand: the list this replaced was
- * the four names the `browser` field happens to stub, so a static
- * `import { Buffer } from "buffer"` or anything out of `stream`, `util`, `os`
- * or `events` passed the browser-safety gate silently and reached a bundle as
- * a real resolve.
+ * Read from the runtime rather than listed by hand: a list of the names the
+ * `browser` field happens to stub would let a static
+ * `import { Buffer } from "buffer"`, or anything out of `stream`, `util`,
+ * `os` or `events`, pass the browser-safety gate silently and reach a bundle
+ * as a real resolve.
  */
 const NODE_BUILTINS = new Set([...builtinModules, ...builtinModules.map(name => `node:${name}`)]);
 const isNodeBuiltin = (specifier: string) => NODE_BUILTINS.has(specifier) || specifier.startsWith('node:');
@@ -42,8 +41,8 @@ const isNodeBuiltin = (specifier: string) => NODE_BUILTINS.has(specifier) || spe
  * per clause.
  *
  * `import { type Foo, bar }` imports a value: the clause STARTS with `type`
- * but `bar` is still a real edge. A "does it start with type" reading called
- * that type-only and let it past the checks below.
+ * but `bar` is still a real edge. A "does it start with type" reading would
+ * call that type-only and let it past the checks below.
  */
 const isTypeOnlyClause = (clause: string) => {
     const trimmed = clause.trim();
@@ -68,10 +67,10 @@ type ModuleImports = {
  * would follow it.
  *
  * Property checks on the namespace cannot see this: an entry can re-export
- * one value and drag a whole library in behind it. That is what happened to
- * the cookie jar, whose tough-cookie/tldts pair carries the public suffix
- * list and took the client bundle from 372 KB to 27 KB once the package
- * declared it has no side effects.
+ * one value and drag a whole library in behind it. The cookie jar's
+ * tough-cookie/tldts pair carries the public suffix list, and it stays out of
+ * a client bundle only because the package declares no side effects (27 KB
+ * against 372 KB, measured by hand with a bundler).
  *
  * This is a source-graph proxy for the bundle, not the bundle: it says what a
  * bundler would be ASKED to resolve. That is the property the entries promise
@@ -79,8 +78,7 @@ type ModuleImports = {
  * only), and it is also the one a bundler cannot check for the type graph at
  * all, since type-only edges never reach a bundler and still bind every
  * consumer's typecheck. A real bundle measurement needs a bundler this
- * repository does not install; the byte figures above were taken by hand with
- * one.
+ * repository does not install.
  */
 const sourceGraph = (entryFile: string) => {
     const graph = new Map<string, ModuleImports>();
@@ -123,9 +121,9 @@ const sourceGraph = (entryFile: string) => {
     };
 };
 
-const ENTRY_FILES = ['../src/index.ts', '../src/client.ts', '../src/mock.ts', '../src/testing.ts'] as const;
+const ENTRY_FILES = ['../src/index.ts', '../src/client.ts', '../src/mock.ts', '../src/testing.ts', '../src/build.ts'] as const;
 
-/** The four entry graphs merged: every module the package can reach, once. */
+/** The five entry graphs merged: every module the package can reach, once. */
 const wholeSourceTree = () => {
     const merged = new Map<string, ModuleImports>();
     for(const entryFile of ENTRY_FILES){
@@ -141,7 +139,7 @@ const expectBrowserSafe = (entry: ReturnType<typeof sourceGraph>) => {
         // because aws-lambda on this graph makes @types/aws-lambda a typecheck
         // dependency of every browser-only consumer, and an SDK type a
         // dependency of one that installed no SDK; a Node built-in reached
-        // through `import { type Foo, bar }` is a value edge that only looked
+        // through `import { type Foo, bar }` is a value edge that only looks
         // type-only.
         for(const specifier of [...imports.value, ...imports.type]){
             expect(specifier.startsWith('@aws-sdk/'), `${file} imports ${specifier}`).toBe(false);
@@ -195,10 +193,9 @@ describe('The published entry points', () => {
         // Type-only edges are followed too: a type reaching into core/ pulls
         // aws-lambda into the type graph of this entry, so a browser-only
         // consumer cannot typecheck without @types/aws-lambda. The allowed
-        // neighbourhood is stated the same way the mock's is, so the whole
-        // claim is pinned rather than the one directory a reader thought of:
-        // the entry reached neither core/ nor session/ and only core/ was
-        // checked.
+        // neighbourhood is stated positively, as the mock's is, so the whole
+        // claim is pinned rather than only the directories a reader thought
+        // to exclude.
         const allowed = /^(client\.ts|client\/|shared\/)/;
         for(const file of client.modules){
             expect(allowed.test(file), `the client entry reaches ${file}`).toBe(true);
@@ -212,13 +209,12 @@ describe('The published entry points', () => {
         expect(packageJson.sideEffects).toBe(false);
     });
 
-    it('keeps the mock entry browser-safe too, which nothing used to check', () => {
-        // The gate was written for the client entry and the mock entry got an
-        // "it resolves" test, so `lambder/mock` reached aws-lambda and
-        // @aws-sdk/client-lambda through its invoke transport and its guards:
-        // 29 typecheck errors for a frontend that adopted it without @types
-        // installed, and zero for the entry beside it. The rule is the same
-        // rule; only the allowed neighbourhood differs.
+    it('keeps the mock entry browser-safe too', () => {
+        // `lambder/mock` runs in a frontend as the client entry does. Reaching
+        // aws-lambda or @aws-sdk/client-lambda through its invoke transport or
+        // its guards would fail the typecheck of a frontend that adopts it
+        // without those @types installed. The rule is the client entry's;
+        // only the allowed neighbourhood differs.
         const mock = sourceGraph('../src/mock.ts');
 
         // The mock runtime is the API core over the memory stores: it may
@@ -246,9 +242,22 @@ describe('The published entry points', () => {
         // The test app exists to put other stores under a built instance.
         // Nothing an app ships should be able to reach it, and "nothing else
         // imports it" is only true while something checks.
-        for(const entryFile of ['../src/index.ts', '../src/client.ts', '../src/mock.ts']){
+        for(const entryFile of ['../src/index.ts', '../src/client.ts', '../src/mock.ts', '../src/build.ts']){
             const reached = sourceGraph(entryFile).modules.filter(file => file === 'testing.ts' || file.startsWith('testing/'));
             expect(reached, `${entryFile} reaches the testing entry`).toEqual([]);
+        }
+    });
+
+    it('resolves the build entry', async () => {
+        const build = await import('lambder/build');
+
+        expect(typeof build.writeApiSignatures).toBe('function');
+    });
+
+    it('keeps the build entry out of every other entry, so no deployment or bundle carries child_process', () => {
+        for(const entryFile of ['../src/index.ts', '../src/client.ts', '../src/mock.ts', '../src/testing.ts']){
+            const reached = sourceGraph(entryFile).modules.filter(file => file === 'build.ts' || file.startsWith('build/'));
+            expect(reached, `${entryFile} reaches the build entry`).toEqual([]);
         }
     });
 
@@ -264,10 +273,9 @@ describe('The published entry points', () => {
         // A bundler reads this field to decide what a browser build gets.
         // Anything the graph asks it to resolve and this field does not answer
         // reaches a browser as a real require and breaks the bundle. The
-        // expectation is derived from the graph rather than written out,
-        // because the literal version failed when an import and its matching
-        // mapping were added together and stayed green when only the import
-        // was.
+        // expectation is derived from the graph rather than written out: a
+        // literal list fails when an import and its mapping are added
+        // together, and stays green when only the import is.
         const reached = new Set<string>();
         for(const [, imports] of wholeSourceTree()){
             // Value edges are forbidden outright on the two browser entries
@@ -290,8 +298,8 @@ describe('The published entry points', () => {
     });
 
     it('declares the subpaths it means to, in exports and typesVersions', () => {
-        expect(Object.keys(packageJson.exports).sort()).toEqual(['.', './client', './mock', './package.json', './testing']);
-        expect(Object.keys(packageJson.typesVersions['*']).sort()).toEqual(['client', 'mock', 'testing']);
+        expect(Object.keys(packageJson.exports).sort()).toEqual(['.', './build', './client', './mock', './package.json', './testing']);
+        expect(Object.keys(packageJson.typesVersions['*']).sort()).toEqual(['build', 'client', 'mock', 'testing']);
     });
 });
 
@@ -321,12 +329,17 @@ const MAY_IMPORT: Record<string, readonly string[]> = {
     // through the typed caller and the in-process transport, over the memory
     // stores. Nothing imports it back, which its own gate above pins.
     testing: ['shared', 'stores', 'session', 'api', 'client', 'core', 'invoke', 'testing'],
+    // build/ is what a generator script runs at build time over an app's
+    // instance, which it takes structurally, so it names no core/ module.
+    // Nothing imports it back, which its own gate above pins.
+    build: ['shared', 'api', 'build'],
     // The entries. The root one is the whole framework minus the mock
     // runtime, which is its own entry and stays out of a server bundle.
     'index.ts': ['shared', 'stores', 'session', 'api', 'client', 'core', 'invoke'],
     'client.ts': ['shared', 'client'],
     'mock.ts': ['shared', 'stores', 'session', 'api', 'mock'],
     'testing.ts': ['shared', 'stores', 'session', 'invoke', 'testing'],
+    'build.ts': ['build'],
 };
 
 /** The layer a src-relative path belongs to: its directory, or the entry file itself. */
@@ -343,8 +356,9 @@ const layerOf = (file: string) => file.includes('/') ? file.slice(0, file.indexO
  * prevent.
  *
  * `contracts/` imports nothing at all: an interface a store implements should
- * cost that store nothing else. The two standalone modules at the root of the
- * group (LambderI18n, LambderHtml) import nothing either, which is what makes
+ * cost that store nothing else. The standalone modules at the root of the
+ * group (LambderI18n, and LambderHtml over the LambderHtmlPositions it places
+ * values with) import nothing from the groups either, which is what makes
  * them standalone rather than shared vocabulary.
  */
 const SHARED_GROUPS = ['wire', 'contracts', 'transport', 'util'] as const;
@@ -353,7 +367,7 @@ const SHARED_MAY_IMPORT: Record<string, readonly string[]> = {
     util: ['util'],
     wire: ['wire', 'util', 'contracts'],
     transport: ['transport', 'wire', 'util', 'contracts'],
-    root: [],
+    root: ['root'],
 };
 
 /** Which group inside `shared/` a src-relative path belongs to; "root" for the standalone modules. */
@@ -472,7 +486,7 @@ const EXPORT_NAME_PREFIXES = [
     'jsonScript', 'lambder', 'local', 'parse', 'raw', 'read', 'refusal',
     'refuse', 'renderHtmlValue', 'resolve', 'response', 'restore', 'serialize',
     'session', 'setAnswer', 'synthesize', 'toHttp', 'validation', 'version',
-    'xml',
+    'write', 'xml',
 ];
 const looksLikeAnExportName = (name: string) =>
     /^[A-Za-z_$][\w$]*$/.test(name)
@@ -484,7 +498,7 @@ describe('docs/exports.md', () => {
     const page = readFileSync(new URL('../docs/exports.md', import.meta.url), 'utf8');
     const backticked = new Set([...page.matchAll(/`([^`\n]+)`/g)].map(match => match[1]!.trim()));
 
-    it('names every export of the four entries', () => {
+    it('names every export of the five entries', () => {
         expect([...exported].filter(name => !backticked.has(name)).sort()).toEqual([]);
     });
 

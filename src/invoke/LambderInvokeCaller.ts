@@ -2,17 +2,17 @@
  * Calling a Lambder app from another lambda, or from any server code that
  * holds AWS credentials and lambda:InvokeFunction on it.
  *
- * API Gateway delivers an HTTP request to a Lambder app as a JSON event and
- * takes a JSON response object back; a direct InvokeCommand carries JSON in
- * both directions too. So this caller builds the payload-format-2.0 event
- * API Gateway would have built, invokes the function with it, and reads the
- * response object Lambder returns. The callee is an unmodified Lambder app,
- * and everything it offers over HTTP (zod validation, the inferred contract,
- * refusals, guards, idempotency keys, Brotli answers, logList, the crash
- * detail its global error handler chooses to send) applies unchanged. The
- * callee tells an invoke from a browser only by the x-lambder-invoke header,
- * which is a marker for guards and hooks, never an authorization: the IAM
- * grant is that.
+ * Builds the payload-format-2.0 event API Gateway would have built, invokes
+ * the function with it directly, and reads the response object Lambder
+ * returns. The callee is an unmodified Lambder app, so everything it offers
+ * over HTTP (zod validation, the inferred contract, refusals, guards,
+ * idempotency keys, Brotli answers, logList, the crash detail its error
+ * handler chooses to send) applies unchanged. The callee tells an invoke
+ * apart by the event's requestContext.apiId, which no gateway lets a client
+ * write, and reads no forwarding header on one, so `clientIp` and `host` are
+ * the only address and host it sees. The x-lambder-invoke header is a marker
+ * for guards and hooks, never an authorization: the IAM grant is the
+ * authorization.
  *
  * Server-only (zlib, the Lambda SDK), so it is exported from the root entry
  * and never from lambder/client. The SDK is an optional peer dependency
@@ -38,6 +38,7 @@ import { readApiSignature, type LambderApiSignatureMap } from "../shared/wire/La
 import type { LambdaClient, LambdaClientConfig } from "@aws-sdk/client-lambda";
 import type { LambderApiContractShape, LambderApiEnvelopeBody } from "../shared/wire/LambderApiContract.js";
 import { resolveApiOutcome, type LambderValidationError } from "../shared/wire/LambderApiOutcome.js";
+import type { LambderAppRefusalMessage } from "../shared/wire/LambderApiRefusal.js";
 import {
     mergeGuardInputs,
     type LambderCallArgs,
@@ -45,6 +46,7 @@ import {
     type LambderGuardInputsProviderOption,
     type LambderSharedCallOptions,
 } from "../shared/wire/LambderCallOptions.js";
+import { beginIdempotentAttempt, IDEMPOTENT_ATTEMPT_NOT_SENT, type LambderIdempotentAttempt } from "../shared/wire/LambderIdempotencyKeyScope.js";
 import { createCallAbort, stopWaitingWhenAborted } from "../shared/util/LambderCallAbort.js";
 import { coerceToError, errorFromCrashDetail } from "../shared/wire/LambderCrashDetail.js";
 import { assertPositiveInteger } from "../shared/util/LambderOptionChecks.js";
@@ -55,6 +57,7 @@ import {
     compressPayloadBrotli,
     resolveRequestCompressionMinBytes,
 } from "../shared/wire/LambderRequestPayload.js";
+import { DEFAULT_API_PATH } from "../shared/wire/LambderDefaultApiPath.js";
 import {
     buildEnvelopeJson,
     decodeLambdaHttpResult,
@@ -110,23 +113,18 @@ type LambderInvokeCallerBaseOptions = {
     /** Function name or ARN. */
     functionName: string;
     /**
-     * A ready client, e.g. one shared with the rest of the app. It keeps
-     * whatever `maxAttempts` it was built with, which is the SDK's own 3
-     * unless the app said otherwise: `clientConfig` below is not consulted
-     * for a client this caller did not create, and a retry at that layer
-     * re-executes a callee whose response was merely lost. Build it with
-     * `{ maxAttempts: 1 }`, or send an `idempotencyKey` and let the callee
-     * settle the repeat.
+     * A ready client, e.g. one shared with the rest of the app. `clientConfig`
+     * does not apply to it, so it keeps its own `maxAttempts` (the SDK's 3 by
+     * default), and a retry re-executes a callee whose response was merely
+     * lost: build it with `{ maxAttempts: 1 }`, or send an `idempotencyKey`.
      */
     client?: LambdaClient;
     /**
      * Otherwise the client is created from this on the first call (region,
-     * credentials, maxAttempts). `maxAttempts` defaults to 1 here rather than
-     * to the SDK's 3: a RequestResponse invoke whose response is lost has
-     * already run the callee, so a retry at this layer executes the operation
-     * a second time, and the transport contract says one call is one delivery
-     * attempt. Raise it deliberately if the callee is idempotent, or send an
-     * `idempotencyKey` and let the callee settle it.
+     * credentials, maxAttempts). `maxAttempts` defaults to 1 rather than the
+     * SDK's 3, since a lost response means the callee already ran and a retry
+     * would run it twice. Raise it only for an idempotent callee, or send an
+     * `idempotencyKey`.
      */
     clientConfig?: LambdaClientConfig;
     /** Must match the callee's apiPath. Default: "/api". */
@@ -156,10 +154,10 @@ type LambderInvokeCallerBaseOptions = {
     /** Receives each answer's logList. Default: console.log with the function and api name. A throw is logged and otherwise ignored. */
     onLogList?: LambderInvokeLogListHandler;
     /**
-     * Called, and awaited, for every failed call before api() throws or
-     * apiOutcome() returns, so failures are reported in one place whichever
-     * method the site used, and before the lambda answers. A throw inside it
-     * is logged and otherwise ignored: apiOutcome() never throws.
+     * Called and awaited for every failed call before api() throws or
+     * apiOutcome() returns, so failures are reported in one place, before the
+     * lambda answers. A throw inside it is logged and otherwise ignored, so
+     * apiOutcome() never throws.
      */
     onFailure?: LambderInvokeFailureHandler;
     /** The session token cookie's name, when a session is carried and the callee uses a non-default `tokenCookieKey`. The CSRF value rides in the envelope's `token` field, which has no name to configure. */
@@ -223,17 +221,17 @@ type FailureInitFields = Omit<LambderInvokeErrorInit, "message" | "apiName" | "f
 
 /**
  * What failureOutcome() is told, by reason. The arms mirror
- * LambderInvokeFailure's, so the site that decides a reason is the site the
- * compiler asks for that reason's evidence: a validation failure without its
- * issues, or an envelope refusal without the envelope, does not compile.
- * Everything else stays optional on the shared fields, since a failure carries
- * whatever the answer happened to have.
+ * LambderInvokeFailure's, so the compiler asks for a reason's evidence where
+ * the reason is chosen: a validation failure without its issues, or an
+ * envelope refusal without the envelope, does not compile. The shared fields
+ * stay optional, since a failure carries whatever the answer happened to have.
  */
 type FailureInit = FailureInitFields & (
     | { reason: 'validation'; zodError: LambderValidationError }
     | { reason: 'crash'; functionError: LambderInvokeFunctionError }
     | { reason: 'payloadTooLarge'; bytes: number }
-    | { reason: 'versionExpired' | 'sessionExpired' | 'notAuthorized' | 'errorMessage'; response: LambderApiEnvelopeBody<any> }
+    | { reason: 'versionExpired' | 'sessionExpired' | 'notAuthorized'; response: LambderApiEnvelopeBody<any> }
+    | { reason: 'errorMessage'; errorMessage: LambderAppRefusalMessage; response: LambderApiEnvelopeBody<any> }
     | { reason: 'network' | 'timeout' | 'server' | 'protocol' | 'unknown' }
 );
 
@@ -269,7 +267,7 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
         this.functionName = functionName;
         this.client = client;
         this.clientConfig = clientConfig;
-        this.apiPath = apiPath ?? "/api";
+        this.apiPath = apiPath ?? DEFAULT_API_PATH;
         this.apiVersion = apiVersion;
         this.apiSignatures = apiSignatures;
         this.host = host ?? functionName;
@@ -296,9 +294,10 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
         const tokenCookieKey = init.sessionTokenCookieKey ?? DEFAULT_SESSION_TOKEN_COOKIE_KEY;
         return synthesizeLambdaHttpEvent({
             method: "POST",
-            path: init.apiPath ?? "/api",
+            path: init.apiPath ?? DEFAULT_API_PATH,
             host,
             headers: init.headers,
+            contentType: "application/json",
             clientIp: init.clientIp,
             cookies: sessionCookies(init.session, tokenCookieKey),
             body: buildEnvelopeJson({
@@ -319,10 +318,9 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
      * Lambda would: a thrown error becomes a FunctionError payload. For
      * tests that want the real handlers behind the real envelope.
      *
-     * It honours the signal the way lambderHandlerTransport does, by ending
-     * the wait: a function call in this process cannot be cancelled, so the
-     * handler runs to completion regardless and what a timeout buys is the
-     * caller's answer. Ignoring it made timeoutMs a no-op here.
+     * It honours the signal by ending the wait, as lambderHandlerTransport
+     * does: an in-process call cannot be cancelled, so the handler runs to
+     * completion regardless, but timeoutMs still frees the caller.
      */
     static localTransport(
         handler: (event: APIGatewayProxyEventV2, context: Context) => Promise<unknown>,
@@ -360,9 +358,9 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
 
     private async invokeThroughSdk(eventJson: string, signal: AbortSignal | undefined): Promise<LambderInvokeTransportResult> {
         const { LambdaClient, InvokeCommand } = await this.loadSdk();
-        // One call is one delivery attempt, which is what LambderApiTransport
-        // promises: the SDK's own default of 3 would re-invoke a callee that
-        // already ran when only the response was lost.
+        // One call is one delivery attempt, as LambderApiTransport promises:
+        // the SDK's default of 3 would re-invoke a callee that already ran
+        // when only the response was lost.
         if(!this.client) this.client = new LambdaClient({ maxAttempts: 1, ...this.clientConfig });
         const output = await this.client.send(new InvokeCommand({
             FunctionName: this.functionName,
@@ -383,10 +381,10 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
         eventJson: string,
         options: { timeoutMs?: number; signal?: AbortSignal },
     ): Promise<{ sent: LambderInvokeTransportResult } | { failed: FailureInit }> {
-        // Measured here rather than on the API path alone, because every
-        // caller of this one sends the same bytes. A path that skips the cap
-        // gets the SDK's RequestEntityTooLargeException back instead, which
-        // classifies as `protocol` and names neither the size nor the cap.
+        // Measured here so every path that delivers an event is capped: an
+        // oversized event would otherwise come back as the SDK's
+        // RequestEntityTooLargeException, which classifies as `protocol` and
+        // names neither the size nor the cap.
         const bytes = Buffer.byteLength(eventJson, "utf8");
         if(bytes > LAMBDER_INVOKE_MAX_EVENT_BYTES){
             return { failed: {
@@ -399,24 +397,23 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
         const abort = createCallAbort({ timeoutMs: options.timeoutMs ?? this.timeoutMs, signal: options.signal });
         try {
             // A call the site has already given up on does not reach the
-            // transport: honouring the signal is the transport's obligation
-            // and not every transport does.
+            // transport: honouring the signal is the transport's obligation,
+            // and not every transport meets it.
             const refused = abort.abortFailure("beforeSending");
             if(refused) return { failed: { reason: refused.reason, cause: refused.error, detail: refused.error.message } };
 
             const sent = await this.transport(event, { functionName: this.functionName, eventJson, signal: abort.signal });
 
             // An answer that arrives after the abort is not a success: a
-            // transport that ignores the signal resolves late, and believing
-            // it would report ok on a 20ms timeoutMs at 300ms, handing the
-            // call site data it had already abandoned.
+            // transport that ignores the signal resolves late, and trusting it
+            // would hand the call site data it had already abandoned.
             const late = abort.abortFailure("afterAnswering");
             if(late) return { failed: { reason: late.reason, cause: late.error, detail: late.error.message } };
             return { sent };
         } catch(err){
             const cause = coerceToError(err, "the invoke failed");
-            // The caller's own timeout wins, since only it knows about that;
-            // otherwise the rejection says what it was.
+            // The caller's own timeout wins, since only the caller knows about
+            // it; otherwise the rejection says what it was.
             return { failed: { reason: abort.timedOut() ? 'timeout' : classifyDeliveryFailure(cause), cause } };
         } finally {
             abort.detach();
@@ -446,9 +443,8 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
             cause,
         });
         // FailureInit's arms mirror the outcome's, so each reason's evidence
-        // was already demanded at the site that chose the reason; the
-        // assembly is one object either way, and this is where it is named as
-        // the arm it is rather than written out five times.
+        // was already demanded where the reason was chosen; the failure is
+        // assembled once here and cast to its arm.
         const failure = {
             ok: false,
             reason: init.reason,
@@ -484,19 +480,35 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
         for(const entry of logList) console.log(`[lambder invoke] ${this.functionName} ${apiName}`, entry);
     }
 
-    /** One call, one outcome. Never throws; api() is what throws. */
+    /**
+     * One call, one outcome. Never throws; api() is what throws. A key scope
+     * is told how the attempt ended, as it is on LambderCaller.
+     */
     private async dispatch<TOutput>(
         apiName: string,
         payload: unknown,
         options: LambderInvokeCallOptions = {},
     ): Promise<LambderInvokeOutcome<TOutput>> {
-        // Everything that happens before the event leaves: the guardInputs
-        // provider, the payload's JSON and its compression. All of it can
-        // throw on the caller's own inputs (a provider that rejects, a
-        // payload holding a cycle or a BigInt), and none of it may escape:
-        // apiOutcome() promises an outcome, api() promises a
-        // LambderInvokeError, and onFailure is the one place failures are
-        // reported. So a throw here is an 'unknown' failure like any other.
+        const idempotentAttempt = beginIdempotentAttempt(options.idempotencyKey);
+        const outcome = await this.dispatchAttempt<TOutput>(apiName, payload, options, idempotentAttempt);
+        // Only the first settle counts: an attempt that never left settled
+        // itself as not sent.
+        idempotentAttempt.settle(outcome);
+        return outcome;
+    }
+
+    private async dispatchAttempt<TOutput>(
+        apiName: string,
+        payload: unknown,
+        options: LambderInvokeCallOptions,
+        idempotentAttempt: LambderIdempotentAttempt,
+    ): Promise<LambderInvokeOutcome<TOutput>> {
+        const idempotencyKey = idempotentAttempt.key;
+        // Everything before the event leaves can throw on the caller's own
+        // inputs (a provider that rejects, a payload holding a cycle or a
+        // BigInt). None of it may escape: apiOutcome() promises an outcome,
+        // api() a LambderInvokeError, and onFailure must see every failure,
+        // so it becomes an 'unknown' failure.
         let event: APIGatewayProxyEventV2;
         let eventJson: string;
         try {
@@ -510,10 +522,10 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
                 : undefined;
             const guardInputs = mergeGuardInputs(provided, options.guardInputs);
 
-            // The payload is serialized once: the compression decision needs
-            // its JSON, and when it goes plainly that same JSON is spliced
-            // into the envelope. Compressed when enabled and the JSON reaches
-            // the threshold; `compressRequest` overrides both ways.
+            // Serialized once: the compression decision needs the JSON, and a
+            // plain payload splices that same JSON into the envelope.
+            // Compressed when enabled and the JSON reaches the threshold;
+            // `compressRequest` overrides both ways.
             const payloadJson = payload !== undefined ? JSON.stringify(payload) : undefined;
             const compressionMinBytes = resolveRequestCompressionMinBytes(options.compressRequest, this.requestCompression);
             const compressed = compressionMinBytes !== null && payloadJson !== undefined
@@ -525,6 +537,7 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
                 path: this.apiPath,
                 host: this.host,
                 headers: options.headers,
+                contentType: "application/json",
                 clientIp: options.clientIp,
                 cookies: sessionCookies(options.session, this.sessionTokenCookieKey),
                 body: buildEnvelopeJson({
@@ -536,13 +549,16 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
                     payloadJson: compressed ? undefined : payloadJson,
                     compressed,
                     guardInputs,
-                    idempotencyKey: options.idempotencyKey,
+                    idempotencyKey,
                 }),
             }, { invoke: true });
 
             // Serialized once here; the size guard and the SDK transport both use it.
             eventJson = JSON.stringify(event);
         } catch(err){
+            // Nothing was sent, so the key was not used: the same as the
+            // browser caller's failure before sending.
+            idempotentAttempt.settle(IDEMPOTENT_ATTEMPT_NOT_SENT);
             return await this.failureOutcome(apiName, { reason: 'unknown', cause: coerceToError(err, "the call could not be built") });
         }
 
@@ -566,17 +582,17 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
             json: async () => http.json(),
             text: async () => http.text(),
         });
-        // Every answer's logs, from the one field the mapping puts them on:
-        // an envelope's, a 500 body's, and a rejected input's, which the
-        // callee writes onto the validation body as it does onto a success.
+        // Every answer's logs arrive on outcome.logList, whether they came
+        // from an envelope, a 500 body or a validation body.
         const logList = outcome.logList ?? [];
         await this.surfaceLogs(apiName, logList);
         // The answer's Set-Cookie values, so a session the callee rotated or
         // cleared is visible to whoever is carrying it.
         const cookies = http.cookies;
-        // The declared output, by the callee's own typing: res.api(null) compiles
-        // only for an output that allows null or beside a reason (an errorMessage
-        // is a failure below; a message-only null is the callee's contract to keep).
+        // The declared output, by the callee's own typing: res.api(null)
+        // compiles only for an output that allows null or beside a reason (an
+        // errorMessage is a failure below; a message-only null is the
+        // callee's contract to keep).
         if(outcome.ok) return { ok: true, payload: (outcome.payload ?? null) as TOutput, response: outcome.response, logList, cookies };
 
         const shared = { status: outcome.status, retryAfterSeconds: outcome.retryAfterSeconds, logList, cookies };
@@ -604,8 +620,7 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
         }
         return await this.failureOutcome(apiName, {
             ...shared,
-            reason: outcome.reason,
-            errorMessage: outcome.errorMessage,
+            ...(outcome.reason === 'errorMessage' ? { reason: outcome.reason, errorMessage: outcome.errorMessage } : { reason: outcome.reason }),
             response: outcome.response,
             crash: outcome.response.crash,
         });
@@ -613,19 +628,17 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
 
     /**
      * Full-fidelity call: resolves to a discriminated LambderInvokeOutcome
-     * instead of throwing. Never throws; for sites that degrade gracefully.
-     *
-     * The output is computed from the contract in the return type rather than
-     * taken as a type parameter, so a call site cannot replace it by
-     * annotating what it assigns to.
+     * instead of throwing, for sites that degrade gracefully. The output type
+     * comes from the contract rather than a type parameter, so a call site
+     * cannot replace it by annotating what it assigns to.
      */
     async apiOutcome<TApiName extends keyof TContract & string = string>(
         apiName: TApiName,
         ...rest: LambderCallArgs<TContract, TApiName, TProvidedGuards, LambderInvokeCallOptions>
     ): Promise<LambderInvokeOutcome<LambderContractOutputOf<TContract, TApiName>>> {
         // The tuple is a conditional type on an unresolved TApiName, so its
-        // elements read as unknown from inside; the contract shaped them on
-        // the way in, which is where the guarantee belongs.
+        // elements read as unknown here; the contract already checked them at
+        // the call site.
         const [payload, options] = rest as [unknown, LambderInvokeCallOptions | undefined];
         return await this.dispatch<LambderContractOutputOf<TContract, TApiName>>(apiName, payload, options);
     }
@@ -634,10 +647,9 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
      * The declared output, or a thrown LambderInvokeError carrying the
      * outcome. A failed dependency is a failed request: the throw reaches the
      * app's global error handler with the callee's error as its cause. The
-     * result is the callee's output type as it declared it: the resolver
-     * only lets a handler answer null when the output allows it or beside a
-     * reason (LambderApiAnswer), so a nullable output is the one place null
-     * arrives.
+     * resolver lets a handler answer null only when the output allows it or
+     * beside a reason (LambderApiAnswer), so null arrives only for a
+     * nullable output.
      */
     async api<TApiName extends keyof TContract & string = string>(
         apiName: TApiName,

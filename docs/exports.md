@@ -1,6 +1,6 @@
 # Exports reference
 
-Every name the four entry points export, grouped by what it is for. Anything
+Every name the five entry points export, grouped by what it is for. Anything
 not listed here is internal and may change without a major version.
 
 - `lambder` is the server surface: the Lambda adapter, the API core, the
@@ -12,6 +12,8 @@ not listed here is internal and may change without a major version.
 - `lambder/mock` carries the mock runtime, browser-safe like `lambder/client`.
 - `lambder/testing` puts a real app under test in this process. Server-only,
   and reached by nothing else in the package, so no deployment carries it.
+- `lambder/build` is what a generator script runs at build time: the
+  signature file. Node-only, and reached by nothing else in the package.
 
 The **Client** column marks what `lambder/client` also exports; `client only`
 marks the two names it exports that the root entry does not.
@@ -20,16 +22,17 @@ marks the two names it exports that the root entry does not.
 
 | Export | Client | Description |
 | --- | --- | --- |
-| `initLambder` | | Curried creator: fix the session data type, then `create(options)`. The canonical entry. See [Configuration](./configuration.md) |
+| `initLambder` | | Curried creator: fix the session data type, then `create(options)`, `guard(...)` and `rateLimitKey(...)` typed to it. The canonical entry. See [Configuration](./configuration.md) |
 | `Lambder` (default) | | The class itself. Use `initLambder` instead; a direct `new` widens the inferred policy types |
 | `LambderResolver` | | The `res` object handlers receive |
 | `LambderResponseBuilder` | | Builds resolvers; reachable via `lambder.getResponseBuilder(ctx?)` |
-| `createContext` | | Build a render context from a raw Lambda event |
+| `createContext` | | Build a render context from a raw Lambda event, given `{ apiPath?, trustedClientIpHeaders?, trustedHostHeaders? }` (`LambderContextOptions`, optional; `apiPath` defaults to `"/api"` as at `create()`) |
 | `isV2HttpEvent` | | Whether an event uses payload format v2 |
 
-Types: `LambderCreateOptions`, `LambderHandler`, `LambderRenderContext`,
+Types: `LambderCreateOptions`, `LambderHandler`, `LambderRenderContext`, `LambderContextOptions`,
 `LambderSessionRenderContext`, `LambderHttpEvent`, `LambderHttpEventFormat`,
-`LambderActionTools`, `LambderCorsConfig`.
+`LambderActionTools`, `LambderCorsConfig`, and the `crashes` option's
+`LambderCrashOptions`, `LambderCrashReporter`, `LambderCrashSite`.
 
 Types of the handlers an app writes, so a hook or a route handler can be
 declared apart from its registration: `LambderRoutePath`,
@@ -74,6 +77,7 @@ See [Responses](./responses.md).
 | `LambderApiRefusal` | yes | The refusal class `refuse()` is sugar over |
 | `isLambderApiRefusal` | yes | Brand-based detection, safe across duplicate copies of the package |
 | `LAMBDER_REFUSAL_CODES` | yes | The codes the framework stamps on its own refusals |
+| `refusalMessageOf` | yes | An envelope's errorMessage as the message object every reader gets: a plain string becomes `{ type: "error", content }` |
 | `describeCrash` | yes | Describe a thrown error for the envelope's `crash` field: name, message, stack, cause chain, where it happened |
 | `errorFromCrashDetail` | yes | Rebuild an Error (with its cause chain) from a crash detail |
 
@@ -89,20 +93,22 @@ See [APIs and refusals](./apis.md).
 | Export | Client | Description |
 | --- | --- | --- |
 | `LambderSessionManager` | | The session model: tokens, expiry, sliding writes, `dataRefresh`, regeneration, over a store |
-| `LambderSessionController` | | The per-request API, via `lambder.getSessionController(ctx)` (and `ctx.sessions` in the mock) |
+| `LambderSessionController` | | The per-request API: `ctx.sessionController` on every context, server and mock, and `lambder.getSessionController(ctx)` |
 | `LambderDdbSessionStore` | | Sessions at rest in DynamoDB, `session.data` Brotli-compressed |
 | `LambderMemorySessionStore` | | Sessions in a `Map`, for tests and the mock runtime |
-| `LambderWebCrypto` | | The default `LambderSessionCrypto`: sha256 through `crypto.subtle` |
+| `LambderWebCrypto` | | The default `LambderSessionCrypto`: sha256 and HMAC-SHA256 through `crypto.subtle` |
 | `LambderPlainSessionCrypto` | | The stand-in for a runtime without WebCrypto and a store that holds nothing worth hashing |
 | `isWebCryptoAvailable` | | Whether this runtime offers `crypto.subtle` |
 | `DEFAULT_SESSION_TOKEN_COOKIE_KEY`, `DEFAULT_SESSION_CSRF_COOKIE_KEY` | yes | The cookie names an app uses unless it configures its own |
 | `LambderSessionDataRefreshError` | | The `dataRefresh` callback threw |
 | `LambderSessionReadError` | | Reading a session record failed at the store level |
-| `LambderSessionNotFoundError` | | No session for this request: the cookies named none, or the one they named did not pair with the posted CSRF token |
-| `LambderSessionAmbiguousError` | | The cookies cannot be resolved to one session, so none is used and every scope this host can write is cleared |
+| `LambderSessionNotFoundError` | | No session for this request: the cookies named none, the one they named did not pair with the posted CSRF token, or the session was ended while the request held it (`updateSessionData`, `refreshSessionData`, `regenerateSession`) |
+| `LambderSessionAmbiguousError` | | The cookies cannot be resolved to one session, so none is used and every scope this host can write is cleared; a subclass of `LambderSessionNotFoundError`, so a route, a hook or an API call answers it as a missing session |
 
 Types: `LambderSessionOptions`, `LambderSessionStore`, `LambderSessionRecord`
-(both generic over the session data), `LambderCreatedSession`,
+(both generic over the session data), `LambderSessionChanges` and
+`LambderSessionUpdateResult` (what a store's `update` takes and answers),
+`LambderCreatedSession`,
 `LambderSessionDataRefreshConfig`, `LambderSessionCookieOptions`,
 `LambderSessionManagerOptions`, `LambderSessionControllerOptions`,
 `LambderSessionRequestInfo`, `LambderSessionCrypto`,
@@ -114,20 +120,23 @@ See [Sessions](./sessions.md).
 
 | Export | Client | Description |
 | --- | --- | --- |
-| `lambderGuard` | | Build a named guard: input mode, session requirement, param, return value |
+| `lambderGuard` | | Build a named guard: input mode, session requirement, param, return value. `initLambder<SessionData>().guard` is the same builder typed to the app's session |
 | `lambderGuardBuilder` | | The guard builder bound to other context types (what the mock runtime's `mock.guard` is) |
 | `lambderRateLimitKey` | | Build a custom rate-limit key from a validated payload slice; the handler sees the render context |
 | `lambderRateLimitKeyBuilder` | | The same builder bound to another context type; the mock runtime binds it as `rateLimitKey` |
 | `rateLimitRefusal`, `DEFAULT_RATE_LIMIT_REFUSAL` | | The 429 refusal a rate limit throws, and its default message |
 
-Types: guards, `LambderApiGuard`, `LambderGuardBuilder`, `LambderGuardMeta`, `LambderGuardMetaMap`,
+Types: guards, `LambderApiGuard`, `LambderGuardBuilder`, `LambderGuardMeta`, `LambderGuardMetaMap`, `LambderGuardRunAt`,
 `LambderGuardsOption`, `LambderGuardsOptionValue`, `LambderAllowedGuardNames`,
 `LambderParamlessGuardNames`, `LambderGuardDataOf`, `LambderGuardInputsOf`;
 rate limits, `LambderApiRateLimitsConfig`, `LambderApiRateLimitPolicyConfig`,
 `LambderRateLimitKeyFn`, `LambderRateLimitKeyBuilder`, `LambderRateLimitPer`,
-`LambderRateLimitBudget`,
+`LambderRateLimitBudget`, `LambderRateLimitChargeAt`,
 `LambderRateLimitOption`, `LambderRateLimitOptionValue`,
-`LambderRateLimitOverride`, `LambderAllowedPolicyNames`; idempotency,
+`LambderRateLimitOverride`, `LambderAllowedPolicyNames`, and for charging a
+policy from code, `LambderContextRateLimit`, `LambderContextRateLimitCheck`,
+`LambderRateLimitCheckResult`, `LambderChargeablePolicyNames`,
+`LambderChargeKeyArgs`; idempotency,
 `LambderApiIdempotencyConfig`.
 
 See [API policies](./api-policies.md).
@@ -140,18 +149,20 @@ implementations ship, and an app may bring its own.
 | Export | Client | Description |
 | --- | --- | --- |
 | `LambderDdbCache` | | Compressed JSON cache with a memory layer, fill lease and grouped keys |
+| `LambderMemoryCache` | | The same `LambderCache` rules in a bounded map, for tests |
 | `LambderDdbRateLimiter` | | Fixed-window rate limiter in DynamoDB, atomic per window |
 | `LambderMemoryRateLimiter` | | The same windows and semantics in a `Map`, with an injectable clock |
 | `LambderDdbIdempotencyStore` | | Idempotency claims and replays in DynamoDB, owner-checked, compressed bodies |
 | `LambderMemoryIdempotencyStore` | | The same claims and expiry in a `Map` |
 | `RATE_LIMIT_WINDOWS` | | The fixed windows a policy may cap, with their lengths |
-| `LambderExpiringMap` | | The bounded map all three memory stores sit on: expiry on read plus an amortized sweep, a ceiling, and `{ evictable }` entries held back from eviction |
+| `LambderExpiringMap` | | The bounded map every memory store and the memory cache sit on: expiry on read plus an amortized sweep, a ceiling, and `{ evictable }` entries held back from eviction |
 | `LambderExpiringMapFullError` | | Thrown by `set()` when the ceiling is reached and every entry is protected from eviction |
 
-Types: the interfaces `LambderRateLimiter`, `LambderIdempotencyStore` (and
-`LambderSessionStore` above); cache, `LambderCacheKey`, `LambderDdbCacheOptions`,
-`LambderDdbCacheSetOptions`, `LambderDdbCacheGetOrSetOptions`,
-`LambderDdbCacheListOptions`; rate limiter, `LambderDdbRateLimiterOptions`,
+Types: the interfaces `LambderRateLimiter`, `LambderIdempotencyStore`,
+`LambderCache` (and `LambderSessionStore` above); cache, `LambderCacheKey`,
+`LambderCacheSetOptions`, `LambderCacheListOptions`,
+`LambderMemoryCacheOptions`, `LambderDdbCacheOptions`,
+`LambderDdbCacheGetOrSetOptions`; rate limiter, `LambderDdbRateLimiterOptions`,
 `LambderRateLimitWindow`, `LambderRateLimitPolicy`,
 `LambderRateLimitExceeded`, `LambderRateLimitResult`; idempotency,
 `LambderDdbIdempotencyStoreOptions`, `LambderIdempotencyBeginResult`,
@@ -180,7 +191,7 @@ See [Frontend hosting](./frontend-hosting.md).
 
 | Export | Client | Description |
 | --- | --- | --- |
-| `html` | yes | Tagged template with automatic HTML escaping |
+| `html` | yes | Tagged template with automatic HTML escaping; throws for an interpolation where escaping cannot protect it (unquoted, in a tag, in `on*`/`style`/`srcdoc`, in script content, at a comment's edge) and checks URL schemes. See [Templating](./templating.md) |
 | `xml` | yes | Alias of `html`, for XML documents |
 | `raw` | yes | Insert trusted markup verbatim |
 | `jsonScript` | yes | Embed JSON safely for client hydration |
@@ -227,11 +238,12 @@ See [Responses](./responses.md#compression) and
 | Export | Client | Description |
 | --- | --- | --- |
 | `LambderCaller` | yes | The typed API caller |
+| `createIdempotencyKey`, `createIdempotencyKeyScope` | yes | An unguessable key for one logical operation, and a key scope that moves to a new one once an answer settles the operation; for `LambderCaller` and `LambderInvokeCaller` alike |
 | `resolveApiOutcome` | yes | The one mapping from an HTTP answer to an outcome, shared by every caller |
 | `apiNameKeyOf`, `lookupApiSignature`, `readApiSignature`, `API_SIGNATURE_HEX_LENGTH` | yes | The generated signature map's keys, and how a caller reads its entry for an endpoint |
 | `extensibleEnum` | yes | Marks an enum whose readers tolerate values they were not built with, so its values stay out of the signature wherever it is output |
 | `LambderApiSignatureEntry` | no | One endpoint as `lambder.apiSignatureEntries()` reports it: name, key, signature |
-| `RELOAD_LOOP_WINDOW_MS` | yes | How long a repeated stale-signature refusal for the same endpoint and signature counts as a reload loop |
+| `RELOAD_LOOP_WINDOW_MS` | yes | How long a stale-signature refusal repeated after a reload (the same endpoint, signature and version) counts as a reload loop |
 | `compareDottedVersions`, `isDottedVersion` | yes | Dotted version strings compared as numbers, the way the server's version floor reads a caller's version |
 | `lambderFetchTransport` | yes | The default transport: one POST over fetch |
 | `lambderCookieJarTransport` | yes | Any transport carrying a `LambderCookieJar` the way a browser carries cookies |
@@ -265,6 +277,7 @@ See [Frontend client](./client.md) and [The API core](./api-core.md#transports).
 | `createApiCallContext` | | A fresh call context |
 | `API_ANSWER_CONTENT_TYPE` | | The content type every API answer carries (`application/json; charset=utf-8`) |
 | `LambderApiValidationRefusal`, `isLambderApiValidationRefusal` | | Input validation as a typed throw |
+| `LambderApiOutputValidationError` | | The crash a handler's answer causes when its API's output schema does not accept it (`apiName`; `zodError` when the schema rejected the payload, null when parsing threw; what was thrown as `cause`); an idempotency key records it as the key's answer |
 | `answerFromResponse`, `responseFromAnswer` | | The server adapter's conversions between a `LambderResponse` and an answer |
 | `synthesizeLambdaHttpEvent`, `decodeLambdaHttpResult`, `localLambdaContext` | | The Lambda event conversions the invoke caller and the handler transport share. The event is payload format 2.0 unless `eventFormat: "v1"` asks for a REST API's |
 
@@ -281,6 +294,9 @@ and `LambderFlattenContract` (what an app's `export interface ApiContractType`
 extends, so that reading the contract stays cheap as endpoints are added);
 and the contract helpers (client too): `LambderApiMode`,
 `LambderGuardNamesIn`, `LambderContractMode`, `LambderContractKeysWithMode`,
+`LambderContractKeysWithGuard`, `LambderJsonOf` (a type after JSON: what an
+API's output reaches a client as), `LambderJsonOutputOf` (the same at the top
+of an output, where `void` and `undefined` stay as they are),
 `LambderContractGuardsOf`, `LambderContractGuardNames`,
 `LambderContractGuardInputsOf`, `LambderContractGuardInput`,
 `LambderContractGuardInputNames`, `LambderContractRateLimitOf`,
@@ -339,7 +355,7 @@ See [Translations](./i18n.md).
 | `LambderCookieJar`, `lambderCookieJarTransport`, `LambderMemorySessionStore`, `LambderMemoryRateLimiter`, `LambderMemoryIdempotencyStore`, `LambderWebCrypto`, `LambderPlainSessionCrypto`, `LambderApiRefusal`, `refuse`, `LAMBDER_REFUSAL_CODES` | Re-exported for a mock setup's convenience |
 
 Types: `LambderMockAppOptions`, `LambderMockSessionsOptions`,
-`LambderMockIdempotencyOptions`, `LambderMockOverride`, `LambderMockTransport`,
+`LambderMockIdempotencyOptions`, `LambderMockInvalidInputAnswer`, `LambderMockOverride`, `LambderMockTransport`,
 `LambderMockTransportOptions`, `LambderMockCallContext`,
 `LambderMockSessionCallContext`, `LambderMockContext`, `LambderMockGuards`,
 `LambderMockHandler`, `LambderMockEntry`, `LambderMockEntryOptions`,
@@ -372,7 +388,7 @@ See [The mock runtime](./mock.md).
 | --- | --- |
 | `lambderTestApp` | Puts a built Lambder instance under test: memory stores under it in place, simulated browsers in front of it. Returns a `LambderTestApp` |
 | `assertApiSuccess`, `assertApiFailure` | Narrow an `apiOutcome` through an `asserts` signature, and throw a plain Error naming what the outcome was. No test runner is imported |
-| `LambderMemorySessionStore`, `LambderMemoryRateLimiter`, `LambderMemoryIdempotencyStore`, `LambderLocalFileSource`, `LambderCookieJar`, `LAMBDER_REFUSAL_CODES` | Re-exported for a test's convenience: the stores to inspect or hand in, a file source over fixtures, a visitor's jar, the codes to assert on |
+| `LambderMemorySessionStore`, `LambderMemoryRateLimiter`, `LambderMemoryIdempotencyStore`, `LambderMemoryCache`, `LambderLocalFileSource`, `LambderCookieJar`, `LAMBDER_REFUSAL_CODES` | Re-exported for a test's convenience: the stores to inspect or hand in, the cache to swap an app's own for, a file source over fixtures, a visitor's jar, the codes to assert on |
 
 Types: `LambderTestApp` and `LambderTestVisitor` (the two classes, reached
 through `lambderTestApp()` and `visitor()` rather than constructed),
@@ -384,3 +400,15 @@ through `lambderTestApp()` and `visitor()` rather than constructed),
 `apiOutcome()`.
 
 See [Testing](./testing.md).
+
+## Build (`lambder/build`)
+
+| Export | Description |
+| --- | --- |
+| `writeApiSignatures` | Writes the signature module both sides ship from an instance, or checks the one on disk, naming the endpoints that moved; with `verifyInFreshProcess`, verifies a write against the instance's module loaded in a fresh process |
+
+Types: `LambderApiSignatureSource` (what it reads: anything with
+`apiSignatureEntries()`), `LambderApiSignatureFileOptions`,
+`LambderApiSignatureFileResult`.
+
+See [APIs](./apis.md#signatures-when-a-client-must-update).

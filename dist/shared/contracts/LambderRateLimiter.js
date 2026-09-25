@@ -3,11 +3,10 @@
  * policy may cap, the policy shape, what an exceeded check reports, and the
  * one method the rate-limit engine asks of a limiter.
  *
- * Kept apart from the DynamoDB limiter on purpose. The engine needs only this
- * table, and importing it from the store would pull the DynamoDB SDK loader
- * into the engine's import graph, which is what kept the policy layer from
- * running anywhere but inside a Lambda. Pure and dependency-free, so the
- * mock runtime and the browser entry can resolve it.
+ * Kept apart from the DynamoDB limiter on purpose: importing it from the
+ * store would pull the DynamoDB SDK loader into the engine's import graph and
+ * keep the policy layer from running anywhere but inside a Lambda. Pure and
+ * dependency-free, so the mock runtime and the browser entry can resolve it.
  */
 /**
  * The fixed windows a policy may cap, smallest first (the evaluation order),

@@ -23,17 +23,16 @@ export type LambderHandlerTransportOptions = {
  * lambderCookieJarTransport to hold a session across calls.
  *
  * A handler that throws (which a Lambder app never does on the HTTP path,
- * since render() answers its own last-resort 500) produced no answer at all,
- * so the call fails as `protocol` carrying the handler's own error as its
- * cause. API Gateway would have turned it into a bare 502, and synthesizing
- * one here would throw the error away; keeping it is the point of an
- * in-process transport, and there is nowhere in an HTTP answer to put one
- * except the user-facing `message` field, which is the wrong channel for an
- * internal fault.
+ * since render() answers its own last-resort 500) produced no answer, so the
+ * call fails as `protocol` with the handler's own error as its cause. API
+ * Gateway would turn it into a bare 502, but synthesizing one here would
+ * throw the error away, and keeping it is the point of an in-process
+ * transport. An HTTP answer's only place for it would be the user-facing
+ * `message` field, the wrong channel for an internal fault.
  *
  * `request.signal` ends the wait, as the transport contract requires. The
- * handler keeps running to completion either way, because a function call in
- * this process cannot be cancelled: what a timeout buys here is the caller's
- * answer, not the callee's attention.
+ * handler still runs to completion, because a function call in this process
+ * cannot be cancelled: a timeout buys the caller its answer, not the
+ * callee's attention.
  */
 export declare const lambderHandlerTransport: (handler: LambderHandler, options?: LambderHandlerTransportOptions) => LambderApiTransport;

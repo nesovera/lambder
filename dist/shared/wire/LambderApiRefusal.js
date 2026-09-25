@@ -1,18 +1,18 @@
 /**
  * A typed refusal: "this request is denied/invalid" as opposed to "the server
  * crashed". Throw it from anywhere in an API call's call stack (handlers,
- * hooks, or nested helpers that have no access to the per-request resolver)
- * and the render pipeline maps it onto the structured API envelope
+ * hooks, or nested helpers with no access to the per-request resolver) and
+ * the render pipeline maps it onto the structured API envelope
  * (`res.api(null, { errorMessage, notAuthorized, sessionExpired })`) instead
- * of routing it through setGlobalErrorHandler. Refusals therefore never reach
- * crash logging, and clients receive a parseable response they can surface.
+ * of routing it through setGlobalErrorHandler, so refusals never reach crash
+ * logging and clients receive a parseable response.
  *
  * Thrown outside an API call (e.g. in a route handler) it behaves like any
  * other error: global error handler, then the default 500.
  *
  * Isomorphic and dependency-free, so shared code (validators, permission
- * checks) may import and throw it from packages used by both server and
- * browser builds; in the browser it is just an Error.
+ * checks) used by both server and browser builds may throw it; in the
+ * browser it is just an Error.
  */
 export class LambderApiRefusal extends Error {
     /**
@@ -21,6 +21,7 @@ export class LambderApiRefusal extends Error {
      * across them while this marker does not. The pipeline checks the brand.
      */
     isLambderApiRefusal = true;
+    /** What the envelope's errorMessage carries: always a message object, a plain string given to the options made into one. */
     errorMessage;
     notAuthorized;
     sessionExpired;
@@ -29,7 +30,7 @@ export class LambderApiRefusal extends Error {
     constructor(message, options = {}) {
         super(message, options.cause !== undefined ? { cause: options.cause } : undefined);
         this.name = "LambderApiRefusal";
-        this.errorMessage = options.errorMessage ?? message;
+        this.errorMessage = refusalMessageOf(options.errorMessage ?? message);
         this.notAuthorized = options.notAuthorized;
         this.sessionExpired = options.sessionExpired;
         this.statusCode = options.statusCode;
@@ -38,6 +39,32 @@ export class LambderApiRefusal extends Error {
 }
 /** Brand-based type guard (see LambderApiRefusal.isLambderApiRefusal). */
 export const isLambderApiRefusal = (err) => err instanceof Error && err.isLambderApiRefusal === true;
+const REFUSAL_MESSAGE_TYPES = ["warning", "error", "info"];
+/**
+ * An errorMessage as the one shape a reader handles: a plain string becomes
+ * an "error" message with that content, and a value that is not a message
+ * at all becomes one describing it. The envelope writer applies it, so a
+ * Lambder server only ever sends the object. A reader applies it too,
+ * because what it reads is wire input no server vouches for: a hand-built
+ * mock answer (an MSW handler, a test double) or a proxy that wrote its own
+ * body can put anything there.
+ */
+export const refusalMessageOf = (message) => {
+    if (message !== null && typeof message === "object" && typeof message.content === "string") {
+        const candidate = message;
+        return REFUSAL_MESSAGE_TYPES.includes(candidate.type) ? candidate : { ...candidate, type: "error" };
+    }
+    if (typeof message === "string")
+        return { type: "error", content: message };
+    let content;
+    try {
+        content = JSON.stringify(message) ?? String(message);
+    }
+    catch {
+        content = String(message);
+    }
+    return { type: "error", content };
+};
 /**
  * Codes the framework stamps on the refusals it authors itself, under the
  * reserved `lambder/` prefix so app codes never collide. Compare against
@@ -49,6 +76,8 @@ export const LAMBDER_REFUSAL_CODES = {
     rateLimited: "lambder/rate-limited",
     /** The original of an idempotent request is still processing (409). */
     duplicateInFlight: "lambder/duplicate-in-flight",
+    /** The idempotencyKey was already used for a request with a different payload (409). */
+    idempotencyKeyReused: "lambder/idempotency-key-reused",
     /** The idempotencyKey is malformed (400). */
     invalidIdempotencyKey: "lambder/invalid-idempotency-key",
     /** No API is registered under the requested name. */

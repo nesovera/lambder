@@ -145,17 +145,16 @@ export interface LambderI18nInstance<
             & TExt
     ): LambderI18nInstance<TLanguages, TDefault, TEnforced, TContract & TExt[TDefault]>;
     /**
-     * Run the loaders a language has in this instance and in every instance
-     * sharing its root, and resolve once their dictionaries are merged.
-     * Defaults to the active language; resolves at once when nothing is left
-     * to load. Until then `t` falls back per key to the default language, so
-     * await it before the first render, and before `setLanguage` to switch
-     * without a flash of the default language. Change listeners fire once
-     * per load, however many calls share it. A loader that answered never
-     * runs again; one that rejected rejects this call and runs again on the
-     * next. Creating an extension loads nothing: one created after its
-     * language was loaded awaits its own `loadLanguage()`, which runs only
-     * what is still missing.
+     * Run the loaders a language has in this instance and every instance
+     * sharing its root, resolving once their dictionaries are merged.
+     * Defaults to the active language. Until then `t` falls back per key to
+     * the default language, so await it before the first render, and before
+     * `setLanguage` to switch without a flash of the default language.
+     * Change listeners fire once per load, however many calls share it. A
+     * loader that answered never runs again; one that rejected rejects this
+     * call and is retried on the next. Creating an extension loads nothing:
+     * one created after its language was loaded needs its own
+     * `loadLanguage()`, which runs only what is still missing.
      */
     loadLanguage(code?: keyof TLanguages & string): Promise<void>;
     /** Merge additional translations at runtime (e.g. fetched from an API). Notifies change listeners. */
@@ -219,9 +218,14 @@ export type LambderI18nTranslatorFor<T extends { t: unknown }> = T["t"];
 // Implementation
 // ---------------------------------------------------------------------------
 
-/** Islamery-style browser detection: ordered prefs, full code then primary subtag. */
+/**
+ * Browser detection: ordered prefs, full code then primary subtag. Only in a
+ * page, where there is a document: Node 21 and later, Deno and Bun define
+ * `navigator.languages` too, from the process locale, and a server's locale
+ * is not its reader's.
+ */
 const detectBrowserLanguage = (isCode: (value: string) => boolean): string | null => {
-    if (typeof navigator === "undefined") return null;
+    if (typeof document === "undefined" || typeof navigator === "undefined") return null;
     const prefs = navigator.languages?.length ? navigator.languages : [navigator.language];
     for (const pref of prefs ?? []) {
         const lower = (pref ?? "").toLowerCase();
@@ -235,7 +239,8 @@ const detectBrowserLanguage = (isCode: (value: string) => boolean): string | nul
 /** Mutable active-language state, shared between an instance and all its extensions. */
 class LanguageState {
     private override: string | null = null;
-    private detected: string | null = null;
+    /** A throwing detector is reported once rather than on every t() call that runs it. */
+    private detectorFailureReported = false;
     private listeners = new Set<(code: string) => void>();
 
     constructor(
@@ -244,20 +249,26 @@ class LanguageState {
         private readonly customDetect: (() => string | null | undefined) | null,
     ) {}
 
+    /**
+     * The active language: the one set, else detected afresh on every read.
+     * Detection is cheap, and what it reads lives outside this instance (the
+     * path an SPA navigates, the browser's languages), so remembering its
+     * first answer would keep a page on /en/ after it moved to /tr/.
+     */
     resolve(): string {
         if (this.override) return this.override;
-        if (this.detected) return this.detected;
         // Fail-open: a broken app detector must not take down every t() call.
         let custom: string | null | undefined = null;
         try {
             custom = this.customDetect?.();
         } catch (err) {
-            console.error("LambderI18n: detectLanguage threw; continuing detection chain.", err);
+            if (!this.detectorFailureReported) {
+                this.detectorFailureReported = true;
+                console.error("LambderI18n: detectLanguage threw; continuing detection chain.", err);
+            }
         }
-        if (custom && this.isCode(custom)) { this.detected = custom; return custom; }
-        const browser = detectBrowserLanguage(this.isCode);
-        this.detected = browser ?? this.defaultLanguage;
-        return this.detected;
+        if (custom && this.isCode(custom)) return custom;
+        return detectBrowserLanguage(this.isCode) ?? this.defaultLanguage;
     }
 
     set(code: string): void {
@@ -269,7 +280,6 @@ class LanguageState {
 
     reset(): void {
         this.override = null;
-        this.detected = null;
         this.notify(this.resolve());
     }
 
@@ -295,13 +305,18 @@ class LanguageState {
     }
 }
 
+/**
+ * Fills `{name}` tokens in one pass over the template, so a value is inserted
+ * as it is: a display name "Eve {org}" stays that, rather than having its own
+ * `{org}` filled by the next parameter. A token with no parameter stays.
+ * Own properties only, through Object.prototype.hasOwnProperty rather than
+ * Object.hasOwn: this runs in the browser bundle, and a browser without
+ * ES2022 (Safari before 15.4) would throw on the first parameterised text.
+ */
 const interpolate = (text: string, params?: Record<string, string | number>): string => {
     if (!params) return text;
-    let out = text;
-    for (const [token, value] of Object.entries(params)) {
-        out = out.split(`{${token}}`).join(String(value));
-    }
-    return out;
+    return text.replace(/\{([^{}]+)\}/g, (token, name: string) =>
+        Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : token);
 };
 
 interface InternalCore {
@@ -387,9 +402,9 @@ const startLayerLoad = (core: InternalCore, layer: DictLayer, lang: string, load
     const load = Promise.resolve()
         .then(loader)
         .then((loaded) => {
-            // A loader that answered is spent even when its answer is refused:
-            // running it again would fetch the same file and fail the same
-            // way. Only a loader that rejected stays, to be retried.
+            // A loader that answered is spent even when its answer is refused,
+            // since running it again would fail the same way. Only a loader
+            // that rejected stays, to be retried.
             layer.loaders.delete(lang);
             if (layer.loaders.size === 0) core.lazyLayers.delete(layer);
             const dict = dictionaryFromLoaded(loaded, lang);

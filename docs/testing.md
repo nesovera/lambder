@@ -36,28 +36,34 @@ no factory to restructure it into, no options to thread through.
 a `LambderMemorySessionStore`, a `LambderMemoryRateLimiter` and a
 `LambderMemoryIdempotencyStore`, each only where the app configured that
 subsystem. In place matters. An app is one module-level instance, and its
-handlers and guards close over it (`lambder.getSessionController(ctx)` in a
-login handler), so a copy of the instance over other stores would still reach
-the original through every one of those closures. Replacing the stores under
+guards and helpers import it (a guards module that reaches the instance's
+stores, a helper that calls `lambder.render`), so a copy of the instance over
+other stores would still reach the original through every one of those
+imports. Replacing the stores under
 the instance everyone already holds is the only version of this that is
 correct.
 
 Everything else runs as you wrote it: your guards, your named rate-limit
 policies and their `failOpen`, your idempotency settings, your session salt,
 cookie options and `dataRefresh`, your hooks and your error handlers. A call
-goes through the whole pipeline (version floor, signature gate, rate limits,
-session, replay, guards, input validation, your handler) exactly as a
-browser's does.
+goes through the whole pipeline (version floor, signature gate, IP rate
+limits, session, replay, session rate limits, guards, input validation,
+custom-key rate limits, your handler) exactly as a browser's does.
 
 Two consequences worth knowing:
 
-- **The production stores are out of reach.** From the moment the test app
-  exists, the instance cannot touch the DynamoDB tables it was created with,
-  even by mistake. Importing the app in a test does not touch AWS either: the
-  SDK loads on the first table access, and there is none.
-- **What the app reaches on its own stays the app's.** Its database, its
-  mailer, its own S3 bucket are not Lambder's to replace. Lambder makes
-  everything it owns swappable in one call and stays out of the rest.
+- **The stores the instance holds are out of reach.** From the moment the
+  test app exists, the instance cannot touch the session, rate-limit and
+  idempotency tables it was created with, even by mistake, and neither can a
+  handler charging a policy through `ctx.rateLimit`, which counts on the
+  instance's limiter. Importing the app in a test does not touch AWS either:
+  the SDK loads on the first table access, and there is none.
+- **What the app constructs itself stays the app's.** Its database, its
+  mailer, its own S3 bucket, and also any Lambder class it builds outside
+  `create()`: a `LambderDdbCache`, a `LambderDdbRateLimiter` it calls
+  directly, a `LambderInvokeCaller` to another function. The test app cannot
+  see those, so they reach AWS unless the suite swaps them; see [What the app
+  constructs itself](#what-the-app-constructs-itself).
 
 ### Options
 
@@ -213,6 +219,23 @@ original is in flight is an ordinary idempotency test, and only the call that
 crashed carries the cause. A refusal is an answer, not a crash. What an
 `event()` rejects with is already in the test's hands, and is not recorded.
 
+A crash still reaches the app's own `crashes.report`, which runs as written
+like everything else the app declared; a reporter that writes to a database
+is one more thing the suite gives a test double.
+
+## What the app constructs itself
+
+A Lambder class an app builds as a module-level constant, rather than hands
+to `create()`, is not under the instance, so the test app has no hold on it.
+Swap each in the suite's setup the way the app's other modules are swapped,
+with the in-process twin Lambder ships for it:
+
+| The app holds | Swap it for |
+| --- | --- |
+| `LambderDdbCache` | `LambderMemoryCache`, the same `LambderCache` interface and rules ([DynamoDB cache](./ddb-cache.md#the-lambdercache-interface-and-the-memory-twin)) |
+| `LambderDdbRateLimiter`, called directly | Nothing, once the calls are `ctx.rateLimit(policy, key)`: they count on the instance's limiter, which the test app already replaced ([Charging a policy from code](./api-policies.md#charging-a-policy-from-code)) |
+| `LambderInvokeCaller` to another function | The same caller with `transport: LambderInvokeCaller.localTransport(callee.getHandler())`, which runs the callee's real handler in this process ([Calling another lambda](./invoke.md#testing-and-boot-checks)) |
+
 ## Time
 
 The test app owns no clock. Fake `Date` with your test runner instead:
@@ -249,5 +272,5 @@ call rejects, as the handler does.
 | A frontend, with no backend | `LambderMockApp` from `lambder/mock`: your contract served from mock handlers over the real pipeline. `mockApp.transport()` on a `LambderCaller`, one caller per browser. See [The mock runtime](./mock.md) |
 | Code that invokes another Lambder app | `LambderInvokeCaller.localTransport(handler)` runs the callee's real handler in this process; `lambderMockInvokeTransport(mockApp)` answers from a mock one. See [Calling another lambda](./invoke.md#testing-and-boot-checks) |
 | A built deployment package | `LambderInvokeCaller.createEvent({ apiPath, apiName })` is the event a call would send, for a boot check that hands the package an event and asserts it answers. Same section |
-| A store of your own | The interfaces are small (`LambderSessionStore`, `LambderRateLimiter`, `LambderIdempotencyStore`), and the memory implementations are the reference for their semantics. Every shipped store takes an injectable `now`. See [The API core](./api-core.md) |
+| A store of your own | The interfaces are small (`LambderSessionStore`, `LambderRateLimiter`, `LambderIdempotencyStore`, `LambderCache`), and the memory implementations are the reference for their semantics. The rate limiters, the idempotency stores, the caches and the memory session store take an injectable `now`. See [The API core](./api-core.md) |
 | The wiring, without the test app | `lambderHandlerTransport(handler)` is the in-process transport underneath a visitor, and `lambderCookieJarTransport` the jar over it, for a test that wants the pieces. See [Frontend client](./client.md) |

@@ -15,8 +15,8 @@ order the first time.
 
 | Page | Covers |
 | --- | --- |
-| [Routing and actions](./routing.md) | `addRoute`, matchers, path params, hooks, fallback handlers, and `addAction` for non-HTTP invocations |
-| [APIs and refusals](./apis.md) | `addApi` and `addSessionApi`, the inferred contract, modular APIs with `use()`, `refuse()` and `LambderApiRefusal` |
+| [Routing and actions](./routing.md) | `addRoute`, matchers, path params, hooks, fallback and error handlers, crash reporting (`crashes`), gateway differences, and `addAction` for non-HTTP invocations |
+| [APIs and refusals](./apis.md) | `addApi` and `addSessionApi`, the inferred contract, modular APIs with `use()`, `refuse()` and `LambderApiRefusal`, the signature file (`writeApiSignatures` from `lambder/build`) |
 | [Responses](./responses.md) | The render context, resolver methods, `die`, cookies, compression, ETag, and Lambda's size caps |
 | [Sessions](./sessions.md) | Sessions over a store (DynamoDB, memory, your own), cookie scope and migrations, secrets at rest, `dataRefresh`, the session controller |
 | [API policies](./api-policies.md) | Declarative rate limits, guards and idempotency, and making an authorization declaration mandatory |
@@ -39,7 +39,7 @@ order the first time.
 | Page | Covers |
 | --- | --- |
 | [DynamoDB tables](./dynamodb-tables.md) | Table shapes, TTL and IAM for sessions, cache, rate limits and idempotency |
-| [DynamoDB cache](./ddb-cache.md) | `LambderDdbCache`: compressed values, memory layer, fill lease, grouped keys |
+| [DynamoDB cache](./ddb-cache.md) | `LambderDdbCache`: compressed values, memory layer, fill lease, grouped keys; `LambderMemoryCache`, its twin for tests |
 | [Rate limiter](./ddb-rate-limiter.md) | `LambderDdbRateLimiter`: fixed windows, atomic counting, fail-open |
 | [Idempotency store](./ddb-idempotency.md) | `LambderDdbIdempotencyStore`: claims, replays, owner tokens, stored bodies |
 
@@ -47,7 +47,7 @@ order the first time.
 
 | Page | Covers |
 | --- | --- |
-| [Exports reference](./exports.md) | Every name the four entry points export, grouped by purpose |
+| [Exports reference](./exports.md) | Every name the five entry points export, grouped by purpose |
 
 ## Elsewhere in the repository
 

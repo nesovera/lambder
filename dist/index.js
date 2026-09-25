@@ -2,6 +2,7 @@ import Lambder from './core/Lambder.js';
 export default Lambder;
 export { initLambder } from './core/Lambder.js';
 export { default as LambderCaller } from "./client/LambderCaller.js";
+export { createIdempotencyKey, createIdempotencyKeyScope } from "./shared/wire/LambderIdempotencyKeyScope.js";
 // Transports: how a caller reaches a server (fetch in production, a handler in-process for tests, a cookie jar over either)
 export { lambderFetchTransport } from "./client/lambderFetchTransport.js";
 export { buildTransportEnvelope, LambderTransportFailure, isLambderTransportFailure } from "./shared/transport/LambderApiTransport.js";
@@ -23,13 +24,14 @@ export { RELOAD_LOOP_WINDOW_MS } from "./client/LambderReloadLoopBreaker.js";
 export { compareDottedVersions, isDottedVersion } from "./shared/wire/LambderVersionOrder.js";
 export { buildApiEnvelope, envelopeAnswer, refusalAnswer, validationAnswer, apiNotFoundAnswer, sessionExpiredAnswer, versionExpiredAnswer, invalidPayloadAnswer, crashAnswer, API_ANSWER_CONTENT_TYPE, } from "./api/LambderApiEnvelope.js";
 export { LambderApiValidationRefusal, isLambderApiValidationRefusal } from "./api/LambderApiValidationRefusal.js";
+export { LambderApiOutputValidationError } from "./api/LambderApiOutputValidationError.js";
 // Calling a Lambder app from another lambda (server-only: the Lambda SDK, zlib)
 export { LambderInvokeError, isLambderInvokeError } from "./invoke/LambderInvokeOutcome.js";
 export { default as LambderInvokeCaller, LAMBDER_INVOKE_MAX_EVENT_BYTES, } from "./invoke/LambderInvokeCaller.js";
 // A crash described for a caller allowed to see it (the envelope's `crash` field)
 export { describeCrash, errorFromCrashDetail } from "./shared/wire/LambderCrashDetail.js";
 // Typed API refusals (isomorphic: shared code may throw them from anywhere)
-export { LambderApiRefusal, isLambderApiRefusal, refuse, LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";
+export { LambderApiRefusal, isLambderApiRefusal, refuse, refusalMessageOf, LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";
 export { default as LambderResponseBuilder } from "./core/LambderResponseBuilder.js";
 export { default as LambderResolver } from "./core/LambderResolver.js";
 export { default as LambderSessionManager } from "./session/LambderSessionManager.js";
@@ -55,8 +57,8 @@ export { resolveCompressionOption, LAMBDER_ENCODINGS } from "./shared/wire/Lambd
 export { compressText, restoreBytes, restoreText, LambderCompressionError, LAMBDER_RESTORE_FAILURES, } from "./shared/wire/LambderCompressionCodec.js";
 export { LambderSessionDataRefreshError, LambderSessionReadError } from "./session/LambderSessionManager.js";
 export { LambderSessionNotFoundError, LambderSessionAmbiguousError } from "./session/LambderSessionController.js";
-// DynamoDB-backed compressed cache (standalone, server-only)
 export { LambderDdbCache } from "./stores/LambderDdbCache.js";
+export { LambderMemoryCache } from "./stores/LambderMemoryCache.js";
 // Fixed-window rate limiting: the shared vocabulary, the DynamoDB limiter and the in-memory one
 export { RATE_LIMIT_WINDOWS } from "./shared/contracts/LambderRateLimiter.js";
 export { LambderDdbRateLimiter } from "./stores/LambderDdbRateLimiter.js";
@@ -74,8 +76,7 @@ export { resolveApiOutcome } from "./shared/wire/LambderApiOutcome.js";
 export { createContext, isV2HttpEvent } from "./core/LambderContext.js";
 // Request payload compression: the wire format LambderCaller and the server share.
 export { COMPRESSED_PAYLOAD_GZ_FIELD, COMPRESSED_PAYLOAD_BR_FIELD, COMPRESSED_PAYLOAD_BYTES_FIELD, DEFAULT_REQUEST_COMPRESSION_SETTINGS, DEFAULT_MAX_RESTORED_PAYLOAD_BYTES, 
-// The Brotli twin of the browser's compressPayloadGzip, beside it now
-// rather than inside LambderInvokeCaller; the root entry's name is unchanged.
+// The Brotli twin of the browser's compressPayloadGzip, and its defaults.
 DEFAULT_INVOKE_REQUEST_COMPRESSION_SETTINGS, compressPayloadBrotli, } from "./shared/wire/LambderRequestPayload.js";
 // Cookies (res.setCookie / res.clearCookie build on these; exported for code holding a LambderResponse)
 export { serializeCookie, serializeClearCookie, resolveCookieDomain } from "./shared/wire/LambderCookie.js";

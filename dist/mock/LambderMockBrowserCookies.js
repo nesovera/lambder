@@ -1,21 +1,17 @@
 import { parseSetCookie } from "../shared/transport/LambderCookieJar.js";
 /**
  * Where the runtime's cookies live outside its own answers: the jars it built
- * for itself, and the copies it planted in the page's own cookie storage.
+ * for itself, and the copies it planted in the page's cookie storage. A
+ * collaborator of LambderMockApp that owns state nothing else touches, meets
+ * the runtime at two calls (an answer coming back, reset()), and holds the
+ * one outside dependency, `document`, keeping the app free of browser
+ * conditionals.
  *
- * The fourth of LambderMockApp's collaborators, and the same argument as the
- * other three: it owns state nothing else touches and meets the runtime at two
- * calls (a transport's answer coming back, and reset()). It is the piece with
- * an outside dependency, `document`, so keeping it here is also what keeps the
- * app free of browser conditionals.
- *
- * Both the direct transport's "document" mode and the MSW adapter come through
- * one instance, so there is one mirror implementation and one record of what
- * was planted. They carried a copy each before: the MSW copy dropped `Secure`
- * on a page that is not a secure context and the transport's did not, so on
- * plain http (device testing on a LAN address) the browser silently refused
- * the CSRF cookie and every session call failed its CSRF check with nothing in
- * any log to say why.
+ * The direct transport's "document" mode and the MSW adapter share one
+ * instance, so they cannot disagree on dropping `Secure`: on plain http
+ * (device testing on a LAN address) a kept `Secure` makes the browser
+ * silently refuse the CSRF cookie, failing every session call's CSRF check
+ * with nothing in any log.
  */
 export class LambderMockBrowserCookies {
     /** The jars transport() and the adapters built for themselves, which reset() is therefore free to empty. */
@@ -24,9 +20,9 @@ export class LambderMockBrowserCookies {
     mirroredCookies = new Map();
     /**
      * Takes a jar built for the runtime as the runtime's own, so reset()
-     * empties it with the rest. A jar the app passed in stays the app's, the
-     * way an app-supplied session store does: the runtime did not create it and
-     * does not know what else holds it.
+     * empties it with the rest. A jar the app passed in stays the app's, like
+     * an app-supplied session store: the runtime does not know what else
+     * holds it.
      */
     adoptJar(jar) {
         this.ownedJars.add(jar);
@@ -35,13 +31,13 @@ export class LambderMockBrowserCookies {
      * Mirrors an answer's non-HttpOnly cookies into document.cookie and
      * remembers them for reset().
      *
-     * HttpOnly cookies are skipped exactly as a real browser skips them, the
-     * jar being the store no script can reach. `Secure` is dropped where the
-     * page is not a secure context, because the browser would refuse the write
-     * and development over plain http on a LAN address has to keep working. A
-     * `__Host-` or `__Secure-` cookie name is then discarded by the browser
-     * for breaking its own prefix rule, which is correct: such a name cannot
-     * work on plain http at all, and localhost is a secure context.
+     * HttpOnly cookies are skipped as a real browser skips them; the jar is
+     * the store no script can reach. `Secure` is dropped where the page is not
+     * a secure context, since the browser would refuse the write and plain
+     * http on a LAN address has to keep working. The browser then discards a
+     * `__Host-` or `__Secure-` name for breaking its prefix rule, which is
+     * correct: such a name cannot work on plain http, and localhost is a
+     * secure context.
      */
     mirrorSetCookies(setCookies) {
         if (typeof document === "undefined")
@@ -59,10 +55,10 @@ export class LambderMockBrowserCookies {
      * Empties the jars the runtime owns and expires what it mirrored, which is
      * what clearing the page's cookie storage would do.
      *
-     * As much a part of a rewind as the session store is: emptying the store
-     * while a jar still holds the token for one of its sessions leaves the next
-     * call carrying a session that no longer exists, which reads as signed in
-     * until the answer says sessionExpired.
+     * Part of a rewind as much as the session store is: emptying the store
+     * while a jar still holds one of its session tokens leaves the next call
+     * carrying a dead session, which reads as signed in until the answer says
+     * sessionExpired.
      */
     reset() {
         for (const jar of this.ownedJars)

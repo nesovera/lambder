@@ -15,11 +15,11 @@ import {
     sessionExpiredAnswer, versionExpiredAnswer, invalidPayloadAnswer, crashAnswer,
 } from '../src/api/LambderApiEnvelope.js';
 import { readApiEnvelope, restoreCompressedPayload, type LambderApiRequest } from '../src/api/LambderApiRequest.js';
-import { createApiCallContext, type LambderApiCallContext } from '../src/api/LambderApiCallContext.js';
+import { bindCallTools, createApiCallContext, type LambderApiCallContext } from '../src/api/LambderApiCallContext.js';
 import { LambderApiPipeline } from '../src/api/LambderApiPipeline.js';
 import type { LambderApiDefinition } from '../src/api/LambderApiDefinition.js';
 import { apiNameKeyOf } from '../src/shared/wire/LambderApiSignature.js';
-import { LambderApiPolicyEngine } from '../src/api/LambderApiPolicyEngine.js';
+import { LambderApiGuardsEngine } from '../src/api/LambderApiGuards.js';
 import { LambderApiValidationRefusal, isLambderApiValidationRefusal } from '../src/api/LambderApiValidationRefusal.js';
 import { LambderApiRefusal, refuse, LAMBDER_REFUSAL_CODES } from '../src/shared/wire/LambderApiRefusal.js';
 import { LambderMemoryRateLimiter } from '../src/stores/LambderMemoryRateLimiter.js';
@@ -92,7 +92,7 @@ describe('The envelope', () => {
     it('buildApiEnvelope carries only the flags that are set and drops an empty logList', () => {
         expect(buildApiEnvelope('1', { a: 1 })).toEqual({ apiVersion: '1', payload: { a: 1 } });
         expect(buildApiEnvelope(undefined, null, { sessionExpired: true, logList: [] })).toEqual({ apiVersion: null, payload: null, sessionExpired: true });
-        expect(buildApiEnvelope(null, null, { errorMessage: 'no', message: 'hi', logList: ['x'] })).toEqual({ apiVersion: null, payload: null, message: 'hi', errorMessage: 'no', logList: ['x'] });
+        expect(buildApiEnvelope(null, null, { errorMessage: 'no', message: 'hi', logList: ['x'] })).toEqual({ apiVersion: null, payload: null, message: 'hi', errorMessage: { type: 'error', content: 'no' }, logList: ['x'] });
     });
 
     it('each answer function renders its outcome with the right status, headers and body', () => {
@@ -118,16 +118,16 @@ describe('The envelope', () => {
         expect(JSON.parse(invalidPayloadAnswer('1', 'bad').body).errorMessage.code).toBe(LAMBDER_REFUSAL_CODES.invalidRequestPayload);
         const crash = crashAnswer('1');
         expect(crash.statusCode).toBe(500);
-        expect(JSON.parse(crash.body)).toEqual({ apiVersion: '1', payload: null, errorMessage: 'Internal server error.' });
+        expect(JSON.parse(crash.body)).toEqual({ apiVersion: '1', payload: null, errorMessage: { type: 'error', content: 'Internal server error.' } });
     });
 
 
     it('counts validation issues past a point instead of echoing all of them', async () => {
         // A public API validates before any guard runs, so an unauthenticated
-        // caller chose this body's size. zod re-serializes the whole issue
-        // list into its own `message` too, so an uncapped answer shipped the
-        // tree twice: a modest posted array came back as megabytes, which also
-        // crosses the response size cap and turns the 422 into a crash.
+        // caller chooses this body's size. zod also repeats the whole issue
+        // list in its own `message`, so an uncapped answer ships the tree
+        // twice: a modest posted array comes back as megabytes, past the
+        // response size cap, and the 422 turns into a crash.
         const schema = z.array(z.object({ n: z.number() }));
         const tooMany = schema.safeParse(Array.from({ length: 5000 }, () => ({ n: 'no' }))).error!;
 
@@ -142,11 +142,11 @@ describe('The envelope', () => {
         expect(answer.body.length).toBeLessThan(20_000);
     });
     it('bounds the 422 body by BYTES, not by issue count, and never ships zod\'s own message', async () => {
-        // The count cap bounds the wrong thing: ONE unrecognized_keys issue
-        // carries every key the client posted, and zod's own message is the
-        // whole tree serialized again. Measured before the fix: 988,903 bytes
-        // in, 4,195,863 bytes out, unauthenticated and before any guard,
-        // which also crosses the response cap and turns the 422 into a 500.
+        // A count cap alone bounds the wrong thing: ONE unrecognized_keys
+        // issue carries every key the client posted, and zod's own message is
+        // the whole tree serialized again. Unbounded, about 1 MB posted
+        // unauthenticated comes back as about 4 MB, past the response cap,
+        // and the 422 turns into a 500.
         const schema = z.strictObject({ value: z.string() });
         const posted: Record<string, unknown> = { value: 'x' };
         for(let i = 0; i < 20_000; i += 1) posted[`extra_${i}`] = i;
@@ -172,12 +172,12 @@ describe('The envelope', () => {
     });
 
     it('renders an errorMessage the app set to an empty value, since presence is the statement', () => {
-        // Truthiness dropped exactly the refusals an app spells out as empty:
-        // errorMessage: "" reached the caller as no errorMessage at all, and
-        // its errorMessageHandler never ran.
+        // A truthiness check would drop exactly the refusals an app spells
+        // out as empty: errorMessage: "" would reach the caller as no
+        // errorMessage at all, and its errorMessageHandler would never run.
         const refusal = refusalAnswer(new LambderApiRefusal('Denied.', { errorMessage: '' }), '1');
-        expect(JSON.parse(refusal.body).errorMessage).toBe('');
-        expect(JSON.parse(refusalAnswer(new LambderApiRefusal('Denied.'), '1').body).errorMessage).toBe('Denied.');
+        expect(JSON.parse(refusal.body).errorMessage).toEqual({ type: 'error', content: '' });
+        expect(JSON.parse(refusalAnswer(new LambderApiRefusal('Denied.'), '1').body).errorMessage).toEqual({ type: 'error', content: 'Denied.' });
         expect(buildApiEnvelope('1', null, { message: '' })).toEqual({ apiVersion: '1', payload: null, message: '' });
     });
 
@@ -292,14 +292,14 @@ describe('LambderApiPipeline', () => {
         expect(JSON.parse((await pipeline.prepare(request({ apiName: 'nope', signature: 'anything' })))!.body).versionExpired).toBe(true);
         // Without a map every signature passes.
         expect(await new LambderApiPipeline().prepare(request({ signature: 'anything' }))).toBeNull();
-        expect(JSON.parse(pipeline.answerUnknownApi(request()).body).errorMessage.code).toBe(LAMBDER_REFUSAL_CODES.apiNotFound);
+        expect(JSON.parse(pipeline.answerUnknownApi().body).errorMessage.code).toBe(LAMBDER_REFUSAL_CODES.apiNotFound);
         // Both adapters run prepare() with the definition the name resolved
         // to, or null, so a signed stale client has already been answered by
         // the time an unknown name is reported: the refusal carries the call's
         // headers instead of a second gate nothing can reach.
         const ctx = createApiCallContext();
         ctx.responseHeaders.set('X-Cors', 'yes');
-        expect(pipeline.answerUnknownApi(request(), ctx).headers['X-Cors']).toEqual(['yes']);
+        expect(pipeline.answerUnknownApi(ctx).headers['X-Cors']).toEqual(['yes']);
 
         const bad = await pipeline.run(request({ compressedPayload: { gzip: 5, brotli: undefined, declaredBytes: 1 } }), createApiCallContext(), definition, okExec);
         expect(bad.answer.statusCode).toBe(400);
@@ -314,13 +314,12 @@ describe('LambderApiPipeline', () => {
         const custom = new LambderApiPipeline({ onInvalidInput: async (zodError) => envelopeAnswer(buildApiEnvelope(null, null, { errorMessage: `bad ${zodError.issues[0]?.path.join('.')}` }), { statusCode: 400 }) });
         const answered = await custom.run(request({ payload: {} }), createApiCallContext(), definition, okExec);
         expect(answered.answer.statusCode).toBe(400);
-        expect(JSON.parse(answered.answer.body).errorMessage).toBe('bad value');
+        expect(JSON.parse(answered.answer.body).errorMessage).toEqual({ type: 'error', content: 'bad value' });
 
         // The handler sees the PARSED payload: the schema's output, unknown
         // keys stripped and coercions applied, not what the client posted.
-        // Read off the request the pipeline mutated; building a fresh request
-        // here and reading THAT compared a literal to itself, so deleting the
-        // assignment the assertion is about left the test green.
+        // It is read off the request the pipeline mutated; a fresh request
+        // would compare a literal to itself and pass without the assignment.
         const coercing = { name: 'thing.do', mode: 'public' as const, input: z.object({ value: z.string(), count: z.coerce.number() }) };
         const posted = request({ payload: { value: 'v', count: '42', extra: 1 } });
         const seen: unknown[] = [];
@@ -329,11 +328,10 @@ describe('LambderApiPipeline', () => {
     });
 
     it('reports the guards that ran, the refusing one last, when a later one refuses', async () => {
-        // The mock's call log reads this. Reporting "no guards ran" for the
-        // one call a developer is looking at, because a guard denied it, is
-        // exactly backwards, and so is leaving out the guard that actually
-        // said no: it is recorded before it runs, so the trace ends on the
-        // name of the refusal and the guards after it never appear.
+        // The mock's call log reads this, and a denied call is the one a
+        // developer looks at: it must list the guards that ran, the one that
+        // said no included. Each is recorded before it runs, so the trace
+        // ends on the refusing guard and the ones after it never appear.
         const pipeline = new LambderApiPipeline({ guards: {
             first: { handler: async () => ({ ok: true }) },
             second: { handler: async () => { refuse('No.', { code: 'app/no' }); } },
@@ -466,8 +464,8 @@ describe('LambderApiPipeline', () => {
     it('writes into the trace the adapter handed it, so a crashed call still reports its guards', async () => {
         // The mock runtime reports the guards a call ran even when the
         // handler threw. The pipeline rethrows a crash, so a trace it created
-        // itself went with the throw and the call log showed no guards on
-        // exactly the calls someone opens a log for.
+        // itself would go with the throw, and the call log would show no
+        // guards on exactly the calls someone opens a log for.
         const pipeline = new LambderApiPipeline({ guards: { first: { handler: async () => {} } } });
         const trace = { guardsRun: [] as string[], replayed: false };
 
@@ -481,9 +479,9 @@ describe('LambderApiPipeline', () => {
     });
 
     it('a guard named after an inherited property reads back as absent when it returned nothing', async () => {
-        // guardData is the app's namespace: guard names are the app's to
-        // choose, and on a plain object a check-only guard named "toString"
-        // read back as the inherited function.
+        // guardData is the app's namespace and guard names are the app's to
+        // choose: on a plain object, a check-only guard named "toString"
+        // would read back as the inherited function.
         const pipeline = new LambderApiPipeline({ guards: { toString: { handler: async () => undefined } } });
         const ctx = createApiCallContext();
         let seen: unknown = 'unset';
@@ -497,11 +495,10 @@ describe('LambderApiPipeline', () => {
     });
 
     it('a guard named "length" reads as absent when the client posted an ARRAY of guard inputs', async () => {
-        // Arrays are objects and answer for their own properties, so without
-        // the array clause in readApiEnvelope a client that sent no guard
-        // input at all handed a guard named "length" the array's length, and
-        // a number is a perfectly good z.number() input: the guard passed on
-        // data nobody sent. The map is client data, and is read as data.
+        // Arrays answer for their own properties, so without the array clause
+        // in readApiEnvelope a client that sent no guard input would hand a
+        // guard named "length" the array's length, a valid z.number() input:
+        // the guard would pass on data nobody sent.
         const envelopeInfo = { headers: {}, cookies: {}, ip: '1.2.3.4', host: 'localhost' };
         const posted = readApiEnvelope({ apiName: 'thing.do', payload: { value: 'x' }, guardInputs: [7, 8] }, envelopeInfo)!;
         expect(posted.guardInputs).toBeUndefined();
@@ -522,7 +519,7 @@ describe('LambderApiPipeline', () => {
         const store = new LambderMemoryIdempotencyStore();
         const recording = {
             peek: async () => null,
-            begin: (scopeKey: string, options: { pendingTtlSeconds: number }) => { windows.push(options.pendingTtlSeconds); return store.begin(scopeKey, options); },
+            begin: (scopeKey: string, options: { pendingTtlSeconds: number; fingerprint: string }) => { windows.push(options.pendingTtlSeconds); return store.begin(scopeKey, options); },
             complete: (scopeKey: string, owner: string, record: Parameters<LambderMemoryIdempotencyStore['complete']>[2]) => store.complete(scopeKey, owner, record),
             abandon: (scopeKey: string, owner: string) => store.abandon(scopeKey, owner),
         };
@@ -555,7 +552,7 @@ describe('LambderApiPipeline', () => {
         const store = new LambderMemoryIdempotencyStore();
         const keepingStore = {
             peek: async () => null,
-            begin: (scopeKey: string, options: { pendingTtlSeconds: number }) => store.begin(scopeKey, options),
+            begin: (scopeKey: string, options: { pendingTtlSeconds: number; fingerprint: string }) => store.begin(scopeKey, options),
             complete: async (_scopeKey: string, _owner: string, record: { statusCode: number; headers: Record<string, string[]>; body: string; ttlSeconds: number }) => {
                 kept = record;
                 return "stored" as const;
@@ -636,12 +633,36 @@ describe('LambderApiPipeline', () => {
             .toThrow(/the guards option was declared with no guards in it/);
         expect(() => new LambderApiPipeline({ rateLimits: { limiter: new LambderMemoryRateLimiter(), policies: {} } }))
             .toThrow(/the rateLimits option was declared with no policies in it/);
-        // And a second configuration is refused rather than merged, the way
-        // the other two engines already refused one.
+        // And a second configuration is refused rather than merged, as the
+        // other two engines refuse one.
         expect(() => {
-            const policies = new LambderApiPolicyEngine();
-            policies.configureGuards({ one: { handler: async () => {} } });
-            policies.configureGuards({ two: { handler: async () => {} } });
+            const guards = new LambderApiGuardsEngine();
+            guards.configure({ one: { handler: async () => {} } });
+            guards.configure({ two: { handler: async () => {} } });
         }).toThrow(/guards were already configured/);
+    });
+});
+
+describe('bindCallTools: how both adapters put tools on a call context', () => {
+    it('binds getters and methods that stay off a copy of the context, and binds again in place', () => {
+        const ctx: Record<string, unknown> = { session: 'the original' };
+        bindCallTools(ctx, {
+            getters: { sessionController: () => `controller over ${String(ctx.session)}` },
+            methods: { rateLimit: (policy: string) => `charged ${policy}` },
+        });
+
+        expect(ctx.sessionController).toBe('controller over the original');
+        expect((ctx.rateLimit as (policy: string) => string)('perIp')).toBe('charged perIp');
+        // Not enumerable: a spread copy carries none of them, rather than
+        // ones still bound to the object it was copied from.
+        expect(Object.keys(ctx)).toEqual(['session']);
+        expect({ ...ctx }).not.toHaveProperty('sessionController');
+
+        const copy: Record<string, unknown> = { ...ctx, session: 'the copy' };
+        bindCallTools(copy, { getters: { sessionController: () => `controller over ${String(copy.session)}` } });
+        expect(copy.sessionController).toBe('controller over the copy');
+        // Binding again replaces what was bound.
+        bindCallTools(ctx, { getters: { sessionController: () => 'rebound' } });
+        expect(ctx.sessionController).toBe('rebound');
     });
 });

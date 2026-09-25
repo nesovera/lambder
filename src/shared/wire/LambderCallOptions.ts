@@ -1,15 +1,15 @@
 /**
- * The per-call options both callers take, the contract-driven typing of a
- * call's arguments, and the runtime merge of guard inputs, shared by the
- * browser caller (LambderCaller) and the server-side invoke caller
- * (LambderInvokeCaller). Both speak the same envelope to the same kind of
- * contract, so what an API demands of its caller (a guardInput-mode guard's
- * value, say) is decided here once and the two callers cannot drift on it.
- * Pure types and one dependency-free function, so the browser entry resolves
- * it.
+ * The per-call options, the contract-driven typing of a call's arguments, and
+ * the runtime merge of guard inputs, shared by the browser caller
+ * (LambderCaller) and the server-side invoke caller (LambderInvokeCaller).
+ * Both speak the same envelope to the same kind of contract, so what an API
+ * demands of its caller (a guardInput-mode guard's value, say) is decided
+ * here once and the two cannot drift. Pure types and one dependency-free
+ * function, so the browser entry resolves it.
  */
 
 import type { LambderContractIdempotencyOf } from "./LambderApiContract.js";
+import type { LambderIdempotencyKeyScope } from "./LambderIdempotencyKeyScope.js";
 
 type IsAny<T> = 0 extends (1 & T) ? true : false;
 
@@ -43,19 +43,22 @@ export type LambderSharedCallOptions = {
     /**
      * Replay-protection key for APIs declared idempotent on the server.
      * Generate once per logical operation with
-     * LambderCaller.createIdempotencyKey() and send the same key on retries:
+     * createIdempotencyKey() and send the same key on retries:
      * duplicates of an in-flight request refuse, and repeats of a completed
      * one replay its stored response instead of re-executing. Must be
      * UNGUESSABLE random (it scopes the replay record for logged-out clients)
      * and at least 16 characters; the server refuses shorter keys with a 400.
      *
-     * The typed contract makes this REQUIRED for an API whose entry declares
-     * `idempotency`, the way it does for guardInput values: a server
-     * declaration that reads as protection and silently provides none (the
-     * server runs a keyless call, which dedupes nothing) is exactly what the
-     * typed caller is for.
+     * REQUIRED by the typed contract for an API that declares `idempotency`,
+     * since the server runs a keyless call unprotected.
+     *
+     * A key scope (createIdempotencyKeyScope()) is the easier
+     * form: it rotates once an answer settles the operation, so a retry after
+     * a dropped connection reuses the key and the next attempt (a corrected
+     * form after a refusal included) gets a new one. See
+     * LambderIdempotencyKeyScope for which answers settle it.
      */
-    idempotencyKey?: string;
+    idempotencyKey?: string | LambderIdempotencyKeyScope;
 };
 
 /** The payload type one API of a contract takes; `any` for an untyped caller or a name the contract does not know. */
@@ -88,12 +91,12 @@ export type LambderProvidedGuardInputs<TContract, TProvided extends string> =
 
 /**
  * Supplies guardInputs for every call from one place (the organization the
- * UI is on, a device token), keyed by guard name; per-call guardInputs
- * merge on top. Name the guards it covers in the caller's second type
- * parameter, `new LambderCaller<Contract, "orgPermission">`, and calls to
- * APIs whose guardInput guards are all covered do not require the
- * options argument. May be async; a throw fails the call as an unknown
- * error before anything is sent.
+ * UI is on, a device token), keyed by guard name; per-call guardInputs merge
+ * on top. Name the guards it covers in the caller's second type parameter,
+ * `new LambderCaller<Contract, "orgPermission">`, and calls to APIs whose
+ * guardInput guards are all covered do not require the options argument.
+ * May be async; a throw fails the call as an unknown error before anything
+ * is sent.
  */
 export type LambderGuardInputsProvider<TContract, TProvided extends string> =
     (apiName: keyof TContract & string) => LambderProvidedGuardInputs<TContract, TProvided> | Promise<LambderProvidedGuardInputs<TContract, TProvided>>;
@@ -126,8 +129,7 @@ type ContractGuardInputsField<TEntry, TProvided extends string> =
  *
  * Read as "required unless it says false" rather than "required only when it
  * says true", so an entry whose option widened to `boolean` (declared through
- * a spread, or built in a helper) keeps the requirement instead of quietly
- * losing its compile-time half.
+ * a spread, or built in a helper) keeps the requirement at compile time.
  */
 type ContractIdempotencyKeyField<TContract, TApiName> =
     TApiName extends keyof TContract
@@ -135,7 +137,7 @@ type ContractIdempotencyKeyField<TContract, TApiName> =
             ? {}
             : [LambderContractIdempotencyOf<TContract, TApiName>] extends [false]
                 ? {}
-                : { idempotencyKey: string }
+                : { idempotencyKey: string | LambderIdempotencyKeyScope }
         : {};
 
 /**
@@ -150,13 +152,9 @@ type ContractCallFields<TContract, TApiName, TProvided extends string> =
 /**
  * The options argument of one call: optional normally, REQUIRED when the
  * contract demands something of it, so forgetting a guard's value or an
- * idempotent API's key is a compile error at the call site rather than a 422
- * from the server or a replay that never happens. TOptions is the caller's own
- * per-call options type; the contract's fields are layered on top of it.
- *
- * `{} extends TFields` is the question "is every field the contract added
- * optional": an empty object is assignable to a type whose properties are all
- * optional and to nothing else.
+ * idempotent API's key is a compile error rather than a 422 or a replay that
+ * never happens. TOptions is the caller's own per-call options type.
+ * `{} extends TFields` asks "is every field the contract added optional".
  */
 type LambderCallOptionsArg<TContract, TApiName, TProvided extends string, TOptions extends { guardInputs?: Record<string, unknown> }> =
     IsAny<TContract> extends true ? [options?: TOptions]
@@ -170,19 +168,13 @@ type LambderCallOptionsArg<TContract, TApiName, TProvided extends string, TOptio
 
 /**
  * Everything one call passes after the API name: the payload, then the
- * options, both decided by the contract.
- *
- * The payload is optional only when the API's input accepts undefined, so
- * `caller.api("getUser")` against `input: { id: string }` is a compile error
- * at the call site rather than a 422 from the server. Building it as one rest
- * tuple is what makes that possible: a plain optional parameter cannot be
- * made mandatory by a later type, and TypeScript has no per-argument
- * conditional otherwise.
- *
- * When the options argument is itself mandatory (an uncovered guardInput
- * guard, an idempotent API's key), the payload cannot stay optional in front
- * of it, since a tuple's required element may not follow an optional one.
- * Such a call passes its payload explicitly, `undefined` included.
+ * options, both decided by the contract. The payload is optional only when
+ * the API's input accepts undefined, so `caller.api("getUser")` against
+ * `input: { id: string }` fails to compile rather than drawing a 422. That
+ * needs one rest tuple, since TypeScript has no other per-argument
+ * conditional. When the options are mandatory, the payload cannot stay
+ * optional before them (a tuple's required element may not follow an
+ * optional one), so such a call passes it explicitly, `undefined` included.
  */
 export type LambderCallArgs<TContract, TApiName, TProvided extends string, TOptions extends { guardInputs?: Record<string, unknown> }> =
     LambderCallOptionsArg<TContract, TApiName, TProvided, TOptions> extends [options: infer TRequired]
@@ -195,9 +187,8 @@ export type LambderCallArgs<TContract, TApiName, TProvided extends string, TOpti
 
 /**
  * Provider values underneath, per-call values on top; undefined when neither
- * side supplied any. Synchronous on purpose: a caller awaits its provider
- * only when it has one, so a call without a provider still issues its
- * request in the same tick it was made.
+ * side supplied any. Synchronous so a call without a provider still issues
+ * its request in the same tick it was made.
  */
 export const mergeGuardInputs = (
     provided: Record<string, unknown> | undefined,

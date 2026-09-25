@@ -36,28 +36,23 @@ export declare const parseSetCookie: (header: string, now: number, requestPath?:
  * in-process handler transport in a Node test, and the mock runtime's direct
  * transport. It stores what an answer's Set-Cookie headers set, honours their
  * expiry and deletion, and hands back the Cookie pairs the next request should
- * carry. One jar is one browser; two jars are two.
+ * carry. One jar is one browser.
  *
- * The rules themselves are tough-cookie's, which is the reference
- * implementation of RFC 6265 and carries the public suffix list: domain and
- * path matching, default-path, Max-Age against Expires, Secure, HttpOnly, and
- * the __Host-/__Secure- prefixes. That list is the part worth importing rather
- * than writing. A hand-rolled check can tell that `Domain=com` is a registry
- * suffix by counting labels, and cannot tell that `co.uk` is one, so a
- * hand-rolled jar either trusts `Domain=co.uk` or bans every two-label domain.
+ * The rules (domain and path matching, default-path, Max-Age against Expires,
+ * Secure, HttpOnly, the __Host-/__Secure- prefixes) are tough-cookie's, the
+ * reference RFC 6265 implementation, imported for its public suffix list:
+ * counting labels can tell `Domain=com` is a registry suffix but not `co.uk`,
+ * so a hand-rolled jar either trusts `Domain=co.uk` or bans every two-label
+ * domain.
  *
- * What stays Lambder's is the shape of the questions a transport asks: whole
- * Set-Cookie header lists in (storeSetCookies), `name=value` pairs out
- * (cookiePairs), and a target given as a host and path rather than a URL,
- * since a transport that never speaks HTTP has no URL to give. A field the
- * caller omits is one it could not know, and an unknown field matches
- * anything: a jar pointed at a single host is the ordinary case, and refusing
- * to answer it until it can name that host would make the common setup the
- * awkward one.
+ * What stays Lambder's is the shape of a transport's questions: Set-Cookie
+ * header lists in (storeSetCookies), `name=value` pairs out (cookiePairs),
+ * and a target given as host and path, since a transport that never speaks
+ * HTTP has no URL. An omitted field matches anything, because a jar pointed
+ * at a single host is the ordinary case and should not have to name it.
  *
- * SameSite is stored but never consulted. It answers "did another site
- * initiate this", and a transport call has no initiating site: every call here
- * is same-site by construction.
+ * SameSite is stored but never consulted: it answers "did another site
+ * initiate this", and every transport call is same-site by construction.
  */
 export declare class LambderCookieJar {
     private readonly jar;
@@ -76,25 +71,24 @@ export declare class LambderCookieJar {
      * came from. Its `host` is the sending host, which every Domain is checked
      * against, and its `path` is the default Path of a cookie that names none.
      *
-     * A Domain the sender is not under does not narrow a cookie, it voids it
-     * (RFC 6265 section 5.3 step 6), and so does a Domain that is a public
-     * suffix. Both are how evil.example.com would otherwise plant a cookie
-     * that bank.example.com is handed on the next call.
+     * A Domain the sender is not under voids the cookie rather than narrowing
+     * it (RFC 6265 section 5.3 step 6), and so does a public-suffix Domain.
+     * Otherwise evil.example.com could plant a cookie that bank.example.com
+     * is handed on the next call.
      */
     storeSetCookies(headers: readonly string[], request?: LambderCookieTarget): void;
     /** Every live cookie. */
     list(): LambderStoredCookie[];
     /**
      * The Cookie header pairs the next request carries, as `name=value`, in
-     * the order RFC 6265 section 5.4 puts them in: the longest Path first,
-     * and among equal paths the one set first. Servers that read only the
-     * first value of a repeated name depend on that order, and so does any
-     * test reasoning about which of two same-named cookies wins.
+     * RFC 6265 section 5.4 order: longest Path first, and among equal paths
+     * the one set first. Servers that read only the first value of a repeated
+     * name depend on that order, as does any test about which of two
+     * same-named cookies wins.
      *
-     * Only the cookies whose scope covers the target travel. A field the
-     * target leaves out is one the caller could not know, and matches
-     * anything: a caller that cannot name its own host still gets the cookies
-     * of the one host its jar talks to.
+     * Only cookies whose scope covers the target travel. An omitted target
+     * field matches anything, so a caller that cannot name its host still
+     * gets the cookies of the one host its jar talks to.
      */
     cookiePairs(target?: LambderCookieTarget): string[];
     /**
@@ -107,10 +101,9 @@ export declare class LambderCookieJar {
     } & LambderCookieTarget): string | undefined;
     /**
      * The live cookies whose scope reaches this target, in RFC 6265 send
-     * order. Delegated to tough-cookie whenever the target names a host,
-     * which is the case worth getting exactly right; an unnamed host falls
-     * back to every cookie the jar holds, filtered by the rules that do not
-     * need one and ordered by the same rule.
+     * order. Delegated to tough-cookie whenever a host is known, the case
+     * worth getting exactly right; with no host, every cookie the jar holds
+     * is filtered by the rules that need none and ordered the same way.
      */
     private matchingCookies;
     /** Number of live cookies. */

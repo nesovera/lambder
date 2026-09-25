@@ -5,7 +5,9 @@ export { initLambder } from './core/Lambder.js';
 // The created hook's parameter is the instance, so it is declared beside the class.
 export type { LambderCreatedHook } from './core/Lambder.js';
 export { default as LambderCaller } from "./client/LambderCaller.js";
-export type { LambderApiOutcome, LambderApiFailureReason, LambderValidationError, LambderCallOptions, LambderCallerOptions, LambderGuardInputsProvider, LambderProvidedGuardInputs, LambderIdempotencyKeyScope, LambderLogListHandler } from "./client/LambderCaller.js";
+export type { LambderApiOutcome, LambderApiFailureReason, LambderValidationError, LambderCallOptions, LambderCallerOptions, LambderGuardInputsProvider, LambderProvidedGuardInputs, LambderLogListHandler } from "./client/LambderCaller.js";
+export { createIdempotencyKey, createIdempotencyKeyScope } from "./shared/wire/LambderIdempotencyKeyScope.js";
+export type { LambderIdempotencyKeyScope } from "./shared/wire/LambderIdempotencyKeyScope.js";
 
 // Transports: how a caller reaches a server (fetch in production, a handler in-process for tests, a cookie jar over either)
 export { lambderFetchTransport } from "./client/lambderFetchTransport.js";
@@ -51,6 +53,7 @@ export {
 } from "./api/LambderApiEnvelope.js";
 export type { LambderApiEnvelopeConfig, LambderValidationAnswerBody } from "./api/LambderApiEnvelope.js";
 export { LambderApiValidationRefusal, isLambderApiValidationRefusal } from "./api/LambderApiValidationRefusal.js";
+export { LambderApiOutputValidationError } from "./api/LambderApiOutputValidationError.js";
 
 // Calling a Lambder app from another lambda (server-only: the Lambda SDK, zlib)
 export { LambderInvokeError, isLambderInvokeError } from "./invoke/LambderInvokeOutcome.js";
@@ -85,7 +88,7 @@ export { describeCrash, errorFromCrashDetail } from "./shared/wire/LambderCrashD
 export type { LambderCrashDetail, LambderCrashCause } from "./shared/wire/LambderCrashDetail.js";
 
 // Typed API refusals (isomorphic: shared code may throw them from anywhere)
-export { LambderApiRefusal, isLambderApiRefusal, refuse, LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";
+export { LambderApiRefusal, isLambderApiRefusal, refuse, refusalMessageOf, LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";
 export type { LambderApiRefusalOptions, LambderRefusalMessage, LambderAppRefusalMessage, LambderRefusalCode, LambderRefuseOptions } from "./shared/wire/LambderApiRefusal.js";
 export { default as LambderResponseBuilder } from "./core/LambderResponseBuilder.js";
 export { default as LambderResolver } from "./core/LambderResolver.js";
@@ -94,7 +97,7 @@ export type { LambderSessionManagerOptions } from "./session/LambderSessionManag
 export { default as LambderSessionController } from "./session/LambderSessionController.js";
 export { DEFAULT_SESSION_TOKEN_COOKIE_KEY, DEFAULT_SESSION_CSRF_COOKIE_KEY } from "./shared/wire/LambderSessionCookieNames.js";
 export type { LambderSessionControllerOptions, LambderSessionRequestInfo } from "./session/LambderSessionController.js";
-export type { LambderSessionStore, LambderSessionRecord } from "./shared/contracts/LambderSessionStore.js";
+export type { LambderSessionStore, LambderSessionRecord, LambderSessionChanges, LambderSessionUpdateResult } from "./shared/contracts/LambderSessionStore.js";
 export { LambderMemorySessionStore } from "./stores/LambderMemorySessionStore.js";
 export { LambderWebCrypto, LambderPlainSessionCrypto, isWebCryptoAvailable } from "./session/LambderSessionCrypto.js";
 export type { LambderSessionCrypto } from "./session/LambderSessionCrypto.js";
@@ -151,6 +154,9 @@ export type {
     LambderGlobalErrorHandler,
     LambderFallbackHandler,
     LambderInputValidationHandler,
+    LambderCrashOptions,
+    LambderCrashReporter,
+    LambderCrashSite,
 } from "./core/LambderCreateOptions.js";
 
 // Public file serving
@@ -190,15 +196,16 @@ export type { LambderRestoreFailure, LambderRestoreBound } from "./shared/wire/L
 export { LambderSessionDataRefreshError, LambderSessionReadError } from "./session/LambderSessionManager.js";
 export { LambderSessionNotFoundError, LambderSessionAmbiguousError } from "./session/LambderSessionController.js";
 
-// DynamoDB-backed compressed cache (standalone, server-only)
+// Caches (standalone): the interface both implement, the DynamoDB-backed
+// compressed one (server-only) and its in-memory twin for tests
+export type { LambderCache, LambderCacheKey, LambderCacheSetOptions, LambderCacheListOptions } from "./shared/contracts/LambderCache.js";
 export { LambderDdbCache } from "./stores/LambderDdbCache.js";
 export type {
-    LambderCacheKey,
     LambderDdbCacheOptions,
-    LambderDdbCacheSetOptions,
     LambderDdbCacheGetOrSetOptions,
-    LambderDdbCacheListOptions,
 } from "./stores/LambderDdbCache.js";
+export { LambderMemoryCache } from "./stores/LambderMemoryCache.js";
+export type { LambderMemoryCacheOptions } from "./stores/LambderMemoryCache.js";
 
 // Fixed-window rate limiting: the shared vocabulary, the DynamoDB limiter and the in-memory one
 export { RATE_LIMIT_WINDOWS } from "./shared/contracts/LambderRateLimiter.js";
@@ -231,6 +238,7 @@ export type {
     LambderApiGuard,
     LambderGuardMeta,
     LambderGuardMetaMap,
+    LambderGuardRunAt,
     LambderAllowedGuardNames,
     LambderParamlessGuardNames,
     LambderGuardsOption,
@@ -242,9 +250,15 @@ export type {
 export { lambderRateLimitKeyBuilder, rateLimitRefusal, DEFAULT_RATE_LIMIT_REFUSAL } from "./api/LambderApiRateLimits.js";
 export type { LambderRateLimitKeyBuilder } from "./api/LambderApiRateLimits.js";
 export type {
+    LambderContextRateLimit,
+    LambderContextRateLimitCheck,
+    LambderRateLimitCheckResult,
+    LambderChargeablePolicyNames,
+    LambderChargeKeyArgs,
     LambderRateLimitKeyFn,
     LambderRateLimitPer,
     LambderRateLimitBudget,
+    LambderRateLimitChargeAt,
     LambderApiRateLimitPolicyConfig,
     LambderApiRateLimitsConfig,
     LambderAllowedPolicyNames,
@@ -290,6 +304,9 @@ export type {
     LambderGuardNamesIn,
     LambderContractMode,
     LambderContractKeysWithMode,
+    LambderContractKeysWithGuard,
+    LambderJsonOf,
+    LambderJsonOutputOf,
     LambderContractGuardsOf,
     LambderContractGuardNames,
     LambderContractGuardInputsOf,
@@ -312,6 +329,7 @@ export type {
 } from "./shared/wire/LambderApiOutcome.js";
 export { resolveApiOutcome } from "./shared/wire/LambderApiOutcome.js";
 export { createContext, isV2HttpEvent } from "./core/LambderContext.js";
+export type { LambderContextOptions } from "./core/LambderContext.js";
 
 // Request payload compression: the wire format LambderCaller and the server share.
 export {
@@ -320,8 +338,7 @@ export {
     COMPRESSED_PAYLOAD_BYTES_FIELD,
     DEFAULT_REQUEST_COMPRESSION_SETTINGS,
     DEFAULT_MAX_RESTORED_PAYLOAD_BYTES,
-    // The Brotli twin of the browser's compressPayloadGzip, beside it now
-    // rather than inside LambderInvokeCaller; the root entry's name is unchanged.
+    // The Brotli twin of the browser's compressPayloadGzip, and its defaults.
     DEFAULT_INVOKE_REQUEST_COMPRESSION_SETTINGS,
     compressPayloadBrotli,
 } from "./shared/wire/LambderRequestPayload.js";

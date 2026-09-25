@@ -1,3 +1,4 @@
+import type { z } from "zod";
 import type { LambderRenderContext } from "./LambderContext.js";
 import { serializeCookie, serializeClearCookie, type LambderCookieOptions, type LambderClearCookieOptions } from "../shared/wire/LambderCookie.js";
 import type { LambderFiles } from "./LambderFiles.js";
@@ -9,6 +10,7 @@ import type { LambderTemplateData } from "./LambderTemplatingEngine.js";
 // the caller and MSW never have to import this server-side module for them.
 import type { LambderApiResponseConfig, LambderApiNullAnswerConfig } from "../shared/wire/LambderApiContract.js";
 import { buildApiEnvelope } from "../api/LambderApiEnvelope.js";
+import { LambderApiOutputValidationError } from "../api/LambderApiOutputValidationError.js";
 
 export type { LambderApiEnvelopeBody, LambderApiResponseConfig } from "../shared/wire/LambderApiContract.js";
 
@@ -28,9 +30,9 @@ export type LambderResponseOptions = {
  * `null` beside a config that says why (a refusal flag, an `errorMessage`, a
  * `message`). A bare `res.api(null)` compiles only when the output type
  * itself allows null, so a success payload is always the declared output,
- * which is what lets a typed caller (LambderInvokeCaller.api) promise it.
- * Untyped resolvers (`TOutput = any`) accept anything, as before. This is
- * the resolver's method type; the core's answer type is LambderApiAnswer.
+ * which lets a typed caller (LambderInvokeCaller.api) promise it. Untyped
+ * resolvers (`TOutput = any`) accept anything. This is the resolver's method
+ * type; the core's answer type is LambderApiAnswer.
  */
 export type LambderResolverApiMethod<TOutput, TResult> = {
     (payload: TOutput, config?: LambderApiResponseConfig, options?: LambderResponseOptions): TResult;
@@ -51,18 +53,22 @@ export default class LambderResponseBuilder<TResponse = any> {
     protected files: LambderFiles | null;
     protected apiVersion: string | null;
     protected ctx?: LambderRenderContext;
+    /** The output schema of the API this builder answers, which every success payload is parsed through; null outside an API handler. */
+    protected apiOutput: z.ZodType | null;
 
     constructor(
-        { files, apiVersion, ctx }:
+        { files, apiVersion, ctx, apiOutput }:
         {
             files?: LambderFiles | null,
             apiVersion?: string | null,
             ctx?: LambderRenderContext,
+            apiOutput?: z.ZodType,
         }
     ){
         this.files = files ?? null;
         this.apiVersion = apiVersion ?? null;
         this.ctx = ctx;
+        this.apiOutput = apiOutput ?? null;
     };
 
     private buildResponse(
@@ -165,9 +171,24 @@ export default class LambderResponseBuilder<TResponse = any> {
         return this.buildResponse(404, "text/html; charset=utf-8", data, options);
     };
 
+    /**
+     * A redirect to `url`, which may be a path or a whole URL. A path stays on
+     * this origin: a leading run of slashes and backslashes collapses to one
+     * slash, since `//evil.example` is a protocol-relative URL and a browser
+     * reads `/\evil.example` as the same thing, so a path built from a
+     * decoded ctx.path cannot send the visitor to another host. Another host
+     * is named with its scheme. What a URL may not carry as it is (control
+     * characters, a space, a backslash, anything outside ASCII) is
+     * percent-encoded for every caller: a browser drops a TAB or line break
+     * inside a Location, so `/<TAB>/evil.example` would otherwise be that
+     * host, and a line break would end the header. `%` is left alone, so an
+     * encoded URL stays as it was written.
+     */
     redirect(url: string, statusCode: LambderHttpStatusCode = 302, options?: LambderResponseOptions): LambderResponse {
         const response = this.buildResponse(statusCode, null, null, options);
-        response.setHeader("Location", url);
+        const target = /^[a-z][a-z0-9+.-]*:/iu.test(url) ? url : url.replace(/^[/\\]+/u, "/");
+        // Everything outside printable ASCII (`!` to `~`), and the backslash.
+        response.setHeader("Location", target.replace(/[^!-~]|\\/gu, (character) => encodeURIComponent(character)));
         return response;
     };
 
@@ -225,9 +246,49 @@ export default class LambderResponseBuilder<TResponse = any> {
         // The envelope is the core's (one writer for both the server and the
         // mock runtime); the logList channel is what this request accumulated
         // unless the config names its own.
-        const envelope = buildApiEnvelope(this.apiVersion, payload, { ...config, logList: config.logList || this.ctx?.logList });
+        const envelope = buildApiEnvelope(this.apiVersion, this.declaredPayload(payload), { ...config, logList: config.logList || this.ctx?.logList });
         return this.json(envelope as Record<string, any>, options);
     };
+
+    /**
+     * A payload as the API's output schema declares it. The type system
+     * accepts a value that carries more than the schema (a row read straight
+     * from a table is assignable to a narrower object type), and without this
+     * the extra fields, a password hash included, would reach the client.
+     * zod strips what the schema does not declare, fills its defaults and
+     * applies its transforms, so the wire and the idempotency store only see
+     * the declared shape. A refusal's payload beside an errorMessage or a
+     * flag is parsed the same way; only null passes as it is. Only an API
+     * handler's own resolver holds the schema: a hook, a validation handler
+     * or an error handler answers in shapes of its own, a cached answer in
+     * its wire form, and is sent as given.
+     *
+     * The payload is the schema's input form (what a handler writes before
+     * the transforms), so a transform runs exactly once. A payload the schema
+     * rejects is a handler breaking its contract, answered as a crash rather
+     * than sent (LambderApiOutputValidationError, which an idempotency key
+     * records as its answer, since the handler has already run).
+     *
+     * The parse is synchronous, so an output schema cannot be async: zod
+     * throws from a synchronous parse that meets an async refinement or
+     * transform, and a transform may throw of its own accord. Either throw
+     * becomes the same LambderApiOutputValidationError, carrying what was
+     * thrown as its cause. Left to escape as it is, it would read as the
+     * handler crashing before its answer: the idempotency engine would
+     * release the key's claim and every retry would run the operation again.
+     */
+    private declaredPayload(payload: TResponse | null): TResponse | null {
+        if(!this.apiOutput || payload === null) return payload;
+        const apiName = this.ctx?.apiName ?? "?";
+        let parsed: z.ZodSafeParseResult<unknown>;
+        try {
+            parsed = this.apiOutput.safeParse(payload);
+        }catch(thrown){
+            throw new LambderApiOutputValidationError(apiName, { thrown });
+        }
+        if(parsed.success) return parsed.data as TResponse;
+        throw new LambderApiOutputValidationError(apiName, { zodError: parsed.error });
+    }
 
     /** Same as api() but forces compression of the response body. */
     apiBinary(payload: TResponse, config?: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;

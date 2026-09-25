@@ -5,9 +5,9 @@ import type { LambderApiCallContext } from "./LambderApiCallContext.js";
 import type { LambderApiCallTrace } from "./LambderApiCallContext.js";
 import type { LambderApiDefinition } from "./LambderApiDefinition.js";
 import { type LambderApiSignatureMap } from "../shared/wire/LambderApiSignature.js";
-import type { LambderApiGuard } from "./LambderApiGuards.js";
-import type { LambderApiRateLimitPolicyConfig, LambderApiRateLimitsConfig } from "./LambderApiRateLimits.js";
-import type { LambderApiIdempotencyConfig } from "./LambderApiIdempotency.js";
+import { type LambderApiGuard } from "./LambderApiGuards.js";
+import { type LambderApiRateLimitPolicyConfig, type LambderApiRateLimitsConfig, type LambderRateLimitChargeResult, type LambderRateLimitChargeSubject } from "./LambderApiRateLimits.js";
+import { type LambderApiIdempotencyConfig } from "./LambderApiIdempotency.js";
 import type { LambderSessionRecord, LambderSessionStore } from "../shared/contracts/LambderSessionStore.js";
 import type { LambderRateLimiter } from "../shared/contracts/LambderRateLimiter.js";
 import type { LambderIdempotencyStore } from "../shared/contracts/LambderIdempotencyStore.js";
@@ -17,11 +17,10 @@ import LambderSessionController, { type LambderSessionCookieOptions, type Lambde
 import type { MaybePromise } from "../shared/util/LambderTypeUtilities.js";
 /**
  * The app's own answer for a rejected input (setApiInputValidationErrorHandler
- * on the server). Returning null asks for the standard 422 body, which is
- * what an adapter whose app set no handler answers: the rule lives in the
- * pipeline alone, so "no handler, standard 422" is written once. The API's
- * schema and every preflight slice (guard inputs, rate-limit keys) answer
- * through here, so one failure has one shape.
+ * on the server). Returning null asks for the standard 422 body, which only
+ * the pipeline writes, so every adapter without a handler answers alike. The
+ * API's schema and every preflight slice (guard inputs, rate-limit keys)
+ * answer through here, so one failure has one shape.
  */
 export type LambderApiInputRefusal<TCtx> = (zodError: z.ZodError, ctx: TCtx, request: LambderApiRequest) => MaybePromise<LambderApiAnswer | null>;
 /** The session subsystem as the pipeline runs it: the manager plus the cookie names and scope the controller writes. */
@@ -92,16 +91,22 @@ export type LambderApiExec<TCtx> = (ctx: TCtx) => Promise<LambderApiAnswer>;
  * are adapters over this class; neither reimplements a step of it.
  *
  * ```
- * version floor → signature gate → restore payload → rate limits that need no session
- * → session (session mode) → idempotency replay → the remaining rate limits
- * → guards → input validation → exec, inside the idempotency claim
- * → drain response headers → answer
+ * version floor → signature gate → restore payload → rate limits keyed per ip
+ * → session (session mode) → idempotency replay → rate limits keyed per session
+ * (and custom keys charged beforeGuards) → guards → input validation → guards
+ * placed after it → rate limits keyed by a custom key → exec, inside the
+ * idempotency claim → drain response headers → answer
  * ```
+ *
+ * Each policy subsystem (rate limits, guards, idempotency) is its own
+ * engine, held here and called at its step, so the order above can be read
+ * directly off execute().
  *
  * Steps whose subsystem is not configured are skipped. A LambderApiRefusal
  * thrown by any step, guard or handler is rendered here, in one place: a
  * validation error through onInvalidInput, any other refusal as the refusal
- * envelope. Anything else propagates, because only the adapter knows what a
+ * envelope, and a session ended while the handler held it
+ * (LambderSessionNotFoundError) as sessionExpired. Anything else propagates, because only the adapter knows what a
  * crash means (a global error handler, a mock event).
  *
  * `run` never sees a name it has no definition for; resolving a name to a
@@ -112,7 +117,9 @@ export type LambderApiExec<TCtx> = (ctx: TCtx) => Promise<LambderApiAnswer>;
 export declare class LambderApiPipeline<TCtx extends LambderApiCallContext<TSessionData>, TSessionData = any> {
     readonly apiVersion: string | null;
     readonly minApiVersion: string | null;
-    private readonly policies;
+    private readonly rateLimits;
+    private readonly guards;
+    private readonly idempotency;
     private readonly maxRequestPayloadBytes;
     private readonly onInvalidInput;
     private readonly sessions;
@@ -136,6 +143,12 @@ export declare class LambderApiPipeline<TCtx extends LambderApiCallContext<TSess
     [LAMBDER_BACKEND_SWAP](backends: LambderPipelineBackends): LambderPipelineBackendSwap;
     /** The session request info of an API request: its cookies, and the CSRF token it posted. */
     static sessionInfoOf(request: LambderApiRequest): LambderSessionRequestInfo;
+    /**
+     * One named rate-limit policy charged by code: what an adapter's
+     * `ctx.rateLimit` and `ctx.isRateLimited` run. The adapter supplies who is
+     * being counted, since only it knows whether the request is an API call.
+     */
+    chargeRateLimit(name: string, subject: LambderRateLimitChargeSubject): Promise<LambderRateLimitChargeResult>;
     /** Registration-time checks of one definition's declarative options; the same messages on the server and in the mock. */
     assertRegistration(definition: LambderApiDefinition): void;
     /**
@@ -146,32 +159,28 @@ export declare class LambderApiPipeline<TCtx extends LambderApiCallContext<TSess
      * client built against a contract that had it) has already been answered
      * versionExpired by the time anything asks for an unknown name.
      */
-    answerUnknownApi(request: LambderApiRequest, ctx?: TCtx): LambderApiAnswer;
+    answerUnknownApi(ctx?: TCtx): LambderApiAnswer;
     /**
      * The steps that come before anything may read the request: the version
      * floor, the signature gate, then the compressed-payload restore that
      * every later reader (a rate-limit key slice, a guard, the input schema)
-     * depends on having happened.
+     * relies on.
      *
-     * The floor answers versionExpired to a request naming a version below
-     * minApiVersion whatever its signature says: the lever for a change the
-     * digest cannot see (a security fix, a field whose meaning changed under
-     * the same shape). A request naming no version is not judged by it, as
-     * one carrying no signature is not gated.
+     * The floor refuses a request naming a version below minApiVersion,
+     * whatever its signature says: the lever for a change the digest cannot
+     * see (a security fix, a field whose meaning changed under the same
+     * shape). The gate refuses a signature that is not the map's entry for
+     * the endpoint named (another entry, or none): a client built against
+     * another shape of this endpoint, or against one that no longer exists.
+     * Both answer versionExpired. A request naming no version skips the
+     * floor, and one carrying no signature skips the gate.
      *
-     * The gate compares the signature the request carries with the map's
-     * entry for the endpoint it names. A match runs; anything else, another
-     * entry or none, is a client built against another shape of this
-     * endpoint or against an endpoint that no longer exists, and is answered
-     * versionExpired. A request carrying no signature is never gated.
-     *
-     * Public and named because the server runs them earlier than run() does,
-     * on the way in, so that its hooks see a plain payload and a stale client
-     * is answered before any of them, whether or not the name it asked for
-     * exists. run() calls it too, so an adapter that has no such step still
-     * gets the whole protocol. Calling it twice is safe by construction: the
-     * gates are comparisons and the restore has already removed the wire
-     * fields it reads.
+     * Public because the server runs it earlier, on the way in, so its hooks
+     * see a plain payload and a stale client is answered before any of them,
+     * whether or not the name it asked for exists. run() calls it too, so an
+     * adapter without that step still gets the whole protocol. Calling it
+     * twice is safe: the gates are comparisons, and the restore has already
+     * removed the wire fields it reads.
      *
      * Returns the answer that ends the call, or null when the request is
      * ready to dispatch.
@@ -182,10 +191,10 @@ export declare class LambderApiPipeline<TCtx extends LambderApiCallContext<TSess
      *
      * An adapter that wants to report what the call did even when it crashed
      * passes its own trace object: the pipeline writes into that one, so a
-     * handler that threw still leaves the guards it ran behind for the
-     * adapter's catch. Without it the trace was created here and lost with
-     * the throw, and the mock's call log showed no guards on exactly the
-     * calls a developer opens the log for.
+     * handler that threw still leaves the guards it ran for the adapter's
+     * catch. A trace created here would be lost with the throw, and the
+     * mock's call log would show no guards on exactly the calls a developer
+     * opens it for.
      */
     run(request: LambderApiRequest, ctx: TCtx, definition: LambderApiDefinition, exec: LambderApiExec<TCtx>, trace?: LambderApiCallTrace): Promise<LambderApiRunResult>;
     private execute;

@@ -10,11 +10,10 @@
 export { LambderMockApp, initLambderMock } from "./mock/LambderMockApp.js";
 // The four collaborators behind LambderMockApp (the entry registry, the call
 // recorder, the failure injector, the browser cookies) are deliberately not
-// exported: the runtime is reached through the app, and its surface did not
-// change when they moved out of it. Only the error a transport rejects with is
-// public, as before.
+// exported: the runtime is reached through the app. Only the error a
+// transport rejects with is public.
 export { LambderMockTransportError } from "./mock/LambderMockFailureInjector.js";
-export type { LambderMockAppOptions, LambderMockSessionsOptions, LambderMockIdempotencyOptions, LambderMockTransport, LambderMockTransportOptions } from "./mock/LambderMockCreateOptions.js";
+export type { LambderMockAppOptions, LambderMockSessionsOptions, LambderMockIdempotencyOptions, LambderMockInvalidInputAnswer, LambderMockTransport, LambderMockTransportOptions } from "./mock/LambderMockCreateOptions.js";
 export type {
     LambderMockCallContext,
     LambderMockSessionCallContext,

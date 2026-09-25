@@ -10,9 +10,18 @@ export type LambderHttpFileSourceOptions = {
     headers?: Record<string, string>;
     /** How long one read may take before it fails. Default: 10000. */
     timeoutMs?: number;
+    /**
+     * The statuses that mean "no such file", read as null so the request
+     * falls through. Default: [403, 404, 410]. A private S3 bucket behind
+     * CloudFront answers a missing key 403, since its reader may not list the
+     * bucket; an origin whose 403 only ever means a refused credential passes
+     * [404, 410] so that failure surfaces as an error.
+     */
+    notFoundStatuses?: readonly number[];
 };
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+const DEFAULT_NOT_FOUND_STATUSES: readonly number[] = [403, 404, 410];
 
 /**
  * Files over HTTP(S) from any origin that serves them by path: a CDN, a
@@ -20,18 +29,19 @@ const DEFAULT_TIMEOUT_MS = 10_000;
  * endpoint) or another server. Reads with the runtime's fetch, so it needs
  * no SDK, and no credentials for a public origin; reads come out of the
  * origin's edge cache. Each path segment is percent-encoded, so a relative
- * path names the same object it would as an S3 key. A 404 or 410 reads as
- * null and the request falls through; any other failed status, a network
- * error or a timeout propagates as an error. The response's Content-Type is
- * used unless it is a generic octet-stream, in which case the extension
- * decides, as for local files.
+ * path names the same object it would as an S3 key. A missing file (see
+ * `notFoundStatuses`) reads as null and the request falls through; any other
+ * failed status, a network error or a timeout throws. The response's
+ * Content-Type is used unless it is a generic octet-stream, in which case
+ * the extension decides.
  */
 export class LambderHttpFileSource implements LambderFileSource {
     private readonly baseUrl: URL;
     private readonly headers: Record<string, string>;
     private readonly timeoutMs: number;
+    private readonly notFoundStatuses: readonly number[];
 
-    constructor({ baseUrl, headers = {}, timeoutMs = DEFAULT_TIMEOUT_MS }: LambderHttpFileSourceOptions){
+    constructor({ baseUrl, headers = {}, timeoutMs = DEFAULT_TIMEOUT_MS, notFoundStatuses = DEFAULT_NOT_FOUND_STATUSES }: LambderHttpFileSourceOptions){
         let url: URL;
         try{
             url = new URL(baseUrl);
@@ -43,22 +53,22 @@ export class LambderHttpFileSource implements LambderFileSource {
         this.baseUrl = url;
         this.headers = headers;
         this.timeoutMs = timeoutMs;
+        this.notFoundStatuses = notFoundStatuses;
     }
 
     async read(relativePath: string): Promise<LambderFile | null> {
         const url = new URL(relativePath.split("/").map(encodeURIComponent).join("/"), this.baseUrl);
-        // The reader's path rule already refuses everything that could make
-        // this reference leave the configured folder (a leading slash makes it
+        // The reader's path rule already refuses anything that could make this
+        // reference leave the configured folder (a leading slash makes it
         // root-relative, two make it protocol-relative and pick the host).
-        // Checked again here rather than trusted, because the value being
-        // resolved is the request path and what leaving costs is a
-        // credentialed fetch of an attacker-named origin, served back from
-        // this app's own domain.
+        // Re-checked rather than trusted: the value is the request path, and
+        // escaping would mean a credentialed fetch of an attacker-named
+        // origin, served back from this app's own domain.
         if(!url.href.startsWith(this.baseUrl.href)) return null;
         const response = await fetch(url, { headers: this.headers, signal: AbortSignal.timeout(this.timeoutMs) });
         if(!response.ok){
             await response.body?.cancel();
-            if(response.status === 404 || response.status === 410) return null;
+            if(this.notFoundStatuses.includes(response.status)) return null;
             throw new Error(`LambderHttpFileSource: ${response.status} ${response.statusText} reading ${url}`);
         }
         return remoteStoreFile(Buffer.from(await response.arrayBuffer()), response.headers.get("content-type"));

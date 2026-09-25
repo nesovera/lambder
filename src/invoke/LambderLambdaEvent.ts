@@ -15,19 +15,25 @@ import type { APIGatewayProxyEvent, APIGatewayProxyEventV2, Context } from "aws-
 import type { LambderHttpEventFormat } from "../core/LambderContext.js";
 import { restoreBytes } from "../shared/wire/LambderCompressionCodec.js";
 import { bytesToBase64 } from "../shared/util/LambderBase64.js";
+import { LAMBDER_INVOKE_API_ID, LAMBDER_LOCAL_API_ID } from "../shared/wire/LambderInvokeApiId.js";
 import { buildEnvelopeFields } from "../shared/transport/LambderApiTransport.js";
 import type { LambderCompressedBrotliPayload, LambderCompressedGzipPayload } from "../shared/wire/LambderRequestPayload.js";
 
-/** Marks a synthesized request as an invoke, for guards and hooks that want to tell. Not an authorization. */
+/**
+ * Marks a synthesized request as an invoke, for guards and hooks that want to
+ * tell. Not an authorization: over HTTP it is a header any client can send.
+ * The server itself tells an invoke by its requestContext.apiId, which no
+ * gateway lets a client write (see LAMBDER_INVOKE_API_ID).
+ */
 export const LAMBDER_INVOKE_HEADER = "x-lambder-invoke";
 /** The invoking function's name, when the caller runs in Lambda; for the callee's logs. */
 export const LAMBDER_INVOKED_BY_HEADER = "x-lambder-invoked-by";
 /** The value of the marker header; a future incompatible event shape would bump it. */
 export const LAMBDER_INVOKE_PROTOCOL = "1";
 /**
- * The forwarded-address header a gateway writes. This event never writes it:
- * the address it asserts travels in requestContext.http.sourceIp, which is
- * what resolveClientIp reads and the only channel a callee trusts by default.
+ * The forwarded-address header a gateway writes, which an invoke never
+ * carries: its address travels as `clientIp` alone (see
+ * synthesizeLambdaHttpEvent).
  */
 const FORWARDED_FOR_HEADER = "x-forwarded-for";
 
@@ -47,6 +53,14 @@ export type LambderSynthesizedRequest = {
     clientIp?: string;
     cookies?: string[];
     body?: string | Buffer;
+    /**
+     * The body's type, owned by the event over any Content-Type in `headers`:
+     * an API call's envelope is JSON whatever headers a caller forwards, and
+     * a server takes a POST to its API path as an API call only when it says
+     * so. Left out, a caller's own Content-Type stands, and a body without
+     * one is typed by its kind.
+     */
+    contentType?: string;
 };
 
 const randomRequestId = (): string => {
@@ -57,39 +71,42 @@ const randomRequestId = (): string => {
 
 /**
  * The event API Gateway would deliver for this request: payload format 2.0
- * (an HTTP API, a Function URL) unless `eventFormat: "v1"` asks for the REST
- * API's. An invoke is always 2.0; the other format is for an in-process call
- * that wants the handler to meet the shape its own deployment delivers.
+ * (an HTTP API's, whose path arrives decoded) unless `eventFormat: "v1"` asks
+ * for the REST API's, whose path arrives as written. An invoke is always 2.0;
+ * the other format is for an in-process call that wants the handler to meet
+ * the shape its own deployment delivers.
  * `invoke: true` adds the invoke marker headers a server-to-server call
  * carries; a browser-shaped request (the handler transport) leaves them off.
  *
  * The client address is `clientIp` and reaches the callee as the gateway's
- * observed source address only (requestContext.http.sourceIp, or
- * requestContext.identity.sourceIp on a REST API event). Writing it as
- * x-forwarded-for as well would put the same fact on a channel a callee may
- * be configured to trust (trustedClientIpHeaders), and the header is the one
- * the caller's own `headers` could otherwise have set.
+ * observed source address (requestContext.http.sourceIp, or
+ * requestContext.identity.sourceIp on a REST API event). On an invoke it is
+ * the only channel, and x-forwarded-for is dropped from the caller's
+ * `headers`: a server of this version reads no trusted forwarding header on
+ * an event carrying LAMBDER_INVOKE_API_ID, but a callee on Lambder 7.x reads
+ * the one it trusts on any event, so a gateway lambda forwarding a browser's
+ * headers would hand it a ctx.ip the browser chose. x-forwarded-for is the
+ * header a gateway writes and the one such a callee trusts in the common
+ * case. A browser-shaped request keeps every header it was given: it stands
+ * for what a gateway delivered, and a test that writes a forwarding header
+ * on one is exercising the app's own trustedClientIpHeaders.
  */
 export function synthesizeLambdaHttpEvent(request: LambderSynthesizedRequest, options: { invoke: boolean; eventFormat?: "v2" }): APIGatewayProxyEventV2;
 export function synthesizeLambdaHttpEvent(request: LambderSynthesizedRequest, options: { invoke: boolean; eventFormat: "v1" }): APIGatewayProxyEvent;
 export function synthesizeLambdaHttpEvent(request: LambderSynthesizedRequest, options: { invoke: boolean; eventFormat?: LambderHttpEventFormat }): APIGatewayProxyEventV2 | APIGatewayProxyEvent;
 export function synthesizeLambdaHttpEvent(request: LambderSynthesizedRequest, options: { invoke: boolean; eventFormat?: LambderHttpEventFormat }): APIGatewayProxyEventV2 | APIGatewayProxyEvent {
     // The caller's own headers go on first, so the ones this function owns
-    // cannot be displaced by them. Forwarding an incoming browser request's
-    // headers into `headers` is an ordinary gateway-lambda pattern, and with
-    // the spread last it let that end user overwrite the invoke markers and
-    // the forwarded address this event is asserting.
+    // cannot be displaced by them.
     const headers: Record<string, string> = {};
     for(const [key, value] of Object.entries(request.headers ?? {})) headers[key.toLowerCase()] = value;
-    // These three the event owns unconditionally, whatever the caller passed:
-    // a forwarded address the caller did not assert through `clientIp` is not
-    // this event's to make, and the invoke markers say what this event is. A
-    // gateway lambda that forwards a browser's headers wholesale would
-    // otherwise hand a callee that trusts x-forwarded-for an end-user-chosen
-    // ctx.ip, and let a browser-shaped request claim to be an invoke.
-    delete headers[FORWARDED_FOR_HEADER];
+    // The invoke markers the event owns whatever the caller passed: they say
+    // what this event is. Forwarding a browser's headers wholesale is an
+    // ordinary gateway-lambda pattern, and without these deletes it would let
+    // a browser-shaped request claim to be an invoke, or an invoke name an
+    // invoking function that did not send it.
     delete headers[LAMBDER_INVOKE_HEADER];
     delete headers[LAMBDER_INVOKED_BY_HEADER];
+    if(options.invoke) delete headers[FORWARDED_FOR_HEADER];
     headers.host = request.host;
     headers["accept-encoding"] = "br, gzip";
     if(options.invoke){
@@ -98,7 +115,8 @@ export function synthesizeLambdaHttpEvent(request: LambderSynthesizedRequest, op
         if(invokedBy) headers[LAMBDER_INVOKED_BY_HEADER] = invokedBy;
     }
     const isBinary = Buffer.isBuffer(request.body);
-    if(request.body !== undefined && !headers["content-type"]){
+    if(request.contentType) headers["content-type"] = request.contentType;
+    else if(request.body !== undefined && !headers["content-type"]){
         headers["content-type"] = isBinary ? "application/octet-stream" : "application/json";
     }
     const body = request.body === undefined ? undefined : isBinary ? bytesToBase64(request.body as Buffer) : request.body as string;
@@ -124,7 +142,7 @@ export function synthesizeLambdaHttpEvent(request: LambderSynthesizedRequest, op
             // Cognito identity) describes a deployment this event has none of.
             requestContext: {
                 accountId: "",
-                apiId: "lambder-local",
+                apiId: options.invoke ? LAMBDER_INVOKE_API_ID : LAMBDER_LOCAL_API_ID,
                 domainName: request.host,
                 httpMethod: request.method,
                 identity: { sourceIp: request.clientIp ?? "", userAgent: "lambder-local" },
@@ -139,21 +157,31 @@ export function synthesizeLambdaHttpEvent(request: LambderSynthesizedRequest, op
             isBase64Encoded: isBinary,
         };
     }
+    // An HTTP API's event, with its path decoded (an encoded slash into a
+    // separator, too) the way the gateway delivers it, whatever host the
+    // request names. The server reads a gateway's v2 event as encoded when
+    // its domain is a Function URL's, so it is told this event is decoded by
+    // the apiId, which is Lambder's own either way: a request naming a
+    // lambda-url host would otherwise have its path decoded a second time,
+    // and `/%2561dmin` would reach `/admin`. A path that does not decode goes
+    // as it is.
+    let decodedPath = request.path;
+    try { decodedPath = decodeURIComponent(request.path); } catch { /* delivered as written */ }
     return {
         version: "2.0",
         routeKey: "$default",
-        rawPath: request.path,
+        rawPath: decodedPath,
         rawQueryString: new URLSearchParams(request.query ?? {}).toString(),
         headers,
         ...(request.cookies?.length ? { cookies: request.cookies } : {}),
         requestContext: {
             accountId: "",
-            apiId: options.invoke ? "lambder-invoke" : "lambder-local",
+            apiId: options.invoke ? LAMBDER_INVOKE_API_ID : LAMBDER_LOCAL_API_ID,
             domainName: request.host,
             domainPrefix: "",
             http: {
                 method: request.method,
-                path: request.path,
+                path: decodedPath,
                 protocol: "HTTP/1.1",
                 sourceIp: request.clientIp ?? "",
                 userAgent: options.invoke ? "lambder-invoke" : "lambder-local",
@@ -248,8 +276,8 @@ export const decodeLambdaHttpResult = async (result: unknown, maxBodyBytes: numb
         body = Buffer.isBuffer(restored) ? restored : Buffer.from(restored);
     }else if(encoding && encoding !== "identity"){
         // "identity" is a legal value meaning no encoding, and a hook or a
-        // proxy may set it; treating it as unsupported turned every such
-        // invoke into a protocol failure.
+        // proxy may set it, so it passes as a plain body; only other values
+        // fail the invoke.
         throw new Error(`the answer carries an unsupported Content-Encoding "${encoding}"`);
     }
     return {

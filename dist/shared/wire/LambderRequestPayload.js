@@ -51,9 +51,8 @@ const compressPayloadWith = async (json, minBytes, field, compress) => {
  * `compressRequest: true` means "whatever the size", which is a threshold of
  * zero rather than a separate path.
  *
- * Both callers decide this, and the three-line ternary they each wrote is the
- * one place a caller can get the override backwards, so it is written once
- * beside the compressors it feeds.
+ * Both callers decide this, and the override is easy to get backwards, so it
+ * is written once, beside the compressors it feeds.
  */
 export const resolveRequestCompressionMinBytes = (compressRequest, settings) => compressRequest === true ? 0
     : compressRequest === false ? null
@@ -62,11 +61,10 @@ export const resolveRequestCompressionMinBytes = (compressRequest, settings) => 
 export const isRequestCompressionAvailable = () => typeof CompressionStream !== "undefined" && typeof btoa !== "undefined";
 /**
  * Gzip one payload's JSON for sending, or null when the plain JSON should go
- * instead (see compressPayloadWith for the two rules). The second null
+ * instead (see compressPayloadWith for the two rules). The second rule
  * matters for the payloads most likely to be large: a base64 image gzips to
  * nearly its own size, and base64 then inflates the result past the
- * original. Sending that would cost CPU on both ends for a request that got
- * bigger, so the compressed form is only ever sent when it is smaller.
+ * original, so sending it would cost CPU on both ends for a bigger request.
  */
 export const compressPayloadGzip = (json, minBytes) => compressPayloadWith(json, minBytes, COMPRESSED_PAYLOAD_GZ_FIELD, async (bytes) => {
     const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream("gzip"));

@@ -3,16 +3,17 @@
  * If-None-Match conditional requests.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { brotliDecompressSync } from 'node:zlib';
 import { z } from 'zod';
 import Lambder, { initLambder } from '../src/core/Lambder.js';
-import { decodeBody, gunzipBody, brotliBody, createMockEvent, createApiEvent, createMockContext, testPublicFiles } from './helpers.js';
+import { decodeBody, gunzipBody, brotliBody, createMockEvent, createMockEventV2, createApiEvent, createMockContext, testPublicFiles } from './helpers.js';
 describe('Compression (Brotli / gzip)', () => {
     const bigHtml = '<p>' + 'lambder '.repeat(500) + '</p>';
 
+    // These events are a REST API's (v1), where compression is on only when named.
     const serveBig = (options?: ConstructorParameters<typeof Lambder>[0]) =>
-        new Lambder({ files: testPublicFiles(), ...options })
+        new Lambder({ files: testPublicFiles(), compression: true, ...options })
             .addRoute('/big', (ctx, res) => res.html(bigHtml));
 
     it('prefers Brotli when the client accepts it', async () => {
@@ -189,13 +190,12 @@ describe('ETag / conditional requests', () => {
     });
 
     /**
-     * A 304 is the same call as the 200 it stands in for. Preserving five
-     * cache headers and dropping everything else made revalidation the one
-     * exit of render() where that stopped being true: a cacheable GET that
-     * also slid the session cookie stopped refreshing it as soon as the
-     * browser held the ETag, and a cross-origin revalidation lost
-     * Access-Control-Allow-Origin, so the browser refused the answer it had
-     * asked for.
+     * A 304 is the same call as the 200 it stands in for, so it keeps the
+     * call's headers, not only the cache ones. Otherwise a cacheable GET that
+     * also slides the session cookie stops refreshing it once the browser
+     * holds the ETag, and a cross-origin revalidation loses
+     * Access-Control-Allow-Origin, so the browser refuses the answer it asked
+     * for.
      */
     it('carries Set-Cookie, the call\'s headers and CORS onto the 304', async () => {
         const lambder = initLambder().create({
@@ -224,6 +224,46 @@ describe('ETag / conditional requests', () => {
         expect(second.multiValueHeaders?.['Access-Control-Allow-Credentials']).toEqual(['true']);
         expect(second.multiValueHeaders?.['Vary']).toContain('Origin');
         expect(second.multiValueHeaders?.['Cache-Control']).toEqual(['private, max-age=0, must-revalidate']);
+    });
+
+    it('keeps an answer that sets a cookie out of shared caches in both gateway formats, the crash path included', async () => {
+        const lambder = initLambder().create({ files: testPublicFiles() })
+            .addRoute('/shared', (ctx, res) => {
+                res.setCookie('guest', 'visitor-1', { path: '/' });
+                return res.html('<p>hi</p>', { cacheControl: 'public, max-age=600, s-maxage=86400, stale-while-revalidate=30' });
+            })
+            .addRoute('/unsaid', (ctx, res) => {
+                res.setCookie('guest', 'visitor-1', { path: '/' });
+                return res.html('<p>hi</p>');
+            })
+            .addRoute('/stored-nowhere', (ctx, res) => {
+                res.setCookie('guest', 'visitor-1', { path: '/' });
+                return res.html('<p>hi</p>', { cacheControl: 'no-store' });
+            })
+            .addRoute('/broken', (ctx, res) => {
+                res.setCookie('guest', 'visitor-1', { path: '/' });
+                res.setHeader('Cache-Control', 'public, max-age=60');
+                throw new Error('the page broke');
+            });
+        const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+        try {
+            const v1 = await lambder.render(createMockEvent('/shared'), createMockContext());
+            expect(v1.multiValueHeaders?.['Cache-Control']).toEqual(['private, max-age=600, stale-while-revalidate=30']);
+
+            const v2 = await lambder.render(createMockEventV2('/shared'), createMockContext());
+            expect(v2.cookies?.[0]).toContain('guest=visitor-1');
+            expect(v2.headers?.['Cache-Control']).toBe('private, max-age=600, stale-while-revalidate=30');
+
+            // Nothing said about caching, or already kept out of every cache: left as it is.
+            expect((await lambder.render(createMockEvent('/unsaid'), createMockContext())).multiValueHeaders?.['Cache-Control']).toBeUndefined();
+            expect((await lambder.render(createMockEvent('/stored-nowhere'), createMockContext())).multiValueHeaders?.['Cache-Control']).toEqual(['no-store']);
+
+            const crashed = await lambder.render(createMockEvent('/broken'), createMockContext());
+            expect(crashed.statusCode).toBe(500);
+            expect(crashed.multiValueHeaders?.['Cache-Control']).toEqual(['private, max-age=60']);
+        } finally {
+            error.mockRestore();
+        }
     });
 
     it('does not set ETags on POST responses', async () => {
@@ -287,8 +327,8 @@ describe('Binary bodies from an API handler', () => {
         expect(fromRoute.multiValueHeaders?.['Content-Encoding']).toEqual(['br']);
         expect(fromApi.body).toBe(fromRoute.body);
         expect(brotliDecompressSync(Buffer.from(fromApi.body || '', 'base64'))).toEqual(wasm);
-        // The point of the fix: the encoded body is far smaller than the
-        // base64 of the raw bytes would have been.
+        // The point of it: the encoded body is far smaller than the base64 of
+        // the raw bytes.
         expect((fromApi.body || '').length).toBeLessThan(wasm.toString('base64').length / 4);
     });
 
@@ -316,11 +356,10 @@ describe('Binary bodies from an API handler', () => {
 describe('The response size guard', () => {
     /**
      * maxResponseBytes stands in for Lambda's ~6MB cap, and the cap is in
-     * bytes. Measuring the finished body with String.length counted UTF-16
-     * code units, so an uncompressed non-ASCII answer passed a guard it was
-     * up to three times over, and Lambda then refused the invocation with an
-     * opaque payload-size error and no envelope, which is the outcome the
-     * guard exists to replace.
+     * bytes. String.length counts UTF-16 code units, so an uncompressed
+     * non-ASCII answer up to three times over would pass, and Lambda would
+     * refuse the invocation with an opaque payload-size error and no
+     * envelope, the outcome the guard exists to replace.
      */
     const serve = (body: string) => new Lambder({ files: testPublicFiles(), apiPath: '/api', compression: false, maxResponseBytes: 1000 })
         .addRoute('/page', (ctx, res) => res.text(body))

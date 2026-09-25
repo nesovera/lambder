@@ -32,10 +32,9 @@ type LambderCookieTarget = {
 
 /**
  * Stands in for the host of a jar that was never told one. Every store and
- * every read of such a jar uses it, so the jar is self-consistent: it behaves
- * as the browser of one unnamed host. `.invalid` is reserved by the IANA and
- * can never be a real name, so a cookie parked here can never match a real
- * target by accident.
+ * read of such a jar uses it, so the jar behaves consistently as the browser
+ * of one unnamed host. `.invalid` is IANA-reserved, so a cookie parked here
+ * can never match a real target by accident.
  */
 const UNNAMED_JAR_HOST = "lambder-cookie-jar.invalid";
 
@@ -58,12 +57,11 @@ const urlFor = (host: string, path: string | undefined, secure: boolean): string
 /**
  * When a cookie actually dies, as an absolute moment.
  *
- * Max-Age and Expires are stored separately and Max-Age wins, so reading the
- * `expires` field alone calls a `Max-Age=0` deletion immortal. The library's
- * own expiryTime() resolves Max-Age against whatever moment it is handed, and
- * against lastAccessed when handed nothing, so neither answers "when does this
- * die" on a fixed clock. A browser measures Max-Age from when the cookie
- * arrived, which is its creation.
+ * Max-Age and Expires are stored separately and Max-Age wins, so reading
+ * `expires` alone would call a `Max-Age=0` deletion immortal. The library's
+ * expiryTime() resolves Max-Age against whatever moment it is handed (or
+ * lastAccessed), so it cannot answer "when does this die" on a fixed clock.
+ * A browser measures Max-Age from when the cookie arrived, its creation.
  */
 const cookieExpiryAt = (cookie: Cookie, now: number): number | undefined => {
     if(typeof cookie.maxAge === "number"){
@@ -81,8 +79,8 @@ const storedFromCookie = (cookie: Cookie, now: number): LambderStoredCookie => {
         name: cookie.key ?? "",
         value: cookie.value ?? "",
         domain: hostOnly ? undefined : domain,
-        // A jar that never learned a host parked this under the stand-in,
-        // which is an implementation detail rather than something it knows.
+        // A jar that never learned a host parks cookies under the stand-in,
+        // an implementation detail rather than something it knows.
         ...(hostOnly && domain !== undefined && domain !== UNNAMED_JAR_HOST ? { host: domain } : {}),
         path: typeof cookie.path === "string" ? cookie.path : "/",
         expires: expiryAt,
@@ -99,11 +97,11 @@ const storedFromCookie = (cookie: Cookie, now: number): LambderStoredCookie => {
 export const parseSetCookie = (header: string, now: number, requestPath?: string): LambderStoredCookie | null => {
     const parsed = Cookie.parse(header, { loose: false });
     if(!parsed) return null;
-    // Cookie.parse stamps creation with the real clock, but the caller's `now`
-    // is the moment this header arrived, and Max-Age is measured from there.
+    // Cookie.parse stamps creation with the real clock, but Max-Age is
+    // measured from the caller's `now`, when this header arrived.
     parsed.creation = new Date(now);
-    // Resolve Max-Age against Expires on the caller's clock, the way the jar
-    // itself will, so a test moving time forward reads the same expiry here.
+    // Max-Age against Expires on the caller's clock, as the jar resolves it,
+    // so a test moving time forward reads the same expiry here.
     return {
         ...storedFromCookie(parsed, now),
         // Cookie.parse leaves an absent Path absent; the default-path is the
@@ -117,28 +115,23 @@ export const parseSetCookie = (header: string, now: number, requestPath?: string
  * in-process handler transport in a Node test, and the mock runtime's direct
  * transport. It stores what an answer's Set-Cookie headers set, honours their
  * expiry and deletion, and hands back the Cookie pairs the next request should
- * carry. One jar is one browser; two jars are two.
+ * carry. One jar is one browser.
  *
- * The rules themselves are tough-cookie's, which is the reference
- * implementation of RFC 6265 and carries the public suffix list: domain and
- * path matching, default-path, Max-Age against Expires, Secure, HttpOnly, and
- * the __Host-/__Secure- prefixes. That list is the part worth importing rather
- * than writing. A hand-rolled check can tell that `Domain=com` is a registry
- * suffix by counting labels, and cannot tell that `co.uk` is one, so a
- * hand-rolled jar either trusts `Domain=co.uk` or bans every two-label domain.
+ * The rules (domain and path matching, default-path, Max-Age against Expires,
+ * Secure, HttpOnly, the __Host-/__Secure- prefixes) are tough-cookie's, the
+ * reference RFC 6265 implementation, imported for its public suffix list:
+ * counting labels can tell `Domain=com` is a registry suffix but not `co.uk`,
+ * so a hand-rolled jar either trusts `Domain=co.uk` or bans every two-label
+ * domain.
  *
- * What stays Lambder's is the shape of the questions a transport asks: whole
- * Set-Cookie header lists in (storeSetCookies), `name=value` pairs out
- * (cookiePairs), and a target given as a host and path rather than a URL,
- * since a transport that never speaks HTTP has no URL to give. A field the
- * caller omits is one it could not know, and an unknown field matches
- * anything: a jar pointed at a single host is the ordinary case, and refusing
- * to answer it until it can name that host would make the common setup the
- * awkward one.
+ * What stays Lambder's is the shape of a transport's questions: Set-Cookie
+ * header lists in (storeSetCookies), `name=value` pairs out (cookiePairs),
+ * and a target given as host and path, since a transport that never speaks
+ * HTTP has no URL. An omitted field matches anything, because a jar pointed
+ * at a single host is the ordinary case and should not have to name it.
  *
- * SameSite is stored but never consulted. It answers "did another site
- * initiate this", and a transport call has no initiating site: every call here
- * is same-site by construction.
+ * SameSite is stored but never consulted: it answers "did another site
+ * initiate this", and every transport call is same-site by construction.
  */
 export class LambderCookieJar {
     // prefixSecurity "silent" drops a __Host-/__Secure- cookie that breaks its
@@ -164,25 +157,23 @@ export class LambderCookieJar {
      * came from. Its `host` is the sending host, which every Domain is checked
      * against, and its `path` is the default Path of a cookie that names none.
      *
-     * A Domain the sender is not under does not narrow a cookie, it voids it
-     * (RFC 6265 section 5.3 step 6), and so does a Domain that is a public
-     * suffix. Both are how evil.example.com would otherwise plant a cookie
-     * that bank.example.com is handed on the next call.
+     * A Domain the sender is not under voids the cookie rather than narrowing
+     * it (RFC 6265 section 5.3 step 6), and so does a public-suffix Domain.
+     * Otherwise evil.example.com could plant a cookie that bank.example.com
+     * is handed on the next call.
      */
     storeSetCookies(headers: readonly string[], request: LambderCookieTarget = {}): void {
-        // The whole target, `secure` included: a cookie is judged against the
-        // channel it actually arrived on. Hardcoding https here accepted
-        // Secure cookies from a plain-http answer and then never sent one, so
-        // the jar held a session it could not use and said nothing.
+        // A cookie is judged against the channel it arrived on. Assuming https
+        // would accept Secure cookies from a plain-http answer and then never
+        // send them, leaving the jar silently holding an unusable session.
         const secure = request.secure !== false;
         const url = urlFor(this.hostFor(request.host), request.path, secure);
         const now = new Date(this.now());
         for(const header of headers){
-            // tough-cookie checks the Domain, the prefixes and HttpOnly
-            // against the URL, but leaves the Secure attribute to the caller:
-            // RFC 6265 lets plain http set one and browsers stopped allowing
-            // it. A cookie this jar would refuse to send is one it refuses to
-            // keep.
+            // tough-cookie checks Domain, prefixes and HttpOnly against the
+            // URL but leaves Secure to the caller: RFC 6265 lets plain http
+            // set one, browsers do not. A cookie this jar would refuse to send
+            // is one it refuses to keep.
             if(!secure && Cookie.parse(header, { loose: false })?.secure) continue;
             // ignoreError: a cookie a browser would refuse is one this jar
             // refuses, silently, rather than failing the call that carried it.
@@ -202,15 +193,14 @@ export class LambderCookieJar {
 
     /**
      * The Cookie header pairs the next request carries, as `name=value`, in
-     * the order RFC 6265 section 5.4 puts them in: the longest Path first,
-     * and among equal paths the one set first. Servers that read only the
-     * first value of a repeated name depend on that order, and so does any
-     * test reasoning about which of two same-named cookies wins.
+     * RFC 6265 section 5.4 order: longest Path first, and among equal paths
+     * the one set first. Servers that read only the first value of a repeated
+     * name depend on that order, as does any test about which of two
+     * same-named cookies wins.
      *
-     * Only the cookies whose scope covers the target travel. A field the
-     * target leaves out is one the caller could not know, and matches
-     * anything: a caller that cannot name its own host still gets the cookies
-     * of the one host its jar talks to.
+     * Only cookies whose scope covers the target travel. An omitted target
+     * field matches anything, so a caller that cannot name its host still
+     * gets the cookies of the one host its jar talks to.
      */
     cookiePairs(target: LambderCookieTarget = {}): string[] {
         return this.matchingCookies(target).map((cookie) => `${cookie.name}=${cookie.value}`);
@@ -228,10 +218,9 @@ export class LambderCookieJar {
 
     /**
      * The live cookies whose scope reaches this target, in RFC 6265 send
-     * order. Delegated to tough-cookie whenever the target names a host,
-     * which is the case worth getting exactly right; an unnamed host falls
-     * back to every cookie the jar holds, filtered by the rules that do not
-     * need one and ordered by the same rule.
+     * order. Delegated to tough-cookie whenever a host is known, the case
+     * worth getting exactly right; with no host, every cookie the jar holds
+     * is filtered by the rules that need none and ordered the same way.
      */
     private matchingCookies(target: LambderCookieTarget, includeHttpOnly = true): LambderStoredCookie[] {
         const secure = target.secure !== false;
@@ -247,7 +236,7 @@ export class LambderCookieJar {
                     allPaths: target.path === undefined,
                     // tough-cookie returns store order unless asked; RFC 6265
                     // order is what a server reading the first of a repeated
-                    // name actually gets.
+                    // name gets.
                     sort: true,
                 })
                 .map((cookie) => storedFromCookie(cookie, this.now()))
@@ -256,8 +245,8 @@ export class LambderCookieJar {
                 .filter((cookie) => cookie.expires === undefined || cookie.expires > this.now())
                 // tough-cookie treats a loopback or localhost target as a
                 // secure context and sends Secure cookies to it over http.
-                // This jar takes `secure: false` at its word in both
-                // directions, so what it stores and what it sends agree.
+                // This jar takes `secure: false` at its word both ways, so
+                // what it stores and what it sends agree.
                 .filter((cookie) => secure || !cookie.secure);
         }
         return this.list()
@@ -267,9 +256,8 @@ export class LambderCookieJar {
                 if(target.path !== undefined && !pathMatch(target.path, cookie.path)) return false;
                 return true;
             })
-            // The longest path first, as tough-cookie's own comparison does;
-            // the sort is stable, so equal paths keep the order they were
-            // stored in, which is the order they were created in.
+            // Longest path first, as tough-cookie sorts; the sort is stable,
+            // so equal paths keep their creation order.
             .sort((a, b) => b.path.length - a.path.length);
     }
 

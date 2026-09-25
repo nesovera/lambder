@@ -57,6 +57,23 @@ describe('Context additions', () => {
         expect(JSON.parse(decodeBody(result)).ip).toBe('1.2.3.4');
     });
 
+    it('reads the host from a trusted forwarding header, the way a Function URL behind CloudFront needs', async () => {
+        const app = (trustedHostHeaders?: string[]) => new Lambder({ files: testPublicFiles(), trustedHostHeaders })
+            .addRoute('/host', (ctx, res) => res.json({ host: ctx.host }));
+        const call = async (lambder: Lambder, headers: Record<string, string>) => JSON.parse(decodeBody(await lambder.render(
+            createMockEvent('/host', { headers: { Host: 'abc123.lambda-url.us-east-1.on.aws', ...headers }, requestContext: gatewayIdentity }),
+            createMockContext(),
+        ))).host;
+
+        // Nothing trusted by default: a header a client can set is a host a client picks.
+        expect(await call(app(), { 'X-Forwarded-Host': 'shop.example.com' })).toBe('abc123.lambda-url.us-east-1.on.aws');
+        expect(await call(app(['x-forwarded-host']), { 'X-Forwarded-Host': 'shop.example.com, cdn.internal' })).toBe('shop.example.com');
+        expect(await call(app(['x-forwarded-host']), { 'X-Forwarded-Host': 'shop.example.com:8443' })).toBe('shop.example.com:8443');
+        // A value that is not a host is not taken as one.
+        expect(await call(app(['x-forwarded-host']), { 'X-Forwarded-Host': 'evil.example/path' })).toBe('abc123.lambda-url.us-east-1.on.aws');
+        expect(await call(app(['x-forwarded-host']), {})).toBe('abc123.lambda-url.us-east-1.on.aws');
+    });
+
     it('takes the leftmost entry of a trusted forwarding header, and falls back when it is empty', async () => {
         const lambder = new Lambder({
             files: testPublicFiles(),
@@ -77,11 +94,9 @@ describe('Context additions', () => {
     it('does not trust a forwarding header because the request claims to be an invoke', async () => {
         // x-lambder-invoke is an ordinary request header, and a gateway passes
         // custom x- headers through untouched while APPENDING to
-        // x-forwarded-for. Honouring the marker would therefore hand every
-        // HTTP caller the leftmost entry again, which is the whole hole
-        // trustedClientIpHeaders exists to close. A real invoke does not need
-        // the exemption: its synthesized event carries the end user's address
-        // in requestContext.http.sourceIp.
+        // x-forwarded-for. Honouring the marker would hand every HTTP caller
+        // the leftmost entry, the very hole trustedClientIpHeaders exists to
+        // close.
         const lambder = new Lambder({ files: testPublicFiles() })
             .addRoute({ path: '/echo', method: 'POST' }, (ctx, res) => res.json({ ip: ctx.ip }));
 
@@ -102,17 +117,32 @@ describe('Context additions', () => {
         expect(JSON.parse(decodeBody(result)).ip).toBe('9.9.9.9');
     });
 
-    it('carries a genuine invoke\'s client address through, with the marker trusted for nothing', async () => {
-        const lambder = new Lambder({ files: testPublicFiles() })
-            .addRoute({ path: '/echo', method: 'POST' }, (ctx, res) => res.json({ ip: ctx.ip }));
+    it('tells an invoke by the apiId a gateway writes, never by the marker a client can send', async () => {
+        const lambder = new Lambder({
+            files: testPublicFiles(),
+            trustedClientIpHeaders: ['cf-connecting-ip'],
+            trustedHostHeaders: ['x-forwarded-host'],
+        }).addRoute({ path: '/echo', method: 'POST' }, (ctx, res) => res.json({ ip: ctx.ip, host: ctx.host }));
+        const forwarded = { 'CF-Connecting-IP': '6.6.6.6', 'X-Forwarded-Host': 'evil.example' };
+        const echo = async (event: Parameters<typeof lambder.render>[0]) =>
+            JSON.parse(decodeBody(await lambder.render(event, createMockContext())));
 
-        const event = synthesizeLambdaHttpEvent(
-            { method: 'POST', path: '/echo', host: 'localhost', body: '{}', clientIp: '1.2.3.4' },
+        // A genuine invoke: the invoker's clientIp and host, whatever it forwarded.
+        const invoke = synthesizeLambdaHttpEvent(
+            { method: 'POST', path: '/echo', host: 'shop.internal', body: '{}', clientIp: '1.2.3.4', headers: forwarded },
             { invoke: true },
         );
+        expect(await echo(invoke)).toEqual({ ip: '1.2.3.4', host: 'shop.internal' });
 
-        const result = await lambder.render(event as any, createMockContext());
-        expect(JSON.parse(decodeBody(result)).ip).toBe('1.2.3.4');
+        // A gateway request wearing the marker is read as the gateway request
+        // it is: the headers the app trusts still name the address and host.
+        const markerOnly = createMockEvent('/echo', {
+            httpMethod: 'POST',
+            body: '{}',
+            headers: { Host: 'abc.lambda-url.us-east-1.on.aws', 'X-Lambder-Invoke': '1', ...forwarded },
+            requestContext: { ...gatewayIdentity, apiId: 'abcdefghij' },
+        });
+        expect(await echo(markerOnly)).toEqual({ ip: '6.6.6.6', host: 'evil.example' });
     });
 
     it('gives one address one rate-limit key, whatever spelling a proxy forwarded', async () => {
@@ -144,11 +174,11 @@ describe('Context additions', () => {
     });
 
     it('reads a cookie named for an Object.prototype member as data, not as a crash', async () => {
-        // The cookie map used to be a plain object, so `__proto__=x` resolved
-        // to Object.prototype on the read, the `??=` skipped, and `.push` was
-        // not a function: every route, API and file answered 500, and a
-        // sibling subdomain could plant the cookie at a parent domain for
-        // good, since nothing on the 500 path clears cookies.
+        // On a plain-object cookie map, `__proto__=x` would resolve to
+        // Object.prototype on the read, skip the `??=`, and fail on `.push`:
+        // every route, API and file would answer 500, and a sibling subdomain
+        // could plant the cookie at a parent domain for good, since nothing on
+        // the 500 path clears cookies.
         const lambder = new Lambder({ files: testPublicFiles() })
             .addRoute({ path: '/echo', method: 'GET' }, (ctx, res) => res.json({
                 cookie: ctx.cookie,
@@ -188,8 +218,8 @@ describe('Context additions', () => {
         // A REST API puts a repeated header's values in multiValueHeaders and
         // only the LAST one in headers, and HTTP/2 lets a client split its
         // cookies across several Cookie headers. Reading the single header
-        // alone dropped candidate sessions the session layer weighs; v2's
-        // event.cookies already carried them all.
+        // alone would drop candidate sessions the session layer weighs, which
+        // v2's event.cookies carries in full.
         const lambder = new Lambder({ files: testPublicFiles() })
             .addRoute({ path: '/echo', method: 'GET' }, (ctx, res) => res.json({ cookie: ctx.cookie, cookieList: ctx.cookieList }));
 

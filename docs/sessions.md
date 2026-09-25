@@ -24,7 +24,7 @@ const lambder = initLambder<SessionData>().create({
 | Option | Default | Description |
 | --- | --- | --- |
 | `store` | required | Where sessions rest: `LambderDdbSessionStore`, `LambderMemorySessionStore`, or your own `LambderSessionStore` |
-| `sessionSalt` | required | Salts the sessionKey hash that partitions the store. Treat as a secret |
+| `sessionSalt` | required | The HMAC key that turns a sessionKey into the store's partition key, so a subject's partition cannot be found from the sessionKey alone. Treat as a secret |
 | `enableSlidingExpiration` | `true` | Extend the session on each access |
 | `slidingWriteIntervalSeconds` | `max(60, 5% of TTL)` | Minimum gap between sliding writes |
 | `cookie` | none | Cookie scope: `domain`, `path`, `sameSite`, `secure` (below) |
@@ -47,12 +47,53 @@ interface LambderSessionStore<SessionData = unknown> {
     readonly isMemoryOnly: boolean;
 
     get(sessionKeyHash, secretHash): Promise<LambderSessionRecord<SessionData> | null>;
-    put(record: LambderSessionRecord<SessionData>): Promise<void>;
-    delete(sessionKeyHash, secretHash): Promise<void>;
+    create(record: LambderSessionRecord<SessionData>): Promise<void>;
+    update(
+        sessionKeyHash, secretHash,
+        changes: LambderSessionChanges<SessionData>,   // data, dataExpiresAt, lastAccessedAt, expiresAt
+        condition?: { dataVersion: number },
+    ): Promise<LambderSessionUpdateResult>;           // "updated" | "missing" | "stale"
+    delete(sessionKeyHash, secretHash): Promise<LambderSessionRecord<SessionData> | null>;
     listSecretHashes(sessionKeyHash): Promise<string[]>;
-    markDataExpired(sessionKeyHash, secretHash, at): Promise<void>;
 }
 ```
+
+`LambderSessionRecord` carries `dataVersion`, a count of the writes its
+`data` and `dataExpiresAt` have had: the manager creates every record at 0,
+and the store advances it. `LambderSessionChanges` leaves it out, because no
+caller sets it.
+
+**No write replaces a record.** `create` writes a new session and refuses one
+that exists (a session is minted once). `update` changes only the fields it
+names, and only while the record exists, so a write already in flight when a
+session is ended (a logout, "log out everywhere", a password change, a
+revocation) cannot bring it back: it answers `"missing"` and writes nothing.
+An update whose changes carry `data` or `dataExpiresAt` also adds one to
+`dataVersion` in the same atomic write (DynamoDB's `ADD`), even when the value
+it writes is the one already stored. With `condition`, it applies only while
+the record's `dataVersion` is still the one the caller read, and answers
+`"stale"` otherwise; that is what keeps data derived from an old read from
+landing over a concurrent refresh, data write or `expireSessionDataAllByKey`.
+A store of your own implements both halves, or a revocation can be undone: a
+deadline compared in whole seconds cannot show a mark that wrote the value
+already stored, or two marks in one second, where a version always moves.
+`delete` hands back the
+record as it held it when removed, or null when there was none:
+`regenerateSession()` carries that record's data over, and leaves no session
+behind when a logout got there first.
+
+**A rotation cannot outlive "log out everywhere".** `regenerateSession()`
+writes the new record before it deletes the old one, and takes the new one
+back out when the old one is already gone. Deleting every session of a
+subject lists them again whenever it finds a listed one already gone. So a
+rotation racing a password change (a thief's request that rotates the stolen
+session) leaves nothing behind, whichever order the writes land in, unless it
+keeps rotating: the delete lists at most four times, and when a rotation
+completed inside every one of those passes a session may still stand. Then it
+logs that with `console.error`, and the manager's `deleteSessionAll()` and
+`deleteSessionAllByKey()` answer false; run it again. A store of your own
+keeps this as long as `delete` answers null for a record that was not
+there.
 
 The interface and both shipped stores are generic over the session data, so
 `LambderMemorySessionStore<SessionData>` (or your own store) types the records
@@ -67,8 +108,10 @@ bytes, so in front of a store that outlives the process every record would be
 a usable credential and the `sessionSalt` would be readable straight out of
 the partition key. Creating that pair throws.
 
-`get` must be strongly consistent. A logout deletes the record, and a read
-served from a stale replica would hand the session back.
+`get` and `listSecretHashes` must be strongly consistent. A logout deletes
+the record, and a read served from a stale replica would hand the session
+back; "log out everywhere" lists a subject's sessions, and a stale listing
+would miss one created a moment before.
 
 A store MAY hand back a record that is past its `expiresAt`. A DynamoDB TTL
 deletes within days rather than at the second, and a store over a plain table
@@ -90,9 +133,10 @@ characters. A minted token is 64 and 64, so the ceiling leaves a custom
 `LambderSessionCrypto`, or `LambderPlainSessionCrypto` over a long session
 key, room to mint longer halves while keeping any candidate well under
 DynamoDB's 2048-byte key limit. Without that check a planted
-4000-character cookie reached the store as a key it cannot take, the read
-threw, and the visitor's own live session answered 500 on every request rather
-than signing them in. A candidate that fails the check is no session, decided
+4000-character cookie would reach the store as a key it cannot take, the read
+would throw, and the visitor's own live session would answer 500 on every
+request rather than signing them in. A candidate that fails the check is no
+session, decided
 before anything is read. More candidates than the reader will weigh (four) is
 refused outright, without a single read.
 
@@ -231,7 +275,7 @@ one DynamoDB read unit and one write unit for longer.
 0-11, default 5) is also accepted. Reads accept both item shapes, so the
 setting can be switched on or off on a live table: items written under the
 other setting keep reading, and each is rewritten in the current shape on its
-next write. A compressed item that fails to decode is treated like any
+next data write. A compressed item that fails to decode is treated like any
 malformed record: no session.
 
 ### `LambderMemorySessionStore`
@@ -261,22 +305,30 @@ long-lived server holding real sessions.
 
 ## Session controller
 
-Everything a request does to its session goes through
-`lambder.getSessionController(ctx)`:
+Everything a request does to its session goes through `ctx.sessionController`, the
+request's session controller, on every context the instance renders: an API
+or route handler's, a guard's, a hook's. It is typed to the app's session data
+on a handler registered with `addApi`, `addSessionApi`, a literal-path
+`addRoute` or `addSessionRoute`, and in a guard built with
+`initLambder<SessionData>().guard()`; a RegExp route, a hook and a fallback read
+it untyped. A controller keeps no state of its own (it reads and writes the
+context), and `lambder.getSessionController(ctx)` builds one for a context the
+instance did not render, such as one `createContext()` built. On an instance created
+without the `session` option, touching `ctx.sessionController` throws and says so.
 
 | Method | Description |
 | --- | --- |
 | `createSession(sessionKey, data?, ttlInSeconds?)` | Start a new session, persist it, and write its cookies |
 | `issueSession(sessionKey, data?, ttlInSeconds?)` | The same, handing back the raw tokens beside the session (tests, the mock runtime) |
-| `fetchSession()` | Fetch and validate the existing session (throws if not found) |
+| `fetchSession()` | Fetch and validate the existing session. Throws `LambderSessionNotFoundError` when there is none, which a route, a hook or an API answers as a missing session |
 | `fetchSessionIfExists()` | The session, or null |
-| `updateSessionData(newData)` | Write new session data |
-| `refreshSessionData()` | Run the `dataRefresh` callback now, regardless of TTL |
+| `updateSessionData(newData)` | Write new session data. Throws `LambderSessionNotFoundError` when the session was ended while the request held it, which an API call answers as sessionExpired |
+| `refreshSessionData()` | Run the `dataRefresh` callback now, regardless of TTL. Throws `LambderSessionNotFoundError` when the session is over (the callback ended it, or it was ended while the request held it) |
 | `endSession()` | End this session and delete it |
 | `endSessionAll()` | End every session for this sessionKey (all devices), this request's own included: to leave the caller signed in, create the replacement after it rather than before |
 | `deleteSessionAllByKey(sessionKey)` | Delete every session of any sessionKey ("log user X out everywhere") |
 | `expireSessionDataAllByKey(sessionKey)` | Mark the data of every session of a sessionKey stale, so each renews via `dataRefresh` on its next read (no logout) |
-| `regenerateSession()` | Regenerate the token (use after a password change) |
+| `regenerateSession()` | Rotate this session's tokens (after a sign-in that raised its privileges), carrying the record over as stored. Throws `LambderSessionNotFoundError` when the session was ended while the request held it. After a password change use `endSessionAll()` then `createSession()`: rotating only the caller's own session leaves every other device signed in |
 | `reissueSession()` | The same, handing back the raw tokens, for a client that holds its CSRF token rather than reading `document.cookie` |
 
 ```typescript
@@ -284,10 +336,20 @@ lambder.addApi("login", { input: LoginSchema, output: z.object({ ok: z.boolean()
     const user = await authenticate(ctx.apiPayload);
     if (!user) refuse("Wrong email or password.");
 
-    await lambder.getSessionController(ctx).createSession(user.id, { userId: user.id });
+    await ctx.sessionController.createSession(user.id, { userId: user.id });
     return res.api({ ok: true });
 });
 ```
+
+A request whose session cookie names no live session (it expired, or was
+ended on another device) is answered as having none, and its cookies are left
+alone. A deletion matches a cookie by name, not by value, so clearing them
+would also delete a session another response set after this request left the
+browser: a poll sent with the old cookie, answering after a login, a
+rotation or a password change, would sign the person straight out of the new
+session. A dead cookie costs a store read per request until it expires; a
+logout (`endSession()`, `endSessionAll()`) clears the cookies as it ends the
+session.
 
 **Session APIs require the posted CSRF token; session routes do not.** The
 controller is handed the token an API call posted, and `csrfToken: null` for
@@ -371,8 +433,11 @@ the app's `dataRefresh` for it, would keep it alive on the victim's traffic.
 ## How the secrets are stored
 
 The session cookie is `sessionKeyHash:secret`, where
-`sessionKeyHash = sha256(sessionKey + sessionSalt)` and `secret` is 256 random
-bits.
+`sessionKeyHash = HMAC-SHA256(key: sessionSalt, message: sessionKey)` and
+`secret` is 256 random bits. The salt is the HMAC key rather than a suffix of
+the message, so no sessionKey can absorb part of it. A read looks the record
+up by the hash the cookie carries and does not recompute it, so the salt is
+not a boundary between deployments: give each deployment its own table.
 
 At rest the record stores only HASHES of the bearer secrets: its `secretHash`
 is `sha256(secret)` (so the lookup itself proves possession of the raw secret)
@@ -387,13 +452,13 @@ edge runtimes), which is what lets the same manager run outside Node.
 
 Fast sha256 is the correct construction here rather than a password KDF: the
 secrets are 256-bit random, so there is nothing to brute-force, while
-`sessionSalt` peppers the identity-to-partition-key mapping so partition keys
+`sessionSalt` keys the identity-to-partition-key mapping so partition keys
 and cookie prefixes cannot be derived from (or linked to) known user ids.
 
 What the salt does not do is survive a dump of the table. The record stores
 `sessionKey` in plaintext beside its own hash, so anyone holding items holds a
-known-plaintext pair for `sha256(sessionKey + sessionSalt)` and can go at the
-salt directly; only the salt's own entropy is in the way, which is why it has
+known-plaintext pair for `HMAC-SHA256(sessionSalt, sessionKey)` and can go at
+the salt directly; only the salt's own entropy is in the way, which is why it has
 to be a long random string rather than a memorable one. What the salt buys is
 unlinkability against someone who sees KEYS without items: a key-only index, a
 log or a metric carrying partition keys, a query that projects no attributes.
@@ -428,7 +493,7 @@ const lambder = initLambder<SessionData>().create({
 Semantics:
 
 - The callback must be a pure derivation of external state: concurrent reads
-  may run it in parallel, last write wins.
+  may run it in parallel, and the first result written stands (see below).
 - Returning `null` deletes the session; the request is answered as
   session-expired.
 - Thrown errors fail the request as a `LambderSessionDataRefreshError` and
@@ -440,15 +505,34 @@ Semantics:
   turning an infra blip into a forced logout.
 - The renewal write and the sliding-expiration write share a single store
   write when both are due.
+- A refresh result is written only over the data it was computed from. If
+  the record's `dataVersion` moved while the callback ran (another request
+  refreshed or wrote the data, or `expireSessionDataAllByKey` marked it
+  stale), the result still serves the request, the newer write stands, and a
+  marked record renews again on its next read.
 - Records created before `dataRefresh` was enabled renew on their first read.
-- `updateSessionData()` marks data fresh (it was just written deliberately);
-  `regenerateSession()` carries the old freshness stamp over.
-- `expireSessionDataAllByKey(sessionKey)` stamps every session of a subject
+- Only the callback's output is stamped fresh. `updateSessionData()` writes
+  the data and leaves the refresh deadline where it is: the data an app
+  writes is almost always the session's own with a field changed, still
+  carrying what the callback derived last, so an app that writes session data
+  more often than `ttlSeconds` still refreshes on schedule. The write lands
+  only over the `dataVersion` it read: when that moved in the meantime
+  (`expireSessionDataAllByKey` marked it, or another request refreshed it),
+  the data is written and marked due, so the next read runs it through the
+  callback again and a revocation is not undone by data derived before it.
+  `regenerateSession()` starts the new session's data due, so its next read
+  renews it through the callback, whatever the handler writes after rotating.
+- `expireSessionDataAllByKey(sessionKey)` marks every session of a subject
   stale at once: call it after changing that subject's roles or permissions,
   and the change applies on their next request instead of within `ttlSeconds`,
-  with no logout. It updates only `dataExpiresAt`, conditionally on the record
+  with no logout. It writes only `dataExpiresAt`, conditionally on the record
   still existing, so it neither resurrects a deleted session nor clobbers a
-  concurrent write.
+  concurrent write, and it moves `dataVersion`, so a refresh or data write in
+  flight at that moment answers stale instead of landing over it.
+- `updateSessionData()` and `refreshSessionData()` do not slide the expiry.
+  Only a session read does, because the read is also what re-issues the
+  cookies at the new expiry (below); a data write that slid the record would
+  leave the browser's cookies at the old one.
 
 ## Sliding expiration
 
@@ -458,10 +542,11 @@ defaulting to `max(60, 5% of TTL)`, so a busy session does not write on every
 request.
 
 When a sliding write actually moves the expiry, the response re-issues both
-session cookies at the new `Expires`. Without that the record slid and the
-browser did not, so it dropped the cookies at creation plus TTL and a visitor
-who never stopped using the app was signed out anyway, on the one deadline
-sliding expiration exists to push back. The re-issue is throttled by the same
+session cookies at the new `Expires`, with `Max-Age` beside it so a device
+whose clock runs ahead does not drop them early. Without that the record would
+slide and the browser would not: it would drop the cookies at creation plus
+TTL, and a visitor who never stopped using the app would be signed out anyway,
+on the one deadline sliding expiration exists to push back. The re-issue is throttled by the same
 interval as the write, so an active session refreshes its cookies at most that
 often rather than on every request.
 
@@ -474,9 +559,13 @@ refreshing.
 
 ## Session-expired responses
 
-- **API calls** answer the protocol's `{ sessionExpired: true }` envelope,
-  which `LambderCaller` routes to `sessionExpiredHandler` and uses to clear the
-  client's cookies.
+- **API calls** answer the protocol's `{ sessionExpired: true }` envelope.
+  `LambderCaller` clears the client's CSRF cookie and calls
+  `sessionExpiredHandler` only while that cookie still holds the token the
+  call sent, or is already gone. A call sent before a login or a rotation (a
+  poll, another tab) can answer sessionExpired after it, and acting on that
+  would delete the cookie the new session just set, so such an answer is
+  returned with nothing touched.
 - **Routes** answer `setSessionExpiredRouteHandler`'s response, or a plain 401
   when none is set.
 
@@ -484,8 +573,8 @@ refreshing.
 
 | Error | Meaning |
 | --- | --- |
-| `LambderSessionNotFoundError` | No session for this request: the cookies named none, or the one they named did not pair with the posted CSRF token. `fetchSessionIfExists()` answers null for it |
-| `LambderSessionAmbiguousError` | The request's session cookies cannot be resolved to one session. `fetchSessionIfExists()` answers null for it, and the response carries the clearing cookies |
+| `LambderSessionNotFoundError` | No session for this request: the cookies named none, or the one they named did not pair with the posted CSRF token. Also thrown by `updateSessionData()`, `refreshSessionData()` and `regenerateSession()` when the session was ended while the request held it (a logout or a password change elsewhere, or the `dataRefresh` callback). `fetchSessionIfExists()` answers null for it |
+| `LambderSessionAmbiguousError` | The request's session cookies cannot be resolved to one session. A subclass of `LambderSessionNotFoundError`, so it is answered as a missing session wherever that one is and `fetchSessionIfExists()` answers null for it; the response carries the clearing cookies |
 | `LambderSessionDataRefreshError` | The `dataRefresh` callback threw. The session is untouched |
 | `LambderSessionReadError` | Reading the session record failed at the store level. Deliberately not reported as "no session" |
 

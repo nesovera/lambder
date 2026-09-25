@@ -100,10 +100,9 @@ export declare class LambderTestVisitor<TContract extends LambderApiContractShap
      * The full outcome, never throwing: LambderCaller.apiOutcome, through
      * this visitor. Pair it with assertApiSuccess / assertApiFailure.
      *
-     * One thing is added to what the caller hands back. When the app crashed
-     * answering the call, the outcome is the `server` failure any client
-     * would get, whose error says "Request failed: 500" and nothing else;
-     * here that error's `cause` is what the app actually threw, stack
+     * When the app crashed answering the call, the outcome is the `server`
+     * failure any client would get, whose error says only "Request failed:
+     * 500"; here that error's `cause` is what the app actually threw, stack
      * included, so a failing test points at the line in the handler.
      */
     readonly apiOutcome: LambderCaller<TContract, TProvidedGuards>["apiOutcome"];
@@ -117,10 +116,9 @@ export declare class LambderTestVisitor<TContract extends LambderApiContractShap
     });
     /**
      * This visitor's cookies, to inspect or clear; every call and request
-     * reads and fills them. Emptied by the test app's reset(), which a
-     * visitor notices here, the next time anything asks for its cookies: a
-     * jar still holding the token of an emptied store would read as signed
-     * in until an answer said otherwise.
+     * reads and fills them. The test app's reset() empties them, noticed here
+     * the next time anything asks: a jar still holding the token of an
+     * emptied store would read as signed in until an answer said otherwise.
      */
     get jar(): LambderCookieJar;
     /**
@@ -144,10 +142,10 @@ export declare class LambderTestVisitor<TContract extends LambderApiContractShap
      * tokens too, as LambderMockApp.signIn does.
      *
      * Throws when the cookies do not stick. An app that scopes its session
-     * cookie to a domain (`cookie: { domain: ".example.com" }`) writes one
-     * this visitor's host is not under, a browser on that host would drop it,
-     * and so does the jar; left silent, every session call after it answers
-     * sessionExpired with nothing to say why.
+     * cookie to a domain (`cookie: { domain: ".example.com" }`) this visitor's
+     * host is not under writes a cookie a browser on that host would drop, and
+     * the jar drops it too; left silent, every later session call would
+     * answer sessionExpired with nothing to say why.
      */
     signIn(sessionKey: string, data: TSessionData, options?: {
         ttlSeconds?: number;

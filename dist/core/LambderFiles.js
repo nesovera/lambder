@@ -1,22 +1,34 @@
 import mimeTypeResolver from "mime-types";
+import { LRUCache } from "lru-cache";
 import { LambderTemplatingEngine } from "./LambderTemplatingEngine.js";
 import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
 const DEFAULT_MEMORY_CACHE_MAX_BYTES = 32 * 1024 * 1024;
 const DEFAULT_MEMORY_CACHE_MAX_FILE_BYTES = 2 * 1024 * 1024;
+const DEFAULT_MISS_TTL_SECONDS = 60;
+/**
+ * The bytes the remembered misses may hold, each counted by its path and the
+ * entry overhead: a bot probing random paths churns through this rather than
+ * growing the map. Counted in bytes because the paths are the caller's: a
+ * count of 10,000 would let 8 KB paths hold 160 MB of a container's memory.
+ * About 12,000 misses of ordinary length.
+ */
+const MISS_MEMORY_MAX_BYTES = 4 * 1024 * 1024;
+/** What an entry costs beside its bytes, so the byte budget also bounds how many entries it holds. */
+const FILE_ENTRY_OVERHEAD_BYTES = 256;
 /**
  * The path a source is asked for, or null for one that names no file.
  *
- * This is the whole path rule, and it belongs to the reader: every source is
- * handed the result, and a source that resolves it against a base (a URL, a
- * filesystem root) is safe only if the value really is the plain relative
- * path the interface promises. Stripping only ONE leading slash would hand a
- * source "//attacker.example/evil.html" as "/attacker.example/evil.html",
- * which the HTTP source resolves as a protocol-relative reference: the app's
- * origin credentials would go to a host the caller chose and its bytes would
- * come back under the app's own domain. So every leading slash goes, and every segment is
- * checked rather than only the ".." ones: an empty inner segment is how a
- * host or a root gets back into the value, and a backslash is a separator to
- * Windows paths and to every browser reading a Location.
+ * This is the whole path rule, and it belongs to the reader: a source that
+ * resolves the result against a base (a URL, a filesystem root) is safe only
+ * if it really is the plain relative path the interface promises. Every
+ * leading slash goes, since stripping only one would hand a source
+ * "//attacker.example/evil.html" as "/attacker.example/evil.html", which the
+ * HTTP source resolves as a protocol-relative reference: the app's origin
+ * credentials would go to a host the caller chose, and its bytes would come
+ * back under the app's own domain. Every segment is checked, not only ".."
+ * ones: an empty inner segment is how a host or a root gets back into the
+ * value, and a backslash is a separator to Windows paths and to every
+ * browser reading a Location.
  */
 const toRelativePath = (target) => {
     const relative = target.replace(/^\/+/, "");
@@ -34,17 +46,38 @@ const toRelativePath = (target) => {
  */
 export class LambderFiles {
     source;
+    /** The files read, least recently served evicted first once the byte budget is spent. */
     cache;
-    cacheBytes = 0;
-    maxBytes;
     maxFileBytes;
+    /**
+     * Paths the source had no file for, until their TTL. An SPA asks for a
+     * file before it serves the shell for every page route, so without this
+     * each navigation would cost a source round trip (an S3 GetObject
+     * answering NoSuchKey) in warm containers too.
+     */
+    misses;
     templates = new Map();
     constructor(option) {
         const { source, memoryCache } = "source" in option ? option : { source: option, memoryCache: undefined };
         this.source = source;
-        this.cache = memoryCache === false ? null : new Map();
-        this.maxBytes = memoryCache === false ? 0 : (memoryCache?.maxBytes ?? DEFAULT_MEMORY_CACHE_MAX_BYTES);
+        const maxBytes = memoryCache === false ? 0 : (memoryCache?.maxBytes ?? DEFAULT_MEMORY_CACHE_MAX_BYTES);
         this.maxFileBytes = memoryCache === false ? 0 : (memoryCache?.maxFileBytes ?? DEFAULT_MEMORY_CACHE_MAX_FILE_BYTES);
+        const missTtlMs = memoryCache === false ? 0 : (memoryCache?.missTtlSeconds ?? DEFAULT_MISS_TTL_SECONDS) * 1000;
+        this.cache = maxBytes > 0
+            ? new LRUCache({
+                maxSize: maxBytes,
+                // The key is a JS string, two bytes a character.
+                sizeCalculation: (entry, key) => entry.body.byteLength + key.length * 2 + FILE_ENTRY_OVERHEAD_BYTES,
+            })
+            : null;
+        this.misses = missTtlMs > 0
+            ? new LRUCache({
+                maxSize: MISS_MEMORY_MAX_BYTES,
+                // The key is a JS string, two bytes a character.
+                sizeCalculation: (_miss, key) => key.length * 2 + FILE_ENTRY_OVERHEAD_BYTES,
+                ttl: missTtlMs,
+            })
+            : null;
     }
     /**
      * Puts the reader over another source, for `lambder/testing`. In place,
@@ -54,7 +87,7 @@ export class LambderFiles {
     [LAMBDER_BACKEND_SWAP](source) {
         this.source = source;
         this.cache?.clear();
-        this.cacheBytes = 0;
+        this.misses?.clear();
         this.templates.clear();
     }
     /**
@@ -68,15 +101,25 @@ export class LambderFiles {
         const cached = this.cache?.get(relativePath);
         if (cached)
             return cached;
-        const file = await this.source.read(relativePath);
-        if (!file)
+        if (this.misses?.has(relativePath))
             return null;
+        const file = await this.source.read(relativePath);
+        if (!file) {
+            this.misses?.set(relativePath, true);
+            return null;
+        }
         const entry = {
             body: file.body,
-            mimeType: file.mimeType || mimeTypeResolver.lookup(relativePath) || "application/octet-stream",
+            // A source's own type as it gave it: the source knows the bytes'
+            // encoding (an S3 object stored as Latin-1 text/plain). Worked out
+            // from the extension, a text type carries a UTF-8 charset, so a
+            // .txt or an .html with no meta charset is not read in the
+            // browser's legacy encoding.
+            mimeType: file.mimeType || mimeTypeResolver.contentType(mimeTypeResolver.lookup(relativePath) || "application/octet-stream") || "application/octet-stream",
             relativePath,
         };
-        this.remember(entry);
+        if (this.cache && entry.body.byteLength <= this.maxFileBytes)
+            this.cache.set(relativePath, entry);
         return entry;
     }
     /**
@@ -95,20 +138,5 @@ export class LambderFiles {
         const template = new LambderTemplatingEngine(file.body.toString("utf8"), { htmlVirtualSlots: options.htmlVirtualSlots });
         this.templates.set(key, template);
         return template;
-    }
-    /** Cache small files within the byte budget, evicting the oldest entries first. */
-    remember(entry) {
-        if (!this.cache || entry.body.length > this.maxFileBytes)
-            return;
-        for (const [key, value] of this.cache) {
-            if (this.cacheBytes + entry.body.length <= this.maxBytes)
-                break;
-            this.cache.delete(key);
-            this.cacheBytes -= value.body.length;
-        }
-        if (this.cacheBytes + entry.body.length <= this.maxBytes) {
-            this.cache.set(entry.relativePath, entry);
-            this.cacheBytes += entry.body.length;
-        }
     }
 }

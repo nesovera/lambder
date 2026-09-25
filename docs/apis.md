@@ -16,16 +16,42 @@ lambder
     }, async ({ apiPayload }, res) => {
         // apiPayload is typed and already validated
         const data = await fetchCompany(apiPayload.companyName);
-        return res.api(data);   // the return value is type-checked against `output`
+        return res.api(data);   // type-checked against `output`, and parsed through it before it is sent
     });
 ```
+
+**The output schema is applied, not only typed.** Every payload `res.api()`
+answers for the API is parsed through `output` before the envelope is built,
+so what reaches the client (and an idempotent replay) is the declared shape:
+zod strips the fields the schema does not declare, fills its defaults and
+runs its transforms. That matters because TypeScript accepts a value carrying
+more than its type: a row read straight from a table, with a password hash
+beside the declared fields, is assignable to a narrower output type, and
+without the parse it went to the client whole. The handler writes the
+schema's input form (`z.input`), what the transforms take, so each transform
+runs once. A refusal's payload beside an `errorMessage` or a flag is parsed
+the same way; only `null` passes as it is. The parse belongs to the handler's
+own resolver: a hook, the input validation handler and the global error
+handler answer in shapes of their own (a cached answer is already in its wire
+form), and what they answer is sent as given. A payload the schema rejects is the
+handler breaking its own contract and is answered as a crash
+(`LambderApiOutputValidationError`, named, with the failing paths but never the
+values), not sent. The handler has run by then, whatever it wrote or charged
+included, so under an idempotency key the crash answer is recorded as the key's
+answer: a retry is told the same thing instead of running the operation again.
+The parse is synchronous, so an output schema cannot be async: an async
+refinement or transform in it makes zod throw, and that throw, or one from a
+transform of your own, is the same `LambderApiOutputValidationError`, with
+what was thrown as its `cause` and `zodError` null (it is set only when the
+schema rejected the payload). Input schemas, guard slices and rate-limit key
+slices are parsed asynchronously and may be async.
 
 The options object beside the schemas is where an API declares its policies:
 
 | Field | Purpose |
 | --- | --- |
 | `input` | Zod schema for the payload. `z.void()` for none |
-| `output` | Zod schema for the result. Checked against what the handler returns |
+| `output` | Zod schema for the result. Type-checked against what the handler returns, and every success payload is parsed through it before it is sent |
 | `guards` | Named guards to run before the handler. See [API policies](./api-policies.md#guards) |
 | `rateLimit` | Named rate-limit policies. See [API policies](./api-policies.md#rate-limits) |
 | `idempotency` | `true` or `{ ttlSeconds }`. See [API policies](./api-policies.md#idempotency) |
@@ -94,6 +120,16 @@ when a guardInput-mode guard applies, and its `guards` option exactly as
 declared: `ApiContractType["getUser"]["guards"]` is the literal
 `{ readonly orgPermission: "USERS.MANAGE" }`.
 
+`input` and `output` are the client's side of each schema. `input` is the
+schema's input form (`z.input`): a field with a default is optional to send,
+and a transformed field is sent as its source type. `output` is what arrives,
+the schema's output as JSON (`LambderJsonOf`): a `z.date()` field is a
+string, and a function, symbol or undefined member is not there. The handler
+sees the other side of both, the parsed input and the output before its
+transforms run, and
+guard and rate-limit slices over the payload are checked against the form a
+client posts.
+
 A client that keeps its own map of what an API needs, to decide whether to
 render a screen before calling, pins that map to the declarations with
 `satisfies` instead of a test that reads the server source:
@@ -111,6 +147,20 @@ Renaming the permission on the server, or moving the API to a different one,
 then fails the client's map to compile. Make the mapped type non-optional (over
 the guarded API names) when the map must also stay complete as guarded APIs are
 added.
+
+`LambderContractKeysWithGuard<Contract, "guardName">` is the names of the
+endpoints whose `guards` option names that guard, in any of its forms. It is
+what a test that calls every endpoint behind one guard loops over, and what a
+list meant to hold exactly those endpoints is checked against. `satisfies`
+refuses a name the guard does not cover; a name left off the list needs a
+check of its own:
+
+```typescript
+type AdminApi = LambderContractKeysWithGuard<ApiContractType, "platformAdmin">;
+const ADMIN_APIS = ["admin.listUsers", "admin.deleteUser"] as const satisfies readonly AdminApi[];
+// Fails to compile while an endpoint behind the guard is left off the list.
+const adminApisComplete: [Exclude<AdminApi, (typeof ADMIN_APIS)[number]>] extends [never] ? true : false = true;
+```
 
 ## Modular APIs with `use()`
 
@@ -148,14 +198,25 @@ by hand; see
 
 ## Request flow per API
 
+An API call is a POST to `apiPath` with `Content-Type: application/json`,
+which every Lambder caller sends. A POST of any other type to that path is
+not an API call and reaches the API fallback. JSON is the one type a browser
+will not send cross-origin without asking first, so this is what puts every
+cross-origin call through the CORS config: a plain HTML form on another site
+could otherwise post a login envelope (`enctype="text/plain"` lays out JSON
+exactly) and plant the attacker's session in a visitor's browser.
+
 ```
 version floor → signature gate → payload restore
   → rate limits keyed on the request alone (per: "ip")
   → session (session APIs)
   → idempotency replay lookup
-  → the remaining rate limits (per: "session", custom keys)
+  → rate limits keyed per session (per: "session"), and custom keys
+    charged before the guards (chargeAt: "beforeGuards")
   → guards
   → zod validation
+  → guards placed after validation (runAt: "afterInputValidation")
+  → rate limits keyed by a custom key (a payload field), by default
   → idempotency claim
   → handler
   → idempotency store
@@ -214,39 +275,76 @@ One rule follows for the schemas themselves: build them from static values. A
 schema that reads the clock, a random source or the environment when it is
 constructed (`z.number().max(Date.now())`, an enum from a directory listing)
 digests differently on every build, so that endpoint's clients reload on every
-deploy whether or not it changed. Running the generator twice, in two
-processes, and comparing the files catches that before a deploy.
+deploy whether or not it changed. `writeApiSignatures` below catches that
+before a deploy, by checking what it wrote from a second process.
 
 `lambder.apiSignatures()` returns every registered endpoint's signature,
-keyed by the endpoint's hashed name, as a `LambderApiSignatureMap`. A
-generator imports the finished instance, awaits it, and writes the object to
-a file that both the frontend and the server ship with. Run it before every
-build, not by hand:
+keyed by the endpoint's hashed name, as a `LambderApiSignatureMap`, and
+`writeApiSignatures` from `lambder/build` writes it to the module both the
+frontend and the server ship with. A generator script imports the finished
+instance and hands it over; run it before every build, not by hand:
 
 ```typescript
 // tools/generate-api-signatures.ts
-import { writeFileSync } from "node:fs";
+import { writeApiSignatures } from "lambder/build";
 import { lambder } from "../backend/index.js";   // the instance with every API registered
 
-const signatures = await lambder.apiSignatures();
-writeFileSync("shared/generated/apiSignatures.generated.ts",   // importable by the frontend and the server
-    "// Generated from the server's registrations by tools/generate-api-signatures.ts. Do not edit.\n"
-    + "import type { LambderApiSignatureMap } from \"lambder/client\";\n"
-    + `export const apiSignatures: LambderApiSignatureMap = ${JSON.stringify(signatures, null, 4)};\n`);
+const result = await writeApiSignatures(lambder, {
+    file: "shared/generated/apiSignatures.generated.ts",   // importable by the frontend and the server
+    check: process.argv.includes("--check"),
+});
+console.log(result.lines.join("\n"));
+process.exit(result.ok ? 0 : 1);
 ```
 
-`lambder.apiSignatureEntries()` is the same signatures with the endpoint name
-each one came from, sorted the same way. The map carries no names on purpose,
-so a generator holding only the map can report that four signatures changed
-but not which endpoints; reading the entries, it can name them. It is a
-build-time view by construction, coming off the server instance that a
-generator imports and a client never does:
+It says which endpoints moved since the file on disk, by name (`~ echo`,
+`+ added`; a removed endpoint by its key, since a key is a one-way hash of a
+name that no longer exists), which is how wide the next deploy's reload will
+be. With `check: true` it writes nothing and fails when the file is stale, the
+gate for a CI step. The comparison reads the map the file holds, so a checkout
+that rewrote its line endings, or a formatter that re-indented it or took the
+quotes off its keys (Prettier's default `quoteProps`, Biome's, ESLint's
+`quote-props`), leaves it current, and it is not rewritten either: the file is
+written only when its map changes, to a temporary file renamed over the old
+one, so a build reading it meanwhile never sees half of it. A symlink is
+written through, to the file it names. The map carries a `// prettier-ignore`
+line, so Prettier leaves it as written. `header`, `quotes` and `semicolons`
+shape the file to the project's style, and a change to them shows with the
+next change of the map (or after deleting the file).
+
+`verifyInFreshProcess` also checks the file from a fresh Node process, after
+a write and after a check that finds it current, which is where a schema
+that digests differently in every process (it reads the clock or a random
+source) shows, named, rather than as signatures that change on every build.
+It names the module that holds the instance, and the export unless it is the
+default one:
 
 ```typescript
-for(const { name, signature } of await lambder.apiSignatureEntries()){
-    if(previous[await apiNameKeyOf(name)] !== signature) console.log(`  changed: ${name}`);
-}
+const result = await writeApiSignatures(lambder, {
+    file: "shared/generated/apiSignatures.generated.ts",
+    verifyInFreshProcess: { module: new URL("../backend/index.js", import.meta.url), exportName: "lambder" },
+});
 ```
+
+The fresh process loads that module alone, never the generator script, so
+nothing the script does before or after the call runs twice; the module's own
+top-level code runs there, as it would for any import of it. `module` is a
+file URL, as a `URL` as above or as the string `import.meta.resolve()`
+answers, or a path relative to the working directory, and `exportName`
+defaults to `"default"`. The process gets the generator's Node flags less the
+inspector, watch mode, the test runner and the eval flags (`-e`, `-p`, `-pe`,
+`--input-type`), so a TypeScript module loads there as it did in the
+generator when its loader is on the command line (`node --import tsx`, the
+`tsx` CLI) or in `NODE_OPTIONS`. A
+loader registered from inside the script is not there, and a module that fails
+to load, or an export that is not an instance, fails the check with the
+reason.
+
+`lambder.apiSignatureEntries()` is the same signatures with the endpoint name
+each one came from, sorted the same way, which is what the naming above reads.
+The map carries no names on purpose, and the entries are a build-time view by
+construction, coming off the server instance that a generator imports and a
+client never does.
 
 The frontend passes the map to `LambderCaller` as `apiSignatures`, the server
 passes the same map to `create()` as `apiSignatures`, and every call then
@@ -326,6 +424,7 @@ the reserved `lambder/` prefix, so app codes never collide:
 | --- | --- | --- |
 | `rateLimited` | `lambder/rate-limited` | A rate-limit policy refused (429) |
 | `duplicateInFlight` | `lambder/duplicate-in-flight` | The original of an idempotent request is still running (409) |
+| `idempotencyKeyReused` | `lambder/idempotency-key-reused` | The `idempotencyKey` was first used for a request with another payload (409) |
 | `invalidIdempotencyKey` | `lambder/invalid-idempotency-key` | The `idempotencyKey` is malformed (400) |
 | `apiNotFound` | `lambder/api-not-found` | No API is registered under the requested name |
 | `invalidRequestPayload` | `lambder/invalid-request-payload` | A compressed request payload (`payloadGz` or `payloadBr`) is malformed, carries both fields, or exceeds `maxRequestPayloadBytes` (400) |
@@ -382,8 +481,9 @@ export const requirePermission = (granted: boolean) => {
 };
 ```
 
-`errorMessage` defaults to the error's message string, so
-`throw new LambderApiRefusal("Nope.")` alone is already visible to the client.
+`errorMessage` defaults to `{ type: "error", content }` with the error's
+message as the content, so `throw new LambderApiRefusal("Nope.")` alone is
+already visible to the client.
 Thrown outside an API call (in a route handler, say) it behaves like a normal
 error. The class is isomorphic and dependency-free, so shared server/browser
 packages can import it safely. Detection is brand-based

@@ -62,7 +62,7 @@ describe('ctx.cookieList', () => {
     it('keeps every value of a repeated cookie name (v1 header); ctx.cookie holds the first', () => {
         const ctx = createContext(createMockEvent('/', {
             headers: { Host: 'localhost', Cookie: 'sid=old; theme=dark; sid=new' },
-        }), createMockContext(), '/api');
+        }), createMockContext(), { apiPath: '/api' });
 
         expect(ctx.cookieList).toEqual({ sid: ['old', 'new'], theme: ['dark'] });
         expect(ctx.cookie).toEqual({ sid: 'old', theme: 'dark' });
@@ -80,7 +80,7 @@ describe('ctx.cookieList', () => {
             },
             isBase64Encoded: false,
         };
-        const ctx = createContext(event, createMockContext(), '/api');
+        const ctx = createContext(event, createMockContext(), { apiPath: '/api' });
 
         expect(ctx.cookieList).toEqual({ sid: ['old', 'new'] });
         expect(ctx.cookie.sid).toBe('old');
@@ -89,7 +89,7 @@ describe('ctx.cookieList', () => {
     it('decodes values and skips malformed pairs like the flat map', () => {
         const ctx = createContext(createMockEvent('/', {
             headers: { Host: 'localhost', Cookie: 'a=x%3Ay; junk; b=' },
-        }), createMockContext(), '/api');
+        }), createMockContext(), { apiPath: '/api' });
 
         expect(ctx.cookieList).toEqual({ a: ['x:y'], b: [''] });
         expect(ctx.cookie).toEqual({ a: 'x:y', b: '' });
@@ -189,6 +189,7 @@ describe('Session cookies at several scopes', () => {
         expiresAt: nowSec() + 3600,
         lastAccessedAt: nowSec(),
         ttlInSeconds: 3600,
+        dataVersion: 0,
     });
 
     /** The call context the controller reads onto and writes cookies into. */
@@ -251,8 +252,8 @@ describe('Session cookies at several scopes', () => {
 
         const cookies = setCookies(ctx);
         expect(cookies.length).toBe(2);
-        expect(cookies[0]).toMatch(/^sid=[0-9a-f]+:[0-9a-f]+; Domain=\.example\.com; Path=\/; Expires=.*; HttpOnly; Secure; SameSite=Lax$/);
-        expect(cookies[1]).toMatch(/^csid=[0-9a-f]+; Domain=\.example\.com; Path=\/; Expires=.*; Secure; SameSite=Lax$/);
+        expect(cookies[0]).toMatch(/^sid=[0-9a-f]+:[0-9a-f]+; Max-Age=\d+; Domain=\.example\.com; Path=\/; Expires=.*; HttpOnly; Secure; SameSite=Lax$/);
+        expect(cookies[1]).toMatch(/^csid=[0-9a-f]+; Max-Age=\d+; Domain=\.example\.com; Path=\/; Expires=.*; Secure; SameSite=Lax$/);
     });
 
     it('finds the live session behind a stale copy that arrived first, and evicts the host-only twin', async () => {
@@ -270,8 +271,8 @@ describe('Session cookies at several scopes', () => {
         expect(setCookies(ctx)).toEqual([
             'sid=; Max-Age=0; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Secure; SameSite=Lax',
             'csid=; Max-Age=0; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure; SameSite=Lax',
-            expect.stringContaining(`sid=${LIVE_TOKEN}; Domain=.example.com; Path=/;`),
-            expect.stringContaining('csid=csrf-token; Domain=.example.com; Path=/;'),
+            expect.stringMatching(new RegExp(`^sid=${LIVE_TOKEN}; Max-Age=\\d+; Domain=\\.example\\.com; Path=/;`)),
+            expect.stringMatching(/^csid=csrf-token; Max-Age=\d+; Domain=\.example\.com; Path=\/;/),
         ]);
         expect(warn).toHaveBeenCalledTimes(1);
         expect(warn.mock.calls[0]![0]).toContain('2 "sid" cookies');
@@ -286,9 +287,9 @@ describe('Session cookies at several scopes', () => {
         // host-only one, and any sibling host can plant a well-formed DEAD
         // cookie at the parent domain to make the twin arrive. Without the
         // re-issue the response is two deletions and nothing else, and an
-        // ordinary successful request signs the visitor out. The record was
-        // just accessed, so no sliding write is due here: the re-issue is the
-        // eviction's own, not a slide that happened to run.
+        // ordinary successful request signs the visitor out. No sliding write
+        // is due (the record was just accessed), so the re-issue is the
+        // eviction's own.
         const planted = 'deadbeef:0a1';
         const { controller, ctx } = makeController([LIVE_TOKEN, planted], '.example.com');
 
@@ -298,8 +299,8 @@ describe('Session cookies at several scopes', () => {
         expect(ddbMock.commandCalls(PutCommand).length).toBe(0);
         const cookies = setCookies(ctx);
         expect(cookies.filter((cookie) => cookie.includes('Max-Age=0')).length).toBe(2);
-        expect(cookies.some((cookie) => cookie.startsWith(`sid=${LIVE_TOKEN}; Domain=.example.com;`))).toBe(true);
-        expect(cookies.some((cookie) => cookie.startsWith('csid=csrf-token; Domain=.example.com;'))).toBe(true);
+        expect(cookies.some((cookie) => new RegExp(`^sid=${LIVE_TOKEN}; Max-Age=\\d+; Domain=\\.example\\.com;`).test(cookie))).toBe(true);
+        expect(cookies.some((cookie) => /^csid=csrf-token; Max-Age=\d+; Domain=\.example\.com;/.test(cookie))).toBe(true);
         warn.mockRestore();
     });
 
@@ -370,7 +371,10 @@ describe('Session cookies at several scopes', () => {
         vi.restoreAllMocks();
     });
 
-    it('reports no session when no copy is live, without evicting anything', async () => {
+    it('reports no session when no copy is live, and leaves the cookies alone', async () => {
+        // A deletion matches a cookie by name, whatever its value, so
+        // clearing here would also delete a session another response set
+        // after this request left the browser (a login, a rotation).
         vi.spyOn(console, 'warn').mockImplementation(() => {});
         const { controller, ctx } = makeController([STALE_TOKEN, 'deadbeef:01de5'], '.example.com');
 
@@ -500,7 +504,7 @@ describe('Session cookies at several scopes', () => {
             csrfTokenHash: hashTok('csrf-token'),
             sessionKey: 'user-123',
             data: { role: 'user' },
-            createdAt: nowSec(), expiresAt: nowSec() + 3600, lastAccessedAt: nowSec(), ttlInSeconds: 3600,
+            createdAt: nowSec(), expiresAt: nowSec() + 3600, lastAccessedAt: nowSec(), ttlInSeconds: 3600, dataVersion: 0,
         };
         const boundedStore: LambderSessionStore<any> = {
             isMemoryOnly: false,
@@ -509,8 +513,8 @@ describe('Session cookies at several scopes', () => {
                 if(sessionKeyHash.length > 2048 || secretHash.length > 2048) throw new Error('DynamoDB: key too long');
                 return sessionKeyHash === PARTITION && secretHash === hashTok(LIVE_SECRET) ? { ...liveRecord } : null;
             },
-            put: async () => {}, delete: async () => {},
-            listSecretHashes: async () => [], markDataExpired: async () => {},
+            create: async () => {}, update: async () => 'missing', delete: async () => null,
+            listSecretHashes: async () => [],
         };
         const ctx = makeCtx();
         const controller = new LambderSessionController({
@@ -569,7 +573,7 @@ describe('Session cookies at several scopes', () => {
 
         const result = await lambder.render(createMockEvent('/api', {
             httpMethod: 'POST',
-            headers: { Host: 'app.example.com', Cookie: `sid=${STALE_TOKEN}; sid=${LIVE_TOKEN}` },
+            headers: { Host: 'app.example.com', 'Content-Type': 'application/json', Cookie: `sid=${STALE_TOKEN}; sid=${LIVE_TOKEN}` },
             body: JSON.stringify({ apiName: 'whoami', payload: {}, token: 'csrf-token' }),
         }), createMockContext());
 
@@ -577,8 +581,8 @@ describe('Session cookies at several scopes', () => {
         expect(result.multiValueHeaders?.['Set-Cookie']).toEqual([
             'sid=; Max-Age=0; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Secure; SameSite=Lax',
             'csid=; Max-Age=0; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure; SameSite=Lax',
-            expect.stringContaining(`sid=${LIVE_TOKEN}; Domain=.example.com; Path=/;`),
-            expect.stringContaining('csid=csrf-token; Domain=.example.com; Path=/;'),
+            expect.stringMatching(new RegExp(`^sid=${LIVE_TOKEN}; Max-Age=\\d+; Domain=\\.example\\.com; Path=/;`)),
+            expect.stringMatching(/^csid=csrf-token; Max-Age=\d+; Domain=\.example\.com; Path=\/;/),
         ]);
         vi.restoreAllMocks();
     });

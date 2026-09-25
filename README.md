@@ -34,7 +34,7 @@ and typed results with no hand-written client:
 import { LambderCaller } from "lambder/client";
 import type { ApiContractType } from "./backend/handler";
 
-const caller = new LambderCaller<ApiContractType>({ apiPath: "/api", isCorsEnabled: false });
+const caller = new LambderCaller<ApiContractType>({ apiPath: "/api" });
 const company = await caller.api("getCompany", { slug: "acme" });
 ```
 
@@ -85,7 +85,7 @@ whatever the code you actually import needs:
 | What you import | What to install alongside |
 | --- | --- |
 | `lambder/client` (browser, shared isomorphic code) | `zod`. `LambderCookieJar` pulls in `tough-cookie` and its public suffix list, so a bundle that never imports the jar never carries either |
-| `lambder` on AWS Lambda (any current Node.js runtime; the package needs Node 20 or later) | `zod`. The runtime already provides the AWS SDK v3, so mark the SDK packages as dev dependencies and keep them out of the deployment package |
+| `lambder` on AWS Lambda (any current Node.js runtime; the package needs Node 20 or later) | `zod`. The runtime already provides the AWS SDK v3, so mark the SDK packages as dev dependencies and keep them out of the deployment package, as long as the runtime's `@aws-sdk/client-dynamodb` is new enough for `LambderDdbRateLimiter` (3.868.0, see below) |
 | `lambder` anywhere else (a long-running server, a container, local tests) | `zod`, plus `@aws-sdk/client-dynamodb` and `@aws-sdk/lib-dynamodb` when sessions or the DynamoDB stores are used; both are loaded on the first table access, so an app that uses neither needs neither |
 | `LambderS3FileSource` | `@aws-sdk/client-s3`, loaded on first read |
 | `LambderInvokeCaller` | `@aws-sdk/client-lambda`, loaded on the first call |
@@ -95,11 +95,16 @@ The SDK and its `@smithy` tree are roughly 21MB installed, which is why they are
 peers rather than dependencies: a frontend importing only `lambder/client` has
 no use for any of it, and a Lambda deployment package should not ship a second
 copy of what the runtime already loads. The runtime pins its own SDK version,
-so if you need a specific one, install it and bundle it yourself.
+so if you need a specific one, install it and bundle it yourself. One version
+matters to Lambder: `LambderDdbRateLimiter` needs `@aws-sdk/client-dynamodb`
+3.868.0 or later, the first whose throttling errors name their reasons. Under
+an older client it never recognizes a key-range throttle, so a flood on one
+key goes to `failOpen` instead of being refused. Check the version your
+runtime bundles before relying on it, or bundle the client yourself.
 
 ## Package entry points
 
-The package ships four entry points; pick by where the code runs:
+The package ships five entry points; pick by where the code runs:
 
 | Entry | Runs in | Carries |
 | --- | --- | --- |
@@ -107,6 +112,7 @@ The package ships four entry points; pick by where the code runs:
 | `lambder/client` | Browser and isomorphic shared code | `LambderCaller`, `LambderApiRefusal`/`refuse`, the API contract and envelope types, `html`/`xml` tagged templates, `createLambderI18n` |
 | `lambder/mock` | Browser and Node, in development and tests | `LambderMockApp`, the mock runtime: your typed contract served from mock handlers over the real API pipeline and memory stores |
 | `lambder/testing` | Node, in tests | `lambderTestApp`: your real instance under test in this process, memory stores put under it in place, simulated browsers with typed callers in front of it, and the outcome assertions |
+| `lambder/build` | Node, in a build step | `writeApiSignatures`: the signature file both sides ship, written or checked from your instance |
 
 Frontends and shared isomorphic packages should import from `lambder/client`
 only; the entry's module graph contains no AWS SDK, Node built-ins, or server
@@ -117,12 +123,15 @@ Source layout mirrors this: `src/api/` (the isomorphic API core: request,
 answer, envelope, pipeline, and the declarative policies the pipeline runs),
 `src/core/` (the Lambda server adapter: routes, files, hooks, finalization),
 `src/session/` (the session manager, controller and crypto), `src/stores/`
-(every store implementation, DynamoDB and in-memory alike), `src/client/`,
+(every store and file-source implementation, DynamoDB and in-memory alike,
+and the helpers the two caches share), `src/client/`,
 `src/invoke/` (the lambda-to-lambda caller and the in-process handler
-transport), `src/mock/` (the mock runtime), and `src/shared/` (isomorphic
-modules every entry re-exports, grouped into `wire/` for the format both
-sides speak, `contracts/` for the four store interfaces, `transport/` for the
-caller-to-server seam, and `util/` for helpers).
+transport), `src/mock/` (the mock runtime), `src/testing/` (the test app),
+`src/build/` (what a generator script runs at build time), and `src/shared/`
+(isomorphic modules every entry re-exports, grouped into `wire/` for the
+format both sides speak, `contracts/` for the five store and source
+interfaces, `transport/` for the caller-to-server seam, and `util/` for
+helpers).
 Directories are layers and imports only ever point down;
 [docs/api-core.md](./docs/api-core.md#layering) states the order and the test
 that enforces it.
@@ -137,8 +146,8 @@ guide that matches what you are building. The full index lives in
 | --- | --- |
 | [Getting started](./docs/getting-started.md) | The three-step path from a first API to a typed frontend call |
 | [Configuration](./docs/configuration.md) | Every `initLambder().create({...})` option, in one reference |
-| [Routing and actions](./docs/routing.md) | Routes, matchers, hooks, fallbacks, and non-HTTP invocations |
-| [APIs and refusals](./docs/apis.md) | `addApi`/`addSessionApi`, the inferred contract, `refuse()` and `LambderApiRefusal` |
+| [Routing and actions](./docs/routing.md) | Routes, matchers, hooks, fallbacks, crash reporting, and non-HTTP invocations |
+| [APIs and refusals](./docs/apis.md) | `addApi`/`addSessionApi`, the inferred contract, `refuse()` and `LambderApiRefusal`, the signature file |
 | [Responses](./docs/responses.md) | The render context, resolver methods, cookies, compression, ETag and the size cap |
 | [Sessions](./docs/sessions.md) | Sessions over a store, cookie scope, secrets at rest, `dataRefresh`, the controller API |
 | [API policies](./docs/api-policies.md) | Declarative rate limits, guards and idempotency, and mandatory authorization declarations |
@@ -151,7 +160,7 @@ guide that matches what you are building. The full index lives in
 | [Translations](./docs/i18n.md) | `createLambderI18n`: typed keys, extension, detection, on-demand languages, runtime dictionaries |
 | [The mock runtime](./docs/mock.md) | `LambderMockApp`: the typed contract served from mock handlers over the real pipeline, in the browser and in tests |
 | [DynamoDB tables](./docs/dynamodb-tables.md) | Table shapes, TTL and IAM for sessions, cache, rate limits and idempotency |
-| [Exports reference](./docs/exports.md) | Every name the four entry points export, grouped by purpose |
+| [Exports reference](./docs/exports.md) | Every name the five entry points export, grouped by purpose |
 
 ## Standalone modules
 
@@ -162,7 +171,7 @@ framework:
 | --- | --- | --- |
 | `html` / `xml` tags + `LambderTemplatingEngine` | [Templating](./docs/templating.md) | Type-safe tagged templates and a comment-only HTML template engine (build-pipeline-safe) |
 | `createLambderI18n` | [Translations](./docs/i18n.md) | Typed translations with enforced/optional languages, component-level extension, auto language detection and on-demand language loading (isomorphic) |
-| `LambderDdbCache` | [DynamoDB cache](./docs/ddb-cache.md) | DynamoDB-backed compressed JSON cache with lease-based single-fill and grouped keys (server-only) |
+| `LambderDdbCache` / `LambderMemoryCache` | [DynamoDB cache](./docs/ddb-cache.md) | JSON cache behind one `LambderCache` interface: DynamoDB-backed and compressed, with lease-based single-fill and grouped keys (server-only), or in memory for tests |
 | `LambderDdbRateLimiter` / `LambderMemoryRateLimiter` | [Rate limiter](./docs/ddb-rate-limiter.md) | Fixed-window rate limiter, atomic per window, in DynamoDB (server-only) or in memory |
 | `LambderDdbIdempotencyStore` / `LambderMemoryIdempotencyStore` | [Idempotency store](./docs/ddb-idempotency.md) | Idempotency records with owner-checked claims, in DynamoDB (compressed replays, server-only) or in memory |
 | `LambderMockApp` | [The mock runtime](./docs/mock.md) | The typed contract served from mock handlers over the real API pipeline, with failure injection, sessions and a call log (isomorphic) |
@@ -170,14 +179,25 @@ framework:
 ## Versioning and changes
 
 Released versions and what each one changed are in
-[CHANGELOG.md](./CHANGELOG.md). The current major is v7, which moved the API
-pipeline into an isomorphic core, put the session layer behind a store
-interface, dropped the resolver argument from guards, and replaced the MSW
-adapter with a mock runtime. Every break and what to do about it is in the
-7.0.0 entry. The compiler finds most of them. Three it cannot are named there:
-leftover `session` fields that `const` generics stop it from seeing, a
-`region` that went from required to optional, and mock handlers that now take
-the call context rather than the payload.
+[CHANGELOG.md](./CHANGELOG.md). The current major is v8, which came out of a
+review of 7.3.1: session writes that cannot undo a logout, API calls that must
+be JSON, output schemas applied at runtime, rate limits that count IPv6 callers
+by their /64 and custom keys after the guards, idempotency keys bound to the
+request they were first sent with, and the same behavior on every gateway and
+in the mock. Every break and what to do about it is in the 8.0.2 entry. The
+compiler finds most of them. Fourteen it cannot are named there: hand-built
+calls without a JSON Content-Type, hand-built answers without `apiVersion`,
+handlers whose payload does not match their output schema, code that decoded
+`ctx.path` itself, string routes that match case-sensitively, compression
+behind a REST API, two more IAM actions (`UpdateItem` on the session table,
+`GetItem` on the rate-limit table), custom-key limits charged after the
+guards, idempotency keys bound to the request they were first sent with,
+`errorMessage` always being an object, `credentials: true` needing named
+origins, template slots and `html` interpolations refused or checked in
+more attribute positions, `refreshSessionData()` throwing where it answered
+null, and `z.ZodType<T>` annotations leaving a field unchecked. Every live
+session is signed out once by the
+upgrade. An app still on v6 goes through the 7.0.0 entry first.
 
 ## Contributing
 

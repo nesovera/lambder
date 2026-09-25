@@ -1,5 +1,5 @@
 import { LambderMockTransportError } from "./LambderMockFailureInjector.js";
-import { readApiEnvelope, cookieValuesByName, lowercaseHeaderNames, type LambderApiRequest } from "../api/LambderApiRequest.js";
+import { readApiEnvelope, cookieValuesByName, isApiCallContentType, lowercaseHeaderNames, type LambderApiRequest } from "../api/LambderApiRequest.js";
 import type { LambderApiAnswer } from "../api/LambderApiAnswer.js";
 import { getAnswerHeader } from "../shared/wire/LambderAnswerHeaders.js";
 import { LambderCookieJar } from "../shared/transport/LambderCookieJar.js";
@@ -8,13 +8,11 @@ import { normalizeClientIp } from "../shared/util/LambderClientIp.js";
 /**
  * The parts of the msw module the adapter uses: `import * as msw from "msw"`.
  *
- * Written so the real package satisfies it, which is the whole point of a
- * structural declaration and was not true of the previous one. msw's resolver
- * answers a Response, or `undefined` to hand the request back (its
- * AsyncResponseResolverReturnType), and a resolver declared to return
- * `Promise<unknown>` is not assignable to that, so `http.post` did not fit
- * here and the handler this returned did not fit `setupWorker`. Both errors
- * landed on the documented five-line wiring.
+ * Written so the real package satisfies it. msw's resolver answers a
+ * Response, or `undefined` to hand the request back (its
+ * AsyncResponseResolverReturnType); a resolver declared to return
+ * `Promise<unknown>` is not assignable to that, so `http.post` would not fit
+ * here and the returned handler would not fit `setupWorker`.
  */
 export type LambderMswModule = {
     http: { post: (path: string, resolver: (info: { request: Request }) => Promise<Response | undefined>) => unknown };
@@ -44,10 +42,10 @@ export type LambderMockMswTarget = {
     /**
      * The host the runtime's cookies belong to, which this adapter's jar is
      * scoped by. The runtime's value, not the request URL's: signIn plants at
-     * the app's cookieHost and the direct transport's jar sends from there, so
-     * an adapter scoping by whatever host the page is served from held the
-     * session cookies at a host it never sent them to, and every session call
-     * behind the worker answered sessionExpired with a full jar.
+     * the app's cookieHost and the direct transport's jar sends from there.
+     * Scoped by the page's host instead, the jar would hold session cookies
+     * at a host it never sends them to, and every session call behind the
+     * worker would answer sessionExpired with a full jar.
      */
     readonly cookieHost: string;
 };
@@ -56,25 +54,31 @@ export type LambderMockMswTarget = {
  * ONE MSW request handler for the whole API path, over the mock app: the
  * opt-in that makes mocked calls appear in the browser's network panel as
  * genuine requests, with real method, status, timing and bodies. The request
- * is read the way the server reads it, its headers and Cookie header
- * included.
+ * is read the way the server reads it, headers included, with the cookies a
+ * browser would send.
  *
- * Session cookies are held in a jar here rather than by the browser, because
- * the browser will not hold them: a response a service worker synthesizes
- * never reaches the cookie store, and MSW's own jar comma-joins the
- * Set-Cookie headers before parsing them, which loses every cookie after the
- * first. So the answer's cookies go into the jar, the next request carries
- * them back, and the ones a page's scripts may see are mirrored into
- * document.cookie. The Set-Cookie headers still travel on the response, where
- * the network panel shows them.
+ * Session cookies are held in a jar here, because the browser will not hold
+ * them: a response a service worker synthesizes never reaches the cookie
+ * store, and MSW's own jar comma-joins the Set-Cookie headers before parsing
+ * them, losing every cookie after the first. So the answer's cookies go into
+ * the jar, the next request carries them back, and the ones a page's scripts
+ * may see are mirrored into document.cookie. The Set-Cookie headers still
+ * travel on the response, where the network panel shows them.
+ *
+ * A request's cookies are therefore the jar's and document.cookie's, never
+ * its Cookie header: MSW fills that from its own store, which captures the
+ * HttpOnly session cookie off those Set-Cookie headers and keeps it in
+ * localStorage across reloads. Reading it would send a second session after
+ * a user switch (every call answering sessionExpired), keep a cleared jar
+ * signed in, and put the raw token into request events.
  *
  * Lambder never depends on msw: the app installs it and passes the module
  * in. An injected network failure answers MSW's network error. A POST whose
  * body is not an API envelope is left to other handlers.
  *
  * Generic over the module so the handler keeps msw's own handler type, which
- * is what `setupWorker(...)` and `setupServer(...)` take. Returning `unknown`
- * made the documented wiring an error at the consumer.
+ * is what `setupWorker(...)` and `setupServer(...)` take; typed `unknown`,
+ * the documented wiring would be a type error at the consumer.
  */
 export const lambderMockMswHandler = <M extends LambderMswModule>(
     mockApp: LambderMockMswTarget,
@@ -90,12 +94,12 @@ export const lambderMockMswHandler = <M extends LambderMswModule>(
          * a partially mocked app runs in while its remaining endpoints still
          * come from a real backend.
          *
-         * This and `mockApp.restNotMocked(reason)` are the two answers to the
-         * same question, and the rest entry wins: it leaves the runtime with
-         * an entry for every name, so nothing is ever unmocked here and a call
-         * that would have gone to the network is answered notMocked instead.
-         * Pick the rest entry for an app with no backend to reach, and this
-         * for one whose remaining endpoints are served by a real one.
+         * This and `mockApp.restNotMocked(reason)` answer the same question,
+         * and the rest entry wins: it gives the runtime an entry for every
+         * name, so nothing is unmocked here and a call is answered notMocked
+         * rather than passed on. Pick the rest entry for an app with no
+         * backend to reach, and this for one whose remaining endpoints are
+         * served by a real one.
          */
         onUnmocked?: "refuse" | "passthrough";
         /** The client IP its calls are read as arriving from. Default: the runtime's own defaultClientIp. */
@@ -111,39 +115,43 @@ export const lambderMockMswHandler = <M extends LambderMswModule>(
     // runtime's, so its reset() empties it along with the sessions those
     // cookies name.
     if(!options.cookieJar) mockApp.adoptCookieJar(jar);
-    // The runtime's default, not a second one of this adapter's own: an app
-    // that set defaultClientIp saw its address through the direct transport
-    // and 127.0.0.1 through the service worker, so a per-IP rate limit counted
-    // two clients where there was one and the two adapters disagreed about
-    // what ctx.request.ip is.
-    // Normalized the way every other adapter's is, so one address is one
-    // counter under a `per: "ip"` limit however it was spelled.
+    // The runtime's default, not one of this adapter's own, so the direct
+    // transport and the service worker agree on ctx.request.ip and a per-IP
+    // rate limit counts one client as one. Normalized the way every other
+    // adapter's is, so one address is one counter under a `per: "ip"` limit
+    // however it was spelled.
     const clientIp = normalizeClientIp(options.clientIp ?? mockApp.defaultClientIp);
     const handler = msw.http.post(apiPath, async ({ request }) => {
         let post: unknown;
         try { post = await request.clone().json(); }
         catch { return undefined; }
-        // Through the one header map every adapter builds, which is built on
-        // Object.create(null): a header literally named __proto__ was dropped
-        // here and landed as an own key on the server, and headers["toString"]
-        // handed a guard an inherited function where every other adapter gives
-        // undefined.
+        // Through the one header map every adapter builds, on
+        // Object.create(null): on a plain object, a header literally named
+        // __proto__ would be dropped here though the server keeps it as an own
+        // key, and headers["toString"] would hand a guard an inherited
+        // function where every other adapter gives undefined.
         const headers = lowercaseHeaderNames(Object.fromEntries(request.headers));
+        // A POST of another type is no API call on the server either: it
+        // goes on to MSW's other handlers and the network, as a non-envelope
+        // body does below, rather than working here and not in production.
+        if(!isApiCallContentType(headers)) return undefined;
+        // The cookies travel as `cookies` below, as the direct transport's do.
+        delete headers.cookie;
         const url = new URL(request.url);
         // Only the cookies whose scope covers this call, as a browser would
-        // send: reading the whole jar sent one host's session to another as
-        // soon as a jar was shared across hosts, and read cookies the request
-        // path was never in scope for. The host is the runtime's own, the path
-        // the one this call is going to. The jar's copies come first: where a
-        // name is in both, the jar holds what this runtime last set and the
-        // document's copy is the mirror of it, so the jar is the one to
-        // believe.
+        // send: the whole jar would send one host's session to another once a
+        // jar is shared across hosts, and cookies the request path is not in
+        // scope for. The host is the runtime's own, the path the one this call
+        // is going to. The jar's copies come first: where a name is in both,
+        // the jar holds what this runtime last set and the document's copy
+        // mirrors it, so the jar is the one to believe.
         const cookieScope = { host: mockApp.cookieHost, path: url.pathname };
         const cookies = cookieValuesByName(jar.cookiePairs(cookieScope));
         // Pair by pair, so a name the document holds at two scopes keeps both
         // values and the session controller can weigh them, as it does on
         // the server.
-        for(const [name, values] of Object.entries(cookieValuesByName((request.headers.get("cookie") ?? "").split(";")))){
+        const pageCookies = typeof document === "undefined" ? "" : document.cookie;
+        for(const [name, values] of Object.entries(cookieValuesByName(pageCookies.split(";")))){
             for(const value of values){
                 if(!cookies[name]?.includes(value)) (cookies[name] ??= []).push(value);
             }
@@ -171,12 +179,12 @@ export const lambderMockMswHandler = <M extends LambderMswModule>(
         const setCookies = getAnswerHeader(answer.headers, "Set-Cookie") ?? [];
         jar.storeSetCookies(setCookies, cookieScope);
         // The cookies a page's own scripts may see are mirrored into
-        // document.cookie, so it reads the same in mocked development as it
-        // does against the real backend. Not decoration: the browser caller
-        // reads the CSRF token from there and posts it on the envelope, so
-        // without this every session call fails its CSRF check. Through the
-        // runtime, which is where the one mirror implementation lives and
-        // where what was planted is remembered for reset().
+        // document.cookie, so it reads the same in mocked development as
+        // against the real backend. Not decoration: the browser caller reads
+        // the CSRF token from there and posts it on the envelope, so without
+        // this every session call fails its CSRF check. Done by the runtime,
+        // which owns the one mirror implementation and remembers what was
+        // planted for reset().
         mockApp.mirrorCookiesIntoDocument(setCookies);
         const responseHeaders = new Headers();
         for(const [key, values] of Object.entries(answer.headers)){

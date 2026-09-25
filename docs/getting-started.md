@@ -78,8 +78,9 @@ ones that authorize a caller rather than record a decision.
 ## 2. Define APIs
 
 Zod schemas define the contract. Inputs are validated at runtime and inferred
-at compile time, and the output type is checked against what the handler
-returns.
+at compile time, the output type is checked against what the handler returns,
+and every payload the handler answers is parsed through the output schema
+before it is sent, so fields it does not declare are stripped.
 
 Every registration returns an instance carrying the contract so far, so the
 chain is not a matter of style: calling `lambder.addApi(...)` as its own
@@ -104,7 +105,8 @@ statement discards the instance the contract accumulated onto and leaves
         const user = await authenticateUser(ctx.apiPayload.email, ctx.apiPayload.password);
         if (!user) return res.api({ success: false });
 
-        await lambder.getSessionController(ctx).createSession(user.id, { userId: user.id, username: user.name });
+        // ctx.sessionController is this request's session controller, typed SessionData.
+        await ctx.sessionController.createSession(user.id, { userId: user.id, username: user.name });
         return res.api({ success: true });
     })
     // Endpoints that require a session use addSessionApi; ctx.session is
@@ -148,7 +150,6 @@ import type { ApiContractType } from "./backend/handler"; // type-only import
 
 const caller = new LambderCaller<ApiContractType>({
     apiPath: "/api",
-    isCorsEnabled: false,
     errorMessageHandler: (message) => showToast(message),
     sessionExpiredHandler: () => redirectToLogin(),
 });

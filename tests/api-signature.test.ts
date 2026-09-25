@@ -4,7 +4,7 @@
  * signature a call carries, and how a stale bundle is kept from reloading
  * itself forever.
  */
-import { describe, it, expect, expectTypeOf, vi } from 'vitest';
+import { describe, it, expect, expectTypeOf, vi, afterEach } from 'vitest';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { testPublicFiles, createApiEvent, createMockContext, decodeBody } from './helpers.js';
@@ -76,8 +76,8 @@ describe('The signature digest', () => {
 
     it('hashes shape, not values: a default\'s value and the order of fields change nothing, and a function default is stable', async () => {
         // zod writes what a function default returned at conversion under
-        // `default`; left in, the same endpoint digested differently on every
-        // computation and the generated map never matched the server.
+        // `default`; left in, the same endpoint would digest differently on
+        // every computation and the generated map would never match the server.
         const fromTheClock = () => z.object({ at: z.number().default(() => Date.now()), n: z.number().prefault(() => Math.random()), c: z.number().catch(() => Math.random()) });
         const first = await apiSignatureOf(definition({ input: fromTheClock() }), guards);
         await new Promise((resolve) => setTimeout(resolve, 5));
@@ -103,11 +103,10 @@ describe('The signature digest', () => {
     });
 
     it('resolves a name on the spot every time, keeping nothing between calls', async () => {
-        // Nothing is memoized by name, and this is the assertion that says so:
-        // on the server the name comes off the wire before anything has
-        // checked that it is an endpoint, so a cache keyed by it would grow by
-        // an entry for every name a request cared to invent. The digest the
-        // gate actually rests on is the generator's, computed at build time.
+        // Nothing is memoized by name: on the server the name comes off the
+        // wire before anything checks that it is an endpoint, so a cache keyed
+        // by it would grow by an entry for every name a request invents. The
+        // digest the gate rests on is the generator's, computed at build time.
         const map = { [await apiNameKeyOf('user.get')]: 'abc' };
         const digest = vi.spyOn(globalThis.crypto.subtle, 'digest');
         try {
@@ -134,7 +133,7 @@ describe('extensibleEnum', () => {
         expect(await returning(extensibleEnum(z.enum(['admin'])))).toBe(base);
         // Still a string, so a change of type is still a change of shape.
         expect(await returning(z.number())).not.toBe(base);
-        // Unmarked, the values count as they always have.
+        // Unmarked, the values count.
         expect(await returning(z.enum(moreRoles))).not.toBe(await returning(z.enum(roles)));
     });
 
@@ -212,7 +211,7 @@ describe('The server and its map', () => {
         expect(await bodyOf({ apiName: 'user.get', payload: { id: '1' }, signature })).toEqual({ apiVersion: '7', payload: { id: '1', name: 'Ada' } });
         expect(await bodyOf({ apiName: 'user.get', payload: { id: '1' }, signature: 'an-older-shape' })).toEqual({ apiVersion: '7', payload: null, versionExpired: true });
         expect(await bodyOf({ apiName: 'user.get', payload: { id: '1' } })).toEqual({ apiVersion: '7', payload: { id: '1', name: 'Ada' } });
-        // The version the caller names decides nothing any more.
+        // With no minApiVersion set, the version the caller names decides nothing.
         expect(await bodyOf({ apiName: 'user.get', payload: { id: '1' }, version: '1', signature })).toMatchObject({ payload: { id: '1', name: 'Ada' } });
         expect(await bodyOf({ apiName: 'gone', payload: {}, signature: 'from-another-contract' })).toEqual({ apiVersion: '7', payload: null, versionExpired: true });
         expect((await bodyOf({ apiName: 'gone', payload: {} })).errorMessage.code).toBe('lambder/api-not-found');
@@ -239,6 +238,11 @@ const withFreshSessionStorage = async (run: (store: Map<string, string>) => Prom
 };
 
 describe('LambderCaller with a signature map', () => {
+    afterEach(() => {
+        vi.useRealTimers();
+        vi.restoreAllMocks();
+    });
+
     it('sends the endpoint\'s signature with every call, and nothing when it has no map', async () => {
         const map = await createServer().apiSignatures();
         const server = createServer(map);
@@ -266,30 +270,43 @@ describe('LambderCaller with a signature map', () => {
         expect(errors.map((err) => err.message).join()).toMatch(/no signature for API "user.get"/);
     });
 
-    it('calls versionExpiredHandler once for a stale signature, and reports a repeat instead of reloading again', () => withFreshSessionStorage(async () => {
+    it('calls versionExpiredHandler once for a stale signature, and reports a repeat after the reload instead of reloading again', () => withFreshSessionStorage(async () => {
         const map = { [await apiNameKeyOf('user.get')]: 'stale', [await apiNameKeyOf('org.get')]: 'stale-too' };
         const versionExpiredHandler = vi.fn();
         const errors: Error[] = [];
-        const caller = new LambderCaller({
-            apiPath: '/api', isCorsEnabled: false, apiSignatures: map, versionExpiredHandler,
-            errorHandler: (err) => { errors.push(err); },
-            transport: async () => answerWith({ apiVersion: '8', payload: null, versionExpired: true }),
-        });
+        // A page load evaluates LambderCaller's modules afresh, as a reload
+        // does, and each loads a second after the last, by the clock and by
+        // the document's load time; what the loads share is the tab's
+        // sessionStorage.
+        let loadedAt = 1_000_000;
+        const loadPage = async () => {
+            loadedAt += 1_000;
+            vi.setSystemTime(loadedAt);
+            vi.spyOn(performance, 'timeOrigin', 'get').mockReturnValue(loadedAt);
+            vi.resetModules();
+            const PageCaller = (await import('../src/client/LambderCaller.js')).default;
+            return new PageCaller({
+                apiPath: '/api', apiSignatures: map, versionExpiredHandler,
+                errorHandler: (err) => { errors.push(err); },
+                transport: async () => answerWith({ apiVersion: '8', payload: null, versionExpired: true }),
+            });
+        };
 
         // The first is the ordinary case: a reload is the right answer.
-        expect(await caller.apiOutcome('user.get', { id: '1' })).toMatchObject({ ok: false, reason: 'versionExpired' });
+        expect(await (await loadPage()).apiOutcome('user.get', { id: '1' })).toMatchObject({ ok: false, reason: 'versionExpired' });
         expect(versionExpiredHandler).toHaveBeenCalledOnce();
         expect(errors).toEqual([]);
-        // The same endpoint failing with the same signature is the reload
-        // having changed nothing: the handler stays quiet, the error says why,
-        // and the outcome still names the reason.
-        expect(await caller.apiOutcome('user.get', { id: '1' })).toMatchObject({ ok: false, reason: 'versionExpired' });
+        // The same endpoint failing with the same signature on the next load
+        // is the reload having changed nothing: the handler stays quiet, the
+        // error says why, and the outcome still names the reason.
+        const reloaded = await loadPage();
+        expect(await reloaded.apiOutcome('user.get', { id: '1' })).toMatchObject({ ok: false, reason: 'versionExpired' });
         expect(versionExpiredHandler).toHaveBeenCalledOnce();
         expect(errors.length).toBe(1);
         expect(errors[0]!.message).toMatch(/Version expired again for API "user.get"/);
         // Once confirmed, another endpoint of the same stale bundle does not
         // earn a reload of its own either.
-        expect(await caller.apiOutcome('org.get', {}, { guardInputs: { org: { organizationId: 'o' } } })).toMatchObject({ ok: false, reason: 'versionExpired' });
+        expect(await reloaded.apiOutcome('org.get', {}, { guardInputs: { org: { organizationId: 'o' } } })).toMatchObject({ ok: false, reason: 'versionExpired' });
         expect(versionExpiredHandler).toHaveBeenCalledOnce();
         expect(errors.length).toBe(2);
     }));
@@ -312,34 +329,78 @@ describe('compareDottedVersions', () => {
 });
 
 describe('LambderReloadLoopBreaker', () => {
-    it('counts the same endpoint and signature inside the window as a repeat, then everything until the window passes', () => withFreshSessionStorage(() => {
-        const breaker = new LambderReloadLoopBreaker();
+    // A new breaker is a new page load, loaded at the time it is given: a reload builds a new caller.
+    const loadPage = (loadedAt: number) => new LambderReloadLoopBreaker(loadedAt);
+    /** An ask that runs until the test finishes it, as a reload prompt waits for its answer. */
+    const startAsk = (page: LambderReloadLoopBreaker) => {
+        let finishAsk!: () => void;
+        const asking = page.runReloadAsk(() => new Promise<void>((resolve) => { finishAsk = resolve; }));
+        return async () => { finishAsk(); await asking; };
+    };
+
+    it('asks one handler at a time, counts a call refused again on a later load as a loop, then everything until the window passes', () => withFreshSessionStorage(async () => {
         const t0 = 1_000_000;
-        expect(breaker.isRepeat('a', 'sig-1', t0)).toBe(false);
-        // A different signature for the same endpoint is a bundle that changed it: a real update, not a loop.
-        expect(breaker.isRepeat('a', 'sig-2', t0 + 1_000)).toBe(false);
-        expect(breaker.isRepeat('a', 'sig-2', t0 + 2_000)).toBe(true);
+        const firstPage = loadPage(t0);
+        expect(firstPage.recordVersionExpired('a', 'sig-1', '1', t0)).toBe('askForReload');
+        const finishAsk = startAsk(firstPage);
+        // The page is being asked: the rest of what it hears is recorded, quietly.
+        expect(firstPage.recordVersionExpired('b', 'sig-b', '1', t0 + 10)).toBe('alreadyAsked');
+        expect(firstPage.recordVersionExpired('a', 'sig-1', '1', t0 + 20)).toBe('alreadyAsked');
+        await finishAsk();
+        // A different signature for the endpoint is a bundle that changed it: a real update, not a loop.
+        expect(loadPage(t0 + 1_000).recordVersionExpired('a', 'sig-2', '1', t0 + 1_000)).toBe('askForReload');
+        // Whichever recorded call the next load hears first is the repeat, not only the latest one.
+        expect(loadPage(t0 + 2_000).recordVersionExpired('b', 'sig-b', '1', t0 + 2_000)).toBe('loopConfirmed');
         // Confirmed: any endpoint within the window from the first event counts.
-        expect(breaker.isRepeat('b', 'other', t0 + 3_000)).toBe(true);
-        // The window runs from the first event of the loop, not from the last repeat.
-        expect(breaker.isRepeat('b', 'other', t0 + 1_000 + RELOAD_LOOP_WINDOW_MS)).toBe(false);
-        expect(breaker.isRepeat('b', 'other', t0 + 1_500 + RELOAD_LOOP_WINDOW_MS)).toBe(true);
+        expect(loadPage(t0 + 3_000).recordVersionExpired('c', 'other', '1', t0 + 3_000)).toBe('loopConfirmed');
+        // The window runs from the first event recorded, not from the latest.
+        const windowEnd = t0 + RELOAD_LOOP_WINDOW_MS;
+        expect(loadPage(windowEnd).recordVersionExpired('c', 'other', '1', windowEnd)).toBe('askForReload');
+        expect(loadPage(windowEnd + 500).recordVersionExpired('c', 'other', '1', windowEnd + 500)).toBe('loopConfirmed');
+    }));
+
+    it('tells bundles apart by version, where a floor refusal carries no signature to tell them by', () => withFreshSessionStorage(() => {
+        expect(loadPage(5_000).recordVersionExpired('a', '', '1.0.0', 5_000)).toBe('askForReload');
+        expect(loadPage(6_000).recordVersionExpired('a', '', '1.1.0', 6_000)).toBe('askForReload');
+        expect(loadPage(7_000).recordVersionExpired('a', '', '1.1.0', 7_000)).toBe('loopConfirmed');
+    }));
+
+    it('answers alreadyAsked only while its ask runs, and asks again once the ask has returned with the page still here', () => withFreshSessionStorage(async () => {
+        const page = loadPage(5_000);
+        expect(page.recordVersionExpired('a', 'sig', '1', 5_000)).toBe('askForReload');
+        const finishAsk = startAsk(page);
+        expect(page.recordVersionExpired('b', 'sig', '1', 5_100)).toBe('alreadyAsked');
+        await finishAsk();
+        // The handler did not reload the page (a per-call no-op, a cancelled
+        // prompt), so the next refusal is asked about rather than dropped.
+        expect(page.recordVersionExpired('b', 'sig', '1', 5_200)).toBe('askForReload');
+        // A handler that throws ends its ask all the same.
+        await expect(page.runReloadAsk(() => { throw new Error('handler failed'); })).rejects.toThrow('handler failed');
+        expect(page.recordVersionExpired('c', 'sig', '1', 5_300)).toBe('askForReload');
+    }));
+
+    it('counts a repeat as a loop only when the earlier refusal was recorded before this document loaded', () => withFreshSessionStorage(async () => {
+        const page = loadPage(4_000);
+        expect(page.recordVersionExpired('a', 'sig', '1', 5_000)).toBe('askForReload');
+        await page.runReloadAsk(() => {});
+        // Refused again by the page that recorded it: no reload came between.
+        expect(page.recordVersionExpired('a', 'sig', '1', 6_000)).toBe('askForReload');
+        // Refused again by a page loaded after it: the reload brought the same bundle back.
+        expect(loadPage(5_001).recordVersionExpired('a', 'sig', '1', 7_000)).toBe('loopConfirmed');
     }));
 
     it('keeps its record in sessionStorage when there is one, so the next page instance sees it', () => withFreshSessionStorage((store) => {
-        expect(new LambderReloadLoopBreaker().isRepeat('a', 'sig', 5_000)).toBe(false);
-        // A fresh instance, as after a reload.
-        expect(new LambderReloadLoopBreaker().isRepeat('a', 'sig', 6_000)).toBe(true);
+        expect(loadPage(5_000).recordVersionExpired('a', 'sig', '1', 5_000)).toBe('askForReload');
+        expect(loadPage(6_000).recordVersionExpired('a', 'sig', '1', 6_000)).toBe('loopConfirmed');
         expect(store.size).toBe(1);
     }));
 
-    it('keeps the record in memory for the page when there is no sessionStorage', () => {
-        vi.stubGlobal('sessionStorage', undefined);
+    it('keeps nothing past the page where sessionStorage is blocked, so every load asks', () => {
+        const blocked = () => { throw new DOMException('The operation is insecure.', 'SecurityError'); };
+        vi.stubGlobal('sessionStorage', { getItem: blocked, setItem: blocked });
         try {
-            const breaker = new LambderReloadLoopBreaker();
-            expect(breaker.isRepeat('a', 'sig', 5_000)).toBe(false);
-            expect(breaker.isRepeat('a', 'sig', 6_000)).toBe(true);
-            expect(new LambderReloadLoopBreaker().isRepeat('a', 'sig', 7_000)).toBe(false);
+            expect(loadPage(5_000).recordVersionExpired('a', 'sig', '1', 5_000)).toBe('askForReload');
+            expect(loadPage(6_000).recordVersionExpired('a', 'sig', '1', 6_000)).toBe('askForReload');
         } finally {
             vi.unstubAllGlobals();
         }

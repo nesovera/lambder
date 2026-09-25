@@ -1,7 +1,8 @@
 import type { z } from "zod";
 import type { LambderApiEnvelopeBody, LambderApiResponseConfig } from "../shared/wire/LambderApiContract.js";
-import { LAMBDER_REFUSAL_CODES, type LambderApiRefusal, type LambderRefusalMessage } from "../shared/wire/LambderApiRefusal.js";
+import { LAMBDER_REFUSAL_CODES, refusalMessageOf, type LambderApiRefusal, type LambderRefusalMessage } from "../shared/wire/LambderApiRefusal.js";
 import { setAnswerHeader } from "../shared/wire/LambderAnswerHeaders.js";
+import type { LambderCrashDetail } from "../shared/wire/LambderCrashDetail.js";
 import type { LambderApiAnswer } from "./LambderApiAnswer.js";
 
 /*
@@ -9,10 +10,9 @@ import type { LambderApiAnswer } from "./LambderApiAnswer.js";
  * kind of protocol outcome onto an answer: a success, a thrown refusal, a
  * rejected input, an unknown name, a missing session, a stale client, a
  * malformed compressed payload, and the last-resort crash. The server's
- * res.api() and the mock runtime's handler wrapping both build through
- * buildApiEnvelope, and the pipeline renders every refusal through the
- * functions below, so the two sides cannot drift on a single byte of the
- * wire format. Pure: no Node built-ins, no response classes.
+ * res.api(), the mock runtime and the pipeline all build through these
+ * functions, so server and mock cannot drift on a single byte of the wire
+ * format. Pure: no Node built-ins, no response classes.
  */
 
 export const API_ANSWER_CONTENT_TYPE = "application/json; charset=utf-8";
@@ -38,12 +38,13 @@ export const buildApiEnvelope = <T>(
     ...(versionExpired ? { versionExpired } : {}),
     ...(sessionExpired ? { sessionExpired } : {}),
     ...(notAuthorized ? { notAuthorized } : {}),
-    // Presence, not truthiness: the three channels below carry app values,
-    // and an app that refuses with errorMessage: "" (or 0, or a message
-    // object it built empty) meant to say something. The flags above are
-    // booleans, where false and absent are the same statement.
+    // Presence, not truthiness: these channels carry app values, and an app
+    // that refuses with errorMessage: "" (or 0) meant to say something. The
+    // flags above are booleans, where false and absent mean the same. An
+    // errorMessage goes out as a message object whatever form it was written
+    // in, so every reader meets one shape.
     ...(message !== undefined ? { message } : {}),
-    ...(errorMessage !== undefined ? { errorMessage } : {}),
+    ...(errorMessage !== undefined ? { errorMessage: refusalMessageOf(errorMessage) } : {}),
     ...(crash !== undefined ? { crash } : {}),
     ...(logList?.length ? { logList } : {}),
 });
@@ -102,11 +103,11 @@ export type LambderValidationAnswerBody = {
  */
 const MAX_VALIDATION_ISSUES = 50;
 /**
- * What the whole issue list may cost, serialized. The count cap alone bounds
+ * What the whole issue list may cost, serialized. A count cap alone bounds
  * the wrong thing: ONE `unrecognized_keys` issue carries every key the client
- * posted, so a strictObject answered a 1MB body with a 4MB one, unauthenticated
- * and before any guard ran, and past maxResponseBytes the 422 became a 500.
- * Bytes are what the amplification is measured in, so bytes are what is
+ * posted, so a strictObject could answer a 1MB body with a 4MB one,
+ * unauthenticated and before any guard ran, and past maxResponseBytes the 422
+ * would become a 500. The amplification is measured in bytes, so bytes are
  * capped.
  */
 const MAX_VALIDATION_ISSUES_BYTES = 32_000;
@@ -121,10 +122,9 @@ const clampText = (value: string): string =>
     value.length > MAX_VALIDATION_TEXT_CHARS ? `${value.slice(0, MAX_VALIDATION_TEXT_CHARS)}...` : value;
 
 /**
- * One issue with its own strings and lists bounded. Applied field by field
- * rather than to the named fields only, because `keys` is merely the one that
- * grows without a bound TODAY: any issue a schema authors itself may carry a
- * list or a message the client chose the size of.
+ * One issue with its own strings and lists bounded. Applied to every field
+ * rather than to known ones like `keys`, because any issue a schema authors
+ * itself may carry a list or a message whose size the client chose.
  */
 const clampIssueValue = (value: unknown): unknown => {
     if(typeof value === "string") return clampText(value);
@@ -133,10 +133,9 @@ const clampIssueValue = (value: unknown): unknown => {
 };
 
 const clampIssue = (issue: z.core.$ZodIssue): z.core.$ZodIssue =>
-    // Structurally an issue with shorter values, so the cast says what the
-    // mapping already guarantees: every field is carried through, in kind,
-    // and the union's discriminant with it. A mapped object has no way to say
-    // that in the type system.
+    // The mapping carries every field through in kind, the union's
+    // discriminant included; the cast states that, since a mapped object
+    // cannot express it in the type system.
     Object.fromEntries(Object.entries(issue).map(([key, value]) => [key, clampIssueValue(value)])) as unknown as z.core.$ZodIssue;
 
 /** The issue list the body may carry: clamped, then cut to the byte budget, whole issues from the end. */
@@ -150,9 +149,9 @@ const boundIssueList = (all: readonly z.core.$ZodIssue[]): { issues: z.core.$Zod
         const size = utf8Encoder.encode(JSON.stringify(clamped)).length;
         if(bytes + size > MAX_VALIDATION_ISSUES_BYTES){
             trimmed = true;
-            // A first issue that is over the budget on its own still has to
-            // say what it is: the three fields every issue carries, so a
-            // client always has a code and a path to branch on.
+            // A first issue over the budget on its own still ships the three
+            // fields every issue carries, so a client always has a code and a
+            // path to branch on.
             if(issues.length === 0){
                 issues.push({ code: clamped.code, path: clamped.path.slice(0, MAX_VALIDATION_LIST_ENTRIES), message: clampText(clamped.message) } as unknown as z.core.$ZodIssue);
             }
@@ -174,14 +173,13 @@ const summarizeIssues = (total: number, listed: number, trimmed: boolean): strin
 
 /**
  * The standard answer for a rejected input: a 422 whose body spells the
- * ZodError out. Spelled out rather than serialized as-is: zod 4 keeps
- * `issues` as a non-enumerable property, so JSON.stringify(zodError) would
- * carry the issues only inside the message string, and a client's
- * validation handler would receive a ZodError with nothing to branch on.
+ * ZodError out. Not serialized as-is: zod 4 keeps `issues` non-enumerable,
+ * so JSON.stringify(zodError) would carry the issues only inside the message
+ * string, leaving a client's validation handler nothing to branch on.
  *
- * zod's own `message` never ships: it is the whole issue tree re-serialized,
- * so carrying it would send every capped byte a second time. The generated
- * summary takes its place on every answer, trimmed or not.
+ * zod's own `message` never ships: it is the whole issue tree re-serialized
+ * and would send every capped byte a second time. A generated summary takes
+ * its place on every answer.
  */
 export const validationAnswer = (zodError: z.ZodError, logList?: unknown[]): LambderApiAnswer => {
     const { issues, trimmed } = boundIssueList(zodError.issues);
@@ -229,9 +227,14 @@ export const invalidPayloadAnswer = (apiVersion: string | null | undefined, mess
  * The last-resort answer when the call crashed and nothing else could
  * answer: a 500 that is still an envelope, so a caller reads a structured
  * failure rather than a text page. The server sends it only when its global
- * error handler is absent or itself failed.
+ * error handler is absent or itself failed. `revealed` (the crash in full,
+ * with the call's logList) is passed only for a caller the app's
+ * `crashes.reveal` trusts.
  */
-export const crashAnswer = (apiVersion: string | null | undefined): LambderApiAnswer => envelopeAnswer(
-    buildApiEnvelope(apiVersion, null, { errorMessage: "Internal server error." }),
+export const crashAnswer = (
+    apiVersion: string | null | undefined,
+    revealed?: { crash: LambderCrashDetail; logList: unknown[] },
+): LambderApiAnswer => envelopeAnswer(
+    buildApiEnvelope(apiVersion, null, { errorMessage: "Internal server error.", ...revealed }),
     { statusCode: 500 },
 );

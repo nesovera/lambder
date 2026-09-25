@@ -19,9 +19,10 @@ export { resolveApiOutcome } from "./shared/wire/LambderApiOutcome.js";
 export { apiNameKeyOf, lookupApiSignature, readApiSignature, API_SIGNATURE_HEX_LENGTH, extensibleEnum } from "./shared/wire/LambderApiSignature.js";
 export { RELOAD_LOOP_WINDOW_MS } from "./client/LambderReloadLoopBreaker.js";
 export { compareDottedVersions, isDottedVersion } from "./shared/wire/LambderVersionOrder.js";
+export { createIdempotencyKey, createIdempotencyKeyScope } from "./shared/wire/LambderIdempotencyKeyScope.js";
 // Typed API refusals (isomorphic: shared code may throw them from anywhere;
 // in the browser they are plain Errors).
-export { LambderApiRefusal, isLambderApiRefusal, refuse, LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";
+export { LambderApiRefusal, isLambderApiRefusal, refuse, refusalMessageOf, LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";
 // A crash described for a caller allowed to see it (the envelope's `crash` field; pure, no Node built-ins).
 export { describeCrash, errorFromCrashDetail } from "./shared/wire/LambderCrashDetail.js";
 // Request payload compression (browser-safe: gzip via CompressionStream, no Node built-ins).

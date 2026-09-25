@@ -3,57 +3,37 @@ import type { LambderApiDefinition } from "./LambderApiDefinition.js";
 import { toGuardEntries, type LambderApiGuard } from "./LambderApiGuards.js";
 import { API_SIGNATURE_HEX_LENGTH, EXTENSIBLE_ENUM_META_KEY } from "../shared/wire/LambderApiSignature.js";
 import { sha256HexOf } from "../shared/util/LambderTextDigest.js";
+import { canonicalJson } from "../shared/util/canonicalJson.js";
 
 /*
  * The digest of an endpoint's client-facing shape, computed once, by the
  * generator, through Lambder.apiSignatures(). Nothing digests at request
- * time: the server and the client both carry the generated map and the
- * pipeline compares entries, so the one computation has nothing to agree
- * with but itself. See LambderApiSignatureMap.
+ * time: server and client both carry the generated map and the pipeline
+ * compares entries, so there is no second computation to disagree with.
+ * See LambderApiSignatureMap.
  */
-
-/**
- * JSON with object keys sorted at every level, so two descriptions of the
- * same shape hash the same whatever order they were built in. Arrays keep
- * their order: a tuple's positions and an enum's values are part of the
- * shape. Undefined entries are dropped, as JSON.stringify would drop them.
- */
-const canonicalJson = (value: unknown): string => JSON.stringify(sortKeys(value));
-
-const sortKeys = (value: unknown): unknown => {
-    if(Array.isArray(value)) return value.map(sortKeys);
-    if(value === null || typeof value !== "object") return value;
-    const source = value as Record<string, unknown>;
-    const sorted: Record<string, unknown> = {};
-    for(const key of Object.keys(source).sort()){
-        if(source[key] !== undefined) sorted[key] = sortKeys(source[key]);
-    }
-    return sorted;
-};
 
 /**
  * Three edits to every node zod emits, before it is hashed.
  *
  * The `default` keyword goes. Its value is server behaviour, not shape: a
- * client never sends it, and its compiled types do not carry it. And for a
- * function default (`.default(() => new Date())`, `.prefault`, `.catch`)
- * zod writes whatever the function returned at conversion time, a clock
- * reading or a random value, which would give the endpoint a different
- * digest on every computation and a generated map that never matches the
- * server. Nothing distinguishes such a default from a constant one once zod
- * has evaluated it, so every default goes, and the one thing about a default
- * a client can see, that the field may be omitted, stays through `required`.
+ * client never sends it. For a function default (`.default(() => new
+ * Date())`, `.prefault`, `.catch`) zod writes whatever the function returned
+ * at conversion time, a clock reading or a random value, so the digest would
+ * differ on every computation and the generated map would never match the
+ * server. Once evaluated, such a default looks like a constant one, so every
+ * default goes; what a client can see of it, that the field may be omitted,
+ * stays through `required`.
  *
- * `required` is sorted. It is a set, and the order fields are declared in is
- * not shape either; left as emitted, reordering two fields forced a reload.
+ * `required` is sorted: it is a set, and declaration order is not shape.
+ * Left as emitted, reordering two fields would force a reload.
  *
- * An enum marked with extensibleEnum() loses its values in an output. Its
- * clients tolerate a value they do not know, so a response carrying one they
- * were not built with, or no longer carrying one they were, changes nothing
- * they can see; the node still says it holds a string. In an input the values
- * stay, since a value dropped from the list is a request an older client may
- * still send and the server now refuses. The mark itself goes in both, so
- * marking an enum changes no input's digest.
+ * An enum marked with extensibleEnum() loses its values in an output: its
+ * clients tolerate unknown values, so adding or removing one changes nothing
+ * they can see, and the node still says it holds a string. In an input the
+ * values stay, since a value dropped from the list is one an older client
+ * may still send and the server would refuse. The mark itself goes in both,
+ * so marking an enum changes no input's digest.
  */
 const keepShapeOnly = (
     node: { default?: unknown; required?: string[]; enum?: unknown[]; [EXTENSIBLE_ENUM_META_KEY]?: unknown },
@@ -80,10 +60,9 @@ const ownGuard = (guards: Record<string, LambderApiGuard<any, any, any>> | undef
     guards !== undefined && Object.prototype.hasOwnProperty.call(guards, name) ? guards[name] : undefined;
 
 /**
- * One endpoint as the generator sees it: the key its signature is stored
- * under, the signature, and the name both were computed from. The name is
- * what the shipped map deliberately does not carry, so this is the build-time
- * view of the same data, and the only place a generated map can be diffed by
+ * One endpoint as the generator sees it: the map key, the signature, and the
+ * name both were computed from. The shipped map deliberately omits the name,
+ * so this build-time view is the only place a generated map can be diffed by
  * endpoint rather than by opaque key.
  */
 export type LambderApiSignatureEntry = {
@@ -98,18 +77,16 @@ export type LambderApiSignatureEntry = {
  * input and output schemas as JSON Schema, every guard it declares with the
  * schema that guard validates (the guardInput the client sends separately,
  * or the apiInput slice of the payload), and whether it demands an
- * idempotency key. Anything else about the endpoint (its rate limits, a
- * guard's parameter, the handler) changes nothing for a client and is left
- * out, so changing it never forces a reload.
+ * idempotency key. Anything else (rate limits, a guard's parameter, the
+ * handler) changes nothing for a client and is left out, so changing it never
+ * forces a reload.
  *
- * The description is hashed as built, descriptions and titles included: a
- * schema is what the server says it is, and a client built against a
- * different one reloads once, with one exception the schema declares itself:
- * the values of an extensibleEnum() in an output (see keepShapeOnly). What
- * must hold for the digest to mean anything is that a schema is built from
- * static values: one that reads the clock, a random source or the environment
- * at construction digests differently in the generator's process and on the
- * server.
+ * Schemas are hashed as built, descriptions and titles included, so a client
+ * built against a different one reloads once. The exception is an output
+ * extensibleEnum()'s values (see keepShapeOnly). Schemas must be built from
+ * static values: one that reads the clock, a random source or the
+ * environment at construction digests differently in the generator's process
+ * and on the server.
  */
 export const apiSignatureOf = async (
     definition: LambderApiDefinition,

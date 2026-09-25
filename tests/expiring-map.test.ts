@@ -3,12 +3,11 @@
  * the ceiling that makes "in memory" a bounded claim.
  *
  * The ceiling is where the interesting rules are. Which entry it takes is a
- * product decision, not a detail: the entries with the most life left are the
- * long-window rate-limit counters and the day-long idempotency records, and
- * the entry that must never be taken at all is a pending idempotency claim,
- * because losing one lets two concurrent retries both execute. The last
- * section drives that through LambderMemoryIdempotencyStore itself, which is where
- * it is reachable.
+ * product decision: the entries with the most life left are the long-window
+ * rate-limit counters and the day-long idempotency records, and a pending
+ * idempotency claim must never be taken at all, because losing one lets two
+ * concurrent retries both execute. The last section drives that through
+ * LambderMemoryIdempotencyStore itself, where it is reachable.
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -48,10 +47,9 @@ describe('LambderExpiringMap', () => {
     });
 
     it('does not accumulate entries nobody reads again', () => {
-        // The leak the class exists to close: two of the memory stores used to
-        // expire an entry only when something asked for that exact key, so a
-        // counter or a record for a key that never returns stayed for the life
-        // of the process.
+        // The leak the class exists to close: a store that expires an entry
+        // only when something asks for that exact key keeps a counter or a
+        // record for a key that never returns for the life of the process.
         let now = START;
         const map = new LambderExpiringMap<number>({ now: () => now });
         for(let i = 0; i < 5000; i += 1) map.set(`k-${i}`, i, Math.floor(now / 1000) + 60);
@@ -65,9 +63,9 @@ describe('LambderExpiringMap', () => {
     });
 
     it('counts and lists live entries without deleting anything, because a read is not a write', () => {
-        // size and values() used to run a full sweep, so reading the map wrote
-        // to it: a debugger hover, a log line or an assertion changed what the
-        // next call saw, and values() deleted from the Map it was iterating.
+        // If size and values() swept, reading the map would write to it: a
+        // debugger hover, a log line or an assertion would change what the
+        // next call saw, and values() would delete from the Map it iterates.
         let now = START;
         const map = new LambderExpiringMap<string>({ now: () => now });
         map.set('gone', 'G', startSeconds + 10);
@@ -90,8 +88,8 @@ describe('LambderExpiringMap', () => {
 
     it('rejects an expiry that is not a number, so nothing can be stored for ever', () => {
         // NaN compares false against every clock, so an entry carrying one is
-        // neither read, swept nor evicted: it is an immortal record, and the
-        // way to get one was a TTL option that arrived as a string.
+        // neither read, swept nor evicted: it is an immortal record, and a TTL
+        // option that arrives as a string is enough to write one.
         const map = new LambderExpiringMap<string>({ now: () => START });
 
         expect(() => map.set('a', 'A', Number.NaN)).toThrow(/expiresAt must be a positive integer/);
@@ -139,8 +137,8 @@ describe('LambderExpiringMap', () => {
     it('never evicts an entry written as not evictable, even when it is the soonest to expire', () => {
         // The inversion this option exists for: a pending idempotency claim
         // lives for minutes while the settled record it becomes lives for a
-        // day, so "soonest to expire" made the claim the first victim of every
-        // flood, which is the one entry whose loss costs correctness.
+        // day, so "soonest to expire" would make the claim the first victim of
+        // every flood, and it is the one entry whose loss costs correctness.
         const map = new LambderExpiringMap<string>({ now: () => START, maxEntries: 10 });
 
         map.set('claim', 'pending', startSeconds + 300, { evictable: false });
@@ -177,13 +175,12 @@ describe('LambderExpiringMap', () => {
     });
 
     it('evicts in batches, so a run of writes at the ceiling does not pay for a pass each', () => {
-        // The cost this pins is the full sweep that used to run from inside
-        // every ceiling write, and the clock is what makes it countable: a
-        // write asks what time it is only in the amortized sweep (one call
-        // per 256 writes) and once per eviction batch (one call per one
-        // percent of the ceiling, when the batch reclaims expired entries in
-        // the same walk). One call per write is the ceiling walking the whole
-        // map again for each of them.
+        // The cost this pins is a full sweep from inside every ceiling write,
+        // and the clock makes it countable: a write asks the time only in the
+        // amortized sweep (one call per 256 writes) and once per eviction
+        // batch (one call per one percent of the ceiling, when the batch
+        // reclaims expired entries in the same walk). One call per write
+        // would mean the ceiling walks the whole map for each of them.
         let nowCalls = 0;
         const now = () => { nowCalls += 1; return START; };
         const maxEntries = 2_000;
@@ -200,23 +197,23 @@ describe('LambderExpiringMap', () => {
 });
 
 describe('LambderMemoryIdempotencyStore at its ceiling', () => {
-    const answer = { statusCode: 200, headers: {}, body: '{"ok":true}', ttlSeconds: 24 * 3600 };
+    const answer = { statusCode: 200, headers: {}, body: '{"ok":true}', fingerprint: 'request-1', ttlSeconds: 24 * 3600 };
 
     it('keeps a pending claim while the settled records around it are evicted', async () => {
-        // Reproduces the defect whole: with the map full of day-long settled
-        // records, a claim's 300-second TTL made it the soonest to expire and
-        // therefore the first thing evicted, so the duplicate that arrived
-        // while the original was still running got a claim of its own and both
-        // executed. The original's complete() then reported "lost".
+        // With the map full of day-long settled records, a claim's 300-second
+        // TTL makes it the soonest to expire. Evicting it would hand a
+        // duplicate arriving while the original still runs a claim of its
+        // own, both would execute, and the original's complete() would report
+        // "lost".
         const store = new LambderMemoryIdempotencyStore({ now: () => START, maxEntries: 50 });
         for(let i = 0; i < 50; i += 1){
-            const token = await store.begin(`settled-${i}`, { pendingTtlSeconds: 300 });
+            const token = await store.begin(`settled-${i}`, { pendingTtlSeconds: 300, fingerprint: 'request-1' });
             if(token.state !== 'new') throw new Error('expected a new claim while filling');
             await store.complete(`settled-${i}`, token.ownerToken, answer);
         }
 
-        const first = await store.begin('victim', { pendingTtlSeconds: 300 });
-        const duplicate = await store.begin('victim', { pendingTtlSeconds: 300 });
+        const first = await store.begin('victim', { pendingTtlSeconds: 300, fingerprint: 'request-1' });
+        const duplicate = await store.begin('victim', { pendingTtlSeconds: 300, fingerprint: 'request-1' });
 
         expect(first.state).toBe('new');
         expect(duplicate.state).toBe('pending');
@@ -231,13 +228,13 @@ describe('LambderMemoryIdempotencyStore at its ceiling', () => {
         const store = new LambderMemoryIdempotencyStore({ now: () => START, maxEntries: 3 });
         const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
         for(let i = 0; i < 3; i += 1){
-            expect((await store.begin(`claim-${i}`, { pendingTtlSeconds: 300 })).state).toBe('new');
+            expect((await store.begin(`claim-${i}`, { pendingTtlSeconds: 300, fingerprint: 'request-1' })).state).toBe('new');
         }
 
-        expect((await store.begin('one-more', { pendingTtlSeconds: 300 })).state).toBe('pending');
+        expect((await store.begin('one-more', { pendingTtlSeconds: 300, fingerprint: 'request-1' })).state).toBe('pending');
         // And the claims that were already held are all still held.
         for(let i = 0; i < 3; i += 1){
-            expect((await store.begin(`claim-${i}`, { pendingTtlSeconds: 300 })).state).toBe('pending');
+            expect((await store.begin(`claim-${i}`, { pendingTtlSeconds: 300, fingerprint: 'request-1' })).state).toBe('pending');
         }
         // Saturation is an operator's problem, so it is reported, and reported
         // once: a refusal per request would otherwise be a log per request.
@@ -249,13 +246,11 @@ describe('LambderMemoryIdempotencyStore at its ceiling', () => {
 
 describe('LambderMemoryRateLimiter at its ceiling', () => {
     it("spends the flood's own counters and keeps the long-window one", async () => {
-        // The ceiling is reachable through the option now, which is the point:
-        // it was hardcoded, so the real bound of a process running all three
-        // memory stores was three times 100,000 and no deployment could say
-        // otherwise. What it costs when it is reached is a counter starting
-        // its window again, and the ones spent first are the ones with the
-        // least life left, so a flood of per-minute keys cannot wipe the
-        // monthly cap it is trying to get past.
+        // The ceiling is an option, so a deployment running all three memory
+        // stores can set its real bound. Reaching it costs a counter its
+        // window, and the ones spent first are the ones with the least life
+        // left, so a flood of per-minute keys cannot wipe the monthly cap it
+        // is trying to get past.
         const limiter = new LambderMemoryRateLimiter({ now: () => START, maxEntries: 4 });
         await limiter.isRateLimited('victim', { perMonth: 2 });
         expect(limiter.countOf('victim', 'perMonth')).toBe(1);
@@ -269,8 +264,9 @@ describe('LambderMemoryRateLimiter at its ceiling', () => {
 
 describe('LambderExpiringMap at a ceiling of protected entries', () => {
     it('refuses an evictable write rather than storing nothing, and never takes the write as its own victim', () => {
-        // Evicting the entry just written answered the write with success
-        // while the map kept nothing: the caller's get() came back empty.
+        // Evicting the entry just written would answer the write with success
+        // while the map kept nothing, and the caller's get() would come back
+        // empty.
         let now = 1_700_000_000_000;
         const far = Math.floor(now / 1000) + 3600;
         const map = new LambderExpiringMap<string>({ now: () => now, maxEntries: 3 });

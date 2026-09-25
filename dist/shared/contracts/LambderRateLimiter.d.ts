@@ -3,11 +3,10 @@
  * policy may cap, the policy shape, what an exceeded check reports, and the
  * one method the rate-limit engine asks of a limiter.
  *
- * Kept apart from the DynamoDB limiter on purpose. The engine needs only this
- * table, and importing it from the store would pull the DynamoDB SDK loader
- * into the engine's import graph, which is what kept the policy layer from
- * running anywhere but inside a Lambda. Pure and dependency-free, so the
- * mock runtime and the browser entry can resolve it.
+ * Kept apart from the DynamoDB limiter on purpose: importing it from the
+ * store would pull the DynamoDB SDK loader into the engine's import graph and
+ * keep the policy layer from running anywhere but inside a Lambda. Pure and
+ * dependency-free, so the mock runtime and the browser entry can resolve it.
  */
 /**
  * The fixed windows a policy may cap, smallest first (the evaluation order),
@@ -53,19 +52,32 @@ export type LambderRateLimitResult = false | LambderRateLimitExceeded;
  * DynamoDB limiter and the in-memory one implement it; an app may bring its
  * own (Redis, a database) by implementing this one method.
  *
- * The engine validates a policy before it ever reaches here, so every capped
- * window arrives as a non-negative whole number and a limiter never has to
- * invent an answer for a nonsense one. A caller reaching isRateLimited
- * directly owes the same precondition: the two shipped implementations
- * disagree on a negative cap (one refuses the first attempt, the other allows
- * it) because neither was ever meant to be asked.
+ * The engine validates a policy before it reaches here, so every capped
+ * window arrives as a non-negative whole number. A caller reaching
+ * isRateLimited directly owes the same precondition: the two shipped
+ * implementations disagree on a negative cap (one refuses the first attempt,
+ * the other allows it), since neither is meant to be asked.
  *
  * The tracker key is bounded there too: the variable half of it (a custom
- * key handler's return, a session key) is replaced by its own sha256 past
- * 1024 UTF-8 bytes, so an implementation with a key limit of its own never
- * meets a key it has to refuse. That matters because a limiter's refusal is a
- * throw, and a throw is what failOpen swallows into no limit at all.
+ * key handler's return, a session key) is replaced by its own sha256 once it
+ * passes 1024 UTF-8 bytes as written into the key, so an implementation with
+ * a key limit of its own never meets a key it has to refuse. That matters
+ * because a limiter's refusal is a throw, and a throw is what failOpen
+ * swallows into no limit at all.
+ *
+ * A limiter that answers a run of requests with one continuing failure (the
+ * DynamoDB limiter, for a flooded partition it cannot size) may throw the
+ * same error object for each of them: the engine logs a failure once, not
+ * once per request that meets it.
  */
 export interface LambderRateLimiter {
     isRateLimited(trackerKey: string, policy: LambderRateLimitPolicy): Promise<LambderRateLimitResult>;
+    /**
+     * The clock the windows are computed against, in epoch milliseconds, for
+     * a limiter that keeps one of its own (an injected test clock). A
+     * refusal's `resetAt` is a second on this clock, so the engine reads the
+     * Retry-After against it. Optional: without it, the engine reads
+     * Date.now().
+     */
+    clockMilliseconds?(): number;
 }

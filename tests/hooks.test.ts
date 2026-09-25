@@ -9,7 +9,9 @@ import path from 'path';
 import { browse, testPublicFiles } from './helpers.js';
 import { z } from 'zod';
 import Lambder from '../src/core/Lambder.js';
+import type { LambderResponse } from '../src/core/LambderResponse.js';
 import { LambderLocalFileSource } from '../src/stores/LambderLocalFileSource.js';
+import type { LambderRenderContext } from '../src/core/LambderContext.js';
 
 
 
@@ -203,6 +205,30 @@ describe('Hooks - afterRender Hook', () => {
         expect(executionOrder).toEqual([1, 2, 3]);
     });
 
+    it('copies a response a hook answers with before the next hook writes into it, so a kept one collects nothing across requests', async () => {
+        const lambder = new Lambder({
+            files: testPublicFiles(),
+            apiPath: '/api'
+        });
+        lambder.addRoute('/test', (ctx, res) => res.json({ data: 'test' }));
+
+        // A module-level answer, the way a maintenance page or a 404 is kept.
+        let kept: LambderResponse | undefined;
+        await lambder.addHook('afterRender', async (ctx, res) => {
+            kept ??= res.html('kept');
+            return kept;
+        });
+        await lambder.addHook('afterRender', async (ctx, res, response) => {
+            response.setHeader('X-Request', ctx.get.n ?? '');
+            return response;
+        });
+
+        const visitor = browse(lambder);
+        expect((await visitor.request('GET', '/test?n=1')).headers['x-request']).toBe('1');
+        expect((await visitor.request('GET', '/test?n=2')).headers['x-request']).toBe('2');
+        expect(Object.keys(kept!.headers).map((name) => name.toLowerCase())).not.toContain('x-request');
+    });
+
     it('should add custom headers in afterRender', async () => {
         const lambder = new Lambder({
             files: testPublicFiles(),
@@ -242,6 +268,29 @@ describe('Hooks - afterRender Hook', () => {
 
         expect(result.statusCode).toBe(500);
         expect(result.text()).toContain('Post-processing failed');
+    });
+
+    it('is handed the context a beforeRender hook replaced, on a matched route and on the fallback chain', async () => {
+        // Regression: the replacement reached the handler alone, and the
+        // afterRender hooks read the context as it arrived, without what the
+        // beforeRender hook added.
+        const seenTenants: (string | undefined)[] = [];
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: path.resolve('./tests/fixtures/public') }) })
+            .servePublicFiles()
+            .addRoute('/test', (ctx, res) => res.text('Test'))
+            .addHook('beforeRender', async (ctx) => {
+                const replaced: LambderRenderContext & { tenant: string } = { ...ctx, tenant: 'acme' };
+                return replaced;
+            })
+            .addHook('afterRender', async (ctx, res, response) => {
+                seenTenants.push((ctx as LambderRenderContext & { tenant?: string }).tenant);
+                return response;
+            });
+        const visitor = browse(lambder);
+
+        expect((await visitor.request('GET', '/test')).text()).toBe('Test');
+        expect((await visitor.request('GET', '/main.css')).statusCode).toBe(200);
+        expect(seenTenants).toEqual(['acme', 'acme']);
     });
 });
 
@@ -358,10 +407,9 @@ describe('Hooks - created Hook', () => {
 
     /**
      * A created hook reaches something that can be briefly unavailable: a
-     * first DynamoDB read, a secret fetch, a warm-up call. The promise the
-     * hooks run under was kept whatever it settled as, so one such failure
-     * answered every later invocation on that warm container with the first
-     * error, forever, and only a cold start recovered.
+     * first DynamoDB read, a secret fetch, a warm-up call. Keeping a failed
+     * run's promise would answer every later invocation on that warm
+     * container with the first error, and only a cold start would recover.
      */
     it('retries the created hooks after one of them fails', async () => {
         let attempts = 0;
@@ -565,10 +613,9 @@ describe('Hooks - Combined Workflow', () => {
 
 describe('Hooks - beforeRender on the fallback chain', () => {
     /**
-     * beforeRender used to run only for a matched route or API: the match ran
-     * first and an unmatched request left for the fallback chain before the
-     * loop. So a servePublicFiles asset and a serveIndexHtml shell, which are
-     * the 200s a frontend is made of, skipped the one hook that can inspect a
+     * beforeRender runs for every request, not only a matched route or API.
+     * A servePublicFiles asset and a serveIndexHtml shell are the 200s a
+     * frontend is made of, and they need the one hook that can inspect a
      * request, replace its context or answer in its place.
      */
     const buildApp = () => new Lambder({

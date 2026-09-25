@@ -27,7 +27,7 @@ describe('servePublicFiles + templateFile fallback (frontend hosting recipe)', (
     it('serves existing static files with mime type and default cache headers', async () => {
         const result = await buildHost().render(createMockEvent('/style.css'), createMockContext());
         expect(result.statusCode).toBe(200);
-        expect(result.multiValueHeaders?.['Content-Type']?.[0]).toBe('text/css');
+        expect(result.multiValueHeaders?.['Content-Type']?.[0]).toBe('text/css; charset=utf-8');
         expect(result.multiValueHeaders?.['Cache-Control']).toEqual(['public, max-age=3600']);
         expect(decodeBody(result)).toContain('color: red');
     });
@@ -36,6 +36,34 @@ describe('servePublicFiles + templateFile fallback (frontend hosting recipe)', (
         const result = await buildHost().render(createMockEvent('/assets/index-Ab3dE5fG7h.js'), createMockContext());
         expect(result.statusCode).toBe(200);
         expect(result.multiValueHeaders?.['Cache-Control']).toEqual(['public, max-age=31536000, immutable']);
+    });
+
+    /**
+     * Pins the bug where a hook that issues a per-visitor cookie (a guest
+     * session, a session read that slides the cookies) sent it on an asset
+     * marked `public, max-age=31536000, immutable`, which a shared cache
+     * keeps, Set-Cookie included, and hands to everyone.
+     */
+    it('makes an asset that carries a cookie private, the 304 included, and leaves a cookieless one public', async () => {
+        const host = buildHost().addHook('beforeRender', (ctx, res) => {
+            if(!ctx.header('cookie')) res.setCookie('guest', 'visitor-1', { path: '/' });
+            return ctx;
+        });
+
+        const first = await host.render(createMockEvent('/assets/index-Ab3dE5fG7h.js'), createMockContext());
+        expect(first.statusCode).toBe(200);
+        expect(first.multiValueHeaders?.['Set-Cookie']?.[0]).toContain('guest=visitor-1');
+        expect(first.multiValueHeaders?.['Cache-Control']).toEqual(['private, max-age=31536000']);
+
+        const etag = first.multiValueHeaders?.['ETag']?.[0];
+        const revalidated = await host.render(createMockEvent('/assets/index-Ab3dE5fG7h.js', { headers: { Host: 'localhost', 'If-None-Match': etag! } }), createMockContext());
+        expect(revalidated.statusCode).toBe(304);
+        expect(revalidated.multiValueHeaders?.['Set-Cookie']?.[0]).toContain('guest=visitor-1');
+        expect(revalidated.multiValueHeaders?.['Cache-Control']).toEqual(['private, max-age=31536000']);
+
+        const returning = await host.render(createMockEvent('/assets/index-Ab3dE5fG7h.js', { headers: { Host: 'localhost', Cookie: 'guest=visitor-1' } }), createMockContext());
+        expect(returning.multiValueHeaders?.['Set-Cookie']).toBeUndefined();
+        expect(returning.multiValueHeaders?.['Cache-Control']).toEqual(['public, max-age=31536000, immutable']);
     });
 
     it('falls through to the fallback shell for page routes', async () => {
@@ -97,7 +125,7 @@ describe('servePublicFiles + templateFile fallback (frontend hosting recipe)', (
     it('supports per-tenant roots through the path mapper', async () => {
         const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
             .servePublicFiles({
-                path: (ctx) => ctx.host.startsWith('brandx.') ? `brandx${ctx.path}` : ctx.path,
+                path: (ctx, filePath) => ctx.host.startsWith('brandx.') ? `brandx${filePath}` : filePath,
             })
             .setRouteFallbackHandler((ctx, res) => res.templateFile(
                 ctx.host.startsWith('brandx.') ? 'brandx/index.html' : 'index.html',
@@ -191,9 +219,9 @@ describe('serveIndexHtml', () => {
     });
 
     it('a narrowed methods list still accepts HEAD, as a route matcher does', async () => {
-        // HEAD is a GET whose body finalization strips, so a list that names
-        // GET and not HEAD 404ing every HEAD was the two slots disagreeing
-        // with compileRouteMatcher about what a method means.
+        // HEAD is a GET whose body finalization strips. Refusing HEAD because
+        // the list names only GET would make these slots disagree with
+        // compileRouteMatcher about what a method means.
         const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
             .serveIndexHtml(undefined, { methods: ['GET'] })
             .setRouteFallbackHandler((ctx, res) => res.status(405, 'nope'));
@@ -245,7 +273,7 @@ describe('serveIndexHtml', () => {
             .serveIndexHtml((ctx, res) => res.html(`page ${ctx.path}`));
 
         const result = await lambder.render(createMockEvent('/style.css'), createMockContext());
-        expect(result.multiValueHeaders?.['Content-Type']?.[0]).toBe('text/css');
+        expect(result.multiValueHeaders?.['Content-Type']?.[0]).toBe('text/css; charset=utf-8');
         expect(decodeBody(result)).toContain('color: red');
     });
 
@@ -281,8 +309,8 @@ describe('serveIndexHtml', () => {
      * The redirect target is built from the request path, which the caller
      * writes. `//evil.example` is a protocol-relative URL and `/\evil.example`
      * becomes one the moment a browser normalizes the backslash, so echoing
-     * either into Location handed anybody who could get a link clicked a
-     * redirect off this origin, from a path that never had to exist.
+     * either into Location would hand anybody who can get a link clicked a
+     * redirect off this origin, from a path that never has to exist.
      */
     it('never redirects off-origin, whichever leading slashes the caller writes', async () => {
         const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })

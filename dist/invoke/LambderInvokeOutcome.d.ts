@@ -4,16 +4,16 @@
  * rejected delivery means, what Lambda's error payload says, the one-line
  * detail an error message ends with).
  *
- * Split out of LambderInvokeCaller for the reason shared/wire/LambderApiOutcome.ts
- * is split out of the browser caller: this is the vocabulary a CALLER of the
+ * Kept apart from LambderInvokeCaller, as shared/wire/LambderApiOutcome.ts is
+ * kept apart from the browser caller: this is the vocabulary a CALLER of the
  * caller reads, and a site that only annotates an outcome or narrows an error
- * should not have to read a 700-line class to find it. The functions here
- * touch none of the caller's state, so every "what went wrong on an invoke"
- * answer is in one file.
+ * should not have to read the whole class to find it. None of these functions
+ * touch the caller's state.
  */
 import type { LambderApiEnvelopeBody } from "../shared/wire/LambderApiContract.js";
 import type { LambderApiFailureReason, LambderValidationError } from "../shared/wire/LambderApiOutcome.js";
 import type { LambderCrashDetail } from "../shared/wire/LambderCrashDetail.js";
+import type { LambderAppRefusalMessage } from "../shared/wire/LambderApiRefusal.js";
 export type LambderInvokeFailureReason = LambderApiFailureReason | 'crash' | 'protocol' | 'payloadTooLarge';
 /** Lambda's own error payload for a FunctionError invocation. */
 export type LambderInvokeFunctionError = {
@@ -26,8 +26,8 @@ type LambderInvokeFailureFields = {
     ok: false;
     /** HTTP status, when the callee answered. */
     status?: number;
-    /** Envelope errorMessage, when the callee provided one. */
-    errorMessage?: any;
+    /** Envelope errorMessage, when the callee provided one: always the message object, a plain string having been read as one (refusalMessageOf). */
+    errorMessage?: LambderAppRefusalMessage;
     /** Seconds to wait before retrying, from the answer's Retry-After header. */
     retryAfterSeconds?: number;
     /** Always present: the error api() throws for this failure, with the callee's error as its cause when one is known. */
@@ -53,13 +53,17 @@ export type LambderInvokePayloadTooLargeFailure = LambderInvokeFailureFields & {
     /** The event's byte size, so a caller can say by how much it is over. */
     bytes: number;
 };
-/** The callee answered, and the envelope itself says the call is refused. Always carries that envelope. */
+/** The callee answered, and the envelope itself says the call is refused. Always carries that envelope, and an `errorMessage` refusal always carries its message. */
 export type LambderInvokeEnvelopeFailure = LambderInvokeFailureFields & {
-    reason: 'versionExpired' | 'sessionExpired' | 'notAuthorized' | 'errorMessage';
     response: LambderApiEnvelopeBody<any>;
     /** The callee's crash detail, when its global error handler sent one (the envelope's `crash` field). */
     crash?: LambderCrashDetail;
-};
+} & ({
+    reason: 'versionExpired' | 'sessionExpired' | 'notAuthorized';
+} | {
+    reason: 'errorMessage';
+    errorMessage: LambderAppRefusalMessage;
+});
 /**
  * Nothing usable came back: the invoke never arrived or was given up on, the
  * Lambda service answered instead of the callee, the callee answered 5xx, or
@@ -74,13 +78,11 @@ export type LambderInvokeDeliveryFailure = LambderInvokeFailureFields & {
     crash?: LambderCrashDetail;
 };
 /**
- * A failed invoke, discriminated by `reason` rather than written as one arm of
- * optional fields, so narrowing to a reason narrows to what that reason
- * actually carries: `zodError` after `validation`, `functionError` after
+ * A failed invoke, discriminated by `reason` so narrowing to a reason narrows
+ * to what it carries: `zodError` after `validation`, `functionError` after
  * `crash`, `bytes` after `payloadTooLarge`, `response` after an envelope
- * reason, so a reader never writes an optional chain or a `!` for a field the
- * reason already guarantees. The browser caller's LambderApiOutcome is
- * discriminated the same way.
+ * reason, with no optional chain or `!` for a guaranteed field. The browser
+ * caller's LambderApiOutcome is discriminated the same way.
  *
  * `error`, `logList` and `cookies` are on every arm, and `status`,
  * `errorMessage` and `retryAfterSeconds` are there whenever an answer came
@@ -94,10 +96,10 @@ export type LambderInvokeOutcome<T> = {
     logList: unknown[];
     /**
      * The answer's Set-Cookie values. A caller carrying a user's session
-     * is the browser for that call, and nothing else is: a callee that
-     * rotated or cleared the session cookies says so here, and a caller
-     * that ignores them keeps sending the old token. See
-     * reissueSession() on the callee for the tokens themselves.
+     * is the browser for that call: a callee that rotated or cleared the
+     * session cookies says so here, and a caller that ignores them keeps
+     * sending the old token. See reissueSession() on the callee for the
+     * tokens themselves.
      */
     cookies: string[];
 } | LambderInvokeFailure;
@@ -107,7 +109,7 @@ export type LambderInvokeErrorInit = {
     apiName: string;
     functionName: string;
     status?: number;
-    errorMessage?: any;
+    errorMessage?: LambderAppRefusalMessage;
     crash?: LambderCrashDetail;
     functionError?: LambderInvokeFunctionError;
     logList: unknown[];
@@ -130,7 +132,7 @@ export declare class LambderInvokeError extends Error {
     readonly apiName: string;
     readonly functionName: string;
     readonly status?: number;
-    readonly errorMessage?: any;
+    readonly errorMessage?: LambderAppRefusalMessage;
     readonly crash?: LambderCrashDetail;
     readonly functionError?: LambderInvokeFunctionError;
     readonly logList: unknown[];
@@ -150,10 +152,9 @@ export declare const isLambderInvokeError: (err: unknown) => err is LambderInvok
  * SDK throws its service exceptions (AccessDeniedException,
  * ResourceNotFoundException, RequestEntityTooLargeException and the rest)
  * with a $fault mark and a name ending in "Exception", while a connectivity
- * failure arrives as a plain Error or TypeError carrying neither. The first
- * kind is the Lambda service answering the invoke, which is a permission,
- * wiring or size fault to go and fix; calling it `network` sent whoever read
- * it to look at their connection instead.
+ * failure is a plain Error or TypeError with neither. A service exception is
+ * a permission, wiring or size fault to fix; calling it `network` would send
+ * the reader to check their connection instead.
  */
 export declare const classifyDeliveryFailure: (error: Error) => "network" | "protocol";
 /** Lambda's error payload as an Error, with the callee's own name and trace. */

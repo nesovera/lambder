@@ -5,10 +5,9 @@
  * Both give a call a `timeoutMs`, both let the site pass its own AbortSignal,
  * and both have to answer the same three questions: which signal does the
  * transport get, has the call already been given up on before it is sent, and
- * did the answer arrive after it was given up on. Written twice, the two
- * drifted: the browser caller learned not to believe a late answer and the
- * invoke caller did not, so a 20ms timeoutMs there reported `ok: true` at
- * 300ms and the call site acted on data it had already abandoned.
+ * did the answer arrive after it was given up on. One implementation keeps
+ * the two from drifting apart: a caller that believed a late answer would
+ * report `ok: true` for a call its site had already abandoned.
  *
  * The listener on an external signal is removed in detach() rather than left
  * to `once`: a site's signal usually outlives the call (one controller per
@@ -64,7 +63,8 @@ export const createCallAbort = (options) => {
  * the callee runs to completion either way, and what the caller's timeout
  * buys is its own answer. Used by lambderHandlerTransport and by
  * LambderInvokeCaller.localTransport, whose in-process calls are the two
- * places a signal has nothing to cancel.
+ * transports a signal has nothing to cancel, and by the crash reporter's
+ * time bound (LambderCrashHandling), where the app's report runs on.
  *
  * The listener is detached on either outcome, for the reason createCallAbort
  * detaches its own.

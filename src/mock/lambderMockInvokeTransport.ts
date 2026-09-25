@@ -1,5 +1,5 @@
 import type { LambderApiAnswer } from "../api/LambderApiAnswer.js";
-import { readApiEnvelope, cookieValuesByName, lowercaseHeaderNames, type LambderApiRequest } from "../api/LambderApiRequest.js";
+import { readApiEnvelope, cookieValuesByName, isApiCallContentType, lowercaseHeaderNames, type LambderApiRequest } from "../api/LambderApiRequest.js";
 import { getAnswerHeader } from "../shared/wire/LambderAnswerHeaders.js";
 import { base64ToText } from "../shared/util/LambderBase64.js";
 import { normalizeClientIp } from "../shared/util/LambderClientIp.js";
@@ -8,14 +8,12 @@ import { normalizeClientIp } from "../shared/util/LambderClientIp.js";
  * The fields of an invoke's synthesized event this transport reads, declared
  * structurally rather than imported as APIGatewayProxyEventV2.
  *
- * `lambder/mock` is browser-safe, and its type graph is part of that claim: a
- * type-only import of the invoke caller pulled `aws-lambda` and
- * `@aws-sdk/client-lambda` into the .d.ts graph of the mock entry, so a
- * frontend compiling without `skipLibCheck` and without those @types got
- * errors from inside node_modules for a module it never loads. Every field a
- * real event carries is optional here and no field is required, so a real
- * event is assignable and the returned function still fits
- * LambderInvokeTransport wherever a caller expects one.
+ * `lambder/mock` is browser-safe, type graph included: a type-only import of
+ * the invoke caller would pull `aws-lambda` and `@aws-sdk/client-lambda` into
+ * the mock entry's .d.ts graph, and a frontend compiling without
+ * `skipLibCheck` or those @types would get errors from a module it never
+ * loads. Every field is optional, so a real event is assignable and the
+ * returned function still fits LambderInvokeTransport.
  */
 export type LambderMockInvokeEvent = {
     body?: string | undefined;
@@ -38,11 +36,11 @@ export type LambderMockInvokeResult = {
 };
 
 /**
- * The mock app as the callee of a LambderInvokeCaller: the invoke's
- * synthesized event is read the way the callee's createContext would read
- * it, and the answer goes back as the Lambda response object the caller
- * decodes. So a server test can point its typed invoke caller at a mock of
- * the function it depends on, with the same registry a browser test uses.
+ * The mock app as the callee of a LambderInvokeCaller: the synthesized event
+ * is read the way the callee's createContext would read it, and the answer
+ * goes back as the Lambda response object the caller decodes. A server test
+ * can then point its typed invoke caller at a mock of the function it
+ * depends on, with the same registry a browser test uses.
  */
 export const lambderMockInvokeTransport = (
     mockApp: { handleRequest(request: LambderApiRequest): Promise<LambderApiAnswer> },
@@ -53,10 +51,11 @@ export const lambderMockInvokeTransport = (
     try { post = JSON.parse(body || "{}") ?? {}; } catch { post = {}; }
     const headers = lowercaseHeaderNames(event.headers);
     const cookies = cookieValuesByName(event.cookies ?? []);
-    // The address the synthesized event carries in sourceIp, as the server's
-    // createContext reads it; no forwarding header is trusted here either,
-    // so a per-IP limit keys the same address under both adapters.
-    const request = readApiEnvelope(post, {
+    // A POST of another type is no API call on the server either. The
+    // address is the one the synthesized event carries in sourceIp, as the
+    // server's createContext reads it; no forwarding header is trusted here
+    // either, so a per-IP limit keys the same address under both adapters.
+    const request = isApiCallContentType(headers) && readApiEnvelope(post, {
         headers, cookies,
         ip: normalizeClientIp(event.requestContext?.http?.sourceIp ?? ""),
         host: headers.host || event.requestContext?.domainName || "lambder-invoke",

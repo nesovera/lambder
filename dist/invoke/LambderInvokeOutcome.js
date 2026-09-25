@@ -4,12 +4,11 @@
  * rejected delivery means, what Lambda's error payload says, the one-line
  * detail an error message ends with).
  *
- * Split out of LambderInvokeCaller for the reason shared/wire/LambderApiOutcome.ts
- * is split out of the browser caller: this is the vocabulary a CALLER of the
+ * Kept apart from LambderInvokeCaller, as shared/wire/LambderApiOutcome.ts is
+ * kept apart from the browser caller: this is the vocabulary a CALLER of the
  * caller reads, and a site that only annotates an outcome or narrows an error
- * should not have to read a 700-line class to find it. The functions here
- * touch none of the caller's state, so every "what went wrong on an invoke"
- * answer is in one file.
+ * should not have to read the whole class to find it. None of these functions
+ * touch the caller's state.
  */
 import { isLambderTransportFailure } from "../shared/transport/LambderApiTransport.js";
 /**
@@ -63,10 +62,9 @@ export const isLambderInvokeError = (err) => err instanceof Error && err.isLambd
  * SDK throws its service exceptions (AccessDeniedException,
  * ResourceNotFoundException, RequestEntityTooLargeException and the rest)
  * with a $fault mark and a name ending in "Exception", while a connectivity
- * failure arrives as a plain Error or TypeError carrying neither. The first
- * kind is the Lambda service answering the invoke, which is a permission,
- * wiring or size fault to go and fix; calling it `network` sent whoever read
- * it to look at their connection instead.
+ * failure is a plain Error or TypeError with neither. A service exception is
+ * a permission, wiring or size fault to fix; calling it `network` would send
+ * the reader to check their connection instead.
  */
 export const classifyDeliveryFailure = (error) => {
     if (isLambderTransportFailure(error))
@@ -102,19 +100,8 @@ export const describeFailure = (init) => {
         return init.crash.message;
     if (init.functionError)
         return `${init.functionError.errorType ?? "FunctionError"}: ${init.functionError.errorMessage ?? "the function failed"}`;
-    if (init.errorMessage !== undefined) {
-        const content = init.errorMessage?.content;
-        if (typeof content === "string")
-            return content;
-        if (typeof init.errorMessage === "string")
-            return init.errorMessage;
-        try {
-            return JSON.stringify(init.errorMessage);
-        }
-        catch {
-            return String(init.errorMessage);
-        }
-    }
+    if (init.errorMessage !== undefined)
+        return init.errorMessage.content;
     if (init.reason === 'validation')
         return "the callee rejected the input";
     if (init.reason === 'versionExpired')

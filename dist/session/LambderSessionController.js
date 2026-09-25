@@ -1,14 +1,19 @@
 import { resolveCookieDomain, serializeCookie, serializeClearCookie } from "../shared/wire/LambderCookie.js";
 import { isMintedSessionToken } from "./LambderSessionManager.js";
 /**
- * No session for this request: the cookies named none, or the single session
- * they named did not pair with the posted CSRF token.
+ * No session for this request: the cookies named none, the single session
+ * they named did not pair with the posted CSRF token, they cannot be
+ * resolved to one session (LambderSessionAmbiguousError, the one case with a
+ * type of its own), or the session was ended while the request held it (a
+ * logout or a password change elsewhere, or the dataRefresh callback).
  *
- * Typed rather than a bare Error because fetchSessionIfExists has to tell
- * "there is no session here" apart from "something broke". Everything else,
- * a TypeError from a custom store, a bug in an app's dataRefresh callback,
- * propagates and becomes a crash: answering sessionExpired for a defect makes
- * the client clear its cookies and turns somebody's bug into a logout.
+ * Typed so fetchSessionIfExists can tell "no session here" from "something
+ * broke", and so can every place that answers a request which needed a
+ * session and has none (the API pipeline, a route or a hook on the server):
+ * each tests for this class, and the ambiguous case with it. Everything else
+ * (a TypeError from a custom store, a bug in a dataRefresh callback)
+ * propagates as a crash: answering sessionExpired for a defect makes the
+ * client clear its cookies and turns a bug into a logout.
  */
 export class LambderSessionNotFoundError extends Error {
     constructor(message = "Session not found") {
@@ -18,39 +23,40 @@ export class LambderSessionNotFoundError extends Error {
 }
 /**
  * The request's session cookies cannot be resolved to one session, so none of
- * them is used and every scope this host can write is cleared. Also a "no
- * session" answer to the caller, and deliberately a different type: this one
- * carries the clearing Set-Cookie headers that heal the state, and it is the
- * one worth finding in a log.
+ * them is used and every scope this host can write is cleared. A request with
+ * no usable session, so it is a LambderSessionNotFoundError and is answered
+ * as one wherever that is (a 401 or the session-expired route answer, the
+ * sessionExpired envelope on an API call). The subclass keeps it apart for
+ * whoever wants to tell: this case carries the clearing Set-Cookie headers
+ * that heal the state, and it is the one worth finding in a log.
  */
-export class LambderSessionAmbiguousError extends Error {
+export class LambderSessionAmbiguousError extends LambderSessionNotFoundError {
     constructor(message = "Session ambiguous") {
         super(message);
         this.name = "LambderSessionAmbiguousError";
     }
 }
-/** The tokens are hex, so the cookie carries them as they are (the format existing browsers hold). */
+/** The tokens are hex, so the cookie carries them unencoded, in the format browsers already hold. */
 const rawCookieValue = (value) => value;
 /**
  * A `__Host-` cookie is the browser's own answer to a sibling subdomain
  * planting a session cookie at a parent domain: it refuses one that carries a
  * Domain, so no other host can write it. `__Secure-` is the weaker sibling,
- * accepted only on a Secure cookie. Both protections fail silently, though: a
- * browser handed a prefixed name with an attribute the prefix forbids simply
- * discards the cookie, and the app looks like it has no sessions at all
- * rather than like it is misconfigured. So the combinations are rejected at
- * creation instead.
+ * accepted only on a Secure cookie. Both fail silently: a browser discards a
+ * prefixed cookie with an attribute the prefix forbids, and the app looks
+ * like it has no sessions rather than like it is misconfigured. So the
+ * combinations are rejected at creation.
  *
  * Session policy, so it lives beside the controller that writes the cookies
- * rather than in the pipeline that happens to call it.
+ * rather than in the pipeline that calls it.
  */
 export const assertSessionCookiePrefixes = (sessions) => {
     const keys = [sessions.tokenCookieKey, sessions.csrfCookieKey];
     const hostPrefixed = keys.filter((key) => key.startsWith("__Host-"));
     const securePrefixed = keys.filter((key) => key.startsWith("__Secure-"));
     if (sessions.cookieOptions.secure === false) {
-        // Both prefixes require Secure, so this one check covers them
-        // together; the messages stay separate because the fix differs.
+        // Both prefixes require Secure, so one check covers them; the
+        // messages stay separate so each names its own prefix.
         if (hostPrefixed.length > 0) {
             throw new Error(`Lambder: session cookie ${hostPrefixed.join(" and ")} uses the __Host- prefix, which a browser accepts only on a Secure cookie. ` +
                 "Drop session.cookie.secure: false, or drop the prefix; keeping both means the browser discards the cookie silently and no session is ever read.");
@@ -74,21 +80,21 @@ export const assertSessionCookiePrefixes = (sessions) => {
 /**
  * How many copies of the session cookie one request may carry before the
  * request is treated as ambiguous. A name legitimately arrives at a few
- * scopes at once (a Domain change mid-migration leaves a host-only twin),
- * and no browser has a reason to send more. Beyond this the request is
- * refused rather than trimmed: dropping the extras would let anyone who can
- * plant cookies at a parent domain push the visitor's own copy out of the
- * read and log them out silently, with no eviction emitted, so it would
- * never heal. Nothing is read from the store on that path.
+ * scopes (a Domain change mid-migration leaves a host-only twin), and no
+ * browser has a reason to send more. Beyond this the request is refused
+ * rather than trimmed: dropping extras would let anyone who can plant cookies
+ * at a parent domain push the visitor's own copy out of the read and log them
+ * out silently, with no eviction emitted, so it would never heal. Nothing is
+ * read from the store on that path.
  */
 const MAX_SESSION_TOKEN_CANDIDATES = 4;
 /**
  * Sessions as one request sees them: reads the session the request's
- * cookies name onto the context, and writes the cookies a created,
- * rotated or ended session needs into the context's response headers.
- * Server handlers reach it through lambder.getSessionController(ctx); mock
- * handlers through ctx.sessions. It works on the call context and the
- * request info alone, so it is one class for both.
+ * cookies name onto the context, and writes the cookies a created, rotated
+ * or ended session needs into the context's response headers. Server and
+ * mock handlers reach it as ctx.sessionController (the server's also through
+ * lambder.getSessionController(ctx)); it needs only the call context and
+ * request info, so one class serves both.
  */
 export default class LambderSessionController {
     manager;
@@ -113,19 +119,23 @@ export default class LambderSessionController {
     }
     ;
     /**
-     * Both cookies at one expiry, with the raw secrets. They exist only on the
-     * LambderCreatedSession result, in these cookies and in the request that
-     * carried them back; the record stores hashes. `csrfToken` is null where
-     * the raw CSRF value is not known to this request, in which case only the
-     * session cookie is written: writing a CSRF cookie whose value does not
-     * pair with the session would break the very session it is refreshing.
+     * Both cookies at one expiry, with the raw secrets, which exist only on
+     * the LambderCreatedSession result, in these cookies and in requests that
+     * carry them back; the record stores hashes. `csrfToken` is null when this
+     * request does not know the raw CSRF value, and then only the session
+     * cookie is written: a CSRF cookie that does not pair with the session
+     * would break the session it is refreshing.
      */
     writeSessionCookies(expiresAt, sessionToken, csrfToken) {
         const scope = this.cookieScope();
         const expires = new Date(expiresAt * 1000);
-        this.ctx.responseHeaders.add("Set-Cookie", serializeCookie(this.tokenCookieKey, sessionToken, { ...scope, expires, httpOnly: true, encode: rawCookieValue }));
+        // Max-Age beside Expires: a browser that knows Max-Age counts from
+        // receipt rather than from a date, so a device whose clock runs ahead
+        // does not drop a short-lived session early.
+        const maxAge = Math.max(0, expiresAt - Math.floor(Date.now() / 1000));
+        this.ctx.responseHeaders.add("Set-Cookie", serializeCookie(this.tokenCookieKey, sessionToken, { ...scope, expires, maxAge, httpOnly: true, encode: rawCookieValue }));
         if (csrfToken !== null)
-            this.ctx.responseHeaders.add("Set-Cookie", serializeCookie(this.csrfCookieKey, csrfToken, { ...scope, expires, encode: rawCookieValue }));
+            this.ctx.responseHeaders.add("Set-Cookie", serializeCookie(this.csrfCookieKey, csrfToken, { ...scope, expires, maxAge, encode: rawCookieValue }));
     }
     ;
     setSessionCookies(created) {
@@ -133,10 +143,9 @@ export default class LambderSessionController {
     }
     ;
     /**
-     * The deleting pair for one scope. Written once because a deletion only
-     * reaches a cookie carrying the same Domain and Path, so the pair is
-     * emitted per scope and the two callers differ in nothing but which
-     * scopes they walk.
+     * The deleting pair for one scope. A deletion only reaches a cookie with
+     * the same Domain and Path, so the pair is emitted per scope; the two
+     * callers differ only in which scopes they walk.
      */
     addClearCookiePair(scope) {
         this.ctx.responseHeaders.add("Set-Cookie", serializeClearCookie(this.tokenCookieKey, { ...scope, httpOnly: true }));
@@ -150,10 +159,10 @@ export default class LambderSessionController {
     /**
      * Every Domain this host is allowed to write the session cookies at: the
      * host-only scope, the configured one, and each parent domain of the
-     * request host. A deletion matches only a cookie carrying the same
-     * Domain, so evicting a copy the app itself never set needs all of them.
-     * A browser ignores a Domain it will not accept, which is why a suffix
-     * the registry owns can be offered without checking a public-suffix list.
+     * request host. A deletion matches only a cookie with the same Domain, so
+     * evicting a copy the app never set needs all of them. A browser ignores
+     * a Domain it will not accept, so a registry-owned suffix can be offered
+     * without checking a public-suffix list.
      */
     cookieClearDomains() {
         const hostname = (this.request.host.split(":")[0] ?? "").toLowerCase();
@@ -174,13 +183,12 @@ export default class LambderSessionController {
     }
     ;
     /**
-     * Clears the session cookies at every scope this host can reach, rather
-     * than at the one the app configured. Used when a request carries more
-     * than one live session: the copy that has to go may sit at a parent
-     * domain a sibling host planted it at, and clearing the configured scope
-     * alone would evict this visitor's own cookie and leave the planted one
-     * as the only survivor, which completes the takeover instead of stopping
-     * it.
+     * Clears the session cookies at every scope this host can reach, not just
+     * the configured one. Used when a request carries more than one live
+     * session: the copy that has to go may sit at a parent domain where a
+     * sibling host planted it, and clearing only the configured scope would
+     * evict the visitor's own cookie and leave the planted one as the sole
+     * survivor, completing the takeover instead of stopping it.
      */
     clearSessionCookiesEverywhere() {
         const base = this.cookieScope(true);
@@ -191,10 +199,8 @@ export default class LambderSessionController {
     ;
     /**
      * Refuses a request whose session cookies cannot be resolved to one
-     * session, clearing every scope this host can write. Clearing only the
-     * configured scope would be worse than picking one: a deletion matches
-     * only a cookie carrying the same Domain, so it would evict the visitor's
-     * own copy and leave a planted one as the sole survivor.
+     * session, clearing every scope this host can write (see
+     * clearSessionCookiesEverywhere for why not just the configured one).
      *
      * Path is the one dimension this cannot sweep: the request info carries
      * no path, and a deletion matches only a cookie at the same Path, so a
@@ -214,12 +220,11 @@ export default class LambderSessionController {
      * Both session cookie names read in one pass: every well-formed value
      * under the token name, and every value under the CSRF name.
      *
-     * The CSRF cookie is counted here rather than looked at only when a token
-     * is checked against it, because it is plantable exactly like the session
-     * cookie and the browser picks between copies without telling anyone: the
-     * client reads its CSRF token with js-cookie's Cookies.get, which returns
-     * the FIRST copy in document.cookie, and a browser orders a longer Path
-     * first. So a sibling host that plants one CSRF cookie at a parent domain
+     * The CSRF cookie is counted, not just checked against a token, because
+     * it is plantable like the session cookie and the browser picks between
+     * copies silently: the client reads it with js-cookie's Cookies.get, which
+     * returns the FIRST copy in document.cookie, and browsers order a longer
+     * Path first. A sibling host that plants a CSRF cookie at a parent domain
      * with a deeper Path decides which token every call posts, and the count
      * is the only thing that shows it.
      */
@@ -227,9 +232,8 @@ export default class LambderSessionController {
         const wellFormed = (this.request.cookies[this.tokenCookieKey] ?? []).filter(isMintedSessionToken);
         // Deduplicated: one value arriving twice (a proxy that appends rather
         // than merges Cookie, the same value set at two scopes) is one
-        // session, and counting it twice would read as an ambiguity. Not
-        // truncated: the count past the cap is the caller's answer, not
-        // something to trim away (see MAX_SESSION_TOKEN_CANDIDATES).
+        // session, not an ambiguity. Not truncated: a count past the cap is
+        // itself the answer (see MAX_SESSION_TOKEN_CANDIDATES).
         return {
             sessionTokens: [...new Set(wellFormed)],
             csrfTokens: [...new Set(this.request.cookies[this.csrfCookieKey] ?? [])],
@@ -250,9 +254,9 @@ export default class LambderSessionController {
     }
     ;
     /**
-     * createSession, handing back the raw tokens beside the session: what a
-     * test or a mock runtime needs to plant the cookies somewhere else (a
-     * cookie jar) than this call's response.
+     * createSession, handing back the raw tokens beside the session, for a
+     * test or mock runtime that plants the cookies somewhere other than this
+     * call's response (a cookie jar).
      */
     async issueSession(sessionKey, data, ttlInSeconds) {
         const created = await this.manager.createSession(sessionKey, data, ttlInSeconds);
@@ -266,16 +270,17 @@ export default class LambderSessionController {
     }
     ;
     /**
-     * regenerateSession, handing back the raw tokens beside the session, the
-     * way issueSession does for a new one. Rotating the session mints a new
-     * CSRF token, and a client that holds its token rather than reading
-     * document.cookie (a native app, an invoke caller) needs the new one to
-     * keep calling.
+     * regenerateSession, handing back the raw tokens beside the session as
+     * issueSession does. Rotation mints a new CSRF token, and a client that
+     * holds its token rather than reading document.cookie (a native app, an
+     * invoke caller) needs the new one to keep calling.
      */
     async reissueSession() {
         if (!this.ctx.session)
             throw new LambderSessionNotFoundError();
         const created = await this.manager.regenerateSession(this.ctx.session);
+        if (!created)
+            this.endWithNoSession();
         this.setSessionCookies(created);
         this.ctx.session = created.session;
         return created;
@@ -289,34 +294,31 @@ export default class LambderSessionController {
         if (candidates.length > MAX_SESSION_TOKEN_CANDIDATES) {
             this.refuseAmbiguousSession(`more than ${MAX_SESSION_TOKEN_CANDIDATES} "${this.tokenCookieKey}" cookies arrived, at different scopes`);
         }
-        // After the cap check, because this line says the store is about to
-        // be read once per copy and over the cap nothing is read at all.
+        // After the cap check: this says the store is about to be read once
+        // per copy, and over the cap nothing is read.
         if (candidates.length > 1) {
             console.warn(`Lambder session: ${candidates.length} "${this.tokenCookieKey}" cookies arrived from ${this.request.host}; the browser holds the cookie at several scopes. Reading each.`);
         }
-        // How many sessions the browser is holding is a question about the
-        // cookies alone, so it is asked without the CSRF pairing. Folding the
-        // pairing in here would answer a different question and always answer
-        // it "one": a sibling subdomain plants its own CSRF cookie beside the
-        // session it planted, only one CSRF token is ever posted, and no two
-        // sessions share a csrfTokenHash, so exactly one candidate would
-        // survive the pairing and the ambiguity this check exists to catch
-        // would be invisible. The pairing is asked once, below, of whichever
-        // single session the cookies resolved to.
+        // How many sessions the browser holds is a question about the cookies
+        // alone, so it is asked without the CSRF pairing. With the pairing
+        // folded in the answer would always be "one": a sibling subdomain
+        // plants its own CSRF cookie beside its planted session, only one
+        // CSRF token is posted, and no two sessions share a csrfTokenHash, so
+        // the ambiguity this check exists to catch would be invisible. The
+        // pairing is checked once, below, against the single resolved session.
         //
-        // One live session and some stale copies is the ordinary case (a
-        // cookie whose Domain or Path changed), and the live one wins. Two
-        // LIVE sessions under one name is not ordinary: any sibling subdomain
-        // can write a cookie at a parent domain that the browser then sends
-        // alongside the real one, and taking either would sign this visitor
-        // into an account that may not be theirs. There is no way to tell
-        // which copy they meant, so neither is used.
+        // One live session plus stale copies is the ordinary case (a cookie
+        // whose Domain or Path changed), and the live one wins. Two LIVE
+        // sessions under one name is not: a sibling subdomain can write a
+        // cookie at a parent domain that the browser sends alongside the real
+        // one, and taking either could sign this visitor into an account that
+        // is not theirs. There is no telling which they meant, so neither is
+        // used.
         const live = [];
         for (const sessionToken of candidates) {
-            // lookupSession finds the record BY the hash of this token's own
-            // secret and checks the structure and the expiry on the way, so
-            // possession is already proved here and re-checking the token
-            // against the record would only hash the same secret twice.
+            // lookupSession finds the record BY the hash of this token's
+            // secret and checks structure and expiry, so possession is proved
+            // here; re-checking the token would hash the same secret twice.
             const candidate = await this.manager.lookupSession(sessionToken);
             if (!candidate)
                 continue;
@@ -330,28 +332,24 @@ export default class LambderSessionController {
         }
         const found = live[0];
         if (!found)
-            throw new LambderSessionNotFoundError();
-        // The pairing check, once, against the one session the cookies
-        // resolved to. An API call that did not post the matching CSRF token
-        // has no session here.
+            this.endWithNoSession();
+        // The pairing check, once, against the resolved session. An API call
+        // that did not post the matching CSRF token has no session here.
         if (this.request.csrfToken !== null && !(await this.manager.isSessionCsrfTokenValid(found.session, this.request.csrfToken))) {
-            // A session cookie that resolves while the posted CSRF token
-            // belongs to nothing is the CSRF half of the planted-cookie
-            // shape, and it is unhealable on its own: the client reads the
-            // FIRST CSRF cookie in document.cookie, a longer Path sorts
-            // first, so the planted copy keeps winning through the logout,
-            // through the next sign-in, and through every call after it. The
-            // ordinary answer (no session) emits no Set-Cookie at all, and
-            // the client can only clear the scopes it knows, which are not
-            // the ones a sibling host planted at. So the everywhere-clear
-            // runs instead, and the state heals.
+            // A live session cookie with a posted CSRF token that pairs with
+            // nothing is the CSRF half of the planted-cookie shape, and it
+            // cannot heal on its own: the client posts the FIRST CSRF cookie
+            // in document.cookie, a longer Path sorts first, so a planted copy
+            // keeps winning through logout, the next sign-in and every call
+            // after. A plain no-session answer emits no Set-Cookie, and the
+            // client can only clear scopes it knows, not the ones a sibling
+            // host planted at. So the everywhere-clear runs instead.
             //
-            // Only when the request actually carried CSRF cookies: an invoke
-            // caller posts the CSRF value in the envelope and sends no CSRF
-            // cookie at all, and its wrong token is an ordinary no-session.
-            // And only when the cookies are the suspect: one CSRF cookie that
-            // is the token posted, not pairing, is a stale pair the visitor
-            // can clear themselves.
+            // Only when the request carried CSRF cookies: an invoke caller
+            // posts the value in the envelope with no CSRF cookie, and its
+            // wrong token is an ordinary no-session. And only when the cookies
+            // are the suspect: a single CSRF cookie equal to the posted token
+            // that does not pair is a stale pair the visitor can clear.
             if (csrfTokens.length > 1) {
                 this.refuseAmbiguousSession(`more than one "${this.csrfCookieKey}" cookie arrived, at different scopes, and the one posted pairs with no session`);
             }
@@ -360,33 +358,32 @@ export default class LambderSessionController {
             }
             throw new LambderSessionNotFoundError();
         }
-        // Renewed only now that this session is known to be the caller's:
-        // a slide or a dataRefresh is a write on their behalf.
+        // Renewed only once this session is known to be the caller's: a
+        // slide or a dataRefresh is a write on their behalf.
         const expiresBefore = found.session.expiresAt;
         const session = await this.manager.renewSession(found.session);
+        // Ended while this request read it (a logout, a password change), or
+        // by its own dataRefresh: no session either way.
         if (!session)
-            throw new LambderSessionNotFoundError();
-        // The other copies are stale. This response can evict the
-        // host-only twin of a Domain= cookie; a copy at a parent domain
-        // this host cannot name is out of reach and expires on its own.
+            this.endWithNoSession();
+        // The other copies are stale. This response can evict the host-only
+        // twin of a Domain= cookie; a copy at a parent domain this host
+        // cannot name is out of reach and expires on its own.
         //
-        // Which copy is the stale one is an assumption, not a fact: the
-        // request carries no scope, so the twin being deleted may be the live
-        // cookie this very read resolved, held by a visitor who signed in
-        // before the app configured a domain. So the eviction always ships
-        // with the replacement, at the configured scope, and the visitor
-        // stays signed in either way. It also lets a domain migration
-        // converge on the first request rather than on the first slide.
+        // Which copy is stale is an assumption: the request carries no scope,
+        // so the twin being deleted may be the very cookie this read resolved
+        // (a visitor who signed in before the app configured a domain). So the
+        // eviction always ships with the replacement at the configured scope,
+        // and the visitor stays signed in either way. It also lets a domain
+        // migration converge on the first request rather than the first slide.
         const evictsHostOnlyTwin = candidates.length > 1 && !!this.cookieScope().domain;
         if (evictsHostOnlyTwin)
             this.clearSessionCookies(true);
-        // A sliding write moved the record's expiry, so the cookies have to
-        // move with it. Without this the browser keeps the Expires it was
-        // given at creation and drops both cookies at createdAt + ttl, so a
-        // visitor who never stops using the app is signed out anyway, on the
-        // one deadline sliding expiration exists to push back. Throttled by
-        // the same interval as the write, so an active session re-issues its
-        // cookies at most that often and not on every request.
+        // A sliding write moved the record's expiry, so the cookies move with
+        // it. Otherwise the browser keeps the creation-time Expires and signs
+        // out an active visitor at createdAt + ttl, the very deadline sliding
+        // expiration exists to push back. Throttled with the write, so an
+        // active session re-issues its cookies at most that often.
         if (evictsHostOnlyTwin || session.expiresAt !== expiresBefore)
             await this.slideSessionCookies(session, found.token, csrfTokens);
         this.ctx.session = session;
@@ -395,17 +392,16 @@ export default class LambderSessionController {
     ;
     /**
      * Re-issues both cookies at this session's expiry: after a sliding write
-     * moved it, and beside the host-only eviction above, which would
-     * otherwise delete a cookie without replacing it.
+     * moved it, and beside the host-only eviction, which would otherwise
+     * delete a cookie without replacing it.
      *
-     * The raw CSRF value is the posted one on an API call, which the pairing
-     * check above has just matched against this session. A route posts none,
-     * so the single arriving CSRF cookie stands in, and only once it is known
-     * to pair: re-issuing an unpaired value would overwrite this visitor's
-     * real CSRF cookie with a planted one, at the app's own scope, which is
-     * the takeover the scan exists to prevent. Where neither is available the
-     * session cookie slides alone, which is the half that decides whether the
-     * session survives.
+     * On an API call the raw CSRF value is the posted one, which the pairing
+     * check just matched. A route posts none, so the single arriving CSRF
+     * cookie stands in, but only once it is known to pair: re-issuing an
+     * unpaired value would overwrite the visitor's real CSRF cookie with a
+     * planted one at the app's own scope, the takeover the scan exists to
+     * prevent. Where neither is available the session cookie slides alone;
+     * it is the half that decides whether the session survives.
      */
     async slideSessionCookies(session, sessionToken, csrfTokens) {
         const posted = this.request.csrfToken;
@@ -418,49 +414,72 @@ export default class LambderSessionController {
         this.writeSessionCookies(session.expiresAt, sessionToken, paired ? only : null);
     }
     ;
+    /**
+     * "No session" for a request whose session cookie names none, or whose
+     * session ended while it held it: the context holds none.
+     *
+     * The cookies are left alone. A deletion matches a cookie by name, not by
+     * value, so clearing here would also delete a session another response
+     * has just set: a poll sent with the old cookie, answering after a login,
+     * a rotation or a password change, would sign the person straight out of
+     * the new session. It also keeps the client's own check working, which
+     * clears the CSRF cookie only while it still holds the token the call
+     * sent. A dead cookie costs a store read per request until it expires.
+     */
+    endWithNoSession() {
+        this.ctx.session = null;
+        throw new LambderSessionNotFoundError();
+    }
+    ;
     async fetchSessionIfExists() {
         try {
             return await this.fetchSession();
         }
         catch (err) {
-            // Only the two "no session" exits become null. A failing
-            // dataRefresh callback, a store read failure, and anything
-            // unexpected (a TypeError from a custom store, a bug in this
-            // layer) propagate: answering sessionExpired for a defect makes
-            // the client clear its cookies, so a crash would present as a
-            // logout and the log would say nothing happened.
+            // Only a "no session" exit becomes null, the ambiguous one
+            // included. A failing dataRefresh, a store read failure and
+            // anything unexpected propagate: answering sessionExpired for a
+            // defect makes the client clear its cookies, so a crash would
+            // present as a logout with nothing in the log.
             if (err instanceof LambderSessionNotFoundError)
-                return null;
-            if (err instanceof LambderSessionAmbiguousError)
                 return null;
             throw err;
         }
     }
     ;
+    /**
+     * Writes new data onto the current session. Throws
+     * LambderSessionNotFoundError when the session was ended while this
+     * request held it: the write does not bring it back, and an API call
+     * answers sessionExpired.
+     */
     async updateSessionData(newData) {
         if (!this.ctx.session)
             throw new LambderSessionNotFoundError();
-        this.ctx.session = await this.manager.updateSessionData(this.ctx.session, newData);
-        return this.ctx.session;
+        const updated = await this.manager.updateSessionData(this.ctx.session, newData);
+        if (!updated)
+            this.endWithNoSession();
+        this.ctx.session = updated;
+        return updated;
     }
     ;
     /**
-     * Force-runs the dataRefresh callback now (see the session option of create) and
-     * persists the result onto the current session. Returns the updated
-     * session, or null when the callback ended it: the record is deleted and
-     * the session cookies are cleared.
+     * Force-runs the dataRefresh callback now (see the session option of
+     * create) and persists the result onto the current session. Throws
+     * LambderSessionNotFoundError when the session is over, because the
+     * callback ended it (the record is deleted) or because it was ended while
+     * this request held it: the same "no session" a read gives for either,
+     * with the cookies left alone (see endWithNoSession), and what an API
+     * call answers as sessionExpired.
      */
     async refreshSessionData() {
         if (!this.ctx.session)
             throw new LambderSessionNotFoundError();
         const refreshed = await this.manager.refreshSessionData(this.ctx.session);
-        if (!refreshed) {
-            this.clearSessionCookies();
-            this.ctx.session = null;
-            return null;
-        }
+        if (!refreshed)
+            this.endWithNoSession();
         this.ctx.session = refreshed;
-        return this.ctx.session;
+        return refreshed;
     }
     ;
     /**
