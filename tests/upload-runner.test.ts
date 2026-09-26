@@ -26,6 +26,7 @@ afterEach(() => {
     server.resetHandlers();
     bucket.reset();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
 });
 afterAll(() => server.close());
 
@@ -212,6 +213,44 @@ describe('LambderUploadRunner over a memory bucket', () => {
         expect(failure.reason).toBe('storageRejected');
         expect(failure.message).toContain('Policy expired');
         expect(issued).toBe(3);
+    });
+
+    it('renews a ticket whose signing credentials ran out first, as S3 says with ExpiredToken', async () => {
+        const { runner, calls } = runnerFor({ storageRetry: { attempts: 1 } });
+        server.use(msw.http.post(bucket.baseUrl, () => new msw.HttpResponse(
+            '<Error><Code>ExpiredToken</Code><Message>The provided token has expired.</Message></Error>',
+            { status: 400, headers: { 'content-type': 'application/xml' } },
+        ), { once: true }));
+
+        expect(await runner.upload(invoice())).toEqual({ objectKey: 'stores/store-7/invoices/2.pdf' });
+        expect(calls.requestTicket).toBe(2);
+    });
+
+    it('waits a random time before every try at storage, the first included, under a ceiling that doubles', async () => {
+        vi.stubGlobal('fetch', async () => { throw new TypeError('Failed to fetch'); });
+        const waits: number[] = [];
+        const realSetTimeout = globalThis.setTimeout;
+        vi.stubGlobal('setTimeout', (callback: () => void, delay: number) => {
+            waits.push(delay);
+            return realSetTimeout(callback, 0);
+        });
+        vi.spyOn(Math, 'random').mockReturnValue(0.999999);
+        const { runner } = runnerFor({ storageRetry: { attempts: 4, baseDelayMs: 100, maxDelayMs: 300 } });
+
+        expect((await failureOf(runner.upload(invoice()))).reason).toBe('networkFailed');
+        // At the top of each ceiling: twice the base, then doubled, held to maxDelayMs.
+        expect(waits.map(Math.round)).toEqual([200, 300, 300]);
+    });
+
+    it('says fileUnreadable when the browser cannot read the file, before asking for a ticket', async () => {
+        const { runner, calls } = runnerFor();
+        const file = invoice();
+        file.arrayBuffer = async () => { throw new DOMException('The requested file could not be read.', 'NotReadableError'); };
+
+        const failure = await failureOf(runner.upload(file));
+        expect(failure.reason).toBe('fileUnreadable');
+        expect((failure.cause as DOMException).name).toBe('NotReadableError');
+        expect(calls.requestTicket).toBe(0);
     });
 
     it('hands the upload\'s signal to the app\'s calls, and reads their failure after a cancel as the cancel', async () => {

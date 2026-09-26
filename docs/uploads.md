@@ -233,8 +233,9 @@ a refusal a retry can cure (S3's `RequestTimeout`, `SlowDown`) or a post that
 moves nothing for a minute (`stallTimeoutMs`) is tried again after a random
 wait whose ceiling grows with each attempt, with the same ticket, so a flaky
 connection does not leave the app a record per attempt; `storageRetry` sets
-the attempts and the bounds of the wait. A ticket storage calls expired is
-replaced with a new one at once, spending no attempt, up to twice. The runner
+the attempts and the bounds of the wait. A ticket storage calls expired, or
+whose signing credentials it calls expired (S3's `ExpiredToken`), is replaced
+with a new one at once, spending no attempt, up to twice. The runner
 posts over XMLHttpRequest, the one way a browser reports how much of a body
 has been sent; where only fetch exists it posts over fetch, without progress
 or the stall watch.

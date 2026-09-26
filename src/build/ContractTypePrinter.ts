@@ -14,7 +14,9 @@ import type ts from "typescript";
  * that name: the file stays as small as the contract, a recursive type
  * (JSON, a tree) can refer to itself, and a diagnostic names the type rather
  * than spilling it. Any other type that recurses (an instance of a generic
- * one, a mapped type) is given a name after what it instantiates.
+ * one, a mapped type) is given a name after what it instantiates. Two types
+ * wanting one name (an interface Row in two modules) are told apart by a
+ * number, given out by where each is declared (see printContract).
  *
  * Whatever has no plain form (a function, a symbol key, an enum, a class's
  * private member, a type parameter the contract leaves open) is collected as
@@ -41,6 +43,13 @@ export type PrintedContract = {
  * optional tuple element has to wrap in parentheses.
  */
 type PrintedType = { text: string; compound: boolean };
+
+/**
+ * A type printed as a declaration of its own: the name it wants, where it is
+ * declared (which decides who keeps a name two types want), the name it is
+ * printed under, and its body, null while that is being printed.
+ */
+type Declaration = { base: string; origin: string; name: string; text: string | null };
 
 const INDENT = "    ";
 const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
@@ -75,11 +84,13 @@ const bySourceOrder = (a: ts.Symbol, b: ts.Symbol): number => {
 const unionMemberRank = (text: string) => text === "null" ? 1 : text === "undefined" ? 2 : 0;
 
 export class ContractTypePrinter {
-    private readonly failures: string[] = [];
-    /** Every named declaration by the type it stands for; its text is null while it is being printed. */
-    private readonly declarations = new Map<ts.Type, { name: string; text: string | null }>();
+    private failures: string[] = [];
+    /** Every declaration by the type it stands for. */
+    private declarations = new Map<ts.Type, Declaration>();
+    /** The name each declaration is printed under, settled from all of them; empty on the pass that finds them. */
+    private settledNames = new Map<ts.Type, string>();
     /** Names a declaration may not take: the default library's, and the contract's own. */
-    private readonly takenNames = new Set<string>();
+    private readonly reservedNames = new Set<string>();
     /** The anonymous types being printed: meeting one again inside itself is recursion, and it needs a name. */
     private readonly inProgress = new Set<ts.Type>();
     /** Under exactOptionalPropertyTypes an optional member's type carries the compiler's own "missing" undefined, which its source never wrote. */
@@ -92,7 +103,7 @@ export class ContractTypePrinter {
         private readonly style: ContractPrintStyle,
         contractName: string,
     ) {
-        this.takenNames.add(contractName);
+        this.reservedNames.add(contractName);
         this.exactOptionalProperties = !!program.getCompilerOptions().exactOptionalPropertyTypes;
         // A declaration named after a global the printed text refers to by
         // name (Date) would shadow it.
@@ -100,20 +111,65 @@ export class ContractTypePrinter {
             if(!program.isSourceFileDefaultLibrary(sourceFile)) continue;
             for(const statement of sourceFile.statements){
                 if((ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement) || ts.isClassDeclaration(statement) || ts.isModuleDeclaration(statement))
-                    && statement.name && ts.isIdentifier(statement.name)) this.takenNames.add(statement.name.text);
+                    && statement.name && ts.isIdentifier(statement.name)) this.reservedNames.add(statement.name.text);
             }
         }
     }
 
-    /** Prints each member of the contract type, sorted by name, and every declaration they refer to. */
+    /**
+     * Prints each member of the contract type, sorted by name, and every
+     * declaration they refer to.
+     *
+     * In two passes: the first finds every type that needs a declaration,
+     * and the second prints with their names settled from all of them. Named
+     * as the printer met them, two types wanting one name would trade it
+     * whenever the APIs were registered in another order, or a union's
+     * members created in another, and the file would move with no API
+     * changed.
+     */
     printContract(contract: ts.Type): PrintedContract {
-        const entries = this.checker.getPropertiesOfType(contract)
-            .map((entry) => ({ name: entry.name, text: this.print(this.checker.getTypeOfSymbol(entry), this.keyOf(entry.name)).text }))
-            .sort((a, b) => byCodeUnits(a.name, b.name));
+        const members = [...this.checker.getPropertiesOfType(contract)].sort((a, b) => byCodeUnits(a.name, b.name));
+        const printEntries = () => members.map((entry) => ({ name: entry.name, text: this.print(this.checker.getTypeOfSymbol(entry), this.keyOf(entry.name)).text }));
+        printEntries();
+        this.settledNames = this.settleNames();
+        this.failures = [];
+        this.declarations = new Map();
+        const entries = printEntries();
         const declarations = [...this.declarations.values()]
             .map(({ name, text }) => ({ name, text: text ?? "never" }))
             .sort((a, b) => byCodeUnits(a.name, b.name));
         return { entries, declarations, failures: this.failures };
+    }
+
+    /**
+     * A name for every declaration the first pass found. Of the types that
+     * want one name, the one declared first (by file, then position) keeps
+     * it, and the others take the lowest free number after it once every
+     * type has claimed its own name, so a number never takes the name
+     * another type is declared under. Types declared at one place (two
+     * instantiations of a generic) keep the order the entries reached them
+     * in, by entry name.
+     */
+    private settleNames(): Map<ts.Type, string> {
+        const wanting = [...this.declarations].sort(([, a], [, b]) => byCodeUnits(a.base, b.base) || byCodeUnits(a.origin, b.origin));
+        const taken = new Set(this.reservedNames);
+        const settled = new Map<ts.Type, string>();
+        const numbered: [ts.Type, string][] = [];
+        for(const [type, { base }] of wanting){
+            if(taken.has(base)){
+                numbered.push([type, base]);
+                continue;
+            }
+            taken.add(base);
+            settled.set(type, base);
+        }
+        for(const [type, base] of numbered){
+            let suffix = 2;
+            while(taken.has(`${base}${suffix}`)) suffix++;
+            taken.add(`${base}${suffix}`);
+            settled.set(type, `${base}${suffix}`);
+        }
+        return settled;
     }
 
     /**
@@ -167,20 +223,15 @@ export class ContractTypePrinter {
     private printComposite(type: ts.Type, path: string): PrintedType {
         const known = this.declarations.get(type);
         if(known) return atom(known.name);
-        const ownName = this.declaredNameOf(type);
-        if(ownName !== undefined){
+        const own = this.ownDeclarationOf(type);
+        if(own){
             // Registered before the body is printed, so a reference to itself
             // inside the body finds the name.
-            const declaration: { name: string; text: string | null } = { name: this.takeName(ownName), text: null };
-            this.declarations.set(type, declaration);
+            const declaration = this.declare(type, own);
             declaration.text = this.printStructure(type, path).text;
             return atom(declaration.name);
         }
-        if(this.inProgress.has(type)){
-            const declaration = { name: this.takeName(this.recursiveNameOf(type)), text: null };
-            this.declarations.set(type, declaration);
-            return atom(declaration.name);
-        }
+        if(this.inProgress.has(type)) return atom(this.declare(type, this.recursiveDeclarationOf(type)).name);
         this.inProgress.add(type);
         const printed = this.printStructure(type, path);
         this.inProgress.delete(type);
@@ -191,11 +242,18 @@ export class ContractTypePrinter {
         return atom(recursive.name);
     }
 
-    /** The name a type is declared under, when it is one to print as a declaration: non-generic, and not the default library's. */
-    private declaredNameOf(type: ts.Type): string | undefined {
+    /** A type's declaration, under the name it is settled to once the first pass has settled them. */
+    private declare(type: ts.Type, { base, origin }: { base: string; origin: string }): Declaration {
+        const declaration: Declaration = { base, origin, name: this.settledNames.get(type) ?? base, text: null };
+        this.declarations.set(type, declaration);
+        return declaration;
+    }
+
+    /** The name a type is declared under and where, when it is one to print as a declaration: non-generic, and not the default library's. */
+    private ownDeclarationOf(type: ts.Type): { base: string; origin: string } | undefined {
         const { ObjectFlags, TypeFlags } = this.ts;
         if(type.aliasSymbol){
-            return type.aliasTypeArguments?.length || this.isDefaultLibrary(type.aliasSymbol) ? undefined : this.nameOf(type.aliasSymbol);
+            return type.aliasTypeArguments?.length || this.isDefaultLibrary(type.aliasSymbol) ? undefined : this.declaredAs(type.aliasSymbol);
         }
         if(!(type.flags & TypeFlags.Object)) return undefined;
         const objectFlags = (type as ts.ObjectType).objectFlags;
@@ -204,7 +262,19 @@ export class ContractTypePrinter {
         // (for its `this` type). A generic one's instances are references to
         // it instead, and are printed in place.
         if(objectFlags & ObjectFlags.Reference && ((type as ts.TypeReference).target !== type || (type as ts.InterfaceType).typeParameters?.length)) return undefined;
-        return this.isDefaultLibrary(type.symbol) ? undefined : this.nameOf(type.symbol);
+        return this.isDefaultLibrary(type.symbol) ? undefined : this.declaredAs(type.symbol);
+    }
+
+    /** A symbol's name to declare a type under, and where the symbol is declared. */
+    private declaredAs(symbol: ts.Symbol): { base: string; origin: string } | undefined {
+        const base = this.nameOf(symbol);
+        return base === undefined ? undefined : { base, origin: this.originOf(symbol) };
+    }
+
+    /** Where a symbol is declared, as text that orders by file and then position; empty for one declared nowhere. */
+    private originOf(symbol: ts.Symbol | undefined): string {
+        const declaration = symbol?.declarations?.[0];
+        return declaration ? `${declaration.getSourceFile().fileName}\0${String(declaration.pos).padStart(10, "0")}` : "";
     }
 
     /** The name a symbol is declared under, read off its declaration, so `export default interface Customer` is Customer; undefined when it has none to print. */
@@ -219,8 +289,11 @@ export class ContractTypePrinter {
      * A name for a type that refers to itself and has none of its own: what it
      * instantiates followed by its arguments (a JSON mapping of a Tree is
      * `JsonOfTree`, a `Tree<string>` is `TreeString`), or `RecursiveType`.
+     * Its origin is where what it instantiates is declared, then where each
+     * argument is, so two instantiations named alike are told apart by their
+     * arguments.
      */
-    private recursiveNameOf(type: ts.Type): string {
+    private recursiveDeclarationOf(type: ts.Type): { base: string; origin: string } {
         const { ObjectFlags, TypeFlags } = this.ts;
         let instantiated: { symbol: ts.Symbol; typeArguments: readonly ts.Type[] } | undefined;
         if(type.aliasSymbol){
@@ -231,11 +304,14 @@ export class ContractTypePrinter {
             instantiated = { symbol: target.symbol, typeArguments };
         }
         const base = instantiated && this.nameOf(instantiated.symbol);
-        if(!instantiated || !base) return "RecursiveType";
+        if(!instantiated || !base) return { base: "RecursiveType", origin: this.originOf(type.symbol) };
         const argumentNames = instantiated.typeArguments
             .map((argument) => (argument.aliasSymbol && this.nameOf(argument.aliasSymbol)) ?? (argument.symbol && this.nameOf(argument.symbol)) ?? this.checker.typeToString(argument))
             .filter((name) => IDENTIFIER.test(name));
-        return `${base}${argumentNames.map((name) => name[0]!.toUpperCase() + name.slice(1)).join("")}`;
+        return {
+            base: `${base}${argumentNames.map((name) => name[0]!.toUpperCase() + name.slice(1)).join("")}`,
+            origin: [instantiated.symbol, ...instantiated.typeArguments.map((argument) => argument.aliasSymbol ?? argument.symbol)].map((symbol) => this.originOf(symbol)).join("\n"),
+        };
     }
 
     private printStructure(type: ts.Type, path: string): PrintedType {
@@ -405,13 +481,6 @@ export class ContractTypePrinter {
         // Every double quote inside is escaped, so each \" is a quote and
         // never the tail of an escaped backslash.
         return `'${doubleQuoted.slice(1, -1).replace(/\\"/g, "\"").replace(/'/g, "\\'")}'`;
-    }
-
-    private takeName(base: string): string {
-        let name = base;
-        for(let suffix = 2; this.takenNames.has(name); suffix++) name = `${base}${suffix}`;
-        this.takenNames.add(name);
-        return name;
     }
 
     private fail(path: string, reason: string): PrintedType {

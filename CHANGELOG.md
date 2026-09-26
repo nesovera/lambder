@@ -9,6 +9,34 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [8.1.2] - 2026-09-26
+
+### Fixed
+
+- **`writeApiContract` names no longer follow the order APIs are registered
+  in.** Two types that want one name (an interface `Row` in two modules) were
+  told apart by a number given in the order the printer met them, so
+  reordering registrations, or adding an API that reaches one of them first,
+  swapped `Row` and `Row2` and reported every API using either as changed.
+  The printer now finds every declaration first and numbers them by where
+  each is declared, the one declared first (by file, then position) keeping
+  the name, and a number never takes the name another type is declared
+  under. A file already written may be renamed once, the first time it is
+  written with this version.
+- **`LambderUploadRunner` randomises its first wait too.** The ceiling of the
+  first wait before trying storage again was the base itself, so browsers
+  dropped together all came back exactly `baseDelayMs` later. Each wait is
+  now between `baseDelayMs` and twice it, doubling with every failed attempt
+  up to `maxDelayMs`.
+- **`LambderUploadRunner` renews a ticket on `ExpiredToken`,** which S3
+  answers when the temporary credentials that signed the ticket ran out
+  before the ticket did. It is renewed like an expired ticket, at once and
+  spending no attempt; before, the upload failed as `storageRejected`.
+- **`LambderUploadRunner` no longer holds the file's bytes through the
+  upload.** The buffer it hashes, as large as the file, was kept in a local
+  for the whole post and every retry; it is now read straight into the
+  digest.
+
 ## [8.1.1] - 2026-09-26
 
 Two additions, and three breaking changes a minor line carries here on

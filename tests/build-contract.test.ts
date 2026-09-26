@@ -249,6 +249,29 @@ describe('writeApiContract', () => {
         expect(printed).toContain('type TreeNumber = {\n    value: number;\n    children: TreeNumber[];\n};');
     }, COMPILER_TIMEOUT_MS);
 
+    it('numbers types sharing a name by where each is declared, whatever order the APIs are registered in', async () => {
+        const files = {
+            'orders.ts': 'export interface Row { orderId: string }',
+            'users.ts': 'export interface Row { userId: string }\nexport interface Row2 { note: string }',
+        };
+        const imports = 'import type { Row as OrderRow } from "./orders";\nimport type { Row as UserRow, Row2 } from "./users";';
+        // The entry reaching users.ts's Row sorts first, and orders.ts is declared first.
+        const accounts = '{ "accounts.list": { input: {}; output: { rows: UserRow[]; note: Row2 }; mode: "public" } }';
+        const orders = '{ "orders.list": { input: {}; output: OrderRow[]; mode: "public" } }';
+        const accountsFirst = projectWith(contractModule(imports, `${accounts} & ${orders}`), { files });
+        const ordersFirst = projectWith(contractModule(imports, `${orders} & ${accounts}`), { files });
+
+        expect((await writeApiContract(accountsFirst)).ok).toBe(true);
+        expect((await writeApiContract(ordersFirst)).ok).toBe(true);
+        const printed = readFileSync(accountsFirst.file, 'utf8');
+        expect(readFileSync(ordersFirst.file, 'utf8')).toBe(printed);
+        // The Row declared first keeps the name, and the other takes the
+        // first number no type is declared under.
+        expect(printed).toContain('type Row = {\n    orderId: string;\n};');
+        expect(printed).toContain('type Row2 = {\n    note: string;\n};');
+        expect(printed).toContain('type Row3 = {\n    userId: string;\n};');
+    }, COMPILER_TIMEOUT_MS);
+
     it('escapes what a template literal holds, so its text prints back as the same text', async () => {
         const { module, file } = projectWith(contractModule('', '{ "orders.get": { input: {}; output: { reference: `line\\n\\`${number}` }; mode: "public" } }'));
 

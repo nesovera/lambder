@@ -48,10 +48,10 @@ export type LambderUploadRunnerOptions<Reference, Receipt> = {
     /**
      * How storage is tried again when it cannot be reached, stalls, or answers
      * a failure a retry can cure (a 5xx, RequestTimeout, SlowDown). Each wait
-     * is a random time between `baseDelayMs` and a ceiling that doubles with
-     * every failed attempt, never past `maxDelayMs`, so many browsers dropped
-     * together do not come back in step. Default: 4 attempts, waits from one
-     * second to 15.
+     * is a random time between `baseDelayMs` and a ceiling of twice that,
+     * doubling with every failed attempt and never past `maxDelayMs`, so many
+     * browsers dropped together do not come back in step, not even the first
+     * time. Default: 4 attempts, waits from one second to 15.
      */
     storageRetry?: {
         attempts?: number;

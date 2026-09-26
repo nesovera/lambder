@@ -88,7 +88,8 @@ export type LambderApiContractFileResult = {
  * written module imports nothing, not even lambder, and exports one type
  * alias, `typeName`. Only the default library's interfaces (Date) are printed
  * by name. A non-generic named type is printed once, as a declaration of its
- * own that the entries refer to.
+ * own that the entries refer to; two that want one name are numbered by where
+ * each is declared, never by the order the APIs were registered in.
  *
  * Anything with no plain form fails the call and names where it sits: a
  * function, a symbol-keyed property, an enum, a class's private member, or a

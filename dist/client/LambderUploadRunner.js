@@ -59,18 +59,16 @@ export class LambderUploadRunner {
         };
         stopIfCancelled();
         report("hashing");
-        let bytes;
-        try {
-            bytes = new Uint8Array(await file.arrayBuffer());
-        }
-        catch (cause) {
-            throw new LambderUploadError("fileUnreadable", { cause });
-        }
         const fileFacts = {
             fileName: file.name,
             mimeType: file.type,
             byteSize: file.size,
-            sha256Base64: await sha256Base64Of(bytes),
+            // Read straight into the digest, never into a variable: the buffer
+            // is the size of the file, and a local would keep it through
+            // every await of the upload that follows.
+            sha256Base64: await sha256Base64Of(new Uint8Array(await file.arrayBuffer().catch((cause) => {
+                throw new LambderUploadError("fileUnreadable", { cause });
+            }))),
         };
         stopIfCancelled();
         const requestTicket = async () => {
@@ -120,7 +118,7 @@ export class LambderUploadRunner {
         await this.options.discardUpload?.(receipt);
     }
     waitBeforeRetry(failedAttempts, signal) {
-        const ceiling = Math.max(this.baseDelayMs, Math.min(this.baseDelayMs * 2 ** (failedAttempts - 1), this.maxDelayMs));
+        const ceiling = Math.max(this.baseDelayMs, Math.min(this.baseDelayMs * 2 ** failedAttempts, this.maxDelayMs));
         return new Promise((resolve, reject) => {
             if (signal?.aborted)
                 return reject(new LambderUploadError("cancelled"));
@@ -218,8 +216,10 @@ const xmlText = (text) => text.replace(/&(#x[0-9a-f]+|#\d+|\w+);/gi, (entity, na
 /**
  * Storage explains a refusal in XML, `<Error><Code/><Message/></Error>`,
  * read here without a DOM so the runner works wherever fetch does. A
- * transient code is tried again like a dropped connection, and an expired
- * ticket is the one refusal a new ticket cures.
+ * transient code is tried again like a dropped connection. An expired ticket
+ * is the one refusal a new ticket cures, and so is ExpiredToken: the
+ * temporary credentials that signed the ticket ran out before it did, and
+ * the next one is signed with fresh ones.
  */
 const rejectedOutcome = (status, body) => {
     const code = xmlText(/<Code>([^<]*)<\/Code>/.exec(body)?.[1] ?? "") || `HTTP ${status}`;
@@ -228,7 +228,7 @@ const rejectedOutcome = (status, body) => {
         return { kind: "unreachable" };
     return {
         kind: "rejected",
-        ticketExpired: code === "AccessDenied" && /expired/i.test(message),
+        ticketExpired: code === "ExpiredToken" || (code === "AccessDenied" && /expired/i.test(message)),
         detail: message ? `${code}: ${message}` : code,
     };
 };

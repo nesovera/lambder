@@ -1,5 +1,6 @@
 import { assertObjectOptions, assertPinnedObjectKey, assertSignatureLifetime, } from "../shared/contracts/LambderUploadBucket.js";
 import { contentDispositionHeader } from "../shared/util/LambderContentDisposition.js";
+import { escapeXmlText } from "../shared/util/escapeXmlText.js";
 import { uploadObjectFormFields } from "../shared/wire/LambderUploadObjectFields.js";
 import { refuseUnacceptedUpload } from "../shared/wire/LambderUploadRefusal.js";
 import { sha256Base64Of } from "../shared/util/LambderTextDigest.js";
@@ -214,6 +215,5 @@ export class LambderMemoryUploadBucket {
 /** A key as a URL path: each segment escaped, the slashes kept, as S3 addresses an object. */
 const encodeObjectKey = (objectKey) => objectKey.split("/").map(encodeURIComponent).join("/");
 const decodeObjectKey = (path) => path.split("/").map(decodeURIComponent).join("/");
-const escapeXml = (text) => text.replace(/[<>&'"]/g, (character) => `&#${character.charCodeAt(0)};`);
 /** An error the way S3 writes one: the status, and `<Error><Code/><Message/></Error>` as XML. */
-const storageError = (status, code, message) => new Response(`<?xml version="1.0" encoding="UTF-8"?>\n<Error><Code>${escapeXml(code)}</Code><Message>${escapeXml(message)}</Message></Error>`, { status, headers: { "content-type": "application/xml" } });
+const storageError = (status, code, message) => new Response(`<?xml version="1.0" encoding="UTF-8"?>\n<Error><Code>${escapeXmlText(code)}</Code><Message>${escapeXmlText(message)}</Message></Error>`, { status, headers: { "content-type": "application/xml" } });
