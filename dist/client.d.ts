@@ -36,3 +36,7 @@ export { html, xml, raw, jsonScript, escapeHtml, renderHtmlValue, LambderSafeHtm
 export { createLambderI18n } from "./shared/LambderI18n.js";
 export type { LambderLanguageMeta, LambderI18nConfig, LambderI18nInstance, LambderI18nTranslator, LambderI18nExtractParams, LambderI18nDictionaryLoader, LambderI18nCodes, LambderI18nKeys, LambderI18nTranslatorFor, } from "./shared/LambderI18n.js";
 export type { LambderHttpStatusCode } from "./shared/wire/LambderHttpStatus.js";
+export { LambderUploadRunner, LambderUploadError } from "./client/LambderUploadRunner.js";
+export type { LambderUploadRunnerOptions, LambderUploadProgress, LambderUploadPhase, LambderUploadFailureReason } from "./client/LambderUploadRunner.js";
+export { checkUploadRule } from "./shared/contracts/LambderUploadBucket.js";
+export type { LambderUploadRule, LambderUploadFileFacts, LambderUploadTicket, LambderUploadRuleVerdict } from "./shared/contracts/LambderUploadBucket.js";

@@ -50,6 +50,14 @@ export { LambderFiles } from "./core/LambderFiles.js";
 export { LambderLocalFileSource } from "./stores/LambderLocalFileSource.js";
 export { LambderS3FileSource } from "./stores/LambderS3FileSource.js";
 export { LambderHttpFileSource } from "./stores/LambderHttpFileSource.js";
+// Direct uploads: storage a browser posts a file to with a ticket the server
+// signed, the schemas an app's ticket endpoint declares, and the browser runner.
+export { LambderS3UploadBucket } from "./stores/LambderS3UploadBucket.js";
+export { LambderMemoryUploadBucket } from "./stores/LambderMemoryUploadBucket.js";
+export { checkUploadRule } from "./shared/contracts/LambderUploadBucket.js";
+export { LambderUploadFileFactsSchema, LambderUploadTicketSchema } from "./shared/wire/LambderUploadSchemas.js";
+export { refuseUnacceptedUpload } from "./shared/wire/LambderUploadRefusal.js";
+export { LambderUploadRunner, LambderUploadError } from "./client/LambderUploadRunner.js";
 // Compression: the option every site shares, and the one codec behind them all.
 export { resolveCompressionOption, LAMBDER_ENCODINGS } from "./shared/wire/LambderCompressionOption.js";
 // Brotli/gzip plus the bounded, length-verified restore every compressed

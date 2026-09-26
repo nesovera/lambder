@@ -26,6 +26,8 @@ export { LambderMemorySessionStore } from "./stores/LambderMemorySessionStore.js
 export { LambderMemoryRateLimiter } from "./stores/LambderMemoryRateLimiter.js";
 export { LambderMemoryIdempotencyStore } from "./stores/LambderMemoryIdempotencyStore.js";
 export { LambderMemoryCache } from "./stores/LambderMemoryCache.js";
+export { LambderMemoryUploadBucket } from "./stores/LambderMemoryUploadBucket.js";
+export type { LambderMemoryUploadBucketOptions, LambderMemoryUploadObject } from "./stores/LambderMemoryUploadBucket.js";
 export { LambderLocalFileSource } from "./stores/LambderLocalFileSource.js";
 export { LambderCookieJar } from "./shared/transport/LambderCookieJar.js";
 export { LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";

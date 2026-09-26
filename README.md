@@ -67,6 +67,10 @@ const company = await caller.api("getCompany", { slug: "acme" });
 - **Frontend hosting.** Serve a build from a folder, S3, R2 or any HTTP
   origin, with an app shell rendered through a build-pipeline-safe template
   engine.
+- **Direct uploads.** Files go from the browser straight to S3 on tickets
+  that pin their size, type and SHA-256, with a browser runner that hashes,
+  retries and reports progress, and a memory bucket that holds tests and the
+  mock to the same rules.
 - **Runs anywhere Lambda does.** API Gateway REST APIs (payload v1), HTTP APIs
   (payload v2) and Lambda Function URLs; the payload format is detected per
   event.
@@ -112,7 +116,7 @@ The package ships five entry points; pick by where the code runs:
 | `lambder/client` | Browser and isomorphic shared code | `LambderCaller`, `LambderApiRefusal`/`refuse`, the API contract and envelope types, `html`/`xml` tagged templates, `createLambderI18n` |
 | `lambder/mock` | Browser and Node, in development and tests | `LambderMockApp`, the mock runtime: your typed contract served from mock handlers over the real API pipeline and memory stores |
 | `lambder/testing` | Node, in tests | `lambderTestApp`: your real instance under test in this process, memory stores put under it in place, simulated browsers with typed callers in front of it, and the outcome assertions |
-| `lambder/build` | Node, in a build step | `writeApiSignatures`: the signature file both sides ship, written or checked from your instance |
+| `lambder/build` | Node, in a build step | `writeApiSignatures`: the signature file both sides ship, written or checked from your instance; `writeApiContract`: the contract as plain types a client compiles instead of the server |
 
 Frontends and shared isomorphic packages should import from `lambder/client`
 only; the entry's module graph contains no AWS SDK, Node built-ins, or server
@@ -156,6 +160,7 @@ guide that matches what you are building. The full index lives in
 | [The API core](./docs/api-core.md) | `LambderApiPipeline`: the one pipeline the server and the mock runtime run, the store interfaces, the transports |
 | [Frontend client](./docs/client.md) | `LambderCaller`: typed calls, failure outcomes, timeouts, guard inputs, request compression, transports |
 | [Frontend hosting](./docs/frontend-hosting.md) | File sources, `servePublicFiles`, `serveIndexHtml`, `res.templateFile` |
+| [Direct uploads](./docs/uploads.md) | Files the browser posts straight to S3 with tickets the server signs, verified before they count |
 | [Templating](./docs/templating.md) | `html`/`xml` tagged templates and `LambderTemplatingEngine` |
 | [Translations](./docs/i18n.md) | `createLambderI18n`: typed keys, extension, detection, on-demand languages, runtime dictionaries |
 | [The mock runtime](./docs/mock.md) | `LambderMockApp`: the typed contract served from mock handlers over the real pipeline, in the browser and in tests |

@@ -81,39 +81,22 @@ second registration would be silently dead code.
 ## The inferred contract
 
 ```typescript
-import type { LambderFlattenContract } from "lambder";
+export const lambder = initLambder().create({ ... })
+    .addApi(...)
+    .addSessionApi(...);
 
-export interface ApiContractType extends LambderFlattenContract<typeof lambder.ApiContract> {}
+export type ApiContractType = typeof lambder.ApiContract;
 export const handler = lambder.getHandler();
 ```
 
-An interface, not a type alias, and the distinction is worth real time in a
-large app. Chaining leaves the contract an intersection one member deep per
-endpoint, so every `C[K]` written against a type parameter resolves the
-property across all of them. That lookup is the atom the contract-reading
-helpers are built from, which means a mock registry, a needs map or a typed
-caller pays it again per endpoint. Extending an interface declares the
-members once instead, and the lookups become ordinary property access. In a
-182-endpoint app the frontend type check went from 27.8M type instantiations
-and 20.2s of check time to 7.0M and 10.6s, with the same diagnostics.
-
-`type C = LambderFlattenContract<...>` does not do this. A mapped type stays
-deferred and each lookup pays the full cost again, so the `interface ...
-extends` spelling is the point. Diagnostics stay the same ones and read
-better: a message naming the contract prints the interface by name, where an
-intersection is printed as a truncated spill of entries.
-
-Two things quietly undo it, and both look like tidying:
-
-- `@typescript-eslint/no-empty-object-type` reports the empty body as
-  "equivalent to its supertype" and offers a type alias as the fix. Disable
-  the rule on that line instead.
-- Extending anything other than the mapped type loses the inferable index
-  signature. An interface has none of its own, so a hand-written
-  `interface ApiContractType { ... }` is not assignable to
-  `LambderApiContractShape` and `initLambderMock<C>`, `LambderCaller<C>` and
-  `LambderInvokeCaller<C>` all reject it. Extending
-  `LambderFlattenContract<...>` is what keeps it.
+`ApiContract` is a type-only property: it holds every registered API as a
+client calls it. A small app's frontend imports `ApiContractType` from here as
+it is. Chaining builds it as an intersection one member deep per endpoint, so
+every generic read of it (a typed caller, a mock registry, a test visitor)
+resolves the member across all of them; in a large app that, and compiling the
+server's schemas to get the type at all, is most of a client's type check. Such
+an app writes the contract out as a generated file instead and has its clients
+import that; see [the contract as a generated file](#the-contract-as-a-generated-file).
 
 Each contract entry carries the API's `input` and `output`, its `guardInputs`
 when a guardInput-mode guard applies, and its `guards` option exactly as
@@ -162,6 +145,93 @@ const ADMIN_APIS = ["admin.listUsers", "admin.deleteUser"] as const satisfies re
 const adminApisComplete: [Exclude<AdminApi, (typeof ADMIN_APIS)[number]>] extends [never] ? true : false = true;
 ```
 
+## The contract as a generated file
+
+A client that imports `ApiContractType` from the server's entry compiles the
+server to get it: every endpoint's schemas, the libraries they infer through,
+and whatever else the entry imports. In a small app that costs nothing worth
+measuring. In one with a couple of hundred endpoints it is most of the
+client's type check: in a 193-endpoint app, 17 of the frontend check's 19
+million type instantiations, and 2.4 of its 4.8 GB, went to deriving again a
+contract the server had already worked out.
+
+`writeApiContract` from `lambder/build` writes the contract out once, as plain
+types in a module that imports nothing, and the client imports it from there
+instead:
+
+```typescript
+// tools/generate-api-contract.ts
+import { writeApiContract } from "lambder/build";
+
+const result = await writeApiContract({
+    module: "backend/index.ts",   // export const lambder = initLambder()...
+    exportName: "lambder",        // default: the module's default export
+    file: "shared/generated/apiContract.generated.ts",
+    check: process.argv.includes("--check"),
+});
+console.log(result.lines.join("\n"));
+process.exit(result.ok ? 0 : 1);
+```
+
+```typescript
+// in the frontend
+import type { ApiContractType } from "../shared/generated/apiContract.generated.js";
+```
+
+The contract is the `ApiContract` property of the instance `module` exports,
+read through the TypeScript compiler under the server's `tsconfig.json` (the
+nearest one above `module`, or the one `tsconfig` names), so path aliases
+resolve as they do in the server's own check, and none of the server runs.
+The app declares nothing for it. Every type is printed as the structure it resolves to: zod's
+inferences, mapped and conditional types and the server's own types become
+object types, unions and literals. The default library's interfaces (`Date`)
+keep their names. A non-generic named type is printed once, as a declaration
+of its own that the entries refer to, which is also how a recursive type (a
+tree, a JSON value) refers to itself; any other type that recurses is named
+after what it instantiates (`Tree<string>` is `TreeString`). Properties keep
+the order they are written in, so the file changes only when an API does. The module exports one type alias,
+`typeName` (default `ApiContractType`), of an object type with plain members:
+reading it is ordinary property access, and as an alias rather than an
+interface it has the inferable index signature `LambderCaller`, the mock and
+`LambderInvokeCaller` ask for.
+
+Anything with no plain form fails the call and says where it sits: a function,
+a symbol-keyed property, an enum, a class's private member, a type parameter
+the contract leaves open. So does a type the compiler could not resolve, which
+a compile error anywhere in the server's sources leaves in the contract where
+a type was meant, and which would otherwise print as `any`; and so does an
+entry module that does not compile. Property `readonly` modifiers are not
+carried over, since assignability ignores them; readonly arrays and tuples
+are. Under `exactOptionalPropertyTypes` an optional member prints as written,
+without the `undefined` the compiler adds to it.
+
+Every client of the app is a candidate: the frontend, another service calling
+it through `LambderInvokeCaller`, and the app's own tests, which name it in
+`lambderTestApp<SessionData, ApiContractType>(lambder)` so their calls are typed
+against plain members. The server's own checks against its declarations (a
+needs map's `satisfies`, say) keep reading `typeof lambder.ApiContract`, which
+is exact and costs a server little.
+
+Before it touches the file, a write compiles the new text beside the server's
+sources and checks every entry against the contract in both directions, and
+writes nothing when one differs. With `check: true` it writes nothing and fails
+when the file on disk is not what the contract prints now, the gate for a CI
+step. Either way the result names the APIs that moved (`~ changed`,
+`+ added`, `- removed`), counting a change to a named declaration against
+every API that reaches it. The check compares text, so keep the file out of
+formatters; each declaration carries a `// prettier-ignore` line for Prettier.
+`header`, `quotes` and `semicolons` shape the file to the project's style.
+
+The compiler is the `typescript` package
+installed beside lambder, 5.4 or later with the compiler API, which means 5.x
+or 6.x (an optional peer dependency, left open so an app on TypeScript 7 still
+installs lambder): TypeScript 7 ships no compiler API, so an app on 7 gives the
+generator a 6.x of its own, in the package the generator script runs from, and
+the generator says so when it finds a 7. Reading
+the contract compiles the server once, and a write that changes the file
+compiles it twice; give a large server's generator a heap to match
+(`node --max-old-space-size=8192`).
+
 ## Modular APIs with `use()`
 
 For larger applications, split APIs into modules. `use()` preserves the
@@ -186,9 +256,9 @@ export const userApi = (lambder: AppLambder) => lambder
 import { lambderApp } from "./app";
 import { userApi } from "./user-api";
 
-const lambder = lambderApp.use(userApi);
+export const lambder = lambderApp.use(userApi);
 
-export interface ApiContractType extends LambderFlattenContract<typeof lambder.ApiContract> {}
+export type ApiContractType = typeof lambder.ApiContract;
 export const handler = lambder.getHandler();
 ```
 
@@ -281,15 +351,17 @@ before a deploy, by checking what it wrote from a second process.
 `lambder.apiSignatures()` returns every registered endpoint's signature,
 keyed by the endpoint's hashed name, as a `LambderApiSignatureMap`, and
 `writeApiSignatures` from `lambder/build` writes it to the module both the
-frontend and the server ship with. A generator script imports the finished
-instance and hands it over; run it before every build, not by hand:
+frontend and the server ship with. A generator script names the module that
+exports the finished instance, as it does for `writeApiContract`, and the
+function imports it; run it before every build, not by hand:
 
 ```typescript
 // tools/generate-api-signatures.ts
 import { writeApiSignatures } from "lambder/build";
-import { lambder } from "../backend/index.js";   // the instance with every API registered
 
-const result = await writeApiSignatures(lambder, {
+const result = await writeApiSignatures({
+    module: "backend/index.ts",   // export const lambder = ..., with every API registered
+    exportName: "lambder",        // default: the module's default export
     file: "shared/generated/apiSignatures.generated.ts",   // importable by the frontend and the server
     check: process.argv.includes("--check"),
 });
@@ -312,32 +384,26 @@ line, so Prettier leaves it as written. `header`, `quotes` and `semicolons`
 shape the file to the project's style, and a change to them shows with the
 next change of the map (or after deleting the file).
 
-`verifyInFreshProcess` also checks the file from a fresh Node process, after
-a write and after a check that finds it current, which is where a schema
-that digests differently in every process (it reads the clock or a random
-source) shows, named, rather than as signatures that change on every build.
-It names the module that holds the instance, and the export unless it is the
-default one:
+`module` is a path relative to the working directory, or a file URL, as a
+`URL` (`new URL("../backend/index.ts", import.meta.url)`) or as the string
+`import.meta.resolve()` answers. It is imported in the generator's own
+process, so a TypeScript module needs the loader the script runs under
+(`tsx`, `node --import tsx`). A module that does not load, or an export that
+is not an instance, throws before anything is written.
 
-```typescript
-const result = await writeApiSignatures(lambder, {
-    file: "shared/generated/apiSignatures.generated.ts",
-    verifyInFreshProcess: { module: new URL("../backend/index.js", import.meta.url), exportName: "lambder" },
-});
-```
-
-The fresh process loads that module alone, never the generator script, so
-nothing the script does before or after the call runs twice; the module's own
-top-level code runs there, as it would for any import of it. `module` is a
-file URL, as a `URL` as above or as the string `import.meta.resolve()`
-answers, or a path relative to the working directory, and `exportName`
-defaults to `"default"`. The process gets the generator's Node flags less the
+After a write, and after a check that finds the file current, the file is
+checked again from a fresh Node process, which is where a schema that digests
+differently in every process (it reads the clock or a random source) shows,
+named, rather than as signatures that change on every build.
+`verifyInFreshProcess: false` skips it. The fresh process loads the module
+alone, never the generator script, so nothing the script does before or after
+the call runs twice; the module's own top-level code runs there, as it would
+for any import of it. The process gets the generator's Node flags less the
 inspector, watch mode, the test runner and the eval flags (`-e`, `-p`, `-pe`,
 `--input-type`), so a TypeScript module loads there as it did in the
 generator when its loader is on the command line (`node --import tsx`, the
-`tsx` CLI) or in `NODE_OPTIONS`. A
-loader registered from inside the script is not there, and a module that fails
-to load, or an export that is not an instance, fails the check with the
+`tsx` CLI) or in `NODE_OPTIONS`. A loader registered from inside the script is
+not there, and a module that fails to load there fails the check with the
 reason.
 
 `lambder.apiSignatureEntries()` is the same signatures with the endpoint name
@@ -429,6 +495,9 @@ the reserved `lambder/` prefix, so app codes never collide:
 | `apiNotFound` | `lambder/api-not-found` | No API is registered under the requested name |
 | `invalidRequestPayload` | `lambder/invalid-request-payload` | A compressed request payload (`payloadGz` or `payloadBr`) is malformed, carries both fields, or exceeds `maxRequestPayloadBytes` (400) |
 | `notMocked` | `lambder/not-mocked` | The mock runtime was asked for an endpoint registered as `notMocked` (200; the mock runtime only) |
+| `uploadEmpty` | `lambder/upload-empty` | An upload bucket was asked to sign a ticket for a file with no bytes (see [Direct uploads](./uploads.md)) |
+| `uploadTypeRejected` | `lambder/upload-type-rejected` | An upload bucket was asked to sign a ticket for a content type the rule does not accept |
+| `uploadTooLarge` | `lambder/upload-too-large` | An upload bucket was asked to sign a ticket for a file larger than the rule accepts |
 
 A rate-limit policy's own `errorMessage` inherits `lambder/rate-limited` unless
 it sets a code, so an `errorMessageHandler` can treat every rate limit alike and

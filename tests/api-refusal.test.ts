@@ -297,6 +297,9 @@ describe('LambderRefusalMessage - branching on the code', () => {
                 case LAMBDER_REFUSAL_CODES.apiNotFound: return 'no such api';
                 case LAMBDER_REFUSAL_CODES.invalidRequestPayload: return 'bad payload';
                 case LAMBDER_REFUSAL_CODES.notMocked: return 'not mocked';
+                case LAMBDER_REFUSAL_CODES.uploadEmpty: return 'empty file';
+                case LAMBDER_REFUSAL_CODES.uploadTypeRejected: return 'wrong kind of file';
+                case LAMBDER_REFUSAL_CODES.uploadTooLarge: return 'file too large';
                 case undefined: return message.content;
                 default: {
                     const unreachable: never = message.code;

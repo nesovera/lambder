@@ -537,7 +537,7 @@ describe('The mock app as a callee', () => {
         class FakeHttpResponse extends Response {
             static error(): Response { return new Response(null, { status: 599 }); }
         }
-        const msw = { http: { post: (path: string, resolver: (info: { request: Request }) => Promise<unknown>) => { registered.push({ path, resolver }); return 'handler'; } }, HttpResponse: FakeHttpResponse };
+        const msw = { http: { post: (path: string, resolver: (info: { request: Request }) => Promise<unknown>) => { registered.push({ path, resolver }); return 'handler'; }, all: () => 'unused' }, HttpResponse: FakeHttpResponse };
         expect(lambderMockMswHandler(mockApp, { msw, apiPath: '/secure', cookieJar: jar })).toBe('handler');
         expect(registered[0]!.path).toBe('/secure');
         const resolve = registered[0]!.resolver;
@@ -587,7 +587,7 @@ describe('The mock app as a callee', () => {
         class FakeHttpResponse extends Response {
             static error(): Response { return new Response(null, { status: 599 }); }
         }
-        const msw = { http: { post: (_path: string, resolver: (info: { request: Request }) => Promise<unknown>) => { registered.push(resolver); return 'handler'; } }, HttpResponse: FakeHttpResponse };
+        const msw = { http: { post: (_path: string, resolver: (info: { request: Request }) => Promise<unknown>) => { registered.push(resolver); return 'handler'; }, all: () => 'unused' }, HttpResponse: FakeHttpResponse };
         lambderMockMswHandler(mockApp, { msw, apiPath: '/api', cookieJar: jar });
         const call = (body: unknown) => registered[0]!({ request: new Request('http://app.test/api', { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json' } }) }) as Promise<Response>;
 

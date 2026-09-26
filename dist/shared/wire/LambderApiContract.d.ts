@@ -148,49 +148,19 @@ export type LambderContractEntry<In, Out, Mode extends LambderApiMode, GuardInpu
 }) & ([Idempotency] extends [never] ? {} : {
     idempotency: Idempotency;
 });
-/** Helper type for merging a new entry into the contract during chaining. */
+/**
+ * Merges a new entry into the contract during chaining.
+ *
+ * The contract is therefore an intersection one member deep per endpoint, and
+ * every `C[K]` read generically (a typed caller, a mock registry, a test
+ * visitor) resolves the property across all of them. That costs nothing
+ * worth measuring in a small app and most of a large client's type check,
+ * which is what writeApiContract (lambder/build) is for: it writes the
+ * contract out as one object type with plain members, for clients to import
+ * instead of the server.
+ */
 export type LambderMergeContract<Old, Name extends string, Entry> = Old & {
     [K in Name]: Entry;
-};
-/**
- * The contract as one object type, for the `export interface` a consuming
- * app declares its contract through:
- *
- * ```ts
- * export interface ApiContractType extends LambderFlattenContract<typeof lambder.ApiContract> {}
- * ```
- *
- * Chaining leaves the contract an intersection one member deep per endpoint
- * (LambderMergeContract above), and every `C[K]` against a type parameter
- * resolves the property across all of them. The reading helpers below are
- * built on that lookup, so each pays it again per endpoint: in a 182-endpoint
- * app one indexed access costs ~3,000 type instantiations and one mock
- * registration ~18,000.
- *
- * An interface's members are declared, so they resolve once for the whole
- * declaration: the same access costs ~6 instantiations instead, roughly
- * halving such an app's frontend type check time. The alias form
- * (`type C = LambderFlattenContract<...>`) does NOT do this: a mapped type
- * stays deferred and each lookup pays in full, so the `interface ... extends`
- * spelling is the point. Diagnostics also print the interface by name rather
- * than a truncated spill of entries.
- *
- * Every endpoint name must be a string literal for an interface to extend
- * the result, which registration through addApi/addSessionApi guarantees.
- *
- * Two things that look like tidying undo it:
- *
- * - `@typescript-eslint/no-empty-object-type` reports the empty body as
- *   "equivalent to its supertype" and its fix is a type alias, the one
- *   spelling that collapses nothing. Disable the rule on the line instead.
- * - Extending anything but a mapped type loses the inferable index signature.
- *   A hand-written `interface C { ... }` has none, so it is not assignable to
- *   LambderApiContractShape, and initLambderMock<C>, LambderCaller<C> and
- *   LambderInvokeCaller<C> reject it. api-contract.test.ts pins this, and
- *   that the flattened contract is the same type member for member.
- */
-export type LambderFlattenContract<C> = {
-    [K in keyof C]: C[K];
 };
 /** Guard names referenced by a guards option, whichever of its three forms is used. */
 export type LambderGuardNamesIn<TOpt> = TOpt extends string ? TOpt : TOpt extends readonly (infer N extends string)[] ? N : TOpt extends object ? keyof TOpt & string : never;

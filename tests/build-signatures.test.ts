@@ -17,13 +17,29 @@ import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
 import { initLambder } from '../src/core/Lambder.js';
 import { writeApiSignatures } from '../src/build.js';
-import { freshProcessNodeFlags } from '../src/build/writeApiSignatures.js';
+import { freshProcessNodeFlags, type LambderApiSignatureFileOptions, type LambderApiSignatureSource } from '../src/build/writeApiSignatures.js';
 
 const directory = mkdtempSync(join(tmpdir(), 'lambder-signatures-'));
 afterAll(() => rmSync(directory, { recursive: true, force: true }));
 
 let fileCount = 0;
 const nextFile = () => join(directory, `apiSignatures-${fileCount++}.generated.ts`);
+
+let moduleCount = 0;
+/**
+ * A module exporting an app's signatures as the app lists them: what the
+ * server's entry is to writeApiSignatures, which imports it.
+ */
+const moduleFor = async (app: LambderApiSignatureSource, exportName = 'default') => {
+    const path = join(directory, `instance-${moduleCount++}.mjs`);
+    const entries = JSON.stringify(await app.apiSignatureEntries());
+    writeFileSync(path, `const instance = { apiSignatureEntries: async () => ${entries} };\nexport ${exportName === 'default' ? 'default instance' : `{ instance as ${exportName} }`};\n`);
+    return path;
+};
+
+/** writeApiSignatures over an app built here, in this process only: the fresh-process check has its own cases below. */
+const write = async (app: LambderApiSignatureSource, options: Omit<LambderApiSignatureFileOptions, 'module'>) =>
+    writeApiSignatures({ module: await moduleFor(app), verifyInFreshProcess: false, ...options });
 
 const appWith = (echoOutput: z.ZodType) => initLambder().create({ apiPath: '/api' })
     .addApi('echo', { input: z.object({ text: z.string() }), output: echoOutput }, async (_ctx, res) => res.api(null as never))
@@ -34,7 +50,7 @@ describe('writeApiSignatures', () => {
         const app = appWith(z.object({ text: z.string() }));
         const file = nextFile();
 
-        const result = await writeApiSignatures(app, { file });
+        const result = await write(app, { file });
 
         expect(result).toMatchObject({ ok: true, written: true, count: 2, changed: [], added: ['echo', 'ping'], removedKeys: [] });
         const contents = readFileSync(file, 'utf8');
@@ -47,12 +63,12 @@ describe('writeApiSignatures', () => {
 
     it('names the endpoints whose signatures moved, and says a removed one by its key', async () => {
         const file = nextFile();
-        await writeApiSignatures(appWith(z.object({ text: z.string() })), { file });
+        await write(appWith(z.object({ text: z.string() })), { file });
 
         const reshaped = initLambder().create({ apiPath: '/api' })
             .addApi('echo', { input: z.object({ text: z.string() }), output: z.object({ text: z.string(), at: z.number() }) }, async (_ctx, res) => res.api(null as never))
             .addApi('added', { input: z.object({}), output: z.object({}) }, async (_ctx, res) => res.api({}));
-        const result = await writeApiSignatures(reshaped, { file });
+        const result = await write(reshaped, { file });
 
         expect(result.changed).toEqual(['echo']);
         expect(result.added).toEqual(['added']);
@@ -69,26 +85,26 @@ describe('writeApiSignatures', () => {
     it('checks without writing: a file that matches passes, a stale one fails and names what moved', async () => {
         const file = nextFile();
         const app = appWith(z.object({ text: z.string() }));
-        await writeApiSignatures(app, { file });
+        await write(app, { file });
         const before = readFileSync(file, 'utf8');
 
-        expect(await writeApiSignatures(app, { file, check: true })).toMatchObject({ ok: true, written: false });
+        expect(await write(app, { file, check: true })).toMatchObject({ ok: true, written: false });
 
-        const stale = await writeApiSignatures(appWith(z.object({ text: z.string(), extra: z.string() })), { file, check: true });
+        const stale = await write(appWith(z.object({ text: z.string(), extra: z.string() })), { file, check: true });
         expect(stale).toMatchObject({ ok: false, written: false, changed: ['echo'] });
         expect(stale.lines[0]).toMatch(/is stale/);
         expect(readFileSync(file, 'utf8')).toBe(before);
 
-        expect(await writeApiSignatures(app, { file: nextFile(), check: true })).toMatchObject({ ok: false, added: ['echo', 'ping'] });
+        expect(await write(app, { file: nextFile(), check: true })).toMatchObject({ ok: false, added: ['echo', 'ping'] });
     });
 
     it('compares the map the file holds, so line endings or a formatter leave it current', async () => {
         const file = nextFile();
         const app = appWith(z.object({ text: z.string() }));
-        await writeApiSignatures(app, { file });
+        await write(app, { file });
         writeFileSync(file, readFileSync(file, 'utf8').replace(/\n/g, '\r\n').replace(/ {4}/g, '  '));
 
-        expect(await writeApiSignatures(app, { file, check: true })).toMatchObject({ ok: true, changed: [], added: [], removedKeys: [] });
+        expect(await write(app, { file, check: true })).toMatchObject({ ok: true, changed: [], added: [], removedKeys: [] });
     });
 
     it('leaves a file whose map is current alone, however it is formatted', async () => {
@@ -97,20 +113,20 @@ describe('writeApiSignatures', () => {
         // would redo it.
         const file = nextFile();
         const app = appWith(z.object({ text: z.string() }));
-        await writeApiSignatures(app, { file });
+        await write(app, { file });
         const reformatted = readFileSync(file, 'utf8').replace(/\n/g, '\r\n').replace(/ {4}/g, '  ').replace(/"/g, "'");
         writeFileSync(file, reformatted);
 
-        expect(await writeApiSignatures(app, { file })).toMatchObject({ ok: true, written: false });
+        expect(await write(app, { file })).toMatchObject({ ok: true, written: false });
         expect(readFileSync(file, 'utf8')).toBe(reformatted);
     });
 
     it('replaces the file with a finished one renamed over it, and leaves nothing beside it', async () => {
         const file = nextFile();
-        await writeApiSignatures(appWith(z.object({ text: z.string() })), { file });
+        await write(appWith(z.object({ text: z.string() })), { file });
         const before = statSync(file).ino;
 
-        expect(await writeApiSignatures(appWith(z.object({ text: z.string(), extra: z.string() })), { file })).toMatchObject({ written: true, changed: ['echo'] });
+        expect(await write(appWith(z.object({ text: z.string(), extra: z.string() })), { file })).toMatchObject({ written: true, changed: ['echo'] });
 
         // Another inode: the file was swapped whole, never rewritten in place
         // where a build reading it could catch half of it.
@@ -126,7 +142,7 @@ describe('writeApiSignatures', () => {
         // map from Prettier, but not from the other two.
         const file = nextFile();
         const app = appWith(z.object({ text: z.string() }));
-        await writeApiSignatures(app, { file });
+        await write(app, { file });
         const unquoted = readFileSync(file, 'utf8')
             .replace(/"([0-9a-f]+)": "([0-9a-f]+)"/g, (_pair, key: string, signature: string) => `${/^[a-f]/.test(key) ? key : `'${key}'`}: '${signature}'`)
             .replace(/ {4}/g, '  ')
@@ -136,10 +152,10 @@ describe('writeApiSignatures', () => {
         expect(unquoted).toMatch(/\n {2}'[0-9][0-9a-f]{15}': '/);
         writeFileSync(file, unquoted);
 
-        expect(await writeApiSignatures(app, { file, check: true })).toMatchObject({ ok: true, changed: [], added: [], removedKeys: [] });
-        expect(await writeApiSignatures(app, { file })).toMatchObject({ ok: true, written: false, changed: [], added: [], removedKeys: [] });
+        expect(await write(app, { file, check: true })).toMatchObject({ ok: true, changed: [], added: [], removedKeys: [] });
+        expect(await write(app, { file })).toMatchObject({ ok: true, written: false, changed: [], added: [], removedKeys: [] });
         expect(readFileSync(file, 'utf8')).toBe(unquoted);
-        expect(await writeApiSignatures(appWith(z.object({ text: z.string(), extra: z.string() })), { file, check: true })).toMatchObject({ ok: false, changed: ['echo'], added: [], removedKeys: [] });
+        expect(await write(appWith(z.object({ text: z.string(), extra: z.string() })), { file, check: true })).toMatchObject({ ok: false, changed: ['echo'], added: [], removedKeys: [] });
     });
 
     it('writes through a symlink into the file it names, and leaves the link a link', async () => {
@@ -147,22 +163,22 @@ describe('writeApiSignatures', () => {
         mkdirSync(realDirectory);
         const realFile = join(realDirectory, 'apiSignatures.generated.ts');
         const link = nextFile();
-        await writeApiSignatures(appWith(z.object({ text: z.string() })), { file: realFile });
+        await write(appWith(z.object({ text: z.string() })), { file: realFile });
         symlinkSync(realFile, link);
 
         const reshaped = appWith(z.object({ text: z.string(), extra: z.string() }));
-        expect(await writeApiSignatures(reshaped, { file: link })).toMatchObject({ ok: true, written: true, changed: ['echo'] });
+        expect(await write(reshaped, { file: link })).toMatchObject({ ok: true, written: true, changed: ['echo'] });
 
         expect(lstatSync(link).isSymbolicLink()).toBe(true);
-        expect(await writeApiSignatures(reshaped, { file: realFile, check: true })).toMatchObject({ ok: true });
+        expect(await write(reshaped, { file: realFile, check: true })).toMatchObject({ ok: true });
         expect(readdirSync(realDirectory)).toEqual(['apiSignatures.generated.ts']);
     });
 
     it('leaves a file that already holds the signatures untouched', async () => {
         const file = nextFile();
         const app = appWith(z.object({ text: z.string() }));
-        expect(await writeApiSignatures(app, { file })).toMatchObject({ ok: true, written: true });
-        const again = await writeApiSignatures(app, { file });
+        expect(await write(app, { file })).toMatchObject({ ok: true, written: true });
+        const again = await write(app, { file });
         expect(again).toMatchObject({ ok: true, written: false });
         expect(again.lines[0]).toMatch(/is up to date/);
     });
@@ -172,14 +188,24 @@ describe('writeApiSignatures', () => {
         const app = appWith(z.object({ text: z.string() }));
         const style = { quotes: 'single', semicolons: false, header: 'Generated by ./compile api-signatures. Do not edit.\n\nBoth sides ship this file.' } as const;
 
-        await writeApiSignatures(app, { file, ...style });
+        await write(app, { file, ...style });
 
         const contents = readFileSync(file, 'utf8');
         expect(contents.startsWith('// Generated by ./compile api-signatures. Do not edit.\n//\n// Both sides ship this file.\nimport type')).toBe(true);
         expect(contents).toContain("import type { LambderApiSignatureMap } from 'lambder/client'\n");
         expect(contents).not.toContain('"');
         expect(contents.trimEnd().endsWith('}')).toBe(true);
-        expect(await writeApiSignatures(app, { file, check: true, ...style })).toMatchObject({ ok: true, changed: [], added: [] });
+        expect(await write(app, { file, check: true, ...style })).toMatchObject({ ok: true, changed: [], added: [] });
+    });
+
+    it('imports the module it is given and reads the export it is told to', async () => {
+        const app = appWith(z.object({ text: z.string() }));
+        const module = await moduleFor(app, 'lambder');
+        const file = nextFile();
+
+        expect(await writeApiSignatures({ module, exportName: 'lambder', file, verifyInFreshProcess: false })).toMatchObject({ ok: true, written: true, count: 2 });
+        await expect(writeApiSignatures({ module, file, verifyInFreshProcess: false })).rejects.toThrow(/has no export "default" that lists API signatures: name the export holding the instance in exportName$/);
+        await expect(writeApiSignatures({ module: join(directory, 'missing.mjs'), file })).rejects.toThrow(/could not load .*missing\.mjs$/);
     });
 });
 
@@ -190,28 +216,32 @@ describe('writeApiSignatures in a fresh process', () => {
 
     /**
      * A generator script over the built package and the module holding its
-     * instance, as an app keeps them: the script imports the instance and
-     * names its module for the fresh process. Each appends a line to a log
-     * when it runs, so a test can count the runs. The instance digests the
-     * same in every process, or differently.
+     * instance, as an app keeps them: the script names the module and
+     * writeApiSignatures imports it. Each appends a line to a log when it
+     * runs, so a test can count the runs. The instance digests the same in
+     * every process, or differently, or loads only once.
      */
     const runGenerator = (options: {
         stable: boolean;
         moduleAs?: 'path' | 'url' | 'urlString';
         exportName?: string;
-        removeModuleBeforeCall?: boolean;
+        /** The module loads in the generator's process and throws in any other. */
+        loadsOnce?: boolean;
         /** Check a file this same process wrote a moment before, rather than write it. */
         check?: boolean;
+        verifyInFreshProcess?: false;
         /** Run the script as `node --input-type=module -e <source>` rather than as a file. */
         runAsEval?: boolean;
     }) => {
         const run = fileCount++;
         const file = join(directory, `apiSignatures-${run}.generated.ts`);
         const log = join(directory, `runs-${run}.log`);
+        const loadedMarker = join(directory, `loaded-${run}`);
         const instanceModule = join(directory, `instance-${run}.mjs`);
         writeFileSync(instanceModule, [
-            'import { appendFileSync } from "node:fs";',
+            'import { appendFileSync, existsSync, writeFileSync } from "node:fs";',
             'if(!globalThis.lambderTestLoaderRan) throw new Error("loaded without the generator\'s --import flag");',
+            ...(options.loadsOnce ? [`if(existsSync(${JSON.stringify(loadedMarker)})) throw new Error("this module loads once");`, `writeFileSync(${JSON.stringify(loadedMarker)}, "");`] : []),
             `appendFileSync(${JSON.stringify(log)}, "module\\n");`,
             'console.log("the module\'s own output, which the verdict line has to survive");',
             `const signature = ${options.stable ? '"0b0b"' : 'process.pid.toString(16)'};`,
@@ -221,34 +251,46 @@ describe('writeApiSignatures in a fresh process', () => {
         const moduleOption = options.moduleAs === 'path' ? JSON.stringify(relative(process.cwd(), instanceModule))
             : options.moduleAs === 'urlString' ? JSON.stringify(pathToFileURL(instanceModule).href)
             : `new URL(${JSON.stringify(pathToFileURL(instanceModule).href)})`;
+        const call = [
+            `module: ${moduleOption}`,
+            `file: ${JSON.stringify(file)}`,
+            ...(options.exportName ? [`exportName: ${JSON.stringify(options.exportName)}`] : []),
+            ...(options.verifyInFreshProcess === false ? ['verifyInFreshProcess: false'] : []),
+        ].join(', ');
         const script = join(directory, `generate-${run}.mjs`);
         writeFileSync(script, [
-            'import { appendFileSync, rmSync } from "node:fs";',
+            'import { appendFileSync } from "node:fs";',
             `import { writeApiSignatures } from ${JSON.stringify(buildEntry)};`,
-            `import instance from ${JSON.stringify(pathToFileURL(instanceModule).href)};`,
             `appendFileSync(${JSON.stringify(log)}, "generator\\n");`,
-            ...(options.removeModuleBeforeCall ? [`rmSync(${JSON.stringify(instanceModule)});`] : []),
-            `const verifyInFreshProcess = { module: ${moduleOption}${options.exportName ? `, exportName: ${JSON.stringify(options.exportName)}` : ''} };`,
-            ...(options.check ? [`await writeApiSignatures(instance, { file: ${JSON.stringify(file)} });`] : []),
-            `const result = await writeApiSignatures(instance, { file: ${JSON.stringify(file)}, verifyInFreshProcess${options.check ? ', check: true' : ''} });`,
+            ...(options.check ? [`await writeApiSignatures({ ${call}, verifyInFreshProcess: false });`] : []),
+            `const result = await writeApiSignatures({ ${call}${options.check ? ', check: true' : ''} });`,
             'process.stdout.write(JSON.stringify(result));',
             'process.exit(result.ok ? 0 : 1);',
         ].join('\n'));
         const child = spawnSync(process.execPath, [...loaderFlag, ...(options.runAsEval ? ['--input-type=module', '-e', readFileSync(script, 'utf8')] : [script])], { encoding: 'utf8' });
+        const json = child.stdout.indexOf('{');
         return {
             status: child.status,
-            result: JSON.parse(child.stdout.slice(child.stdout.indexOf('{'))),
+            result: json === -1 ? null : JSON.parse(child.stdout.slice(json)),
+            stderr: child.stderr,
             runs: readFileSync(log, 'utf8').trim().split('\n'),
         };
     };
 
-    it('passes when a second process digests the same signatures, loading the instance module and never the script', () => {
+    it('verifies by default: a second process digests the same signatures, loading the instance module and never the script', () => {
         const { status, result, runs } = runGenerator({ stable: true });
         expect(status).toBe(0);
         expect(result.lines.at(-1)).toBe('✓ a fresh process digests the same signatures');
-        // The generator ran once; the module once for it and once in the
-        // fresh process, which got the generator's --import flag too.
-        expect(runs).toEqual(['module', 'generator', 'module']);
+        // The generator ran once; the module once in its process and once in
+        // the fresh one, which got the generator's --import flag too.
+        expect(runs).toEqual(['generator', 'module', 'module']);
+    });
+
+    it('verifies nothing when told not to, and loads the module once', () => {
+        const { status, result, runs } = runGenerator({ stable: false, verifyInFreshProcess: false });
+        expect(status).toBe(0);
+        expect(result.lines.join('\n')).not.toMatch(/fresh process/);
+        expect(runs).toEqual(['generator', 'module']);
     });
 
     it('takes the module as a path relative to the working directory as well as a URL', () => {
@@ -268,7 +310,7 @@ describe('writeApiSignatures in a fresh process', () => {
         expect(status).toBe(0);
         expect(result).toMatchObject({ ok: true, written: false });
         expect(result.lines).toEqual([expect.stringMatching(/matches the 1 registered APIs$/), '✓ a fresh process digests the same signatures']);
-        expect(runs).toEqual(['module', 'generator', 'module']);
+        expect(runs).toEqual(['generator', 'module', 'module']);
     });
 
     it('fails a check whose file a second process digests differently', () => {
@@ -293,17 +335,18 @@ describe('writeApiSignatures in a fresh process', () => {
         expect(result.lines).toContain('    ~ report.daily');
     });
 
-    it('fails, saying so, when the export named is not an instance', () => {
-        const { status, result } = runGenerator({ stable: true, exportName: 'lambder' });
+    it('throws before writing anything when the export named is not an instance', () => {
+        const { status, result, stderr } = runGenerator({ stable: true, exportName: 'lambder' });
         expect(status).toBe(1);
-        expect(result.lines).toContainEqual(expect.stringMatching(/never compared it: .* has no export "lambder" that lists API signatures/));
+        expect(result).toBeNull();
+        expect(stderr).toMatch(/has no export "lambder" that lists API signatures/);
     });
 
     it('fails, with the error, when the module does not load in the fresh process', () => {
-        const { status, result } = runGenerator({ stable: true, removeModuleBeforeCall: true });
+        const { status, result } = runGenerator({ stable: true, loadsOnce: true });
         expect(status).toBe(1);
         expect(result.lines).toContainEqual(expect.stringMatching(/never compared it: loading .*instance-\d+\.mjs failed \(exit status 1\)/));
-        expect(result.lines.join('\n')).toMatch(/ERR_MODULE_NOT_FOUND|Cannot find module/);
+        expect(result.lines.join('\n')).toMatch(/this module loads once/);
     });
 });
 

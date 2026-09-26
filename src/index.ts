@@ -172,6 +172,28 @@ export type { LambderS3FileSourceOptions } from "./stores/LambderS3FileSource.js
 export { LambderHttpFileSource } from "./stores/LambderHttpFileSource.js";
 export type { LambderHttpFileSourceOptions } from "./stores/LambderHttpFileSource.js";
 
+// Direct uploads: storage a browser posts a file to with a ticket the server
+// signed, the schemas an app's ticket endpoint declares, and the browser runner.
+export { LambderS3UploadBucket } from "./stores/LambderS3UploadBucket.js";
+export type { LambderS3UploadBucketOptions } from "./stores/LambderS3UploadBucket.js";
+export { LambderMemoryUploadBucket } from "./stores/LambderMemoryUploadBucket.js";
+export type { LambderMemoryUploadBucketOptions, LambderMemoryUploadObject } from "./stores/LambderMemoryUploadBucket.js";
+export { checkUploadRule } from "./shared/contracts/LambderUploadBucket.js";
+export type {
+    LambderUploadBucket,
+    LambderUploadRule,
+    LambderUploadFileFacts,
+    LambderUploadTicket,
+    LambderUploadVerdict,
+    LambderUploadRuleVerdict,
+    LambderUploadObjectOptions,
+    LambderUploadContentDisposition,
+} from "./shared/contracts/LambderUploadBucket.js";
+export { LambderUploadFileFactsSchema, LambderUploadTicketSchema } from "./shared/wire/LambderUploadSchemas.js";
+export { refuseUnacceptedUpload } from "./shared/wire/LambderUploadRefusal.js";
+export { LambderUploadRunner, LambderUploadError } from "./client/LambderUploadRunner.js";
+export type { LambderUploadRunnerOptions, LambderUploadProgress, LambderUploadPhase, LambderUploadFailureReason } from "./client/LambderUploadRunner.js";
+
 // Session types
 export type { LambderSessionCookieOptions } from "./session/LambderSessionController.js";
 export type { LambderCreatedSession, LambderSessionDataRefreshConfig } from "./session/LambderSessionManager.js";
@@ -300,7 +322,6 @@ export type {
     LambderApiNullAnswerConfig,
     LambderContractEntry,
     LambderMergeContract,
-    LambderFlattenContract,
     LambderGuardNamesIn,
     LambderContractMode,
     LambderContractKeysWithMode,

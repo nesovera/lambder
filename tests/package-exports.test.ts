@@ -252,6 +252,7 @@ describe('The published entry points', () => {
         const build = await import('lambder/build');
 
         expect(typeof build.writeApiSignatures).toBe('function');
+        expect(typeof build.writeApiContract).toBe('function');
     });
 
     it('keeps the build entry out of every other entry, so no deployment or bundle carries child_process', () => {

@@ -9,6 +9,120 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [8.1.1] - 2026-09-26
+
+Two additions, and three breaking changes a minor line carries here on
+purpose. An app's contract can now be written out as a generated file of
+plain types for its clients to import, which does by default what
+`LambderFlattenContract` asked each app to spell out, so that helper is gone.
+And direct uploads, files posted from the browser straight to S3 on tickets
+the server signs, are part of the framework.
+
+### Added
+
+- **`writeApiContract` in `lambder/build`: the contract as a generated file.**
+  A client that imports `typeof lambder.ApiContract` from the server compiles
+  the server to get it, every endpoint's schemas and the libraries they infer
+  through included, and reads it as the intersection chaining built. In a
+  193-endpoint app that was 17 of the frontend check's 19 million type
+  instantiations and 2.4 of its 4.8 GB. `writeApiContract` reads the
+  `ApiContract` of the instance a module exports (`module`, `exportName`)
+  through the TypeScript compiler, under the server's own tsconfig and
+  without running any of it, and writes the contract as one object type with
+  plain members to a module that imports nothing. The app declares nothing
+  for it, and its clients (a frontend, another service's
+  `LambderInvokeCaller`, its own tests through `lambderTestApp`) import the
+  type from there: the same frontend check fell to 1.8 million
+  instantiations and 2.4 GB.
+  - Every type is printed as the structure it resolves to. The default
+    library's interfaces (`Date`) keep their names, a non-generic named type
+    (an alias, an interface, a class) is printed once as a declaration the
+    entries refer to, which is also how a recursive type refers to itself,
+    and properties keep the order they are written in, so the file changes
+    only when an API does.
+  - Anything with no plain form fails the call and names where it sits: a
+    function, a symbol key, an enum, a class's private member, an open type
+    parameter, and a type a compile error left unresolved, wherever in the
+    server's sources the error is.
+  - A write compiles the new text beside the server's sources and checks each
+    entry against the contract in both directions before it touches the file.
+    `check: true` writes nothing and fails a stale file. Both name the APIs
+    that moved, counting a change to a shared declaration against every API
+    that reaches it.
+  - `typescript` 5.4 or later is an optional peer dependency, loaded only when
+    `writeApiContract` runs. It needs the compiler API, so 5.x or 6.x:
+    TypeScript 7 ships none, and the call says so when it finds a 7.
+
+  See [the contract as a generated file](./docs/apis.md#the-contract-as-a-generated-file).
+
+- **Direct uploads.** A file too large for an API payload goes from the
+  browser straight to object storage, on a ticket the app's endpoint signs
+  for exactly that file: its key, byte size, content type and SHA-256, all
+  enforced by storage, and verified by the server before the app's record
+  counts it as uploaded.
+  - `LambderUploadBucket`, the interface a bucket implements: sign a ticket,
+    verify what arrived, sign a download link, and read, write, copy and
+    delete objects for the rest of their life. `LambderS3UploadBucket`
+    implements it over an S3 presigned POST whose policy pins every fact;
+    `@aws-sdk/s3-presigned-post` and `@aws-sdk/s3-request-presigner` join
+    `@aws-sdk/client-s3` as optional peers, each loaded on first use.
+    `writeObject` sends the checksum it is given or has the SDK compute one.
+  - Lifetimes at both levels: `ticketLifetimeSeconds` and
+    `downloadLifetimeSeconds` on the bucket, `lifetimeSeconds` on a ticket or
+    a link, each held to S3's seven days. What a stored object carries,
+    `object` on a ticket or a write: tags (how an object gets a time to live,
+    through a lifecycle rule), metadata, `Cache-Control` and a
+    `Content-Disposition`, all pinned in the ticket's policy. A download link
+    takes its own `contentDisposition`, to save a file under its name.
+  - `LambderUploadRunner` in `lambder/client`, the browser half: checks the
+    file against the rule, hashes it, asks for a ticket, posts it with
+    progress, tries again after a dropped, failing, timed-out or stalled
+    connection with a growing wait, asks for a new ticket when storage says
+    the old one expired, stops on an abort signal it also hands to the app's
+    own calls, and has the server confirm. A failure is a `LambderUploadError`
+    whose `reason` a screen words. It posts over XMLHttpRequest for progress,
+    and over fetch where that is all there is.
+  - `LambderMemoryUploadBucket`, the same bucket in memory, holding a post to
+    the rules S3 holds a presigned POST to and refusing with S3's statuses and
+    XML errors, so a runner takes the same path against it as against S3; and
+    `lambderMockUploadMswHandler` in `lambder/mock`, which puts it behind MSW
+    for a mock app's uploads.
+  - `LambderUploadFileFactsSchema` and `LambderUploadTicketSchema`, the zod
+    schemas of the two shapes that cross the app's own API; and
+    `checkUploadRule` and `refuseUnacceptedUpload`, for a bucket of an app's
+    own to refuse a file as Lambder's do.
+  - Three refusal codes for a file a rule does not accept:
+    `lambder/upload-empty`, `lambder/upload-type-rejected` and
+    `lambder/upload-too-large`.
+
+  See [Direct uploads](./docs/uploads.md).
+
+### Removed
+
+- **`LambderFlattenContract`.** It collapsed the chained contract into an
+  interface an app had to declare by hand for its clients' type checks to stay
+  cheap. A client that needs that now imports the contract `writeApiContract`
+  generates, which is flat by construction, and the server's own reads of its
+  contract cost it little. Replace
+  `export interface ApiContractType extends LambderFlattenContract<typeof lambder.ApiContract> {}`
+  with `export type ApiContractType = typeof lambder.ApiContract`, or drop it
+  and point the clients at the generated file.
+
+### Changed
+
+- **`writeApiSignatures({ module, exportName, file })`.** It takes the module
+  that exports the instance, as `writeApiContract` does, and imports it,
+  rather than the instance and then its module again for the fresh-process
+  check. That check now runs by default; `verifyInFreshProcess: false` skips
+  it. Replace `writeApiSignatures(lambder, { file, verifyInFreshProcess: {
+  module, exportName } })` with `writeApiSignatures({ module, exportName,
+  file })`. Both generators take `module` as a path or a file URL
+  (`LambderModuleLocation`).
+- **`LambderMswModule` names `http.all` beside `http.post`.** It is the one
+  description of the msw module both mock adapters take, the API's and an
+  upload bucket's. The real `msw` module fits it as before; a hand-built
+  stand-in for it needs an `all` as well.
+
 ## [8.0.2] - 2026-09-25
 
 A major, out of a review of 7.3.1. Most of it closes holes: session writes

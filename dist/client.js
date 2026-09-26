@@ -33,3 +33,7 @@ export { resolveCompressionOption } from "./shared/wire/LambderCompressionOption
 export { html, xml, raw, jsonScript, escapeHtml, renderHtmlValue, LambderSafeHtml } from "./shared/LambderHtml.js";
 // Typed translations (standalone, isomorphic)
 export { createLambderI18n } from "./shared/LambderI18n.js";
+// Direct uploads: the runner that takes a file from the browser straight to
+// storage, and the vocabulary it shares with the server's bucket.
+export { LambderUploadRunner, LambderUploadError } from "./client/LambderUploadRunner.js";
+export { checkUploadRule } from "./shared/contracts/LambderUploadBucket.js";

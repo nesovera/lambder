@@ -1,6 +1,6 @@
 {
   "name": "lambder",
-  "version": "8.0.2",
+  "version": "8.1.1",
   "sideEffects": false,
   "description": "Opinionated serverless web framework for TypeScript on AWS Lambda: type-safe APIs from Zod schemas, DynamoDB sessions, and declarative rate limits, authorization guards and idempotency.",
   "keywords": [
@@ -114,7 +114,10 @@
     "@aws-sdk/client-lambda": "^3.574.0",
     "@aws-sdk/client-s3": "^3.574.0",
     "@aws-sdk/lib-dynamodb": "^3.574.0",
+    "@aws-sdk/s3-presigned-post": "^3.574.0",
+    "@aws-sdk/s3-request-presigner": "^3.574.0",
     "msw": "^2.0.0",
+    "typescript": ">=5.4",
     "zod": "^4.6.2"
   },
   "peerDependenciesMeta": {
@@ -130,7 +133,16 @@
     "@aws-sdk/lib-dynamodb": {
       "optional": true
     },
+    "@aws-sdk/s3-presigned-post": {
+      "optional": true
+    },
+    "@aws-sdk/s3-request-presigner": {
+      "optional": true
+    },
     "msw": {
+      "optional": true
+    },
+    "typescript": {
       "optional": true
     }
   },
@@ -139,6 +151,8 @@
     "@aws-sdk/client-lambda": "^3.1131.0",
     "@aws-sdk/client-s3": "^3.1127.0",
     "@aws-sdk/lib-dynamodb": "^3.913.0",
+    "@aws-sdk/s3-presigned-post": "^3.1141.0",
+    "@aws-sdk/s3-request-presigner": "^3.1141.0",
     "@types/js-cookie": "^3.0.6",
     "@types/mime-types": "^2.1.4",
     "@types/node": "^24.9.0",

@@ -5,8 +5,13 @@ import { getAnswerHeader } from "../shared/wire/LambderAnswerHeaders.js";
 import { LambderCookieJar } from "../shared/transport/LambderCookieJar.js";
 import { normalizeClientIp } from "../shared/util/LambderClientIp.js";
 
+/** What a resolver of Lambder's adapters is: msw's, answering a Response, or `undefined` to hand the request on. */
+type LambderMswResolver = (info: { request: Request }) => Promise<Response | undefined>;
+
 /**
- * The parts of the msw module the adapter uses: `import * as msw from "msw"`.
+ * The parts of the msw module Lambder's adapters use, `import * as msw from
+ * "msw"`: `http.post` for the API (lambderMockMswHandler) and `http.all` for
+ * an upload bucket's storage (lambderMockUploadMswHandler).
  *
  * Written so the real package satisfies it. msw's resolver answers a
  * Response, or `undefined` to hand the request back (its
@@ -15,7 +20,10 @@ import { normalizeClientIp } from "../shared/util/LambderClientIp.js";
  * here and the returned handler would not fit `setupWorker`.
  */
 export type LambderMswModule = {
-    http: { post: (path: string, resolver: (info: { request: Request }) => Promise<Response | undefined>) => unknown };
+    http: {
+        post: (path: string, resolver: LambderMswResolver) => unknown;
+        all: (path: string, resolver: LambderMswResolver) => unknown;
+    };
     HttpResponse: {
         new (body?: BodyInit | null, init?: ResponseInit): Response;
         error(): Response;

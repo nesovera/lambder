@@ -1,10 +1,11 @@
+import { bytesToBase64 } from "./LambderBase64.js";
 import { getCrypto } from "./LambderNodeModules.js";
 /**
- * SHA-256 over text through WebCrypto, as hex: the one digest every layer
- * shares. The session crypto hashes bearer secrets with it and the
- * rate-limit engine folds an over-long tracker key with it, so both key
- * spaces are built from the same primitive on every runtime (browsers on a
- * secure context, Node 20+, edge runtimes).
+ * SHA-256 through WebCrypto: the one digest every layer shares. The session
+ * crypto hashes bearer secrets with it and the rate-limit engine folds an
+ * over-long tracker key with it, so both key spaces are built from the same
+ * primitive on every runtime (browsers on a secure context, Node 20+, edge
+ * runtimes); an upload's checksum is the same digest over the file's bytes.
  */
 /** Lowercase hex of a byte array, two characters per byte. */
 export const bytesToHexString = (bytes) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -31,4 +32,9 @@ export const sha256HexOf = async (text) => {
     const webCrypto = await resolveWebCrypto();
     const digest = await webCrypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
     return bytesToHexString(new Uint8Array(digest));
+};
+/** The SHA-256 digest of `bytes`, as base64: the form object storage checks an upload's checksum in. */
+export const sha256Base64Of = async (bytes) => {
+    const webCrypto = await resolveWebCrypto();
+    return bytesToBase64(new Uint8Array(await webCrypto.subtle.digest("SHA-256", bytes)));
 };

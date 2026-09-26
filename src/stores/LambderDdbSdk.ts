@@ -18,19 +18,13 @@
 
 import type { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { withInstallHint } from "./LambderSdkInstallHint.js";
 
 type LambderDynamoClientSdk = typeof import("@aws-sdk/client-dynamodb");
 type LambderDynamoDocumentSdk = typeof import("@aws-sdk/lib-dynamodb");
 
 let clientSdk: Promise<LambderDynamoClientSdk> | undefined;
 let documentSdk: Promise<LambderDynamoDocumentSdk> | undefined;
-
-const withInstallHint = <T>(loading: Promise<T>, packageName: string, user: string, reset: () => void): Promise<T> =>
-    loading.catch((cause: unknown) => {
-        // Not memoized: the package may be installed later in the same process (tests), and the next caller names itself.
-        reset();
-        throw new Error(`${user} requires ${packageName}: npm install ${packageName}`, { cause });
-    });
 
 /** `@aws-sdk/client-dynamodb`, for the item-level API the stores speak and the client the session manager wraps. */
 const loadDynamoClientSdk = (user: string): Promise<LambderDynamoClientSdk> => {

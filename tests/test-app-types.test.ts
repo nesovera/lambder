@@ -11,7 +11,6 @@ import { z } from 'zod';
 import { initLambder } from '../src/core/Lambder.js';
 import { lambderGuard } from '../src/core/LambderPolicyBuilders.js';
 import { LambderMemorySessionStore } from '../src/stores/LambderMemorySessionStore.js';
-import type { LambderFlattenContract } from '../src/shared/wire/LambderApiContract.js';
 import type { LambderApiOutcome } from '../src/shared/wire/LambderApiOutcome.js';
 import type { LambderInvokeOutcome } from '../src/invoke/LambderInvokeOutcome.js';
 import { lambderTestApp, assertApiSuccess, assertApiFailure, type LambderTestApp, type LambderTestVisitor } from '../src/testing.js';
@@ -28,8 +27,12 @@ const server = initLambder<SessionData>().create({
     .addSessionApi('me', { input: z.object({}), output: z.object({ userId: z.string() }) }, async (ctx, res) => res.api({ userId: ctx.session.data.userId }))
     .addApi('tenant.name', { input: z.object({}), output: z.object({ tenantId: z.string() }), guards: 'tenant' }, async (ctx, res) => res.api({ tenantId: ctx.guardData.tenant.tenantId }));
 
-// eslint-disable-next-line @typescript-eslint/no-empty-object-type
-interface FlatContract extends LambderFlattenContract<typeof server.ApiContract> {}
+/** The contract as writeApiContract prints it for a large app's clients and tests: plain members. */
+type PrintedContract = {
+    echo: { input: { text: string }; output: { text: string }; mode: 'public' };
+    me: { input: Record<string, never>; output: { userId: string }; mode: 'session' };
+    'tenant.name': { input: Record<string, never>; output: { tenantId: string }; mode: 'public'; guards: 'tenant'; guardInputs: { tenant: { tenantId: string } } };
+};
 
 describe('lambderTestApp: what the instance types', () => {
     it('reads the contract and the session data off the instance', async () => {
@@ -51,9 +54,9 @@ describe('lambderTestApp: what the instance types', () => {
         expect(await visitor.api('tenant.name', {}, { guardInputs: { tenant: { tenantId: 'acme' } } })).toEqual({ tenantId: 'acme' });
     });
 
-    it('takes the app\'s flattened contract interface by name, for an app large enough to have one', async () => {
-        const app = lambderTestApp<SessionData, FlatContract>(server);
-        expectTypeOf(app).toEqualTypeOf<LambderTestApp<FlatContract, SessionData>>();
+    it('takes the contract generated for the app\'s clients by name, for an app large enough to have one', async () => {
+        const app = lambderTestApp<SessionData, PrintedContract>(server);
+        expectTypeOf(app).toEqualTypeOf<LambderTestApp<PrintedContract, SessionData>>();
         expect(await app.visitor().api('echo', { text: 'hi' })).toEqual({ text: 'hi' });
     });
 
