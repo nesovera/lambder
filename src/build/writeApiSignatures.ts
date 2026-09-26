@@ -1,9 +1,11 @@
 import { spawnSync } from "child_process";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "fs";
-import { dirname, resolve } from "path";
-import { fileURLToPath, pathToFileURL } from "url";
+import { existsSync, readFileSync } from "fs";
+import { resolve } from "path";
+import { fileURLToPath } from "url";
 import type { LambderApiSignatureEntry } from "../api/LambderApiSignature.js";
 import type { FreshProcessRequest, FreshProcessVerdict } from "./freshProcessVerifier.js";
+import { moduleUrlOf, type LambderModuleLocation } from "./moduleLocation.js";
+import { writeFileAtomically } from "./writeFileAtomically.js";
 
 /*
  * The signature file every app with apiSignatures needs, written and checked
@@ -80,6 +82,15 @@ export type LambderApiSignatureSource = {
 };
 
 export type LambderApiSignatureFileOptions = {
+    /**
+     * The module that exports the instance, usually the server's entry: a
+     * path relative to the working directory, or a file URL. It is imported
+     * in this process, so a TypeScript module needs the process's loader
+     * (`tsx`, `node --import tsx`), as the generator script itself does.
+     */
+    module: LambderModuleLocation;
+    /** The export that holds the instance. Default: "default", the module's default export. */
+    exportName?: string;
     /** The TypeScript module to write, exporting `apiSignatures`. Relative to the working directory. */
     file: string;
     /** Write nothing, and answer whether the file on disk is what the registrations produce now. Default: false. */
@@ -92,30 +103,19 @@ export type LambderApiSignatureFileOptions = {
     semicolons?: boolean;
     /**
      * After writing, or after a check that found the file current, load the
-     * module that holds the instance in a fresh Node process and check the
-     * file against what it digests there. A schema built from the clock or a
-     * random source digests differently in every process; this catches it by
-     * endpoint name instead of letting signatures change on every build. Only
-     * that module is loaded, never the calling script, so nothing the script
-     * does runs twice; the module's own top-level code does run again. The
-     * fresh process gets this process's Node flags (`--import`, `--require`,
+     * module again in a fresh Node process and check the file against what
+     * it digests there. A schema built from the clock or a random source
+     * digests differently in every process; this catches it by endpoint name
+     * instead of letting signatures change on every build. Only the module is
+     * loaded there, never the calling script, so nothing the script does runs
+     * twice; the module's own top-level code does run again. The fresh
+     * process gets this process's Node flags (`--import`, `--require`,
      * `--loader`, `--conditions`) less the inspector, watch mode, the test
      * runner and the eval flags (`-e`, `-p`, `--input-type`), so a TypeScript
      * module loads there as it did here when its loader is on the command
-     * line or in NODE_OPTIONS. Default: not verified.
+     * line or in NODE_OPTIONS. Default: true.
      */
-    verifyInFreshProcess?: {
-        /**
-         * The module that exports the instance: a path relative to the
-         * working directory, or a file URL, as a URL such as
-         * `new URL("../backend/index.js", import.meta.url)` beside the
-         * generator's own import of it, or as the string
-         * `import.meta.resolve()` answers.
-         */
-        module: string | URL;
-        /** The export that holds the instance. Default: "default", the module's default export. */
-        exportName?: string;
-    };
+    verifyInFreshProcess?: boolean;
 };
 
 export type LambderApiSignatureFileResult = {
@@ -190,28 +190,43 @@ const renderSignatureFile = (entries: LambderApiSignatureEntry[], options: Lambd
  * that endpoint, so this is the line that says how wide a deploy's reload
  * will be.
  *
- * Call it from a generator script that imports the app's instance:
+ * Call it from a generator script, naming the module that exports the app's
+ * instance, as writeApiContract takes it:
  *
  * ```ts
  * import { writeApiSignatures } from "lambder/build";
- * import { lambder } from "../server/src/index.js";
  *
- * const result = await writeApiSignatures(lambder, { file: "shared/generated/apiSignatures.generated.ts", check: process.argv.includes("--check") });
+ * const result = await writeApiSignatures({
+ *     module: "server/src/index.ts",   // export const lambder = initLambder()...
+ *     exportName: "lambder",
+ *     file: "shared/generated/apiSignatures.generated.ts",
+ *     check: process.argv.includes("--check"),
+ * });
  * console.log(result.lines.join("\n"));
  * process.exit(result.ok ? 0 : 1);
  * ```
  *
  * Signatures are compared as the map the file holds, so a checkout that
  * rewrote its line endings or a formatter that re-indented it or unquoted
- * its keys is neither stale nor rewritten. `verifyInFreshProcess` also
- * checks the file, written or found current, against the instance's module
- * loaded in a fresh process.
+ * its keys is neither stale nor rewritten. The file, written or found
+ * current, is then checked again against the module loaded in a fresh
+ * process (see `verifyInFreshProcess`). A module that does not load, or an
+ * export that is not an instance, throws.
  */
-export const writeApiSignatures = async (
-    source: LambderApiSignatureSource,
-    options: LambderApiSignatureFileOptions,
-): Promise<LambderApiSignatureFileResult> => {
+export const writeApiSignatures = async (options: LambderApiSignatureFileOptions): Promise<LambderApiSignatureFileResult> => {
     const file = resolve(options.file);
+    const moduleUrl = moduleUrlOf(options.module);
+    const exportName = options.exportName ?? "default";
+    let namespace: Record<string, unknown>;
+    try {
+        namespace = await import(moduleUrl) as Record<string, unknown>;
+    } catch(err) {
+        throw new Error(`writeApiSignatures could not load ${moduleUrl}`, { cause: err });
+    }
+    const source = namespace[exportName] as Partial<LambderApiSignatureSource> | null | undefined;
+    if(typeof source?.apiSignatureEntries !== "function"){
+        throw new Error(`${moduleUrl} has no export "${exportName}" that lists API signatures: name the export holding the instance in exportName`);
+    }
     const entries = await source.apiSignatureEntries();
     const previous = existsSync(file) ? readFileSync(file, "utf8") : null;
     const { changed, added, removedKeys, movedLines, summary } = describeSignatureChanges(entries, previous === null ? {} : readSignatureMap(previous));
@@ -221,7 +236,7 @@ export const writeApiSignatures = async (
 
     // A stale file is the answer by itself: a fresh process could only find
     // it stale again. A current one goes on to the verification, as a write
-    // does, so a check that names verifyInFreshProcess verifies.
+    // does.
     let written = false;
     let lines: string[];
     if(options.check){
@@ -232,43 +247,17 @@ export const writeApiSignatures = async (
         // formatted, so a watcher or an incremental build sees no change
         // where there is none, and a formatter's or a checkout's version of
         // the file is not rewritten back on every run. A change of header,
-        // quotes or semicolons shows the next time the map changes. The write
-        // goes to a file beside the target and is renamed over it, so a build
-        // reading the file meanwhile sees the old map or the new one, never
-        // half of one. A symlink is followed to the file it names: renamed
-        // over, the link itself would become the new file and its target
-        // would keep the old map.
+        // quotes or semicolons shows the next time the map changes.
         written = !unchanged;
-        if(written){
-            const target = previous === null ? file : realpathSync(file);
-            mkdirSync(dirname(target), { recursive: true });
-            const partial = `${target}.${process.pid}.tmp`;
-            try {
-                writeFileSync(partial, renderSignatureFile(entries, options));
-                renameSync(partial, target);
-            } catch(err) {
-                rmSync(partial, { force: true });
-                throw err;
-            }
-        }
+        if(written) writeFileAtomically(file, renderSignatureFile(entries, options), previous !== null);
         lines = [
             written ? `✓ Wrote ${options.file} (${entries.length} APIs)` : `✓ ${options.file} is up to date (${entries.length} APIs)`,
             ...(movedLines.length ? [`  ${summary}`, ...movedLines] : ["  no signatures changed: this build forces no reloads"]),
         ];
     }
-    if(!options.verifyInFreshProcess) return result(true, written, lines);
+    if(options.verifyInFreshProcess === false) return result(true, written, lines);
 
-    const { module: instanceModule, exportName = "default" } = options.verifyInFreshProcess;
-    const request: FreshProcessRequest = {
-        // A string that is already a file URL (what import.meta.resolve()
-        // answers) is taken as one: resolved as a path, it would name a
-        // directory called "file:" under the working directory.
-        moduleUrl: typeof instanceModule === "string" && !/^file:/i.test(instanceModule)
-            ? pathToFileURL(resolve(instanceModule)).href
-            : new URL(instanceModule).href,
-        exportName,
-        file,
-    };
+    const request: FreshProcessRequest = { moduleUrl, exportName, file };
     const child = spawnSync(process.execPath, [...freshProcessNodeFlags(process.execArgv), fileURLToPath(FRESH_PROCESS_ENTRY), JSON.stringify(request)], {
         encoding: "utf8",
         timeout: VERIFY_TIMEOUT_MS,

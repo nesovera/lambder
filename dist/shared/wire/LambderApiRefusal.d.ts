@@ -123,6 +123,12 @@ export declare const LAMBDER_REFUSAL_CODES: {
     readonly invalidRequestPayload: "lambder/invalid-request-payload";
     /** Only the mock runtime emits it: the endpoint is registered as not mocked, with a reason. */
     readonly notMocked: "lambder/not-mocked";
+    /** An upload bucket would not sign a ticket for a file with no bytes. */
+    readonly uploadEmpty: "lambder/upload-empty";
+    /** An upload bucket would not sign a ticket for a content type the rule does not accept. */
+    readonly uploadTypeRejected: "lambder/upload-type-rejected";
+    /** An upload bucket would not sign a ticket for a file larger than the rule accepts. */
+    readonly uploadTooLarge: "lambder/upload-too-large";
 };
 export type LambderRefusalCode = (typeof LAMBDER_REFUSAL_CODES)[keyof typeof LAMBDER_REFUSAL_CODES];
 export type LambderRefuseOptions = {

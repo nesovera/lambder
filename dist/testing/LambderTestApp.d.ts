@@ -46,10 +46,10 @@ export type LambderTestAppOptions = {
 /**
  * A Lambder instance as a test app takes it: any instance, read for its
  * session data type and, through the ApiContract property rather than the
- * class parameter, for its contract. The property lets a large app name its
- * flattened contract interface explicitly
- * (`lambderTestApp<SessionData, ApiContractType>(lambder)`) and keep the
- * cheap type check that interface exists for.
+ * class parameter, for its contract. The property lets a large app name the
+ * contract writeApiContract generated for its clients
+ * (`lambderTestApp<SessionData, ApiContractType>(lambder)`), so the tests type
+ * their calls against plain members rather than the chained intersection.
  */
 export type LambderTestedInstance<TSessionData, TContract> = Lambder<TSessionData, any, any, any, any, any, any, any> & {
     readonly ApiContract: TContract;

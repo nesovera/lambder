@@ -1,7 +1,9 @@
 import { spawnSync } from "child_process";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "fs";
-import { dirname, resolve } from "path";
-import { fileURLToPath, pathToFileURL } from "url";
+import { existsSync, readFileSync } from "fs";
+import { resolve } from "path";
+import { fileURLToPath } from "url";
+import { moduleUrlOf } from "./moduleLocation.js";
+import { writeFileAtomically } from "./writeFileAtomically.js";
 /*
  * The signature file every app with apiSignatures needs, written and checked
  * by the framework that defines it.
@@ -116,25 +118,44 @@ const renderSignatureFile = (entries, options) => {
  * that endpoint, so this is the line that says how wide a deploy's reload
  * will be.
  *
- * Call it from a generator script that imports the app's instance:
+ * Call it from a generator script, naming the module that exports the app's
+ * instance, as writeApiContract takes it:
  *
  * ```ts
  * import { writeApiSignatures } from "lambder/build";
- * import { lambder } from "../server/src/index.js";
  *
- * const result = await writeApiSignatures(lambder, { file: "shared/generated/apiSignatures.generated.ts", check: process.argv.includes("--check") });
+ * const result = await writeApiSignatures({
+ *     module: "server/src/index.ts",   // export const lambder = initLambder()...
+ *     exportName: "lambder",
+ *     file: "shared/generated/apiSignatures.generated.ts",
+ *     check: process.argv.includes("--check"),
+ * });
  * console.log(result.lines.join("\n"));
  * process.exit(result.ok ? 0 : 1);
  * ```
  *
  * Signatures are compared as the map the file holds, so a checkout that
  * rewrote its line endings or a formatter that re-indented it or unquoted
- * its keys is neither stale nor rewritten. `verifyInFreshProcess` also
- * checks the file, written or found current, against the instance's module
- * loaded in a fresh process.
+ * its keys is neither stale nor rewritten. The file, written or found
+ * current, is then checked again against the module loaded in a fresh
+ * process (see `verifyInFreshProcess`). A module that does not load, or an
+ * export that is not an instance, throws.
  */
-export const writeApiSignatures = async (source, options) => {
+export const writeApiSignatures = async (options) => {
     const file = resolve(options.file);
+    const moduleUrl = moduleUrlOf(options.module);
+    const exportName = options.exportName ?? "default";
+    let namespace;
+    try {
+        namespace = await import(moduleUrl);
+    }
+    catch (err) {
+        throw new Error(`writeApiSignatures could not load ${moduleUrl}`, { cause: err });
+    }
+    const source = namespace[exportName];
+    if (typeof source?.apiSignatureEntries !== "function") {
+        throw new Error(`${moduleUrl} has no export "${exportName}" that lists API signatures: name the export holding the instance in exportName`);
+    }
     const entries = await source.apiSignatureEntries();
     const previous = existsSync(file) ? readFileSync(file, "utf8") : null;
     const { changed, added, removedKeys, movedLines, summary } = describeSignatureChanges(entries, previous === null ? {} : readSignatureMap(previous));
@@ -142,7 +163,7 @@ export const writeApiSignatures = async (source, options) => {
     const result = (ok, written, lines) => ({ ok, file, count: entries.length, written, changed, added, removedKeys, lines });
     // A stale file is the answer by itself: a fresh process could only find
     // it stale again. A current one goes on to the verification, as a write
-    // does, so a check that names verifyInFreshProcess verifies.
+    // does.
     let written = false;
     let lines;
     if (options.check) {
@@ -155,44 +176,18 @@ export const writeApiSignatures = async (source, options) => {
         // formatted, so a watcher or an incremental build sees no change
         // where there is none, and a formatter's or a checkout's version of
         // the file is not rewritten back on every run. A change of header,
-        // quotes or semicolons shows the next time the map changes. The write
-        // goes to a file beside the target and is renamed over it, so a build
-        // reading the file meanwhile sees the old map or the new one, never
-        // half of one. A symlink is followed to the file it names: renamed
-        // over, the link itself would become the new file and its target
-        // would keep the old map.
+        // quotes or semicolons shows the next time the map changes.
         written = !unchanged;
-        if (written) {
-            const target = previous === null ? file : realpathSync(file);
-            mkdirSync(dirname(target), { recursive: true });
-            const partial = `${target}.${process.pid}.tmp`;
-            try {
-                writeFileSync(partial, renderSignatureFile(entries, options));
-                renameSync(partial, target);
-            }
-            catch (err) {
-                rmSync(partial, { force: true });
-                throw err;
-            }
-        }
+        if (written)
+            writeFileAtomically(file, renderSignatureFile(entries, options), previous !== null);
         lines = [
             written ? `✓ Wrote ${options.file} (${entries.length} APIs)` : `✓ ${options.file} is up to date (${entries.length} APIs)`,
             ...(movedLines.length ? [`  ${summary}`, ...movedLines] : ["  no signatures changed: this build forces no reloads"]),
         ];
     }
-    if (!options.verifyInFreshProcess)
+    if (options.verifyInFreshProcess === false)
         return result(true, written, lines);
-    const { module: instanceModule, exportName = "default" } = options.verifyInFreshProcess;
-    const request = {
-        // A string that is already a file URL (what import.meta.resolve()
-        // answers) is taken as one: resolved as a path, it would name a
-        // directory called "file:" under the working directory.
-        moduleUrl: typeof instanceModule === "string" && !/^file:/i.test(instanceModule)
-            ? pathToFileURL(resolve(instanceModule)).href
-            : new URL(instanceModule).href,
-        exportName,
-        file,
-    };
+    const request = { moduleUrl, exportName, file };
     const child = spawnSync(process.execPath, [...freshProcessNodeFlags(process.execArgv), fileURLToPath(FRESH_PROCESS_ENTRY), JSON.stringify(request)], {
         encoding: "utf8",
         timeout: VERIFY_TIMEOUT_MS,

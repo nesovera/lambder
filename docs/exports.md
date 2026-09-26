@@ -13,7 +13,8 @@ not listed here is internal and may change without a major version.
 - `lambder/testing` puts a real app under test in this process. Server-only,
   and reached by nothing else in the package, so no deployment carries it.
 - `lambder/build` is what a generator script runs at build time: the
-  signature file. Node-only, and reached by nothing else in the package.
+  signature file and the generated contract. Node-only, and reached by
+  nothing else in the package.
 
 The **Client** column marks what `lambder/client` also exports; `client only`
 marks the two names it exports that the root entry does not.
@@ -187,6 +188,30 @@ Types: `LambderFileSource`, `LambderFile`, `LambderReadFile`,
 
 See [Frontend hosting](./frontend-hosting.md).
 
+## Direct uploads
+
+| Export | Client | Description |
+| --- | --- | --- |
+| `LambderS3UploadBucket` | | An S3 bucket browsers post files to with presigned POST tickets, and that the server verifies, reads, writes, copies and deletes through |
+| `LambderMemoryUploadBucket` | | The same bucket in memory, answering storage requests the way S3 does, for tests and the mock runtime |
+| `LambderUploadFileFactsSchema`, `LambderUploadTicketSchema` | | The zod schemas an app's ticket endpoint declares its input and output with |
+| `checkUploadRule` | yes | A rule's verdict on a file's type and size, or null when it may be uploaded |
+| `refuseUnacceptedUpload` | | Refuses a ticket for a file the rule does not accept, with the `lambder/upload-*` code; what a bucket of an app's own calls before it signs |
+| `LambderUploadRunner` | yes | The browser half: checks the file against the rule, hashes it, asks for a ticket, posts it with progress, retries and cancellation, and has the server confirm it |
+| `LambderUploadError` | yes | How an upload failed, as a reason a screen can word |
+
+Types: `LambderUploadBucket` (the interface both buckets implement),
+`LambderUploadVerdict`, `LambderUploadObjectOptions` (what a stored object
+carries: tags, metadata, cache and disposition headers),
+`LambderUploadContentDisposition`, `LambderS3UploadBucketOptions`,
+`LambderMemoryUploadBucketOptions`, `LambderMemoryUploadObject` (what
+`inspectObject` answers); and, the client too, `LambderUploadRule`,
+`LambderUploadFileFacts`, `LambderUploadTicket`, `LambderUploadRuleVerdict`,
+`LambderUploadRunnerOptions`, `LambderUploadProgress`, `LambderUploadPhase`,
+`LambderUploadFailureReason`.
+
+See [Direct uploads](./uploads.md).
+
 ## Templating
 
 | Export | Client | Description |
@@ -288,10 +313,9 @@ Types: `LambderApiRequest`, `LambderApiRequestInfo`, `LambderCompressedPayloadFi
 `LambderApiIdempotencyOption`, `LambderApiPipelineOptions`,
 `LambderApiSessionsConfig`, `LambderApiInputRefusal`, `LambderApiRunResult`,
 `LambderApiExec`, `LambderApiEnvelopeConfig`, `LambderValidationAnswerBody`,
-`LambderSynthesizedRequest`, `LambderLambdaHttpResult`, and the three contract
-builders the root alone exports, `LambderContractEntry`, `LambderMergeContract`
-and `LambderFlattenContract` (what an app's `export interface ApiContractType`
-extends, so that reading the contract stays cheap as endpoints are added);
+`LambderSynthesizedRequest`, `LambderLambdaHttpResult`, and the two contract
+builders the root alone exports, `LambderContractEntry` and
+`LambderMergeContract`;
 and the contract helpers (client too): `LambderApiMode`,
 `LambderGuardNamesIn`, `LambderContractMode`, `LambderContractKeysWithMode`,
 `LambderContractKeysWithGuard`, `LambderJsonOf` (a type after JSON: what an
@@ -349,6 +373,7 @@ See [Translations](./i18n.md).
 | `LambderMockApp` | The runtime: registry, transports, sessions, failure injection, subscription, call log |
 | `lambderMockConsoleLogger` | A ready-made subscriber |
 | `lambderMockMswHandler` | One MSW handler for the whole API path, over the runtime |
+| `LambderMemoryUploadBucket`, `lambderMockUploadMswHandler` | The storage a mock app's uploads go to, and the MSW handler that answers its storage requests the way S3 does |
 | `lambderMockInvokeTransport` | The runtime as a callee of `LambderInvokeCaller` |
 | `LambderMockTransportError` | An injected network failure or timeout, as the transport rejects |
 | `assertApiSuccess`, `assertApiFailure` | The outcome assertions, shared with `lambder/testing`: narrow an `apiOutcome` and say what it was when it is not what the test expected |
@@ -367,6 +392,7 @@ Types: `LambderMockAppOptions`, `LambderMockSessionsOptions`,
 `LambderMockResponseEvent`, `LambderMockCallRecord`, `LambderMockListener`,
 `LambderMockRateLimitPolicies`, `LambderMockInputOf`, `LambderMockOutputOf`,
 `LambderMockConsoleLoggerOptions`, `LambderMswModule`, `LambderMockMswTarget`,
+`LambderMemoryUploadBucketOptions`, `LambderMemoryUploadObject`,
 and the event and answer shapes the invoke transport reads and returns,
 `LambderMockInvokeEvent` and `LambderMockInvokeResult`, declared here so the
 entry's type graph reaches neither `aws-lambda` nor the Lambda SDK; and
@@ -388,12 +414,13 @@ See [The mock runtime](./mock.md).
 | --- | --- |
 | `lambderTestApp` | Puts a built Lambder instance under test: memory stores under it in place, simulated browsers in front of it. Returns a `LambderTestApp` |
 | `assertApiSuccess`, `assertApiFailure` | Narrow an `apiOutcome` through an `asserts` signature, and throw a plain Error naming what the outcome was. No test runner is imported |
-| `LambderMemorySessionStore`, `LambderMemoryRateLimiter`, `LambderMemoryIdempotencyStore`, `LambderMemoryCache`, `LambderLocalFileSource`, `LambderCookieJar`, `LAMBDER_REFUSAL_CODES` | Re-exported for a test's convenience: the stores to inspect or hand in, the cache to swap an app's own for, a file source over fixtures, a visitor's jar, the codes to assert on |
+| `LambderMemorySessionStore`, `LambderMemoryRateLimiter`, `LambderMemoryIdempotencyStore`, `LambderMemoryCache`, `LambderMemoryUploadBucket`, `LambderLocalFileSource`, `LambderCookieJar`, `LAMBDER_REFUSAL_CODES` | Re-exported for a test's convenience: the stores to inspect or hand in, the cache to swap an app's own for, an upload bucket to put under an app's uploads, a file source over fixtures, a visitor's jar, the codes to assert on |
 
 Types: `LambderTestApp` and `LambderTestVisitor` (the two classes, reached
 through `lambderTestApp()` and `visitor()` rather than constructed),
 `LambderTestAppOptions`, `LambderTestVisitorOptions`, `LambderTestRequestInit`,
 `LambderTestedInstance` (an instance as `lambderTestApp` takes it),
+`LambderMemoryUploadBucketOptions`, `LambderMemoryUploadObject`,
 `LambderExpectedFailure`, and what a visitor hands back:
 `LambderLambdaHttpResult` from `request()`, `LambderCreatedSession` from
 `signIn()`, `LambderApiOutcome` and `LambderApiFailureReason` from
@@ -405,10 +432,14 @@ See [Testing](./testing.md).
 
 | Export | Description |
 | --- | --- |
-| `writeApiSignatures` | Writes the signature module both sides ship from an instance, or checks the one on disk, naming the endpoints that moved; with `verifyInFreshProcess`, verifies a write against the instance's module loaded in a fresh process |
+| `writeApiSignatures` | Writes the signature module both sides ship from the instance a module exports, or checks the one on disk, naming the endpoints that moved, and verifies it against the module loaded in a fresh process |
+| `writeApiContract` | Writes the server's contract type as plain types in a module that imports nothing, for a client to compile instead of the server, or checks the one on disk, naming the APIs that moved; a write is verified against the contract, entry by entry, before the file is touched |
 
 Types: `LambderApiSignatureSource` (what it reads: anything with
 `apiSignatureEntries()`), `LambderApiSignatureFileOptions`,
-`LambderApiSignatureFileResult`.
+`LambderApiSignatureFileResult`, `LambderApiContractFileOptions`,
+`LambderApiContractFileResult`, `LambderModuleLocation` (how both take the
+module that exports the instance).
 
-See [APIs](./apis.md#signatures-when-a-client-must-update).
+See [APIs](./apis.md#signatures-when-a-client-must-update) and
+[the contract as a generated file](./apis.md#the-contract-as-a-generated-file).

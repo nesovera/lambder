@@ -1,8 +1,14 @@
 import { type LambderApiRequest } from "../api/LambderApiRequest.js";
 import type { LambderApiAnswer } from "../api/LambderApiAnswer.js";
 import { LambderCookieJar } from "../shared/transport/LambderCookieJar.js";
+/** What a resolver of Lambder's adapters is: msw's, answering a Response, or `undefined` to hand the request on. */
+type LambderMswResolver = (info: {
+    request: Request;
+}) => Promise<Response | undefined>;
 /**
- * The parts of the msw module the adapter uses: `import * as msw from "msw"`.
+ * The parts of the msw module Lambder's adapters use, `import * as msw from
+ * "msw"`: `http.post` for the API (lambderMockMswHandler) and `http.all` for
+ * an upload bucket's storage (lambderMockUploadMswHandler).
  *
  * Written so the real package satisfies it. msw's resolver answers a
  * Response, or `undefined` to hand the request back (its
@@ -12,9 +18,8 @@ import { LambderCookieJar } from "../shared/transport/LambderCookieJar.js";
  */
 export type LambderMswModule = {
     http: {
-        post: (path: string, resolver: (info: {
-            request: Request;
-        }) => Promise<Response | undefined>) => unknown;
+        post: (path: string, resolver: LambderMswResolver) => unknown;
+        all: (path: string, resolver: LambderMswResolver) => unknown;
     };
     HttpResponse: {
         new (body?: BodyInit | null, init?: ResponseInit): Response;
@@ -101,3 +106,4 @@ export declare const lambderMockMswHandler: <M extends LambderMswModule>(mockApp
     /** The client IP its calls are read as arriving from. Default: the runtime's own defaultClientIp. */
     clientIp?: string;
 }) => ReturnType<M["http"]["post"]>;
+export {};

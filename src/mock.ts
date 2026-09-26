@@ -49,6 +49,11 @@ export { lambderMockConsoleLogger } from "./mock/lambderMockConsoleLogger.js";
 export type { LambderMockConsoleLoggerOptions } from "./mock/lambderMockConsoleLogger.js";
 export { lambderMockMswHandler } from "./mock/lambderMockMswHandler.js";
 export type { LambderMswModule, LambderMockMswTarget } from "./mock/lambderMockMswHandler.js";
+// The storage a mock app's uploads go to: a memory bucket the mock's ticket and
+// confirm handlers call, and the MSW handler that answers its storage requests.
+export { LambderMemoryUploadBucket } from "./stores/LambderMemoryUploadBucket.js";
+export type { LambderMemoryUploadBucketOptions, LambderMemoryUploadObject } from "./stores/LambderMemoryUploadBucket.js";
+export { lambderMockUploadMswHandler } from "./mock/lambderMockUploadMswHandler.js";
 export { lambderMockInvokeTransport } from "./mock/lambderMockInvokeTransport.js";
 // The event and answer shapes that transport reads and returns, declared
 // structurally so the mock entry's type graph reaches neither aws-lambda nor

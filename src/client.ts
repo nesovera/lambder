@@ -115,3 +115,10 @@ export type {
 } from "./shared/LambderI18n.js";
 // The status union every refusal option names; browser and mock code declares statuses too.
 export type { LambderHttpStatusCode } from "./shared/wire/LambderHttpStatus.js";
+
+// Direct uploads: the runner that takes a file from the browser straight to
+// storage, and the vocabulary it shares with the server's bucket.
+export { LambderUploadRunner, LambderUploadError } from "./client/LambderUploadRunner.js";
+export type { LambderUploadRunnerOptions, LambderUploadProgress, LambderUploadPhase, LambderUploadFailureReason } from "./client/LambderUploadRunner.js";
+export { checkUploadRule } from "./shared/contracts/LambderUploadBucket.js";
+export type { LambderUploadRule, LambderUploadFileFacts, LambderUploadTicket, LambderUploadRuleVerdict } from "./shared/contracts/LambderUploadBucket.js";

@@ -15,13 +15,9 @@
  * too: a conditional write's refusal is an answer rather than a failure, and
  * a partition key has a limit that keys built from caller data can pass.
  */
+import { withInstallHint } from "./LambderSdkInstallHint.js";
 let clientSdk;
 let documentSdk;
-const withInstallHint = (loading, packageName, user, reset) => loading.catch((cause) => {
-    // Not memoized: the package may be installed later in the same process (tests), and the next caller names itself.
-    reset();
-    throw new Error(`${user} requires ${packageName}: npm install ${packageName}`, { cause });
-});
 /** `@aws-sdk/client-dynamodb`, for the item-level API the stores speak and the client the session manager wraps. */
 const loadDynamoClientSdk = (user) => {
     clientSdk ??= withInstallHint(import("@aws-sdk/client-dynamodb"), "@aws-sdk/client-dynamodb", user, () => { clientSdk = undefined; });

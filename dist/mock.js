@@ -14,6 +14,10 @@ export { LambderMockApp, initLambderMock } from "./mock/LambderMockApp.js";
 export { LambderMockTransportError } from "./mock/LambderMockFailureInjector.js";
 export { lambderMockConsoleLogger } from "./mock/lambderMockConsoleLogger.js";
 export { lambderMockMswHandler } from "./mock/lambderMockMswHandler.js";
+// The storage a mock app's uploads go to: a memory bucket the mock's ticket and
+// confirm handlers call, and the MSW handler that answers its storage requests.
+export { LambderMemoryUploadBucket } from "./stores/LambderMemoryUploadBucket.js";
+export { lambderMockUploadMswHandler } from "./mock/lambderMockUploadMswHandler.js";
 export { lambderMockInvokeTransport } from "./mock/lambderMockInvokeTransport.js";
 // What a mock setup reaches for beside the app: the stores it runs on, the
 // jar its transport carries, and the refusal a handler says no with.

@@ -32,6 +32,11 @@ const caller = new LambderCaller<ApiContractType>({
 const user = await caller.api("getCompanyPage", { companyName: "Acme" });
 ```
 
+Importing the contract from the server's entry compiles the server's sources
+in the frontend's type check. In a large app, import it instead from the file
+`writeApiContract` generates, which holds the same type as plain types; see
+[the contract as a generated file](./apis.md#the-contract-as-a-generated-file).
+
 ## Constructor options
 
 | Option | Default | Description |

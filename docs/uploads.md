@@ -1,0 +1,304 @@
+# Direct uploads
+
+A file that travels from the browser straight to object storage, never
+through the app's function.
+
+An API payload tops out near a few megabytes once a file is base64, and a
+Lambda's request body at six, so anything larger (a scanned contract, a
+signed PDF, a video) is posted by the browser to the bucket itself, with a
+ticket the server signed beforehand. The ticket pins everything about the
+upload: the key, the exact byte size, the content type and the SHA-256 of
+the bytes, and storage enforces all of it, so the browser can only ever store
+the one file it described.
+
+The conversation is the same three steps whatever an app stores:
+
+1. The browser describes the file (`LambderUploadFileFacts`: name, type, size,
+   SHA-256) to the app's ticket endpoint, which signs a ticket for exactly
+   that file (`LambderUploadTicket`) under a key the app chose.
+2. The browser posts the file to storage with the ticket.
+3. The browser asks the app's confirm endpoint to take it, and the server asks
+   the bucket what arrived before its record counts as uploaded. The browser
+   saying "done" proves nothing.
+
+The server half is a `LambderUploadBucket`: `LambderS3UploadBucket` in
+production, `LambderMemoryUploadBucket` in tests and the mock runtime. The
+browser half is `LambderUploadRunner`.
+
+## The rule
+
+What one kind of upload accepts, declared once in code both sides import:
+
+```typescript
+import type { LambderUploadRule } from "lambder/client";
+
+export const INVOICE_UPLOAD_RULE: LambderUploadRule = {
+    maxBytes: 25 * 1024 * 1024,
+    mimeTypes: ["application/pdf"],   // exact, no wildcards
+};
+```
+
+The runner refuses a file the rule does not take before hashing it, and the
+bucket refuses to sign a ticket for one, which is the check that counts.
+
+## The server
+
+```typescript
+import { z } from "zod";
+import { LambderS3UploadBucket, LambderUploadFileFactsSchema, LambderUploadTicketSchema, refuse } from "lambder";
+
+export const invoiceFiles = new LambderS3UploadBucket({ bucket: "shop-invoices", clientConfig: { region: "us-east-1" } });
+
+lambder
+    .addSessionApi("invoices.requestUpload", {
+        input: z.object({ storeId: z.uuid(), fileFacts: LambderUploadFileFactsSchema }),
+        output: z.object({ ticket: LambderUploadTicketSchema, invoiceId: z.uuid() }),
+    }, async ({ apiPayload }, res) => {
+        const invoiceId = crypto.randomUUID();
+        // The key is the app's, built from its own ids, never the browser's.
+        const objectKey = `stores/${apiPayload.storeId}/invoices/${invoiceId}.pdf`;
+        // Signed before the record is written: a file the rule refuses leaves nothing behind.
+        const ticket = await invoiceFiles.issueUploadTicket({ objectKey, fileFacts: apiPayload.fileFacts, uploadRule: INVOICE_UPLOAD_RULE });
+        await invoices.insert({ invoiceId, objectKey, ...apiPayload.fileFacts, uploadedAt: null });
+        return res.api({ ticket, invoiceId });
+    })
+    .addSessionApi("invoices.confirmUpload", {
+        input: z.object({ invoiceId: z.uuid() }),
+        output: z.object({ invoiceId: z.uuid(), fileName: z.string() }),
+    }, async ({ apiPayload }, res) => {
+        const invoice = await invoices.find(apiPayload.invoiceId);
+        if(!invoice) refuse("Invoice not found.");
+        const verdict = await invoiceFiles.verifyUploadedObject({ objectKey: invoice.objectKey, fileFacts: invoice });
+        if(!verdict.verified) refuse("The upload did not arrive. Please try again.");
+        await invoices.markUploaded(invoice.invoiceId);
+        return res.api({ invoiceId: invoice.invoiceId, fileName: invoice.fileName });
+    });
+```
+
+`LambderUploadFileFactsSchema` and `LambderUploadTicketSchema` are the zod
+schemas of the two shapes that cross the app's own API; they come from the
+root entry, which keeps zod out of `lambder/client` at runtime. The key is
+always the app's: a bucket will not sign one holding `${filename}`, which S3
+fills with the uploaded file's own name, since the ticket would then let the
+browser choose where the file lands.
+`issueUploadTicket` refuses a file the rule does not accept with a
+`LambderApiRefusal` coded `lambder/upload-empty`,
+`lambder/upload-type-rejected` or `lambder/upload-too-large`, which a client
+branches and translates on like any refusal code.
+
+`verifyUploadedObject` answers `{ verified: true }`, or
+`{ verified: false, reason }` with `objectMissing` (nothing was posted) or
+`factsMismatch` (something else sits under the key).
+
+For the rest of an object's life the same bucket is the way in:
+
+| Method | Does |
+| --- | --- |
+| `issueDownloadUrl({ objectKey, lifetimeSeconds?, contentDisposition? })` | A link the browser reads the object with (a preview, a download), shown in place or saved under a name |
+| `readObject(objectKey)` | The bytes, for work the server does on the file; throws when the key holds nothing |
+| `writeObject({ objectKey, body, mimeType, sha256Base64?, object? })` | Stores bytes the server made (a stamped copy), with the SHA-256 checked by storage on the way in; computed when not given |
+| `copyObject({ fromObjectKey, toObjectKey })` | A second object with the same bytes, type, metadata and tags, made inside storage, for records that must each own their file |
+| `deleteObject(objectKey)` | Removes it; a key that holds nothing is not an error |
+
+### Lifetimes
+
+| Signature | Bucket default | Per call |
+| --- | --- | --- |
+| A ticket | `ticketLifetimeSeconds`, ten minutes: enough for a large file on a slow phone | `issueUploadTicket({ lifetimeSeconds })` |
+| A download link | `downloadLifetimeSeconds`, five minutes | `issueDownloadUrl({ lifetimeSeconds })` |
+
+Both are seconds, above zero and at most seven days, the longest S3 honours a
+signature; anything else throws where it is written. A signature also dies
+with the credentials that made it: a Lambda's role credentials last hours, so
+a ticket or link meant to live longer than that needs a bucket built on
+long-lived keys (`client` or `clientConfig.credentials`).
+
+### What an object carries
+
+A ticket and `writeObject` take `object`, what storage keeps beside the bytes:
+
+```typescript
+await invoiceFiles.issueUploadTicket({
+    objectKey, fileFacts, uploadRule: INVOICE_UPLOAD_RULE,
+    lifetimeSeconds: 3600,
+    object: {
+        tags: { retention: "30d" },                    // a lifecycle rule deletes it after 30 days
+        metadata: { storeId: apiPayload.storeId },     // x-amz-meta-storeid, back with every read
+        cacheControl: "private, max-age=3600",
+        contentDisposition: { disposition: "attachment", fileName: apiPayload.fileFacts.fileName },
+    },
+});
+```
+
+A ticket pins each of these in its signed policy, as it pins the key and the
+checksum, so the browser posts them unchanged or not at all. Names and sizes
+S3 would not keep (more than ten tags, a metadata name with a space, non-ASCII
+metadata, more than 2 KB of it) throw where the app writes them.
+
+**A time to live.** S3 has no expiry per object; a lifecycle rule on the
+bucket deletes what matches it, by prefix or by tag, a day at a time. Tag an
+object and give the bucket one rule per retention it uses:
+
+```json
+{ "Rules": [{ "ID": "retention-30d", "Status": "Enabled",
+  "Filter": { "Tag": { "Key": "retention", "Value": "30d" } },
+  "Expiration": { "Days": 30 } }] }
+```
+
+An object that must go at an exact moment, or when a record says so, is
+deleted by the app (`deleteObject`) on its own schedule instead.
+
+**How a browser presents it.** `contentDisposition` on the object is what
+every read answers with, and `contentDisposition` on a download link overrides
+it for that link: `{ disposition: "attachment", fileName }` saves the file
+under its own name, `{ disposition: "inline" }` shows it in place. The name is
+encoded for the header whatever it holds.
+
+### S3
+
+A ticket is an S3 presigned POST whose policy carries the key, the content
+type, a `content-length-range` of exactly the size, and the SHA-256 checksum
+fields, so S3 refuses any other file. That needs S3's POST policies with
+checksum fields: S3 itself, or a store that implements them. Cloudflare R2
+does not take presigned POSTs.
+
+`LambderS3UploadBucket` needs `@aws-sdk/client-s3`,
+`@aws-sdk/s3-presigned-post` and `@aws-sdk/s3-request-presigner`, optional
+peer dependencies, each loaded the first time a call needs it. Signing a
+ticket or a link reaches nothing; the other calls go to the bucket. The
+function's role needs, on the bucket:
+
+- `s3:PutObject`: the browser's post is authorized as the role that signed
+  its ticket, and `writeObject` and `copyObject` write.
+- `s3:GetObject`: download links, `readObject`, `copyObject`'s source, and
+  the checksum `verifyUploadedObject` reads.
+- `s3:ListBucket`: without it S3 answers a missing key with 403 rather than
+  404, and `verifyUploadedObject` throws where it would answer
+  `objectMissing`.
+- `s3:DeleteObject`.
+- With tags, `s3:PutObjectTagging` (a post or write that sets them) and
+  `s3:GetObjectTagging` (`copyObject`, which copies them).
+- With SSE-KMS, `kms:GenerateDataKey` for the writes and `kms:Decrypt` for the
+  reads and the checksum.
+
+The bucket also needs a CORS rule allowing `POST` from the app's origins, and
+`GET` if the browser fetches download links rather than navigating to them.
+
+## The browser
+
+```typescript
+import { LambderUploadError, LambderUploadRunner } from "lambder/client";
+
+const runner = new LambderUploadRunner({
+    uploadRule: INVOICE_UPLOAD_RULE,
+    requestTicket: async (fileFacts, { signal }) => {
+        const answer = await caller.api("invoices.requestUpload", { storeId, fileFacts }, { signal });
+        if(!answer) throw new Error("The ticket was refused.");
+        return { ticket: answer.ticket, reference: answer.invoiceId };
+    },
+    confirmUpload: async (invoiceId, { signal }) => {
+        const answer = await caller.api("invoices.confirmUpload", { invoiceId }, { signal });
+        if(!answer) throw new Error("The upload was not confirmed.");
+        return answer;
+    },
+});
+
+try{
+    const invoice = await runner.upload(file, { onProgress: showProgress, signal: controller.signal });
+}catch(err){
+    if(err instanceof LambderUploadError) showFailure(err.reason);
+}
+```
+
+`reference` is whatever the confirm endpoint needs to find the upload again
+(the id of the record the ticket endpoint made), and means nothing to the
+runner. Both calls get the upload's `signal` to pass on, so a cancel stops the
+app's request as well as the runner; a call that fails after the cancel is
+read as the cancel. `upload()` answers the confirm endpoint's receipt, or
+throws a `LambderUploadError` whose `reason` a screen words for the person:
+
+| Reason | What happened |
+| --- | --- |
+| `fileEmpty`, `fileTypeRejected`, `fileTooLarge` | The rule's verdict, before anything was sent |
+| `fileUnreadable` | The browser could not read the file (moved, deleted, a cloud placeholder never downloaded) |
+| `ticketRefused` | `requestTicket` threw |
+| `storageRejected` | Storage said no for a reason a retry cannot cure (or kept calling new tickets expired); the message carries its code |
+| `networkFailed` | Storage could not be reached, or kept stalling, through every attempt |
+| `confirmRefused` | The bytes are stored and `confirmUpload` threw |
+| `cancelled` | `signal` was aborted |
+
+Along the way the runner reports its phase (`hashing`, `requesting`,
+`uploading` with the bytes sent, `confirming`). A dropped connection, a 5xx,
+a refusal a retry can cure (S3's `RequestTimeout`, `SlowDown`) or a post that
+moves nothing for a minute (`stallTimeoutMs`) is tried again after a random
+wait whose ceiling grows with each attempt, with the same ticket, so a flaky
+connection does not leave the app a record per attempt; `storageRetry` sets
+the attempts and the bounds of the wait. A ticket storage calls expired is
+replaced with a new one at once, spending no attempt, up to twice. The runner
+posts over XMLHttpRequest, the one way a browser reports how much of a body
+has been sent; where only fetch exists it posts over fetch, without progress
+or the stall watch.
+
+The runner reads the whole file to hash it, since WebCrypto digests a buffer
+rather than a stream, so a rule's `maxBytes` should stay within what a
+browser holds in memory at once: hundreds of megabytes, not gigabytes.
+
+`checkFile(file)` answers the rule's verdict without sending anything, for a
+drop zone to ask on drop, `acceptedTypes` is the rule's types for a file
+input's `accept`, and `discard(receipt)` calls the optional `discardUpload`
+for an upload the person removed again.
+
+## Tests and the mock runtime
+
+`LambderMemoryUploadBucket` is the same bucket in memory. It checks a post
+the way S3 checks a presigned POST (every field the ticket carries with its
+value and no other, ahead of the file; a ticket it issued and not expired; a
+body of exactly the size; bytes with that SHA-256) and refuses otherwise with
+the status and XML error S3 answers with, so a runner, or any other client,
+takes the same path against it as against S3. Its tickets and
+links point under `baseUrl`, a host of its own that cannot resolve unless
+something answers for it, and `handleStorageRequest(request)` is what answers:
+a fetch `Request` in, a `Response` out, or null for a request that is not the
+bucket's. `listObjectKeys()`, `inspectObject(key)` (the object's facts, tags,
+metadata and headers) and `reset()` are there for assertions and between
+tests, and `now` moves its clock past an expiry without waiting.
+
+In the mock runtime, `lambderMockUploadMswHandler` puts that behind MSW, and
+the mock's handlers call the memory bucket as the server's call the real one:
+
+```typescript
+import * as msw from "msw";
+import { setupWorker } from "msw/browser";
+import { LambderMemoryUploadBucket, lambderMockMswHandler, lambderMockUploadMswHandler } from "lambder/mock";
+
+const invoiceFiles = new LambderMemoryUploadBucket();
+
+export const invoiceMocks = mockApp.apiSlice(
+    mockApp.sessionApi("invoices.requestUpload", async ({ payload }) => {
+        const invoiceId = crypto.randomUUID();
+        const ticket = await invoiceFiles.issueUploadTicket({ objectKey: `mock/${invoiceId}.pdf`, fileFacts: payload.fileFacts, uploadRule: INVOICE_UPLOAD_RULE });
+        return { ticket, invoiceId };
+    }),
+    // ...confirmUpload verifies through invoiceFiles the same way
+);
+
+const worker = setupWorker(
+    lambderMockMswHandler(mockApp, { msw, apiPath: "/api" }),
+    lambderMockUploadMswHandler(invoiceFiles, { msw }),
+);
+```
+
+In Node, `setupServer` from `msw/node` takes the same handler, and a test
+that stubs `fetch` itself can hand requests to `handleStorageRequest`
+directly.
+
+## A bucket of your own
+
+`LambderUploadBucket` is an interface, so other storage can stand behind the
+same runner and endpoints. Its `issueUploadTicket` refuses a file the rule
+does not take with the three `lambder/upload-*` codes: call
+`refuseUnacceptedUpload(uploadRule, fileFacts)` before signing, as both of
+Lambder's buckets do, and `checkUploadRule` for the verdict alone. What the
+browser posts is up to the ticket: the runner sends `formFields` as form
+fields ahead of the file, to `uploadUrl`, and reads a refusal written as S3
+writes one.

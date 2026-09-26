@@ -1,4 +1,5 @@
 import type { LambderApiSignatureEntry } from "../api/LambderApiSignature.js";
+import { type LambderModuleLocation } from "./moduleLocation.js";
 /**
  * How the fresh process reports its comparison: one line on stdout starting
  * with this, then the verdict as JSON. The line, not the exit status, is the
@@ -13,6 +14,15 @@ export type LambderApiSignatureSource = {
     apiSignatureEntries(): Promise<LambderApiSignatureEntry[]>;
 };
 export type LambderApiSignatureFileOptions = {
+    /**
+     * The module that exports the instance, usually the server's entry: a
+     * path relative to the working directory, or a file URL. It is imported
+     * in this process, so a TypeScript module needs the process's loader
+     * (`tsx`, `node --import tsx`), as the generator script itself does.
+     */
+    module: LambderModuleLocation;
+    /** The export that holds the instance. Default: "default", the module's default export. */
+    exportName?: string;
     /** The TypeScript module to write, exporting `apiSignatures`. Relative to the working directory. */
     file: string;
     /** Write nothing, and answer whether the file on disk is what the registrations produce now. Default: false. */
@@ -25,30 +35,19 @@ export type LambderApiSignatureFileOptions = {
     semicolons?: boolean;
     /**
      * After writing, or after a check that found the file current, load the
-     * module that holds the instance in a fresh Node process and check the
-     * file against what it digests there. A schema built from the clock or a
-     * random source digests differently in every process; this catches it by
-     * endpoint name instead of letting signatures change on every build. Only
-     * that module is loaded, never the calling script, so nothing the script
-     * does runs twice; the module's own top-level code does run again. The
-     * fresh process gets this process's Node flags (`--import`, `--require`,
+     * module again in a fresh Node process and check the file against what
+     * it digests there. A schema built from the clock or a random source
+     * digests differently in every process; this catches it by endpoint name
+     * instead of letting signatures change on every build. Only the module is
+     * loaded there, never the calling script, so nothing the script does runs
+     * twice; the module's own top-level code does run again. The fresh
+     * process gets this process's Node flags (`--import`, `--require`,
      * `--loader`, `--conditions`) less the inspector, watch mode, the test
      * runner and the eval flags (`-e`, `-p`, `--input-type`), so a TypeScript
      * module loads there as it did here when its loader is on the command
-     * line or in NODE_OPTIONS. Default: not verified.
+     * line or in NODE_OPTIONS. Default: true.
      */
-    verifyInFreshProcess?: {
-        /**
-         * The module that exports the instance: a path relative to the
-         * working directory, or a file URL, as a URL such as
-         * `new URL("../backend/index.js", import.meta.url)` beside the
-         * generator's own import of it, or as the string
-         * `import.meta.resolve()` answers.
-         */
-        module: string | URL;
-        /** The export that holds the instance. Default: "default", the module's default export. */
-        exportName?: string;
-    };
+    verifyInFreshProcess?: boolean;
 };
 export type LambderApiSignatureFileResult = {
     /** False when a check found the file stale, or a fresh process digested different signatures or never compared them. */
@@ -89,21 +88,27 @@ export declare const describeSignatureChanges: (entries: LambderApiSignatureEntr
  * that endpoint, so this is the line that says how wide a deploy's reload
  * will be.
  *
- * Call it from a generator script that imports the app's instance:
+ * Call it from a generator script, naming the module that exports the app's
+ * instance, as writeApiContract takes it:
  *
  * ```ts
  * import { writeApiSignatures } from "lambder/build";
- * import { lambder } from "../server/src/index.js";
  *
- * const result = await writeApiSignatures(lambder, { file: "shared/generated/apiSignatures.generated.ts", check: process.argv.includes("--check") });
+ * const result = await writeApiSignatures({
+ *     module: "server/src/index.ts",   // export const lambder = initLambder()...
+ *     exportName: "lambder",
+ *     file: "shared/generated/apiSignatures.generated.ts",
+ *     check: process.argv.includes("--check"),
+ * });
  * console.log(result.lines.join("\n"));
  * process.exit(result.ok ? 0 : 1);
  * ```
  *
  * Signatures are compared as the map the file holds, so a checkout that
  * rewrote its line endings or a formatter that re-indented it or unquoted
- * its keys is neither stale nor rewritten. `verifyInFreshProcess` also
- * checks the file, written or found current, against the instance's module
- * loaded in a fresh process.
+ * its keys is neither stale nor rewritten. The file, written or found
+ * current, is then checked again against the module loaded in a fresh
+ * process (see `verifyInFreshProcess`). A module that does not load, or an
+ * export that is not an instance, throws.
  */
-export declare const writeApiSignatures: (source: LambderApiSignatureSource, options: LambderApiSignatureFileOptions) => Promise<LambderApiSignatureFileResult>;
+export declare const writeApiSignatures: (options: LambderApiSignatureFileOptions) => Promise<LambderApiSignatureFileResult>;

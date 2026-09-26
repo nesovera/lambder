@@ -951,7 +951,7 @@ describe('LambderMockApp - overrides, reset, observation', () => {
 
 /**
  * A stand-in for the msw module: the adapter needs a post() to register a
- * resolver and a Response constructor.
+ * resolver and a Response constructor, and the module type names all() too.
  *
  * Deliberately not annotated as LambderMswModule. Annotated, the fake would be
  * checked against the adapter's own declaration and prove only that the
@@ -961,7 +961,7 @@ describe('LambderMockApp - overrides, reset, observation', () => {
 const fakeMswModule = () => {
     let resolver: ((info: { request: Request }) => Promise<Response | undefined>) | null = null;
     const msw = {
-        http: { post: (_path: string, given: typeof resolver) => { resolver = given; return null; } },
+        http: { post: (_path: string, given: typeof resolver) => { resolver = given; return null; }, all: () => null },
         HttpResponse: Response,
     };
     // JSON, as every Lambder caller posts it; a test passes its own Content-Type to see another.

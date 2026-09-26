@@ -16,7 +16,7 @@ order the first time.
 | Page | Covers |
 | --- | --- |
 | [Routing and actions](./routing.md) | `addRoute`, matchers, path params, hooks, fallback and error handlers, crash reporting (`crashes`), gateway differences, and `addAction` for non-HTTP invocations |
-| [APIs and refusals](./apis.md) | `addApi` and `addSessionApi`, the inferred contract, modular APIs with `use()`, `refuse()` and `LambderApiRefusal`, the signature file (`writeApiSignatures` from `lambder/build`) |
+| [APIs and refusals](./apis.md) | `addApi` and `addSessionApi`, the inferred contract, modular APIs with `use()`, `refuse()` and `LambderApiRefusal`, the signature file (`writeApiSignatures` from `lambder/build`), the contract as a generated file for a client (`writeApiContract`) |
 | [Responses](./responses.md) | The render context, resolver methods, `die`, cookies, compression, ETag, and Lambda's size caps |
 | [Sessions](./sessions.md) | Sessions over a store (DynamoDB, memory, your own), cookie scope and migrations, secrets at rest, `dataRefresh`, the session controller |
 | [API policies](./api-policies.md) | Declarative rate limits, guards and idempotency, and making an authorization declaration mandatory |
@@ -30,6 +30,7 @@ order the first time.
 | --- | --- |
 | [Frontend client](./client.md) | `LambderCaller`: typed calls, `apiOutcome`, timeouts, guard inputs, idempotency keys, request compression, transports |
 | [Frontend hosting](./frontend-hosting.md) | File sources (local, S3, R2, HTTP), `servePublicFiles`, `serveIndexHtml`, `res.templateFile` |
+| [Direct uploads](./uploads.md) | Files the browser posts straight to S3 with tickets the server signs: `LambderS3UploadBucket`, `LambderUploadRunner`, and `LambderMemoryUploadBucket` for tests and the mock |
 | [Templating](./templating.md) | `html`/`xml` tagged templates and the comment-only `LambderTemplatingEngine` |
 | [Translations](./i18n.md) | `createLambderI18n`: typed keys, component extension, language detection, on-demand languages, runtime dictionaries |
 | [The mock runtime](./mock.md) | `LambderMockApp`: your typed contract served from mock handlers over the real pipeline, in the browser and in tests |
