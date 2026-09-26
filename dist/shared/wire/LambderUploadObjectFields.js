@@ -1,5 +1,5 @@
 import { contentDispositionHeader } from "../util/LambderContentDisposition.js";
-const escapeXml = (text) => text.replace(/[<>&'"]/g, (character) => `&#${character.charCodeAt(0)};`);
+import { escapeXmlText } from "../util/escapeXmlText.js";
 /**
  * What a ticket's form carries for the stored object, in the fields S3's
  * presigned POST reads them from: the tag set as the XML `tagging` field,
@@ -12,7 +12,7 @@ export const uploadObjectFormFields = (object) => {
     const fields = {};
     const tags = Object.entries(object?.tags ?? {});
     if (tags.length) {
-        fields.tagging = `<Tagging><TagSet>${tags.map(([key, value]) => `<Tag><Key>${escapeXml(key)}</Key><Value>${escapeXml(value)}</Value></Tag>`).join("")}</TagSet></Tagging>`;
+        fields.tagging = `<Tagging><TagSet>${tags.map(([key, value]) => `<Tag><Key>${escapeXmlText(key)}</Key><Value>${escapeXmlText(value)}</Value></Tag>`).join("")}</TagSet></Tagging>`;
     }
     for (const [name, value] of Object.entries(object?.metadata ?? {}))
         fields[`x-amz-meta-${name.toLowerCase()}`] = value;

@@ -1,7 +1,6 @@
 import type { LambderUploadObjectOptions } from "../contracts/LambderUploadBucket.js";
 import { contentDispositionHeader } from "../util/LambderContentDisposition.js";
-
-const escapeXml = (text: string) => text.replace(/[<>&'"]/g, (character) => `&#${character.charCodeAt(0)};`);
+import { escapeXmlText } from "../util/escapeXmlText.js";
 
 /**
  * What a ticket's form carries for the stored object, in the fields S3's
@@ -15,7 +14,7 @@ export const uploadObjectFormFields = (object: LambderUploadObjectOptions | unde
     const fields: Record<string, string> = {};
     const tags = Object.entries(object?.tags ?? {});
     if(tags.length){
-        fields.tagging = `<Tagging><TagSet>${tags.map(([key, value]) => `<Tag><Key>${escapeXml(key)}</Key><Value>${escapeXml(value)}</Value></Tag>`).join("")}</TagSet></Tagging>`;
+        fields.tagging = `<Tagging><TagSet>${tags.map(([key, value]) => `<Tag><Key>${escapeXmlText(key)}</Key><Value>${escapeXmlText(value)}</Value></Tag>`).join("")}</TagSet></Tagging>`;
     }
     for(const [name, value] of Object.entries(object?.metadata ?? {})) fields[`x-amz-meta-${name.toLowerCase()}`] = value;
     if(object?.cacheControl !== undefined) fields["Cache-Control"] = object.cacheControl;

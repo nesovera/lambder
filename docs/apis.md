@@ -188,10 +188,13 @@ object types, unions and literals. The default library's interfaces (`Date`)
 keep their names. A non-generic named type is printed once, as a declaration
 of its own that the entries refer to, which is also how a recursive type (a
 tree, a JSON value) refers to itself; any other type that recurses is named
-after what it instantiates (`Tree<string>` is `TreeString`). Properties keep
-the order they are written in, so the file changes only when an API does. The module exports one type alias,
-`typeName` (default `ApiContractType`), of an object type with plain members:
-reading it is ordinary property access, and as an alias rather than an
+after what it instantiates (`Tree<string>` is `TreeString`). Two types that
+want one name (an interface `Row` in two modules) are told apart by a number,
+the one declared first, by file and then position, keeping the name.
+Properties keep the order they are written in, and names do not follow the
+order APIs are registered in, so the file changes only when an API does. The
+module exports one type alias, `typeName` (default `ApiContractType`), of an
+object type with plain members: reading it is ordinary property access, and as an alias rather than an
 interface it has the inferable index signature `LambderCaller`, the mock and
 `LambderInvokeCaller` ask for.
 

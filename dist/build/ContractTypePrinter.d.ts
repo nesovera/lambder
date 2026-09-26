@@ -22,18 +22,40 @@ export declare class ContractTypePrinter {
     private readonly program;
     private readonly checker;
     private readonly style;
-    private readonly failures;
-    /** Every named declaration by the type it stands for; its text is null while it is being printed. */
-    private readonly declarations;
+    private failures;
+    /** Every declaration by the type it stands for. */
+    private declarations;
+    /** The name each declaration is printed under, settled from all of them; empty on the pass that finds them. */
+    private settledNames;
     /** Names a declaration may not take: the default library's, and the contract's own. */
-    private readonly takenNames;
+    private readonly reservedNames;
     /** The anonymous types being printed: meeting one again inside itself is recursion, and it needs a name. */
     private readonly inProgress;
     /** Under exactOptionalPropertyTypes an optional member's type carries the compiler's own "missing" undefined, which its source never wrote. */
     private readonly exactOptionalProperties;
     constructor(ts: typeof import("typescript"), program: ts.Program, checker: ts.TypeChecker, style: ContractPrintStyle, contractName: string);
-    /** Prints each member of the contract type, sorted by name, and every declaration they refer to. */
+    /**
+     * Prints each member of the contract type, sorted by name, and every
+     * declaration they refer to.
+     *
+     * In two passes: the first finds every type that needs a declaration,
+     * and the second prints with their names settled from all of them. Named
+     * as the printer met them, two types wanting one name would trade it
+     * whenever the APIs were registered in another order, or a union's
+     * members created in another, and the file would move with no API
+     * changed.
+     */
     printContract(contract: ts.Type): PrintedContract;
+    /**
+     * A name for every declaration the first pass found. Of the types that
+     * want one name, the one declared first (by file, then position) keeps
+     * it, and the others take the lowest free number after it once every
+     * type has claimed its own name, so a number never takes the name
+     * another type is declared under. Types declared at one place (two
+     * instantiations of a generic) keep the order the entries reached them
+     * in, by entry name.
+     */
+    private settleNames;
     /**
      * `label value`, with a union too long for one line starting on the next
      * line, one member per line: what a property, an index signature and a
@@ -43,16 +65,25 @@ export declare class ContractTypePrinter {
     private print;
     /** A union, an intersection or an object: printed in place, or as a reference to a declaration of its own. */
     private printComposite;
-    /** The name a type is declared under, when it is one to print as a declaration: non-generic, and not the default library's. */
-    private declaredNameOf;
+    /** A type's declaration, under the name it is settled to once the first pass has settled them. */
+    private declare;
+    /** The name a type is declared under and where, when it is one to print as a declaration: non-generic, and not the default library's. */
+    private ownDeclarationOf;
+    /** A symbol's name to declare a type under, and where the symbol is declared. */
+    private declaredAs;
+    /** Where a symbol is declared, as text that orders by file and then position; empty for one declared nowhere. */
+    private originOf;
     /** The name a symbol is declared under, read off its declaration, so `export default interface Customer` is Customer; undefined when it has none to print. */
     private nameOf;
     /**
      * A name for a type that refers to itself and has none of its own: what it
      * instantiates followed by its arguments (a JSON mapping of a Tree is
      * `JsonOfTree`, a `Tree<string>` is `TreeString`), or `RecursiveType`.
+     * Its origin is where what it instantiates is declared, then where each
+     * argument is, so two instantiations named alike are told apart by their
+     * arguments.
      */
-    private recursiveNameOf;
+    private recursiveDeclarationOf;
     private printStructure;
     private printUnion;
     private printUnionOf;
@@ -80,6 +111,5 @@ export declare class ContractTypePrinter {
     private wrapped;
     keyOf(name: string): string;
     private quoted;
-    private takeName;
     private fail;
 }

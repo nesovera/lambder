@@ -72,10 +72,10 @@ export type LambderUploadRunnerOptions<Reference, Receipt> = {
     /**
      * How storage is tried again when it cannot be reached, stalls, or answers
      * a failure a retry can cure (a 5xx, RequestTimeout, SlowDown). Each wait
-     * is a random time between `baseDelayMs` and a ceiling that doubles with
-     * every failed attempt, never past `maxDelayMs`, so many browsers dropped
-     * together do not come back in step. Default: 4 attempts, waits from one
-     * second to 15.
+     * is a random time between `baseDelayMs` and a ceiling of twice that,
+     * doubling with every failed attempt and never past `maxDelayMs`, so many
+     * browsers dropped together do not come back in step, not even the first
+     * time. Default: 4 attempts, waits from one second to 15.
      */
     storageRetry?: { attempts?: number; baseDelayMs?: number; maxDelayMs?: number };
     /**
@@ -151,17 +151,16 @@ export class LambderUploadRunner<Reference, Receipt> {
 
         stopIfCancelled();
         report("hashing");
-        let bytes: Uint8Array;
-        try{
-            bytes = new Uint8Array(await file.arrayBuffer());
-        }catch(cause){
-            throw new LambderUploadError("fileUnreadable", { cause });
-        }
         const fileFacts: LambderUploadFileFacts = {
             fileName: file.name,
             mimeType: file.type,
             byteSize: file.size,
-            sha256Base64: await sha256Base64Of(bytes),
+            // Read straight into the digest, never into a variable: the buffer
+            // is the size of the file, and a local would keep it through
+            // every await of the upload that follows.
+            sha256Base64: await sha256Base64Of(new Uint8Array(await file.arrayBuffer().catch((cause: unknown) => {
+                throw new LambderUploadError("fileUnreadable", { cause });
+            }))),
         };
         stopIfCancelled();
 
@@ -210,7 +209,7 @@ export class LambderUploadRunner<Reference, Receipt> {
     }
 
     private waitBeforeRetry(failedAttempts: number, signal: AbortSignal | undefined): Promise<void> {
-        const ceiling = Math.max(this.baseDelayMs, Math.min(this.baseDelayMs * 2 ** (failedAttempts - 1), this.maxDelayMs));
+        const ceiling = Math.max(this.baseDelayMs, Math.min(this.baseDelayMs * 2 ** failedAttempts, this.maxDelayMs));
         return new Promise<void>((resolve, reject) => {
             if(signal?.aborted) return reject(new LambderUploadError("cancelled"));
             const cancel = () => {
@@ -307,8 +306,10 @@ const xmlText = (text: string) => text.replace(/&(#x[0-9a-f]+|#\d+|\w+);/gi, (en
 /**
  * Storage explains a refusal in XML, `<Error><Code/><Message/></Error>`,
  * read here without a DOM so the runner works wherever fetch does. A
- * transient code is tried again like a dropped connection, and an expired
- * ticket is the one refusal a new ticket cures.
+ * transient code is tried again like a dropped connection. An expired ticket
+ * is the one refusal a new ticket cures, and so is ExpiredToken: the
+ * temporary credentials that signed the ticket ran out before it did, and
+ * the next one is signed with fresh ones.
  */
 const rejectedOutcome = (status: number, body: string): StorageOutcome => {
     const code = xmlText(/<Code>([^<]*)<\/Code>/.exec(body)?.[1] ?? "") || `HTTP ${status}`;
@@ -316,7 +317,7 @@ const rejectedOutcome = (status: number, body: string): StorageOutcome => {
     if(TRANSIENT_STORAGE_CODES.has(code)) return { kind: "unreachable" };
     return {
         kind: "rejected",
-        ticketExpired: code === "AccessDenied" && /expired/i.test(message),
+        ticketExpired: code === "ExpiredToken" || (code === "AccessDenied" && /expired/i.test(message)),
         detail: message ? `${code}: ${message}` : code,
     };
 };
