@@ -78,34 +78,8 @@ export type LambderRateLimitKeyBuilder<TCtx> = {
 export declare const lambderRateLimitKeyBuilder: <TCtx>() => LambderRateLimitKeyBuilder<TCtx>;
 /** What one rate-limit counter tracks: the client IP, the session identity, or a custom payload-derived key. */
 export type LambderRateLimitPer<TCtx = any> = "ip" | "session" | LambderRateLimitKeyFn<any, TCtx>;
-/**
- * What one budget spans:
- *
- * - "perApi" (default): every API referencing the policy gets its own
- *   counter, so the windows are a per-API ceiling (three APIs referencing a
- *   60/min policy allow one subject 180/min in total). An API may tune the
- *   windows in its declaration: `rateLimit: { name: { perMin: 20 } }`.
- * - "perPolicy": every API referencing the policy shares ONE counter, so the
- *   windows are one combined budget (e.g. one per-email allowance across
- *   send, register, and reset). The policy IS the group: to give user APIs
- *   and report APIs separate shared budgets, declare two policies.
- */
-export type LambderRateLimitBudget = "perApi" | "perPolicy";
-/**
- * When a custom-keyed policy is charged, relative to the guards and the input
- * schema.
- *
- * - "afterGuards" (default): after every guard and the input schema passed.
- *   The key is a value the caller chose (an email in the payload), so a
- *   caller who never passes a captcha guard cannot spend a victim's budget
- *   and lock them out of reset, register and send-code.
- * - "beforeGuards": before the guards and the input schema, so an attempt
- *   they refuse is counted too. For a limit on guessing a secret a guard or
- *   the schema checks (a one-time code checked by a guard, keyed per email):
- *   charged after them, a wrong guess is refused before it is ever counted.
- *   Pair it with an IP limit, since anyone may spend this budget.
- */
-export type LambderRateLimitChargeAt = "beforeGuards" | "afterGuards";
+import type { LambderRateLimitBudget, LambderRateLimitChargeAt } from "../shared/wire/LambderApiOptionEntries.js";
+export type { LambderRateLimitBudget, LambderRateLimitChargeAt };
 /**
  * A named rate-limit policy: fixed windows, the key one counter tracks, and
  * what one budget spans.
@@ -357,4 +331,3 @@ export declare class LambderApiRateLimitsEngine {
      */
     private requestKeyOf;
 }
-export {};

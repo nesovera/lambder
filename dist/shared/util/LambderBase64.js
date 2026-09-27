@@ -25,3 +25,20 @@ export const base64ToBytes = (base64) => {
 };
 /** The base64 of UTF-8 text back to the text. */
 export const base64ToText = (base64) => new TextDecoder().decode(base64ToBytes(base64));
+/**
+ * The base64url alphabet (RFC 4648 section 5) without padding: what a token
+ * or a digest carries where "+", "/" and "=" would need escaping, in a URL, a
+ * header or a database column.
+ */
+export const bytesToBase64Url = (bytes) => bytesToBase64(bytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+/**
+ * Whether `text` is base64url and nothing else, so decoding it decodes rather
+ * than guesses; Buffer decodes anything. A length that leaves a remainder of
+ * one past a multiple of four is no encoding of any bytes, and the platform's
+ * atob throws on it where Buffer shrugs, so it is refused here on both.
+ */
+export const isBase64Url = (text) => text.length % 4 !== 1 && /^[A-Za-z0-9_-]*$/.test(text);
+export const base64UrlToBytes = (base64Url) => {
+    const base64 = base64Url.replace(/-/g, "+").replace(/_/g, "/");
+    return base64ToBytes(base64.padEnd(base64.length + (4 - base64.length % 4) % 4, "="));
+};

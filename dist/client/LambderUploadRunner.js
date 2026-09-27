@@ -1,4 +1,5 @@
 import { checkUploadRule, } from "../shared/contracts/LambderUploadBucket.js";
+import { LambderBackoffTimer } from "../shared/util/LambderBackoffTimer.js";
 import { sha256Base64Of } from "../shared/util/LambderTextDigest.js";
 /** How an upload failed: `reason` for a screen to word, the underlying error as `cause`. */
 export class LambderUploadError extends Error {
@@ -21,14 +22,16 @@ const TRANSIENT_STORAGE_CODES = new Set(["RequestTimeout", "SlowDown", "Internal
 export class LambderUploadRunner {
     options;
     attempts;
-    baseDelayMs;
-    maxDelayMs;
+    /** The ladder one upload's waits climb; each upload() builds a timer of its own from it, so two uploads never share a count. */
+    backoff;
     stallTimeoutMs;
     constructor(options) {
         this.options = options;
         this.attempts = Math.max(1, options.storageRetry?.attempts ?? 4);
-        this.baseDelayMs = options.storageRetry?.baseDelayMs ?? 1_000;
-        this.maxDelayMs = options.storageRetry?.maxDelayMs ?? 15_000;
+        const baseDelayMs = options.storageRetry?.baseDelayMs ?? 1_000;
+        const maxDelayMs = options.storageRetry?.maxDelayMs ?? 15_000;
+        // A longest wait below the shortest is every wait at the shortest.
+        this.backoff = { baseMs: baseDelayMs, maxMs: Math.max(baseDelayMs, maxDelayMs) };
         this.stallTimeoutMs = options.stallTimeoutMs ?? 60_000;
     }
     /** For a file input's `accept`, so the picker only offers what the rule takes. */
@@ -81,6 +84,7 @@ export class LambderUploadRunner {
             }
         };
         let issued = await requestTicket();
+        const backoff = new LambderBackoffTimer(this.backoff);
         let failedAttempts = 0;
         let ticketRenewals = 0;
         for (;;) {
@@ -103,7 +107,10 @@ export class LambderUploadRunner {
             // connection does not leave the app a record per attempt.
             if (++failedAttempts >= this.attempts)
                 throw new LambderUploadError("networkFailed");
-            await this.waitBeforeRetry(failedAttempts, signal);
+            // The wait rejects only for the signal: nothing else cancels it.
+            await backoff.wait(signal).catch((cause) => {
+                throw new LambderUploadError("cancelled", { cause });
+            });
         }
         report("confirming", file.size);
         try {
@@ -116,22 +123,6 @@ export class LambderUploadRunner {
     /** Forgets a confirmed upload through the app's endpoint, when it declared one. */
     async discard(receipt) {
         await this.options.discardUpload?.(receipt);
-    }
-    waitBeforeRetry(failedAttempts, signal) {
-        const ceiling = Math.max(this.baseDelayMs, Math.min(this.baseDelayMs * 2 ** failedAttempts, this.maxDelayMs));
-        return new Promise((resolve, reject) => {
-            if (signal?.aborted)
-                return reject(new LambderUploadError("cancelled"));
-            const cancel = () => {
-                clearTimeout(timer);
-                reject(new LambderUploadError("cancelled"));
-            };
-            const timer = setTimeout(() => {
-                signal?.removeEventListener("abort", cancel);
-                resolve();
-            }, this.baseDelayMs + Math.random() * (ceiling - this.baseDelayMs));
-            signal?.addEventListener("abort", cancel, { once: true });
-        });
     }
     /** One post of the file to storage. Never throws: every ending is an outcome. */
     post(ticket, file, signal, onSent) {

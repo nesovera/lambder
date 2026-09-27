@@ -6,6 +6,7 @@ import {
     PutItemCommand,
     GetItemCommand,
     DeleteItemCommand,
+    TransactWriteItemsCommand,
     type AttributeValue,
 } from '@aws-sdk/client-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyEventV2, Context } from 'aws-lambda';
@@ -145,15 +146,26 @@ const conditionalFailure = (): Error =>
     Object.assign(new Error("conditional request failed"), { name: "ConditionalCheckFailedException" });
 
 /**
- * In-memory DynamoDB covering the limiter's ADD counters and the idempotency
- * put/get/delete, with DynamoDB's own condition semantics: an attribute the
- * condition names but the item does not carry makes a comparison false, not
- * true and not zero, which is what decides whether a record with no readable
- * expiry is claimable or immortal.
+ * In-memory DynamoDB covering the limiter's ADD counters, the idempotency
+ * put/get/delete and the one-shot secret store's conditional put, two-item
+ * transaction, counted update and conditional delete, with DynamoDB's own
+ * condition semantics: an attribute the condition names but the item does not
+ * carry makes a comparison false, not true and not zero, which is what
+ * decides whether a record with no readable expiry is claimable or immortal.
+ * A transaction checks every item's condition before writing any, and a
+ * refusal cancels the whole of it with one reason per item, as DynamoDB's
+ * TransactionCanceledException does.
+ *
+ * Requests run one at a time here, so two writers never meet on an item the
+ * way they can on a real table. `conflictNextWrites` stands in for that: the
+ * next that many writes are refused as DynamoDB refuses a write that met a
+ * transaction on its item, a transaction with a TransactionConflict reason and
+ * a single-item write with TransactionConflictException, writing nothing.
  */
 export class MemoryDdb extends DynamoDBClient {
     readonly items = new Map<string, Item>();
     failAll = false;
+    conflictNextWrites = 0;
 
     constructor(){
         super({ region: "us-east-1", credentials: { accessKeyId: "test", secretAccessKey: "test" } });
@@ -164,6 +176,25 @@ export class MemoryDdb extends DynamoDBClient {
         const input = command.input;
         const keyOf = (key: any) => `${key.pk.S}|${key.sk.S}`;
 
+        if(this.conflictNextWrites > 0 && !(command instanceof GetItemCommand)){
+            this.conflictNextWrites -= 1;
+            if(command instanceof TransactWriteItemsCommand){
+                const reasons = (input.TransactItems as unknown[]).map((_item, index) => ({ Code: index === 0 ? "TransactionConflict" : "None" }));
+                throw Object.assign(new Error("Transaction cancelled"), { name: "TransactionCanceledException", CancellationReasons: reasons });
+            }
+            throw Object.assign(new Error("Transaction is ongoing for the item"), { name: "TransactionConflictException" });
+        }
+
+        if(command instanceof UpdateItemCommand && input.UpdateExpression === "ADD attempts :one"){
+            // The one-shot secret store's try: counted on the record named
+            // and no other, the item handed back with the count spent.
+            const k = keyOf(input.Key);
+            const existing = this.items.get(k);
+            if(input.ConditionExpression?.includes("id = :id") && existing?.id?.S !== input.ExpressionAttributeValues[":id"].S) throw conditionalFailure();
+            const updated = { ...existing, attempts: { N: String(Number(existing?.attempts?.N ?? 0) + Number(input.ExpressionAttributeValues[":one"].N)) } };
+            this.items.set(k, updated as Item);
+            return input.ReturnValues === "ALL_NEW" ? { Attributes: { ...updated } } : {};
+        }
         if(command instanceof UpdateItemCommand){
             const k = keyOf(input.Key);
             const existing = this.items.get(k);
@@ -178,38 +209,29 @@ export class MemoryDdb extends DynamoDBClient {
             return {};
         }
         if(command instanceof PutItemCommand){
-            const k = keyOf(input.Item);
-            const existing = this.items.get(k);
-            const nowOf = () => Number(input.ExpressionAttributeValues?.[":now"]?.N ?? Math.floor(Date.now() / 1000));
-            // DynamoDB evaluates a comparison whose operand path is missing,
-            // or whose stored value is not a number, as FALSE. Reading a
-            // missing expiresAt as 0 (expired) would give the opposite answer
-            // and hide a claim condition that refuses such an item for ever.
-            const expiryPassed = (item: Item | undefined, now: number): boolean => {
-                const expiresAt = Number(item?.expiresAt?.N);
-                return Number.isFinite(expiresAt) && expiresAt <= now;
-            };
-            if(input.ConditionExpression?.includes("attribute_not_exists(pk)") && existing){
-                const now = nowOf();
-                const claimable = (input.ConditionExpression.includes("attribute_not_exists(expiresAt)") && existing.expiresAt === undefined)
-                    || expiryPassed(existing, now);
-                // ALL_OLD hands the item that refused the write back with the
-                // failure, as DynamoDB does.
-                if(!claimable) throw Object.assign(conditionalFailure(), input.ReturnValuesOnConditionCheckFailure === "ALL_OLD" ? { Item: { ...existing } } : {});
+            this.assertPutCondition(input);
+            this.items.set(keyOf(input.Item), input.Item);
+            return {};
+        }
+        if(command instanceof TransactWriteItemsCommand){
+            const puts = (input.TransactItems as { Put?: any }[]).map((item) => {
+                if(!item.Put) throw new Error("MemoryDdb: only Put is handled in a transaction");
+                return item.Put;
+            });
+            const reasons = puts.map((put) => {
+                try {
+                    this.assertPutCondition(put);
+                    return { Code: "None" };
+                } catch (error) {
+                    if((error as { name?: string }).name !== "ConditionalCheckFailedException") throw error;
+                    const item = (error as { Item?: Item }).Item;
+                    return { Code: "ConditionalCheckFailed", ...(item ? { Item: item } : {}) };
+                }
+            });
+            if(reasons.some((reason) => reason.Code !== "None")){
+                throw Object.assign(new Error("Transaction cancelled"), { name: "TransactionCanceledException", CancellationReasons: reasons });
             }
-            // Matched by clause rather than by whole-string equality: an
-            // exact-string match would silently become an unconditional write
-            // the moment the store's expression changed, which is the one
-            // failure a double like this must not have.
-            if(input.ConditionExpression?.includes("ownerToken = :owner")){
-                if(existing?.ownerToken?.S !== input.ExpressionAttributeValues?.[":owner"]?.S) throw conditionalFailure();
-            }
-            if(input.ConditionExpression?.includes("expiresAt > :now")){
-                const now = nowOf();
-                const live = Number.isFinite(Number(existing?.expiresAt?.N)) && Number(existing?.expiresAt?.N) > now;
-                if(!live) throw conditionalFailure();
-            }
-            this.items.set(k, input.Item);
+            for(const put of puts) this.items.set(keyOf(put.Item), put.Item);
             return {};
         }
         if(command instanceof GetItemCommand){
@@ -223,10 +245,58 @@ export class MemoryDdb extends DynamoDBClient {
             if(input.ConditionExpression?.includes("#state = :pending")){
                 if(existing?.[input.ExpressionAttributeNames["#state"]]?.S !== input.ExpressionAttributeValues?.[":pending"]?.S) throw conditionalFailure();
             }
+            if(input.ConditionExpression?.includes("id = :id")){
+                if(existing?.id?.S !== input.ExpressionAttributeValues?.[":id"]?.S) throw conditionalFailure();
+            }
             this.items.delete(keyOf(input.Key));
             return {};
         }
         throw new Error("MemoryDdb: unhandled command " + command?.constructor?.name);
+    }
+
+    /** Throws DynamoDB's ConditionalCheckFailedException when a put's condition refuses the item it would replace. */
+    private assertPutCondition(input: any): void {
+        const existing = this.items.get(`${input.Item.pk.S}|${input.Item.sk.S}`);
+        const nowOf = () => Number(input.ExpressionAttributeValues?.[":now"]?.N ?? Math.floor(Date.now() / 1000));
+        // DynamoDB evaluates a comparison whose operand path is missing,
+        // or whose stored value is not a number, as FALSE. Reading a
+        // missing expiresAt as 0 (expired) would give the opposite answer
+        // and hide a claim condition that refuses such an item for ever.
+        const expiryPassed = (item: Item | undefined, now: number): boolean => {
+            const expiresAt = Number(item?.expiresAt?.N);
+            return Number.isFinite(expiresAt) && expiresAt <= now;
+        };
+        if(input.ConditionExpression?.includes("#scope = :scope")){
+            // The one-shot secret store's digest claim: free, or already
+            // held by the scope claiming it.
+            if(existing && existing[input.ExpressionAttributeNames["#scope"]]?.S !== input.ExpressionAttributeValues[":scope"].S) throw conditionalFailure();
+        }else if(input.ConditionExpression?.includes("issuedAt <= :threshold") && existing){
+            // The one-shot secret store's cooldown: an item with no
+            // readable issuedAt never blocks, as DynamoDB reads the
+            // absent-attribute clause.
+            const issuedAt = Number(existing.issuedAt?.N);
+            const claimable = !Number.isFinite(issuedAt) || issuedAt <= Number(input.ExpressionAttributeValues[":threshold"].N);
+            if(!claimable) throw Object.assign(conditionalFailure(), input.ReturnValuesOnConditionCheckFailure === "ALL_OLD" ? { Item: { ...existing } } : {});
+        }else if(input.ConditionExpression?.includes("attribute_not_exists(pk)") && existing){
+            const now = nowOf();
+            const claimable = (input.ConditionExpression.includes("attribute_not_exists(expiresAt)") && existing.expiresAt === undefined)
+                || expiryPassed(existing, now);
+            // ALL_OLD hands the item that refused the write back with the
+            // failure, as DynamoDB does.
+            if(!claimable) throw Object.assign(conditionalFailure(), input.ReturnValuesOnConditionCheckFailure === "ALL_OLD" ? { Item: { ...existing } } : {});
+        }
+        // Matched by clause rather than by whole-string equality: an
+        // exact-string match would silently become an unconditional write
+        // the moment the store's expression changed, which is the one
+        // failure a double like this must not have.
+        if(input.ConditionExpression?.includes("ownerToken = :owner")){
+            if(existing?.ownerToken?.S !== input.ExpressionAttributeValues?.[":owner"]?.S) throw conditionalFailure();
+        }
+        if(input.ConditionExpression?.includes("expiresAt > :now")){
+            const now = nowOf();
+            const live = Number.isFinite(Number(existing?.expiresAt?.N)) && Number(existing?.expiresAt?.N) > now;
+            if(!live) throw conditionalFailure();
+        }
     }
 }
 

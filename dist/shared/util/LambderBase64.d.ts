@@ -8,3 +8,17 @@ export declare const bytesToBase64: (bytes: Uint8Array) => string;
 export declare const base64ToBytes: (base64: string) => Uint8Array;
 /** The base64 of UTF-8 text back to the text. */
 export declare const base64ToText: (base64: string) => string;
+/**
+ * The base64url alphabet (RFC 4648 section 5) without padding: what a token
+ * or a digest carries where "+", "/" and "=" would need escaping, in a URL, a
+ * header or a database column.
+ */
+export declare const bytesToBase64Url: (bytes: Uint8Array) => string;
+/**
+ * Whether `text` is base64url and nothing else, so decoding it decodes rather
+ * than guesses; Buffer decodes anything. A length that leaves a remainder of
+ * one past a multiple of four is no encoding of any bytes, and the platform's
+ * atob throws on it where Buffer shrugs, so it is refused here on both.
+ */
+export declare const isBase64Url: (text: string) => boolean;
+export declare const base64UrlToBytes: (base64Url: string) => Uint8Array;

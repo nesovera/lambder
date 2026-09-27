@@ -73,6 +73,8 @@ when the registry loads.
 | `rateLimits` | off | Required when an endpoint references a policy. `{ policies, limiter?, failOpen? }`: the same policies the server declares, over `LambderMemoryRateLimiter` unless a limiter is given, checked against the contract (below). `failOpen: false` refuses a call whose limiter threw instead of letting it through |
 | `idempotency` | off | Required when an endpoint declares idempotency. `true`, or `{ defaultTtlSeconds?, defaultPendingTtlSeconds?, failOpen?, store?, callerIdentity? }`: the server's own options, `callerIdentity` bound to the mock call context without its session, since it runs on public endpoints alone |
 | `guards` | none | The mock guard map; required whenever the contract declares a guard name, and checked against the contract (below) |
+| `guardDeclarations` | none | The generated `guardDeclarations` table: each mock guard of a name it has is held to the server guard's input mode and session requirement ([below](#declarations-policies-and-guards-from-the-generated-options)) |
+| `apiOptions` | none | The generated `apiOptions` table: every entry's guards, rate limit and idempotency are read off it rather than restated, and a rest answer runs under the mode it gives the name ([below](#declarations-policies-and-guards-from-the-generated-options)) |
 | `cookieHost` | the page's host, else `localhost` | The host this runtime's cookies belong to: what `signIn` plants them under, what the transport's jar sends them to, and what a call naming no `siteHost` is read as arriving at |
 | `maxRequestPayloadBytes` | `20_000_000` | Ceiling on what a compressed request payload may restore to |
 | `defaultClientIp` | `127.0.0.1` | The IP a call carrying none is read as; a transport may name its own, and the MSW adapter reads the same default |
@@ -104,6 +106,74 @@ mock copy that differs from the server's where it matters, fails at the
 option rather than when the registry loads. Policies the contract does not
 reference may be added freely.
 
+### Declarations, policies and guards from the generated options
+
+An app that writes its options out with `writeApiOptions` (see [the options
+as a generated file](./apis.md#the-options-as-a-generated-file)) restates
+nothing of the server's declarations by hand: not an entry's guards, rate
+limit or idempotency, and not a policy. `lambderMockPoliciesFrom` turns the generated
+`rateLimitPolicies` table back into the policy configs `create()` takes,
+asking for a key handler for exactly the policies the server keys by a
+handler of its own (`per: "custom"` in the table), since a handler is code
+and the table cannot hold one:
+
+```typescript
+import { lambderMockPoliciesFrom } from "lambder/mock";
+import { apiOptions, guardDeclarations, rateLimitPolicies } from "./generated/apiOptions.generated";
+
+export const mockApp = mock.create({
+    sessions: true,
+    rateLimits: {
+        policies: lambderMockPoliciesFrom(rateLimitPolicies, {
+            keys: {
+                codePerEmail: mock.rateLimitKey({ apiInput: z.object({ email: z.string() }), handler: (_ctx, { email }) => email.toLowerCase() }),
+            },
+        }),
+    },
+    guards: { ... },
+    guardDeclarations,
+    apiOptions,
+});
+```
+
+`apiOptions`, the table of every API's declared options, is what the entries
+read their `guards`, `rateLimit` and `idempotency` from. Given it, an entry is
+its handler (and an `input` schema, where it has one) for every endpoint, and
+a restated option is a compile error and a throw, since beside the table it
+could only be a second copy of the server's declaration:
+
+```typescript
+mockApp.sessionApi("staff.invite", async ({ payload, guardData }) => ({ invited: true }))
+```
+
+The table has to cover the contract, each endpoint under its own mode, so a
+table generated before an endpoint was added fails at the option rather than
+when the endpoint's entry registers; an entry whose builder and table disagree
+on the mode is refused at registration. The mode is also what lets a
+`restNotMocked` answer read the session for a session endpoint nothing mocks
+(see [the rest of the contract](#the-rest-of-the-contract-for-an-app-adopting-the-mock)).
+The table ships only with the mock, in development: a browser in production
+imports nothing of it (a screen that gates on one guard reads [that guard's
+parameters](./apis.md#one-guards-parameters-for-a-browser) instead).
+
+A custom-keyed policy without a key, or a key for a policy the server does not
+key that way, is a compile error and a throw. Everything else about a policy
+(its windows, budget, charge point and message) is the table's, so the mock
+never disagrees with the server about a limit it did not mean to change, and a
+policy added on the server reaches the mock on the next generation. The result
+keeps each policy's `per` and `budget` as literals, so the checks above
+against the contract still apply to it.
+
+`guardDeclarations`, the table of the server's guards, holds each mock guard
+of a name the table has to the server guard's input mode (`apiInput`,
+`guardInput` or neither) and session requirement, at the `guards` option. The
+contract alone cannot say these for every guard: it names a `guardInput`'s
+shape and a public endpoint's guards, and nothing about a guard fed from the
+payload or from nothing. A mock guard that read a payload slice the server's
+never sees, or that required a session where the server's does not, would run
+and decide differently without it. The handlers stay the mock's own: what a
+guard decides is not data, and the table never pretends it is.
+
 ## The registry
 
 Entries carry their name, so a wrong mode, a stray name or a missing guard
@@ -129,8 +199,10 @@ mockApp.register(userMocks, billingMocks, adminMocks);   // exhaustive over the 
 
 `publicApi` mocks an `addApi` endpoint and `sessionApi` an `addSessionApi`
 one; the pipeline fetches the session before a session handler runs and
-answers `sessionExpired` without one. An entry is a bare handler only where
-the contract declares nothing for the endpoint, and the options form wherever
+answers `sessionExpired` without one. On a mock created with the generated
+`apiOptions` table, every entry may be a bare handler, as above. Without the
+table, an entry is a bare handler only where the contract declares nothing
+for the endpoint, and the options form, restating the declarations, wherever
 it declares guards, a rate limit or idempotency: the bare handler is the form
 that carries no restatement at all, so it is unavailable exactly where one is
 owed. `notMocked` and `sessionNotMocked` register an endpoint
@@ -171,18 +243,22 @@ rather than `unknownApi`. Registering the endpoint later, through
 rest entry, as it keeps every registration, and a second one, in the same
 call or in a later one, throws the way a duplicate name does.
 
-The one thing it cannot do is the session read. Its answer is processed as a
-public endpoint: the steps before dispatch still run, so a stale client still
-hears `versionExpired` (given the signature map) and a compressed payload
-still reaches the events, but
-nothing reads the session, because the mode of a name nothing registered is
-not knowable at runtime. That is the same reason `notMocked` and
-`sessionNotMocked` are two builders, arriving where there is no builder to
-say it in. So a signed-out call to an unmocked session endpoint answers "not
-mocked" where the server answers `sessionExpired`; where that difference
-matters for an endpoint, declare that one with `sessionNotMocked` and leave
-the rest to the rest entry. The `mode` on the event and the call-log row is
-`null` for the same reason: the answer is public, the endpoint is unknown.
+On a mock created with the `apiOptions` table, a rest answer runs under the
+mode the table gives the name, so an unmocked session endpoint reads the
+session first, and a signed-out call answers `sessionExpired` as the server
+does; the `mode` on the event and the call-log row is the table's. Without
+the table the one thing it cannot do is the session read. Its answer is then
+processed as a public endpoint: the steps before dispatch still run, so a
+stale client still hears `versionExpired` (given the signature map) and a
+compressed payload still reaches the events, but nothing reads the session,
+because the mode of a name nothing registered is not knowable at runtime.
+That is the same reason `notMocked` and `sessionNotMocked` are two builders,
+arriving where there is no builder to say it in. So a signed-out call to an
+unmocked session endpoint answers "not mocked" where the server answers
+`sessionExpired`; where that difference matters for an endpoint, declare that
+one with `sessionNotMocked` and leave the rest to the rest entry. The `mode`
+on the event and the call-log row is `null` for the same reason: the answer
+is public, the endpoint is unknown.
 
 A rest entry and the MSW adapter's `onUnmocked: "passthrough"` are
 alternatives, and the rest entry wins: it leaves the runtime with an answer
@@ -203,6 +279,10 @@ What the compiler catches, with the contract still a type-only import:
   these checks can be made over it;
 - **mode**: `publicApi` on a session endpoint fails at the name, and the
   reverse;
+- **declarations from the table**: with `apiOptions` given, a restated
+  `guards`, `rateLimit` or `idempotency` on an entry fails, and a table that
+  lacks an endpoint of the contract, or gives one another mode, fails at the
+  option. The two items below are what holds a mock without the table;
 - **guards**: required wherever the contract declares any, and type-equal to
   the server's own declaration, so a guard added, removed or re-parameterised
   on the server breaks the mock's compile. Not only where the contract
@@ -226,11 +306,13 @@ a slice written by hand rather than through `apiSlice` is where the two can
 part, and a key that names another endpoint registers a mock nothing will
 call while leaving one unanswered.
 
-Why the mode and the guards are restated at all: the contract is a type, and
-types are erased. The runtime needs the mode to know whether to fetch a
-session and the guards to know which to run with which parameter, so they are
-written once more in the builder, in the form the compiler can pin to the
-contract.
+Why the mode is restated at all, and the declarations without the table: the
+contract is a type, and types are erased. The runtime needs the mode to know
+whether to fetch a session and the guards to know which to run with which
+parameter. The generated `apiOptions` table carries both as values, which is
+why an entry of a mock created with it restates no declaration; the builder
+still names the mode, which is what lets the compiler type the handler, and
+the table is held to agree with it.
 
 ### Partial registration, for tests
 

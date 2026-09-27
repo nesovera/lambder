@@ -47,7 +47,8 @@ const defaultCookieHost = () => globalThis.location?.host || "localhost";
  *
  * Create one with initLambderMock<Contract, SessionData>().create(...),
  * which fixes the contract and session types first so everything else is
- * inferred from the options.
+ * inferred from the options. `TDerived` is true for a mock created with the
+ * generated `apiOptions` table, whose entries are their handlers alone.
  */
 export class LambderMockApp {
     apiVersion;
@@ -85,10 +86,13 @@ export class LambderMockApp {
     recorder;
     /** Registered entries and the overrides over them (see LambderMockEntryRegistry). */
     registry = new LambderMockEntryRegistry();
+    /** The server's declared options per API, when create() was given the generated table; the entries' declarations come from here. */
+    apiOptions;
     /** The jars the runtime owns and what it planted in document.cookie (see LambderMockBrowserCookies). */
     browserCookies = new LambderMockBrowserCookies();
     constructor(options) {
         this.apiVersion = options.apiVersion ?? null;
+        this.apiOptions = options.apiOptions ?? null;
         this.failures = new LambderMockFailureInjector({ apiVersion: this.apiVersion, latency: options.latency ?? 0 });
         this.recorder = new LambderMockCallRecorder({ callLogSize: options.callLogSize ?? DEFAULT_CALL_LOG_SIZE });
         // The loopback address when nothing names a client, as for a request
@@ -196,13 +200,49 @@ export class LambderMockApp {
             throw new Error(`LambderMockApp: session endpoint "${definition.name}" needs the sessions option at creation.`);
         }
     }
+    /**
+     * The table's entry for an endpoint, when create() was given one: null
+     * without a table, and a throw for a name the table does not hold or an
+     * entry registered under the other mode. The compiler already refuses
+     * both against the contract; this is where a stale table meets a caller
+     * the compiler did not see.
+     */
+    declaredOptionsOf(name, mode) {
+        if (!this.apiOptions)
+            return null;
+        const declared = Object.prototype.hasOwnProperty.call(this.apiOptions, name) ? this.apiOptions[name] : undefined;
+        if (!declared) {
+            throw new Error(`LambderMockApp: "${name}" has no entry in the apiOptions table given to create(). The table predates this endpoint: regenerate it with writeApiOptions.`);
+        }
+        if (declared.mode !== mode) {
+            throw new Error(`LambderMockApp: "${name}" is a ${declared.mode} endpoint in the apiOptions table, registered here as a ${mode} one.`);
+        }
+        return declared;
+    }
+    /** The mode the apiOptions table gives a name, or null without a table or for a name it does not hold. */
+    declaredModeOf(name) {
+        if (!this.apiOptions || !Object.prototype.hasOwnProperty.call(this.apiOptions, name))
+            return null;
+        return this.apiOptions[name].mode;
+    }
     buildEntry(name, mode, input) {
         const options = (typeof input === "function" ? { handler: input } : input);
+        const declared = this.declaredOptionsOf(name, mode);
+        if (declared) {
+            // A caller the compiler did not see (a JavaScript slice, a cast)
+            // would otherwise have its restatement silently lose to the table.
+            for (const field of ["guards", "rateLimit", "idempotency"]) {
+                if (options[field] !== undefined) {
+                    throw new Error(`LambderMockApp: "${name}" restates its ${field} option, which the apiOptions table given to create() already declares. Leave it out of the entry.`);
+                }
+            }
+        }
+        const declarations = declared ?? options;
         const definition = {
             name, mode,
-            guards: options.guards,
-            rateLimit: options.rateLimit,
-            idempotency: options.idempotency,
+            guards: declarations.guards,
+            rateLimit: declarations.rateLimit,
+            idempotency: declarations.idempotency,
             // No cast: the entry's schema is a z.ZodType, the same type the
             // definition holds. A structural { safeParse } here would let a
             // validator that is not a zod schema reach the 422 body as
@@ -257,18 +297,21 @@ export class LambderMockApp {
      * still refused, and an entry registered later (registerPartial, or a
      * second register) takes its endpoint back from the rest.
      *
-     * What it cannot do is the session read. The mode of an unregistered name
-     * is not knowable at runtime (the contract is a type), so a call it
-     * answers is processed as public: the protocol's pre-pass still runs, so
-     * a stale client still hears versionExpired, but a signed-out call to an
-     * unmocked session endpoint answers "not mocked" where the server answers
-     * sessionExpired. Declare an endpoint whose signed-out path a test cares
-     * about with sessionNotMocked instead.
+     * The mode of an unregistered name comes from the apiOptions table, when
+     * create() was given one, so an unmocked session endpoint still reads the
+     * session and a signed-out call answers sessionExpired as on the server.
+     * Without the table the mode is not knowable at runtime (the contract is
+     * a type), and a call it answers is processed as public: the protocol's
+     * pre-pass still runs, so a stale client still hears versionExpired, but
+     * a signed-out call to an unmocked session endpoint answers "not mocked"
+     * where the server answers sessionExpired. Declare an endpoint whose
+     * signed-out path a test cares about with sessionNotMocked there.
      */
     restNotMocked(reason) {
         return { restNotMockedReason: reason };
     }
     buildNotMockedEntry(name, mode, reason) {
+        this.declaredOptionsOf(name, mode);
         const definition = { name, mode };
         this.assertEntryRegistration(definition);
         return { name, mode, definition, handler: null, notMockedReason: reason };
@@ -352,16 +395,18 @@ export class LambderMockApp {
     /**
      * The entry that answers a name nothing registered, when register() was
      * given a rest entry: the notMocked refusal carrying its reason, run
-     * through the pipeline as a public endpoint, since the mode of an
-     * unregistered name cannot be recovered at runtime. Everything before
-     * dispatch still runs (the signature gate, the payload restore); the
-     * missing session read is the fidelity limit restNotMocked documents.
+     * through the pipeline under the mode the apiOptions table gives the
+     * name, and as a public endpoint where there is no table to say (the
+     * mode of an unregistered name cannot otherwise be recovered at runtime).
+     * Everything before dispatch still runs (the signature gate, the payload
+     * restore, and for a session endpoint the session read).
      */
     restNotMockedEntry(apiName) {
         const reason = this.registry.restNotMockedReason;
         if (reason === null)
             return null;
-        return { name: apiName, mode: "public", definition: { name: apiName, mode: "public" }, handler: null, notMockedReason: reason };
+        const mode = this.declaredModeOf(apiName) ?? "public";
+        return { name: apiName, mode, definition: { name: apiName, mode }, handler: null, notMockedReason: reason };
     }
     // -----------------------------------------------------------------------
     // Control surface
@@ -581,12 +626,13 @@ export class LambderMockApp {
         const id = this.recorder.nextCallId();
         const registered = this.entryFor(request.apiName);
         // The rest entry answers whatever nothing registered, when register()
-        // was given one. The mode reported stays the registered entry's, so it
-        // is null here exactly as it is for a name the registry does not know:
-        // the rest answer is processed as public, which is a property of the
-        // answer rather than a claim about the endpoint.
+        // was given one. The mode reported is the registered entry's, or the
+        // apiOptions table's for a name it holds, and null otherwise, exactly
+        // as for a name nothing knows: without the table a rest answer is
+        // processed as public, which is a property of the answer rather than
+        // a claim about the endpoint.
         const entry = registered ?? this.restNotMockedEntry(request.apiName);
-        const mode = registered?.mode ?? null;
+        const mode = registered?.mode ?? this.declaredModeOf(request.apiName);
         const facts = this.callFacts(id, request, mode);
         const startedAt = facts.startedAt;
         const ctx = this.createContext(request);

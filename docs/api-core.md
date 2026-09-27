@@ -60,7 +60,8 @@ Directories are layers, and imports only ever point down. From the bottom:
    helpers the two caches share. Only a `LambderDdb*` or `LambderS3*` store
    may name an AWS SDK, and then lazily.
 3. `session/`: the session model and the per-request controller over a
-   `LambderSessionStore`.
+   `LambderSessionStore`. `secrets/`: the one-shot secrets class over a
+   `LambderOneShotSecretStore`, a sibling over `shared/` alone.
 4. `api/`: this core, over `shared/` and `session/`.
 5. `client/`: the browser caller, over `shared/` alone.
 6. `core/`, `mock/`, `invoke/`: the three adapters, each over everything

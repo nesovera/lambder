@@ -265,6 +265,55 @@ The event goes to the handler as Lambda would deliver it, with a Lambda
 context filled in, and the first matching `addAction` runs. With no match the
 call rejects, as the handler does.
 
+## A store of your own
+
+A store an app writes over its own database (sessions in Postgres, one-shot
+codes in columns it already has) has to keep the rules the engines rely on,
+and the compiler checks a method's signature, not what it does. The rules are
+exported as suites, one per interface, which register their cases with your
+runner's own `it` and `expect`:
+
+| Suite | Interface |
+| --- | --- |
+| `lambderSessionStoreConformance` | `LambderSessionStore` |
+| `lambderIdempotencyStoreConformance` | `LambderIdempotencyStore` |
+| `lambderRateLimiterConformance` | `LambderRateLimiter` |
+| `lambderOneShotSecretStoreConformance` | `LambderOneShotSecretStore` |
+
+```typescript
+import { describe, it, expect } from "vitest";
+import { lambderOneShotSecretStoreConformance } from "lambder/testing";
+
+describe("TicketCodeStore", () => {
+    lambderOneShotSecretStoreConformance({
+        it, expect,
+        // A store holding nothing under either scope, once per case.
+        create: async () => { await emptyTicketCodes(); return new TicketCodeStore(pool); },
+        scopes: [ticketA.id, ticketB.id],
+        kinds: { code: "ticketCode" },
+        meta: [{}, {}],
+    });
+});
+```
+
+Lambder's own memory and DynamoDB stores run through the same suites, so a
+store that passes them behaves as the ones the rest of the framework was
+tested against. Each case builds its store with `create`, which is handed the
+case's clock as `now` (epoch milliseconds): a store that judges time itself
+must read it from there, because the clock starts at a fixed moment and moves
+only when a case moves it. Nothing in the suites depends on a runner beyond a
+jest-style `expect` (vitest, jest and bun's all fit). The races are real
+`Promise.all` calls, so run a store over a database that can hold two
+connections at once, or its races are only ever run one after the other.
+
+The one-shot suite takes what a store over existing rows needs in place of
+the defaults: two `scopes` it can hold (rows that exist), the kind its columns
+keep for each shape it holds (`kinds: { code?, token? }`), the `meta` they
+keep, and the `lifetimeSeconds` it derives an expiry from. The cases run once
+per shape named: for codes, the ones about counting tries; for tokens, the
+ones about finding a record by its digest and about two scopes never sharing
+one.
+
 ## Testing everything else
 
 | What | How |
@@ -272,5 +321,5 @@ call rejects, as the handler does.
 | A frontend, with no backend | `LambderMockApp` from `lambder/mock`: your contract served from mock handlers over the real pipeline. `mockApp.transport()` on a `LambderCaller`, one caller per browser. See [The mock runtime](./mock.md) |
 | Code that invokes another Lambder app | `LambderInvokeCaller.localTransport(handler)` runs the callee's real handler in this process; `lambderMockInvokeTransport(mockApp)` answers from a mock one. See [Calling another lambda](./invoke.md#testing-and-boot-checks) |
 | A built deployment package | `LambderInvokeCaller.createEvent({ apiPath, apiName })` is the event a call would send, for a boot check that hands the package an event and asserts it answers. Same section |
-| A store of your own | The interfaces are small (`LambderSessionStore`, `LambderRateLimiter`, `LambderIdempotencyStore`, `LambderCache`), and the memory implementations are the reference for their semantics. The rate limiters, the idempotency stores, the caches and the memory session store take an injectable `now`. See [The API core](./api-core.md) |
+| A store of your own | The conformance suites above, for the session, idempotency, rate-limit and one-shot secret stores. A `LambderCache` has none yet: the memory implementation is the reference for its semantics. See [The API core](./api-core.md) |
 | The wiring, without the test app | `lambderHandlerTransport(handler)` is the in-process transport underneath a visitor, and `lambderCookieJarTransport` the jar over it, for a test that wants the pieces. See [Frontend client](./client.md) |

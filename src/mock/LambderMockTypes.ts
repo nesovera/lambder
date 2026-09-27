@@ -212,9 +212,28 @@ type LambderMockInputPin<C, K extends keyof C, TSchema extends z.ZodType> =
             : { "LambderMockApp: this input schema takes less than the endpoint takes (an extra required field, or a narrower type), so the mock would answer 422 to payloads the server accepts": LambderMockInputOf<C, K> })
         : { "LambderMockApp: this input schema takes something else than the endpoint's contract input": LambderMockInputOf<C, K> };
 
-/** An entry written in full: the declarations restated and pinned, plus the handler. */
-export type LambderMockEntryOptions<C, K extends keyof C, S, G, TInputSchema extends z.ZodType = z.ZodType> =
-    LambderMockGuardsField<C, K> & LambderMockRateLimitField<C, K> & LambderMockIdempotencyField<C, K> & {
+/**
+ * The three declaration fields of an entry on a mock created with the
+ * generated `apiOptions` table: absent, because the runtime reads them off
+ * the table. A restatement beside the table would be a second copy of the
+ * server's declaration, so writing one is an error rather than an override.
+ */
+type LambderMockDerivedFields = {
+    /** Read off the apiOptions table given to create(); not restated. */
+    guards?: never;
+    /** Read off the apiOptions table given to create(); not restated. */
+    rateLimit?: never;
+    /** Read off the apiOptions table given to create(); not restated. */
+    idempotency?: never;
+};
+
+/**
+ * An entry written in full: the handler, and the declarations restated and
+ * pinned to the contract, or, with `TDerived` (a mock created with the
+ * generated `apiOptions` table), the handler alone.
+ */
+export type LambderMockEntryOptions<C, K extends keyof C, S, G, TInputSchema extends z.ZodType = z.ZodType, TDerived extends boolean = false> =
+    (TDerived extends true ? LambderMockDerivedFields : LambderMockGuardsField<C, K> & LambderMockRateLimitField<C, K> & LambderMockIdempotencyField<C, K>) & {
     /**
      * A schema to validate the posted payload against, so the mock answers
      * 422 exactly as the server would. Optional, and the mock's own: the
@@ -229,16 +248,21 @@ export type LambderMockEntryOptions<C, K extends keyof C, S, G, TInputSchema ext
 };
 
 /**
- * What publicApi/sessionApi accept: a bare handler only for an endpoint the
- * contract declares nothing for, the full options otherwise, so the form that
- * cannot carry a restatement is unavailable exactly where one is owed. Keyed
- * on all three declarations: keyed on guards alone, a guardless endpoint
- * could drop its rate limit and idempotency through the bare form.
+ * What publicApi/sessionApi accept. On a mock created with the generated
+ * `apiOptions` table (`TDerived`), a bare handler or the options without the
+ * declarations, for every endpoint. Otherwise a bare handler only for an
+ * endpoint the contract declares nothing for, the full options elsewhere, so
+ * the form that cannot carry a restatement is unavailable exactly where one
+ * is owed. Keyed on all three declarations: keyed on guards alone, a
+ * guardless endpoint could drop its rate limit and idempotency through the
+ * bare form.
  */
-export type LambderMockEntryInput<C, K extends keyof C, S, G, TInputSchema extends z.ZodType = z.ZodType> =
-    [LambderContractGuardsOf<C, K> | LambderContractRateLimitOf<C, K> | LambderContractIdempotencyOf<C, K>] extends [never]
-        ? LambderMockHandler<C, K, S, G> | LambderMockEntryOptions<C, K, S, G, TInputSchema>
-        : LambderMockEntryOptions<C, K, S, G, TInputSchema>;
+export type LambderMockEntryInput<C, K extends keyof C, S, G, TInputSchema extends z.ZodType = z.ZodType, TDerived extends boolean = false> =
+    TDerived extends true
+        ? LambderMockHandler<C, K, S, G> | LambderMockEntryOptions<C, K, S, G, TInputSchema, true>
+        : [LambderContractGuardsOf<C, K> | LambderContractRateLimitOf<C, K> | LambderContractIdempotencyOf<C, K>] extends [never]
+            ? LambderMockHandler<C, K, S, G> | LambderMockEntryOptions<C, K, S, G, TInputSchema>
+            : LambderMockEntryOptions<C, K, S, G, TInputSchema>;
 
 /** One registry entry: the endpoint's definition as the pipeline runs it, and its handler (null when registered as not mocked). */
 export type LambderMockEntry<C, K extends keyof C & string> = {

@@ -55,22 +55,10 @@ type LambderGuardOf<TOutput, TGuard> =
 type LambderGuardHandler<TCtx, TPayload, TParam, TOutput> =
     (ctx: TCtx, payload: TPayload, param: TParam) => TOutput | Promise<TOutput>;
 
-/**
- * When a guard runs, relative to the API's input validation.
- *
- * - "beforeInputValidation" (default): an unauthorized caller learns nothing
- *   about the input, and no async refinement in the schema runs for it.
- * - "afterInputValidation": for a guard that spends something on the
- *   request, such as a single-use captcha token, which a request refused for
- *   a mistyped field would otherwise waste. The API's input schema then runs
- *   for callers this guard would refuse, so keep lookups (an "email is free"
- *   refinement) out of it, in the handler.
- *
- * Guards run in their declared order within each, and the limits keyed by
- * caller data are charged after both unless their policy says otherwise
- * (LambderRateLimitChargeAt).
- */
-export type LambderGuardRunAt = "beforeInputValidation" | "afterInputValidation";
+// When a guard runs is part of what the generated options module records of
+// it, so the vocabulary is declared with the entries and read from there.
+import type { LambderGuardRunAt } from "../shared/wire/LambderApiOptionEntries.js";
+export type { LambderGuardRunAt };
 
 /** Where in the call a guard runs: see LambderGuardRunAt. */
 export type LambderGuardPlacement = {

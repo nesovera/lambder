@@ -10,6 +10,7 @@ import { LambderMemoryIdempotencyStore } from "../stores/LambderMemoryIdempotenc
 import { LambderMemorySessionStore } from "../stores/LambderMemorySessionStore.js";
 import LambderSessionManager, { type LambderCreatedSession } from "../session/LambderSessionManager.js";
 import type { LambderMockAppOptions, LambderMockIdempotencyOptions, LambderMockTransport, LambderMockTransportOptions } from "./LambderMockCreateOptions.js";
+import type { LambderApiOptionEntry, LambderGuardDeclarationEntry } from "../shared/wire/LambderApiOptionEntries.js";
 import type { LambderMockCallContext, LambderMockCallRecord, LambderMockEntry, LambderMockEntryInput, LambderMockFailure, LambderMockFailureReason, LambderMockHandler, LambderMockLatency, LambderMockListener, LambderMockPublicNames, LambderMockRateLimitPolicies, LambderMockRegistryCheck, LambderMockRestEntry, LambderMockSessionCallContext, LambderMockSessionNames, LambderMockSlice, LambderMockOverride } from "./LambderMockTypes.js";
 /**
  * The mock runtime: the API core (LambderApiPipeline, the same class the
@@ -23,9 +24,10 @@ import type { LambderMockCallContext, LambderMockCallRecord, LambderMockEntry, L
  *
  * Create one with initLambderMock<Contract, SessionData>().create(...),
  * which fixes the contract and session types first so everything else is
- * inferred from the options.
+ * inferred from the options. `TDerived` is true for a mock created with the
+ * generated `apiOptions` table, whose entries are their handlers alone.
  */
-export declare class LambderMockApp<C extends LambderApiContractShape, S = any, G extends Record<string, LambderApiGuard<any, any, any>> = {}> {
+export declare class LambderMockApp<C extends LambderApiContractShape, S = any, G extends Record<string, LambderApiGuard<any, any, any>> = {}, TDerived extends boolean = false> {
     readonly apiVersion: string | null;
     /** The memory stores, for assertions and reset; null for a subsystem that is off or backed by a store of yours. */
     readonly sessionStore: LambderMemorySessionStore<S> | null;
@@ -61,9 +63,11 @@ export declare class LambderMockApp<C extends LambderApiContractShape, S = any, 
     private readonly recorder;
     /** Registered entries and the overrides over them (see LambderMockEntryRegistry). */
     private readonly registry;
+    /** The server's declared options per API, when create() was given the generated table; the entries' declarations come from here. */
+    private readonly apiOptions;
     /** The jars the runtime owns and what it planted in document.cookie (see LambderMockBrowserCookies). */
     private readonly browserCookies;
-    constructor(options: LambderMockAppOptions<C, S, G>);
+    constructor(options: LambderMockAppOptions<C, S, G, LambderMockRateLimitPolicies<S>, boolean | LambderMockIdempotencyOptions<S>, {}, Record<string, LambderApiOptionEntry> | undefined>);
     /**
      * The registration-time checks every entry goes through, mocked or not:
      * the ones the server runs on a definition, and the mock's own "a session
@@ -75,11 +79,21 @@ export declare class LambderMockApp<C extends LambderApiContractShape, S = any, 
      * option, for a mistake fixed by one option at create().
      */
     private assertEntryRegistration;
+    /**
+     * The table's entry for an endpoint, when create() was given one: null
+     * without a table, and a throw for a name the table does not hold or an
+     * entry registered under the other mode. The compiler already refuses
+     * both against the contract; this is where a stale table meets a caller
+     * the compiler did not see.
+     */
+    private declaredOptionsOf;
+    /** The mode the apiOptions table gives a name, or null without a table or for a name it does not hold. */
+    private declaredModeOf;
     private buildEntry;
     /** A mock for a public endpoint: a handler, or the handler with the endpoint's declarations restated. */
-    publicApi<K extends LambderMockPublicNames<C>, TInputSchema extends z.ZodType = z.ZodType>(name: K, entry: LambderMockEntryInput<C, K, S, G, TInputSchema>): LambderMockEntry<C, K>;
+    publicApi<K extends LambderMockPublicNames<C>, TInputSchema extends z.ZodType = z.ZodType>(name: K, entry: LambderMockEntryInput<C, K, S, G, TInputSchema, TDerived>): LambderMockEntry<C, K>;
     /** A mock for a session endpoint: the pipeline fetches the session before the handler runs, and refuses without one. */
-    sessionApi<K extends LambderMockSessionNames<C>, TInputSchema extends z.ZodType = z.ZodType>(name: K, entry: LambderMockEntryInput<C, K, S, G, TInputSchema>): LambderMockEntry<C, K>;
+    sessionApi<K extends LambderMockSessionNames<C>, TInputSchema extends z.ZodType = z.ZodType>(name: K, entry: LambderMockEntryInput<C, K, S, G, TInputSchema, TDerived>): LambderMockEntry<C, K>;
     /**
      * A public endpoint deliberately left without a mock; a call answers the
      * notMocked refusal carrying the reason.
@@ -111,13 +125,15 @@ export declare class LambderMockApp<C extends LambderApiContractShape, S = any, 
      * still refused, and an entry registered later (registerPartial, or a
      * second register) takes its endpoint back from the rest.
      *
-     * What it cannot do is the session read. The mode of an unregistered name
-     * is not knowable at runtime (the contract is a type), so a call it
-     * answers is processed as public: the protocol's pre-pass still runs, so
-     * a stale client still hears versionExpired, but a signed-out call to an
-     * unmocked session endpoint answers "not mocked" where the server answers
-     * sessionExpired. Declare an endpoint whose signed-out path a test cares
-     * about with sessionNotMocked instead.
+     * The mode of an unregistered name comes from the apiOptions table, when
+     * create() was given one, so an unmocked session endpoint still reads the
+     * session and a signed-out call answers sessionExpired as on the server.
+     * Without the table the mode is not knowable at runtime (the contract is
+     * a type), and a call it answers is processed as public: the protocol's
+     * pre-pass still runs, so a stale client still hears versionExpired, but
+     * a signed-out call to an unmocked session endpoint answers "not mocked"
+     * where the server answers sessionExpired. Declare an endpoint whose
+     * signed-out path a test cares about with sessionNotMocked there.
      */
     restNotMocked(reason: string): LambderMockRestEntry;
     private buildNotMockedEntry;
@@ -165,10 +181,11 @@ export declare class LambderMockApp<C extends LambderApiContractShape, S = any, 
     /**
      * The entry that answers a name nothing registered, when register() was
      * given a rest entry: the notMocked refusal carrying its reason, run
-     * through the pipeline as a public endpoint, since the mode of an
-     * unregistered name cannot be recovered at runtime. Everything before
-     * dispatch still runs (the signature gate, the payload restore); the
-     * missing session read is the fidelity limit restNotMocked documents.
+     * through the pipeline under the mode the apiOptions table gives the
+     * name, and as a public endpoint where there is no table to say (the
+     * mode of an unregistered name cannot otherwise be recovered at runtime).
+     * Everything before dispatch still runs (the signature gate, the payload
+     * restore, and for a session endpoint the session read).
      */
     private restNotMockedEntry;
     /** The next call to the endpoint fails this way; several calls queue in order. */
@@ -332,5 +349,5 @@ export declare const initLambderMock: <C extends LambderApiContractShape, S = an
      * dropped. `I` exists for the same reason `P` does, and
      * LambderMockSurplusKeys puts the error back on the key.
      */
-    create<const G extends Record<string, LambderApiGuard<any, any, any, LambderMockCallContext<S>, LambderMockSessionCallContext<S>>> = {}, const P extends LambderMockRateLimitPolicies<S> = {}, I extends boolean | LambderMockIdempotencyOptions<S> = boolean | LambderMockIdempotencyOptions<S>>(options: LambderMockAppOptions<C, S, G, P, I>): LambderMockApp<C, S, G>;
+    create<const G extends Record<string, LambderApiGuard<any, any, any, LambderMockCallContext<S>, LambderMockSessionCallContext<S>>> = {}, const P extends LambderMockRateLimitPolicies<S> = {}, I extends boolean | LambderMockIdempotencyOptions<S> = boolean | LambderMockIdempotencyOptions<S>, const D extends Record<string, LambderGuardDeclarationEntry> = {}, const A extends Record<string, LambderApiOptionEntry> | undefined = undefined>(options: LambderMockAppOptions<C, S, G, P, I, D, A>): LambderMockApp<C, S, G, [A] extends [undefined] ? false : true>;
 };

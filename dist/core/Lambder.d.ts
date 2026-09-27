@@ -14,6 +14,7 @@ import type { LambderFileSource } from "../shared/contracts/LambderFileSource.js
 import { LAMBDER_BACKEND_SWAP, LAMBDER_CRASH_WATCH } from "../shared/util/LambderTestingDoors.js";
 import { type LambderApiSignatureEntry } from "../api/LambderApiSignature.js";
 import { type LambderApiSignatureMap } from "../shared/wire/LambderApiSignature.js";
+import type { LambderApiOptionEntries } from "../shared/wire/LambderApiOptionEntries.js";
 import type { LambderApiIdempotencyOption } from "../shared/wire/LambderApiOptionValues.js";
 import type { LambderApiGuard, LambderGuardMetaMap, LambderGuardsOption, LambderGuardDataOf, LambderGuardInputsOf } from "../api/LambderApiGuards.js";
 import type { LambderApiRateLimitPolicyConfig, LambderRateLimitOption } from "../api/LambderApiRateLimits.js";
@@ -91,6 +92,8 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
     private readonly apiDefinitions;
     /** The guards map given at creation, kept for apiSignatures(): a guard's schema is part of the signature of every endpoint declaring it. */
     private readonly guards;
+    /** The rate-limit policies given at creation, kept for apiOptionEntries(), which records each one less its key handler. */
+    private readonly rateLimitPolicies;
     private hookList;
     private createdHooks;
     private initPromise;
@@ -246,6 +249,24 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
      * unless the generator writes it there.
      */
     apiSignatureEntries(): Promise<LambderApiSignatureEntry[]>;
+    /**
+     * Every registered API's mode and declared options as plain data, with
+     * the rate-limit policies and guards they name reduced to what is not
+     * code: what writeApiOptions (lambder/build) writes to a module a client,
+     * a mock or a test imports instead of the server. The contract carries
+     * the same options as types; this is the same fact as a value, for code
+     * that decides something at runtime with it.
+     *
+     * Nothing here is a secret or a handler by construction. A guard's
+     * parameter is written as it was declared, so it has to be plain data
+     * (a permission string, a list, a reason); one that is not fails by API
+     * and guard name. A policy's key handler is never written: its `per`
+     * says "custom" and no more. A guard's input schema is never written
+     * either; its declaration says only which of the three input modes it
+     * has. Every table is sorted by name, so the module diffs by endpoint
+     * and never moves when registrations are reordered.
+     */
+    apiOptionEntries(): LambderApiOptionEntries;
     getResponseBuilder(ctx?: LambderRenderContext): LambderResponseBuilder<any>;
     private getResolver;
     getHandler(): LambderHandler;

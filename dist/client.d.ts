@@ -26,6 +26,8 @@ export type { LambderIdempotencyKeyScope } from "./shared/wire/LambderIdempotenc
 export { LambderApiRefusal, isLambderApiRefusal, refuse, refusalMessageOf, LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";
 export type { LambderApiRefusalOptions, LambderRefusalMessage, LambderAppRefusalMessage, LambderRefusalCode, LambderRefuseOptions } from "./shared/wire/LambderApiRefusal.js";
 export type { LambderApiContractShape, LambderApiMode, LambderApiEnvelopeBody, LambderApiResponseConfig, LambderGuardNamesIn, LambderContractMode, LambderContractKeysWithMode, LambderContractKeysWithGuard, LambderJsonOf, LambderJsonOutputOf, LambderContractGuardsOf, LambderContractGuardNames, LambderContractGuardInputsOf, LambderContractGuardInput, LambderContractGuardInputNames, LambderContractRateLimitOf, LambderContractRateLimitNames, LambderContractIdempotencyOf, } from "./shared/wire/LambderApiContract.js";
+export { apiGuardParam } from "./shared/wire/LambderApiOptionEntries.js";
+export type { LambderApiOptionEntries, LambderApiOptionEntry, LambderRateLimitPolicyEntry, LambderGuardDeclarationEntry, LambderApisWithGuard, LambderApisGuardedBy, LambderApisWithMode, LambderGuardParamOf, } from "./shared/wire/LambderApiOptionEntries.js";
 export { describeCrash, errorFromCrashDetail } from "./shared/wire/LambderCrashDetail.js";
 export type { LambderCrashDetail, LambderCrashCause } from "./shared/wire/LambderCrashDetail.js";
 export { compressPayloadGzip, isRequestCompressionAvailable, COMPRESSED_PAYLOAD_GZ_FIELD, COMPRESSED_PAYLOAD_BR_FIELD, COMPRESSED_PAYLOAD_BYTES_FIELD, DEFAULT_REQUEST_COMPRESSION_SETTINGS, } from "./shared/wire/LambderRequestPayload.js";
@@ -36,6 +38,11 @@ export { html, xml, raw, jsonScript, escapeHtml, renderHtmlValue, LambderSafeHtm
 export { createLambderI18n } from "./shared/LambderI18n.js";
 export type { LambderLanguageMeta, LambderI18nConfig, LambderI18nInstance, LambderI18nTranslator, LambderI18nExtractParams, LambderI18nDictionaryLoader, LambderI18nCodes, LambderI18nKeys, LambderI18nTranslatorFor, } from "./shared/LambderI18n.js";
 export type { LambderHttpStatusCode } from "./shared/wire/LambderHttpStatus.js";
+export { LambderBackoffTimer } from "./shared/util/LambderBackoffTimer.js";
+export type { LambderBackoffTimerOptions } from "./shared/util/LambderBackoffTimer.js";
+export { LambderSignedClaims, keyedDigest, randomSecret } from "./shared/util/LambderSignedClaims.js";
+export type { LambderSignedClaimsOptions } from "./shared/util/LambderSignedClaims.js";
+export { constantTimeEquals } from "./shared/util/LambderTextDigest.js";
 export { LambderUploadRunner, LambderUploadError } from "./client/LambderUploadRunner.js";
 export type { LambderUploadRunnerOptions, LambderUploadProgress, LambderUploadPhase, LambderUploadFailureReason } from "./client/LambderUploadRunner.js";
 export { checkUploadRule } from "./shared/contracts/LambderUploadBucket.js";

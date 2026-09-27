@@ -31,6 +31,8 @@ import { LAMBDER_BACKEND_SWAP, LAMBDER_CRASH_WATCH } from "../shared/util/Lambde
 import type { LambderApiDefinition } from "../api/LambderApiDefinition.js";
 import { apiSignatureOf, type LambderApiSignatureEntry } from "../api/LambderApiSignature.js";
 import { apiNameKeyOf, type LambderApiSignatureMap } from "../shared/wire/LambderApiSignature.js";
+import type { LambderApiOptionEntries, LambderApiOptionEntry, LambderGuardDeclarationEntry, LambderRateLimitPolicyEntry } from "../shared/wire/LambderApiOptionEntries.js";
+import { assertPlainData } from "../shared/util/assertPlainData.js";
 import type { LambderApiMode } from "../shared/wire/LambderApiContract.js";
 import type {
     LambderApiIdempotencyOption,
@@ -181,6 +183,8 @@ export default class Lambder<
     private readonly apiDefinitions = new Map<string, LambderApiDefinition>();
     /** The guards map given at creation, kept for apiSignatures(): a guard's schema is part of the signature of every endpoint declaring it. */
     private readonly guards: LambderCreateOptions<TSessionData>["guards"];
+    /** The rate-limit policies given at creation, kept for apiOptionEntries(), which records each one less its key handler. */
+    private readonly rateLimitPolicies: Record<string, LambderApiRateLimitPolicyConfig> | undefined;
     private hookList: {
         "beforeRender": { priority: number, hookFn: LambderBeforeRenderHook }[],
         "afterRender": { priority: number, hookFn: LambderAfterRenderHook }[],
@@ -231,6 +235,7 @@ export default class Lambder<
 
         const session = options.session;
         this.guards = options.guards;
+        this.rateLimitPolicies = options.rateLimits?.policies;
         this.pipeline = new LambderApiPipeline<LambderRenderContext, TSessionData>({
             apiVersion: this.apiVersion,
             minApiVersion: options.minApiVersion,
@@ -647,6 +652,67 @@ export default class Lambder<
         })));
         entries.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
         return entries;
+    }
+
+    /**
+     * Every registered API's mode and declared options as plain data, with
+     * the rate-limit policies and guards they name reduced to what is not
+     * code: what writeApiOptions (lambder/build) writes to a module a client,
+     * a mock or a test imports instead of the server. The contract carries
+     * the same options as types; this is the same fact as a value, for code
+     * that decides something at runtime with it.
+     *
+     * Nothing here is a secret or a handler by construction. A guard's
+     * parameter is written as it was declared, so it has to be plain data
+     * (a permission string, a list, a reason); one that is not fails by API
+     * and guard name. A policy's key handler is never written: its `per`
+     * says "custom" and no more. A guard's input schema is never written
+     * either; its declaration says only which of the three input modes it
+     * has. Every table is sorted by name, so the module diffs by endpoint
+     * and never moves when registrations are reordered.
+     */
+    apiOptionEntries(): LambderApiOptionEntries {
+        const apis: Record<string, LambderApiOptionEntry> = {};
+        for(const name of [...this.apiDefinitions.keys()].sort()){
+            const { mode, guards, rateLimit, idempotency } = this.apiDefinitions.get(name)!;
+            const entry: LambderApiOptionEntry = { mode };
+            if(guards !== undefined){
+                assertPlainData(guards, `the guards option of API "${name}"`);
+                entry.guards = guards;
+            }
+            if(rateLimit !== undefined){
+                assertPlainData(rateLimit, `the rateLimit option of API "${name}"`);
+                entry.rateLimit = rateLimit;
+            }
+            if(idempotency !== undefined) entry.idempotency = idempotency;
+            apis[name] = entry;
+        }
+        const rateLimitPolicies: Record<string, LambderRateLimitPolicyEntry> = {};
+        for(const name of Object.keys(this.rateLimitPolicies ?? {}).sort()){
+            const { per, budget, chargeAt, errorMessage, ...windows } = this.rateLimitPolicies![name]!;
+            const entry: LambderRateLimitPolicyEntry = {};
+            for(const [window, limit] of Object.entries(windows)){
+                if(limit !== undefined) (entry as Record<string, unknown>)[window] = limit;
+            }
+            if(per !== undefined) entry.per = per === "ip" || per === "session" ? per : "custom";
+            if(budget !== undefined) entry.budget = budget;
+            if(chargeAt !== undefined) entry.chargeAt = chargeAt;
+            if(errorMessage !== undefined){
+                assertPlainData(errorMessage, `the errorMessage of rate-limit policy "${name}"`);
+                entry.errorMessage = errorMessage;
+            }
+            rateLimitPolicies[name] = entry;
+        }
+        const guards: Record<string, LambderGuardDeclarationEntry> = {};
+        for(const name of Object.keys(this.guards ?? {}).sort()){
+            const guard = this.guards![name]!;
+            guards[name] = {
+                input: guard.apiInput ? "apiInput" : guard.guardInput ? "guardInput" : "none",
+                session: guard.session === true,
+                runAt: guard.runAt ?? "beforeInputValidation",
+            };
+        }
+        return { apis, rateLimitPolicies, guards };
     }
 
     getResponseBuilder(ctx?: LambderRenderContext){

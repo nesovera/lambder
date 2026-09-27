@@ -12,6 +12,9 @@ export { LambderMockApp, initLambderMock } from "./mock/LambderMockApp.js";
 // exported: the runtime is reached through the app. Only the error a
 // transport rejects with is public.
 export { LambderMockTransportError } from "./mock/LambderMockFailureInjector.js";
+// The server's rate-limit policies as the mock restates them, from the
+// generated options module plus the key handlers the module cannot hold.
+export { lambderMockPoliciesFrom } from "./mock/lambderMockPoliciesFrom.js";
 export { lambderMockConsoleLogger } from "./mock/lambderMockConsoleLogger.js";
 export { lambderMockMswHandler } from "./mock/lambderMockMswHandler.js";
 // The storage a mock app's uploads go to: a memory bucket the mock's ticket and

@@ -23,6 +23,9 @@ export { createIdempotencyKey, createIdempotencyKeyScope } from "./shared/wire/L
 // Typed API refusals (isomorphic: shared code may throw them from anywhere;
 // in the browser they are plain Errors).
 export { LambderApiRefusal, isLambderApiRefusal, refuse, refusalMessageOf, LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";
+// The server's declared options as plain data (the generated options module's
+// entry types) and the readers a client derives its own facts from.
+export { apiGuardParam } from "./shared/wire/LambderApiOptionEntries.js";
 // A crash described for a caller allowed to see it (the envelope's `crash` field; pure, no Node built-ins).
 export { describeCrash, errorFromCrashDetail } from "./shared/wire/LambderCrashDetail.js";
 // Request payload compression (browser-safe: gzip via CompressionStream, no Node built-ins).
@@ -33,6 +36,14 @@ export { resolveCompressionOption } from "./shared/wire/LambderCompressionOption
 export { html, xml, raw, jsonScript, escapeHtml, renderHtmlValue, LambderSafeHtml } from "./shared/LambderHtml.js";
 // Typed translations (standalone, isomorphic)
 export { createLambderI18n } from "./shared/LambderI18n.js";
+// Waiting longer after each failure, once: for a reconnecting client or a
+// screen that has to come back by itself.
+export { LambderBackoffTimer } from "./shared/util/LambderBackoffTimer.js";
+// Signed claims tokens, for the isomorphic code that verifies them where a
+// server's secret is at hand (an edge Worker, a shared backend package);
+// never in a page, which holds no secret to verify with.
+export { LambderSignedClaims, keyedDigest, randomSecret } from "./shared/util/LambderSignedClaims.js";
+export { constantTimeEquals } from "./shared/util/LambderTextDigest.js";
 // Direct uploads: the runner that takes a file from the browser straight to
 // storage, and the vocabulary it shares with the server's bucket.
 export { LambderUploadRunner, LambderUploadError } from "./client/LambderUploadRunner.js";

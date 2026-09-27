@@ -26,6 +26,8 @@ const { LambderDdbCache } = await import('../src/stores/LambderDdbCache.js');
 const { initLambderMock } = await import('../src/mock/LambderMockApp.js');
 const { default: LambderCaller } = await import('../src/client/LambderCaller.js');
 const { createIdempotencyKey } = await import('../src/shared/wire/LambderIdempotencyKeyScope.js');
+const { LambderSignedClaims, keyedDigest, randomSecret } = await import('../src/shared/util/LambderSignedClaims.js');
+const { z } = await import('zod');
 
 describe('A runtime whose crypto is a bundler stub', () => {
     it('reports no crypto at all, rather than a module that cannot hash', async () => {
@@ -46,6 +48,19 @@ describe('A runtime whose crypto is a bundler stub', () => {
         const cache = new LambderDdbCache({ tableName: 'test-cache' });
 
         await expect(cache.get('city')).rejects.toThrow('LambderDdbCache requires a Node.js environment.');
+    });
+});
+
+describe('Signed claims and keyed digests on a page without crypto.subtle', () => {
+    it('name what is missing instead of failing inside WebCrypto', async () => {
+        const tokens = new LambderSignedClaims({ secret: 's', version: 'v1', schema: z.object({ id: z.string() }) });
+        await expect(tokens.sign({ id: 'a' })).rejects.toThrow('Lambder needs WebCrypto (crypto.subtle) in this runtime.');
+        await expect(tokens.verify('v1.eyJ.AAAA')).rejects.toThrow('Lambder needs WebCrypto (crypto.subtle) in this runtime.');
+        await expect(keyedDigest('s', 'value')).rejects.toThrow('Lambder needs WebCrypto (crypto.subtle) in this runtime.');
+    });
+
+    it('still mint a secret, which needs only getRandomValues', () => {
+        expect(randomSecret()).toMatch(/^[A-Za-z0-9_-]{43}$/);
     });
 });
 

@@ -9,6 +9,142 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [8.3.1] - 2026-09-27
+
+Six additions, each a thing an app otherwise writes for itself once per kind
+of token, secret, retry loop, copied declaration or store: signed claims
+tokens, one-shot secrets over a store that settles their races, the declared
+API options as generated files of plain data, a backoff timer, the digest and
+random secret behind stored secrets, and the store conformance suites for a
+store an app writes over its own database. Nothing changes on the wire, and
+every existing option keeps its meaning.
+
+### Added
+
+- **`writeApiOptions` in `lambder/build`: the declared options as a generated
+  file.** The contract carries every API's `guards`, `rateLimit` and
+  `idempotency` options as types; code that decides something at runtime with
+  them (a mock restating the server's policies, a test walking the public
+  surface, a screen asking which permission an endpoint needs) copied them by
+  hand and held the copies honest with tests that read the source.
+  `writeApiOptions({ module, exportName, file, check })` writes them once, as
+  three `as const` tables of plain data (`apiOptions`, `rateLimitPolicies`,
+  `guardDeclarations`) from the new `lambder.apiOptionEntries()`, sorted by
+  name, and `check: true` fails a stale file naming what moved per table.
+  Nothing in the file is code: a guard parameter that is not plain data fails
+  the write by API name, a policy keyed by a handler is written as `per:
+  "custom"` and no more, and a guard's schema as its input mode alone.
+  - Readers in `lambder/client`, typed to the tables' literals:
+    `LambderApisWithGuard`, `LambderApisGuardedBy`, `LambderApisWithMode`,
+    `LambderGuardParamOf` and `apiGuardParam(apiOptions, name, guard)`.
+  - `writeApiGuardParams({ module, exportName, guard, file, check })` writes
+    one guard's parameters beside it, as an `as const` table (`guardParams`)
+    of the APIs that declare the guard and what each gives it, with nothing
+    else about any API and no import: the least a browser gating a screen on
+    that guard needs, where importing `apiOptions` as a value would ship
+    every endpoint name and every guard's parameter, reasons included.
+  - `lambderMockPoliciesFrom(rateLimitPolicies, { keys })` in `lambder/mock`
+    rebuilds the policy configs `create()` takes from the table, requiring a
+    key handler for exactly the custom-keyed policies; `create()` takes a
+    `guardDeclarations` option that holds each mock guard to the server
+    guard's input mode and session requirement (`LambderMockGuardShapeOf`);
+    and an `apiOptions` option, the table itself, from which every entry's
+    guards, rate limit and idempotency are read. Given it, an entry is its
+    handler alone, a restated option is a compile error and a throw, the
+    table must cover the contract under each endpoint's mode
+    (`LambderMockApiOptionsCover`), and a `restNotMocked` answer runs under
+    the mode the table gives the name, so an unmocked session endpoint reads
+    the session first.
+  - The entry types `LambderApiOptionEntries`, `LambderApiOptionEntry`,
+    `LambderRateLimitPolicyEntry` and `LambderGuardDeclarationEntry` live in
+    `shared/wire`, with `LambderGuardRunAt`, `LambderRateLimitBudget` and
+    `LambderRateLimitChargeAt`, which moved down there unchanged.
+
+  See [the options as a generated file](./docs/apis.md#the-options-as-a-generated-file).
+
+- **`LambderSignedClaims`: signed tokens that are their own record.** One
+  instance per kind of token, built once with the secret, a version and the
+  zod schema of its claims; `sign(claims)` writes `<version>.<base64url
+  claims>.<base64url HMAC-SHA256>`, `verify(token, { now? })` answers the
+  claims or null for a forged, foreign, malformed, refused or expired token
+  alike. An optional `exp` claim in epoch seconds is judged on every verify,
+  against an injectable clock. WebCrypto only, exported from `lambder` and
+  `lambder/client` for the edge runtimes and shared backend packages that
+  verify where the secret is at hand. Beside it, `keyedDigest(secret,
+  value)`, the HMAC-SHA256 as base64url a stored secret rests as;
+  `randomSecret(bytes?)`; and `constantTimeEquals`.
+
+- **`LambderOneShotSecrets`: codes and tokens handed out once and taken back
+  once.** The code emailed to an address, the link in an activation mail, the
+  code texted before a document opens, the code read out to pair a device:
+  one life (minted, sent, stored as a digest, tried against, spent), written
+  once, over a `LambderOneShotSecretStore` that settles its races in six
+  methods. An app declares its kinds (a `code` of an alphabet and length with
+  a ceiling on tries, or a `token` redeemed by value: random bytes, or an
+  alphabet's characters for one somebody types) and names, per secret,
+  the scope it proves; `issue(kind, scope, { cooldownSeconds?, meta? })`
+  answers the plaintext exactly once, `redeem(kind, scope, candidate)` and
+  `redeemToken(kind, candidate)` answer `accepted`, `wrong` (with the tries
+  left), `expired`, `exhausted` or `none`, and `retire(scope)` ends what the
+  scope holds. One record is live per scope; a cooldown is a condition on
+  the issuing write; a token's digest is claimed by one scope at a time in
+  that same write, and a secret drawn onto a digest another scope holds is
+  drawn again (up to five times), so two scopes that drew the same short
+  code never redeem each other's; a try is counted in the write that reads
+  the digest; a redemption is a conditional consume.
+  `LambderDdbOneShotSecretStore` keeps a code as one item under `OTS#` in
+  the policy table and a token as two, written in one transaction, and sends
+  a write DynamoDB refused for a concurrent transaction on its item again, up
+  to three times; `LambderMemoryOneShotSecretStore` keeps the same in a map, and
+  `lambderOneShotSecretStoreConformance` holds both, and an app's own store,
+  to one set of rules. The class sits in a new `src/secrets/` layer beside
+  `session/`.
+
+- **`LambderBackoffTimer`: waiting longer after each failure, once.** One
+  pending wait at a time: `retry(run)` and `wait(signal?)` climb a jittered
+  ladder (`baseMs` the shortest wait, `maxMs` the longest, `factor`,
+  `jitter`), `after(ms, run)` waits off
+  it, `reset()` and `cancel()`; `wait` rejects with the signal's reason on
+  abort and with an Error when dropped, so an await on it always settles.
+  Exported from `lambder` and `lambder/client`.
+
+  See [Secrets and retries](./docs/secrets.md).
+
+- **Store conformance suites in `lambder/testing`.** The rules each store
+  interface promises its engine were asserted in Lambder's own test suite,
+  where only Lambder's stores could meet them; a store an app writes over its
+  own database had nothing to hold it to the same rules. They are now
+  exported, one suite per interface: `lambderSessionStoreConformance`,
+  `lambderIdempotencyStoreConformance`, `lambderRateLimiterConformance` and
+  `lambderOneShotSecretStoreConformance`. Each takes the runner's own `it`
+  and `expect` (any jest-style `expect`; Lambder imports no runner) and a
+  `create` that builds a store for one case, handed the case's clock as
+  `now`. The one-shot suite also takes what a store over existing rows needs
+  in place of its defaults: two `scopes` it can hold, the kind it keeps for
+  each shape it holds (`kinds: { code?, token? }`, which decides whether the
+  cases about tries or the ones about digests run), the `meta`, and the
+  `lifetimeSeconds` it derives an expiry from. Among its rules: two issues
+  racing for one scope leave exactly one live record, two scopes racing for
+  one token digest leave it with exactly one, and `attempt` and `consume`
+  name a record by its scope and id together, so a record of another scope
+  is never the one named. Lambder's memory and DynamoDB stores run through
+  the same suites.
+
+  See [A store of your own](./docs/testing.md#a-store-of-your-own).
+
+### Changed
+
+- **`LambderUploadRunner` waits on a `LambderBackoffTimer` between tries at
+  storage.** The ladder is the timer's: each wait is `baseDelayMs` plus a
+  random share of a ceiling that starts at `baseDelayMs` and doubles per
+  failed attempt, the whole never past `maxDelayMs`. The first wait is
+  unchanged (between the base and twice it); a later one may be shorter than
+  before, since the ceiling now counts from the base rather than from twice
+  it.
+- **The session crypto shares its HMAC and its constant-time comparison** with
+  the new module through `shared/util/LambderTextDigest.ts` rather than
+  keeping copies of its own. Behaviour is unchanged.
+
 ## [8.1.2] - 2026-09-26
 
 ### Fixed

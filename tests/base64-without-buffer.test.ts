@@ -11,7 +11,9 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { bytesToBase64, base64ToBytes, base64ToText } from '../src/shared/util/LambderBase64.js';
+import { z } from 'zod';
+import { bytesToBase64, base64ToBytes, base64ToText, isBase64Url } from '../src/shared/util/LambderBase64.js';
+import { LambderSignedClaims } from '../src/shared/util/LambderSignedClaims.js';
 
 /** Runs `body` with no `Buffer` global, whatever it does. */
 const withoutBuffer = <T>(body: () => T): T => {
@@ -66,6 +68,37 @@ describe('LambderBase64 where there is no Buffer', () => {
         withoutBuffer(() => {
             expect(base64ToText(encoded)).toBe(text);
             expect(bytesToBase64(new TextEncoder().encode(text))).toBe(encoded);
+        });
+    });
+});
+
+describe('Signed claims where there is no Buffer', () => {
+    /** The same as withoutBuffer, for a body that awaits: the global stays away until it settles. */
+    const withoutBufferAsync = async <T>(body: () => Promise<T>): Promise<T> => {
+        const global = globalThis as { Buffer?: unknown };
+        const saved = global.Buffer;
+        delete global.Buffer;
+        try {
+            return await body();
+        } finally {
+            global.Buffer = saved;
+        }
+    };
+
+    it('answers null for a mac of a length no encoding has, rather than letting atob throw', async () => {
+        const tickets = new LambderSignedClaims({ secret: 'ticket-secret', version: 't1', schema: z.object({ seat: z.string() }) });
+        const token = await tickets.sign({ seat: 'A1' });
+        const [version, body, mac] = token.split('.') as [string, string, string];
+        // A SHA-256 mac is 43 characters; 41 leaves a remainder of one past a multiple of four.
+        expect(mac).toHaveLength(43);
+        const mangled = mac.slice(0, 41);
+        expect(isBase64Url(mangled)).toBe(false);
+
+        await withoutBufferAsync(async () => {
+            expect(typeof Buffer).toBe('undefined');
+            expect(await tickets.verify(`${version}.${body}.${mangled}`)).toBeNull();
+            expect(await tickets.verify(`${version}.${body}X.${mac}`)).toBeNull();
+            expect(await tickets.verify(token)).toEqual({ seat: 'A1' });
         });
     });
 });

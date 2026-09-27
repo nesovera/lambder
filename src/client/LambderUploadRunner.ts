@@ -5,6 +5,7 @@ import {
     type LambderUploadRuleVerdict,
     type LambderUploadTicket,
 } from "../shared/contracts/LambderUploadBucket.js";
+import { LambderBackoffTimer, type LambderBackoffTimerOptions } from "../shared/util/LambderBackoffTimer.js";
 import { sha256Base64Of } from "../shared/util/LambderTextDigest.js";
 
 /*
@@ -72,10 +73,11 @@ export type LambderUploadRunnerOptions<Reference, Receipt> = {
     /**
      * How storage is tried again when it cannot be reached, stalls, or answers
      * a failure a retry can cure (a 5xx, RequestTimeout, SlowDown). Each wait
-     * is a random time between `baseDelayMs` and a ceiling of twice that,
-     * doubling with every failed attempt and never past `maxDelayMs`, so many
-     * browsers dropped together do not come back in step, not even the first
-     * time. Default: 4 attempts, waits from one second to 15.
+     * is `baseDelayMs` plus a random share of a ceiling that starts at
+     * `baseDelayMs` and doubles with every failed attempt, the whole never
+     * past `maxDelayMs` (the ladder of LambderBackoffTimer), so many browsers
+     * dropped together do not come back in step, not even the first time.
+     * Default: 4 attempts, waits from one second to 15.
      */
     storageRetry?: { attempts?: number; baseDelayMs?: number; maxDelayMs?: number };
     /**
@@ -108,15 +110,17 @@ const TRANSIENT_STORAGE_CODES = new Set(["RequestTimeout", "SlowDown", "Internal
 export class LambderUploadRunner<Reference, Receipt> {
     private readonly options: LambderUploadRunnerOptions<Reference, Receipt>;
     private readonly attempts: number;
-    private readonly baseDelayMs: number;
-    private readonly maxDelayMs: number;
+    /** The ladder one upload's waits climb; each upload() builds a timer of its own from it, so two uploads never share a count. */
+    private readonly backoff: LambderBackoffTimerOptions;
     private readonly stallTimeoutMs: number;
 
     constructor(options: LambderUploadRunnerOptions<Reference, Receipt>){
         this.options = options;
         this.attempts = Math.max(1, options.storageRetry?.attempts ?? 4);
-        this.baseDelayMs = options.storageRetry?.baseDelayMs ?? 1_000;
-        this.maxDelayMs = options.storageRetry?.maxDelayMs ?? 15_000;
+        const baseDelayMs = options.storageRetry?.baseDelayMs ?? 1_000;
+        const maxDelayMs = options.storageRetry?.maxDelayMs ?? 15_000;
+        // A longest wait below the shortest is every wait at the shortest.
+        this.backoff = { baseMs: baseDelayMs, maxMs: Math.max(baseDelayMs, maxDelayMs) };
         this.stallTimeoutMs = options.stallTimeoutMs ?? 60_000;
     }
 
@@ -174,6 +178,7 @@ export class LambderUploadRunner<Reference, Receipt> {
         };
 
         let issued = await requestTicket();
+        const backoff = new LambderBackoffTimer(this.backoff);
         let failedAttempts = 0;
         let ticketRenewals = 0;
         for(;;){
@@ -192,7 +197,10 @@ export class LambderUploadRunner<Reference, Receipt> {
             // The ticket is kept through a network retry, so a flaky
             // connection does not leave the app a record per attempt.
             if(++failedAttempts >= this.attempts) throw new LambderUploadError("networkFailed");
-            await this.waitBeforeRetry(failedAttempts, signal);
+            // The wait rejects only for the signal: nothing else cancels it.
+            await backoff.wait(signal).catch((cause: unknown) => {
+                throw new LambderUploadError("cancelled", { cause });
+            });
         }
 
         report("confirming", file.size);
@@ -206,22 +214,6 @@ export class LambderUploadRunner<Reference, Receipt> {
     /** Forgets a confirmed upload through the app's endpoint, when it declared one. */
     async discard(receipt: Receipt): Promise<void> {
         await this.options.discardUpload?.(receipt);
-    }
-
-    private waitBeforeRetry(failedAttempts: number, signal: AbortSignal | undefined): Promise<void> {
-        const ceiling = Math.max(this.baseDelayMs, Math.min(this.baseDelayMs * 2 ** failedAttempts, this.maxDelayMs));
-        return new Promise<void>((resolve, reject) => {
-            if(signal?.aborted) return reject(new LambderUploadError("cancelled"));
-            const cancel = () => {
-                clearTimeout(timer);
-                reject(new LambderUploadError("cancelled"));
-            };
-            const timer = setTimeout(() => {
-                signal?.removeEventListener("abort", cancel);
-                resolve();
-            }, this.baseDelayMs + Math.random() * (ceiling - this.baseDelayMs));
-            signal?.addEventListener("abort", cancel, { once: true });
-        });
     }
 
     /** One post of the file to storage. Never throws: every ending is an outcome. */

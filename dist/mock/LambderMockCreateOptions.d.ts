@@ -3,8 +3,9 @@ import type { LambderApiSignatureMap } from "../shared/wire/LambderApiSignature.
 import type { LambderApiResponseConfig } from "../shared/wire/LambderApiContract.js";
 import type { LambderHttpStatusCode } from "../shared/wire/LambderHttpStatus.js";
 import type { MaybePromise } from "../shared/util/LambderTypeUtilities.js";
-import type { LambderContractGuardNames, LambderContractIdempotencyOf, LambderContractKeysWithMode, LambderContractRateLimitNames, LambderContractRateLimitOf } from "../shared/wire/LambderApiContract.js";
+import type { LambderContractGuardNames, LambderContractIdempotencyOf, LambderContractKeysWithMode, LambderContractMode, LambderContractRateLimitNames, LambderContractRateLimitOf } from "../shared/wire/LambderApiContract.js";
 import type { LambderApiGuard } from "../api/LambderApiGuards.js";
+import type { LambderApiOptionEntry, LambderGuardDeclarationEntry } from "../shared/wire/LambderApiOptionEntries.js";
 import type { LambderApiRateLimitPolicyConfig } from "../api/LambderApiRateLimits.js";
 import type { LambderApiRequest } from "../api/LambderApiRequest.js";
 import type { LambderApiTransport } from "../shared/transport/LambderApiTransport.js";
@@ -115,6 +116,37 @@ type LambderMockRateLimitsOptions<C, S, P extends LambderMockRateLimitPolicies<S
     failOpen?: boolean;
 };
 /**
+ * The shape a mock guard has to have to stand in for a server guard the
+ * generated `guardDeclarations` table describes: the same input mode and the
+ * same session requirement. The contract cannot say these for every guard
+ * (it names a guardInput's shape, and nothing about a guard fed from the
+ * payload or from nothing), so a mock guard that reads a payload slice the
+ * server's guard never sees, or that requires a session where the server's
+ * does not, would run and decide differently without this.
+ */
+export type LambderMockGuardShapeOf<D> = (D extends {
+    input: "apiInput";
+} ? {
+    apiInput: z.ZodType;
+} : D extends {
+    input: "guardInput";
+} ? {
+    guardInput: z.ZodType;
+} : {
+    apiInput?: undefined;
+    guardInput?: undefined;
+}) & (D extends {
+    session: true;
+} ? {
+    session: true;
+} : {
+    session?: false | undefined;
+});
+/** Each mock guard the declarations know held to its declared shape; a guard the table does not have is free. */
+type LambderMockGuardsAgree<G, D> = {
+    [N in keyof G & keyof D]: G[N] extends LambderMockGuardShapeOf<D[N]> ? unknown : LambderMockGuardShapeOf<D[N]>;
+};
+/**
  * The guards option: required whenever the contract declares any guard name,
  * omittable only for a contract that declares none.
  *
@@ -123,12 +155,12 @@ type LambderMockRateLimitsOptions<C, S, P extends LambderMockRateLimitPolicies<S
  * would answer 200 here. Optional, it would be the droppable half of exactly
  * the check it exists for.
  */
-type LambderMockGuardsOption<C, S, G> = [
+type LambderMockGuardsOption<C, S, G, D> = [
     LambderContractGuardNames<C>
 ] extends [never] ? {
-    guards?: G & LambderMockGuards<C, S> & LambderMockGuardShapes<S, G>;
+    guards?: G & LambderMockGuards<C, S> & LambderMockGuardShapes<S, G> & LambderMockGuardsAgree<G, NoInfer<D>>;
 } : {
-    guards: G & LambderMockGuards<C, S> & LambderMockGuardShapes<S, G>;
+    guards: G & LambderMockGuards<C, S> & LambderMockGuardShapes<S, G> & LambderMockGuardsAgree<G, NoInfer<D>>;
 };
 /**
  * The sessions, idempotency and rateLimits options: each required whenever
@@ -168,7 +200,38 @@ type LambderMockRateLimitsOption<C, S, P extends LambderMockRateLimitPolicies<S>
 type LambderMockGuardShapes<S, G> = {
     [N in keyof G]: LambderMockSurplusKeys<G[N], LambderApiGuard<any, any, any, LambderMockCallContext<S>, LambderMockSessionCallContext<S>>>;
 };
-export type LambderMockAppOptions<C, S, G, P extends LambderMockRateLimitPolicies<S> = LambderMockRateLimitPolicies<S>, I extends boolean | LambderMockIdempotencyOptions<S> = boolean | LambderMockIdempotencyOptions<S>> = LambderMockGuardsOption<C, S, G> & LambderMockSessionsOption<C, S> & LambderMockIdempotencyOption<C, S, I> & LambderMockRateLimitsOption<C, S, P> & {
+/**
+ * What the generated `apiOptions` table has to hold to stand in for the
+ * restated declarations of a contract's entries: an entry for every endpoint
+ * the contract declares, of the endpoint's mode. A table generated before an
+ * endpoint was added, or before one changed mode, is a compile error at the
+ * option rather than a throw when that endpoint's entry registers.
+ */
+export type LambderMockApiOptionsCover<C> = {
+    [K in keyof C & string]: {
+        mode: LambderContractMode<C, K>;
+    };
+};
+export type LambderMockAppOptions<C, S, G, P extends LambderMockRateLimitPolicies<S> = LambderMockRateLimitPolicies<S>, I extends boolean | LambderMockIdempotencyOptions<S> = boolean | LambderMockIdempotencyOptions<S>, D extends Record<string, LambderGuardDeclarationEntry> = {}, A extends Record<string, LambderApiOptionEntry> | undefined = undefined> = LambderMockGuardsOption<C, S, G, D> & LambderMockSessionsOption<C, S> & LambderMockIdempotencyOption<C, S, I> & LambderMockRateLimitsOption<C, S, P> & {
+    /**
+     * The server's guard declarations, as the generated options module
+     * exports them (`guardDeclarations`). Given, every mock guard of a name
+     * the table has is held to its input mode and session requirement at
+     * the `guards` option (see LambderMockGuardShapeOf). Nothing runs on it.
+     */
+    guardDeclarations?: D;
+    /**
+     * The server's declared options per API, as the generated options module
+     * exports them (`apiOptions`). Given, every entry's guards, rateLimit and
+     * idempotency are read off the table rather than restated: an entry is
+     * its handler (and an input schema, if it has one), a restated option is
+     * a compile error, and an endpoint whose mode the table and the builder
+     * disagree on is refused at registration. A restNotMocked answer reads
+     * the endpoint's mode off the table too, so a session endpoint nothing
+     * mocks still reads the session first. The table has to cover the
+     * contract (see LambderMockApiOptionsCover).
+     */
+    apiOptions?: A & LambderMockApiOptionsCover<C>;
     /** Stamped on every answer's envelope as apiVersion, as the server's option is. */
     apiVersion?: string;
     /** The version floor, as on the server: a call naming a lower `version` answers versionExpired whatever its signature says. */

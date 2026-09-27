@@ -16,12 +16,13 @@ order the first time.
 | Page | Covers |
 | --- | --- |
 | [Routing and actions](./routing.md) | `addRoute`, matchers, path params, hooks, fallback and error handlers, crash reporting (`crashes`), gateway differences, and `addAction` for non-HTTP invocations |
-| [APIs and refusals](./apis.md) | `addApi` and `addSessionApi`, the inferred contract, modular APIs with `use()`, `refuse()` and `LambderApiRefusal`, the signature file (`writeApiSignatures` from `lambder/build`), the contract as a generated file for a client (`writeApiContract`) |
+| [APIs and refusals](./apis.md) | `addApi` and `addSessionApi`, the inferred contract, modular APIs with `use()`, `refuse()` and `LambderApiRefusal`, the signature file (`writeApiSignatures` from `lambder/build`), the contract as a generated file for a client (`writeApiContract`), the declared options as a generated file of plain data (`writeApiOptions`), and one guard's parameters for a browser (`writeApiGuardParams`) |
 | [Responses](./responses.md) | The render context, resolver methods, `die`, cookies, compression, ETag, and Lambda's size caps |
 | [Sessions](./sessions.md) | Sessions over a store (DynamoDB, memory, your own), cookie scope and migrations, secrets at rest, `dataRefresh`, the session controller |
 | [API policies](./api-policies.md) | Declarative rate limits, guards and idempotency, and making an authorization declaration mandatory |
+| [Secrets and retries](./secrets.md) | `LambderSignedClaims`: signed tokens that are their own record; `keyedDigest` and `randomSecret` for the secrets an app stores; `LambderOneShotSecrets`: codes and tokens handed out once and taken back once, over a store that settles their races; `LambderBackoffTimer`: waiting longer after each failure, once |
 | [Calling another lambda](./invoke.md) | `LambderInvokeCaller`: invoking a Lambder app in another function directly, with its contract, crash detail and logs |
-| [Testing](./testing.md) | `lambderTestApp`: your real instance under test in this process, memory stores put under it in place, simulated browsers in front of it, outcome assertions, time, and where every other kind of test lives |
+| [Testing](./testing.md) | `lambderTestApp`: your real instance under test in this process, memory stores put under it in place, simulated browsers in front of it, outcome assertions, time, the store conformance suites for a store of your own, and where every other kind of test lives |
 | [The API core](./api-core.md) | `LambderApiPipeline`: the one request pipeline the server and the mock runtime run, the request and answer shapes, store interfaces, transports |
 
 ## Building a frontend

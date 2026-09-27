@@ -16,6 +16,13 @@ export { lambderCookieJarTransport } from "./shared/transport/lambderCookieJarTr
 export type { LambderApiTransport, LambderApiTransportRequest, LambderTransportFailureReason } from "./shared/transport/LambderApiTransport.js";
 export { LambderCookieJar, parseSetCookie } from "./shared/transport/LambderCookieJar.js";
 export { LambderExpiringMap, LambderExpiringMapFullError } from "./shared/util/LambderExpiringMap.js";
+// Waiting longer after each failure, once: what the upload runner and an app's own retrying code climb.
+export { LambderBackoffTimer } from "./shared/util/LambderBackoffTimer.js";
+export type { LambderBackoffTimerOptions } from "./shared/util/LambderBackoffTimer.js";
+// Signed claims tokens, and the keyed digest and random secret for the secrets an app stores.
+export { LambderSignedClaims, keyedDigest, randomSecret } from "./shared/util/LambderSignedClaims.js";
+export type { LambderSignedClaimsOptions } from "./shared/util/LambderSignedClaims.js";
+export { constantTimeEquals } from "./shared/util/LambderTextDigest.js";
 export type { LambderStoredCookie } from "./shared/transport/LambderCookieJar.js";
 export { lambderHandlerTransport } from "./invoke/lambderHandlerTransport.js";
 export type { LambderHandlerTransportOptions } from "./invoke/lambderHandlerTransport.js";
@@ -242,6 +249,28 @@ export { LambderDdbRateLimiter } from "./stores/LambderDdbRateLimiter.js";
 export type { LambderDdbRateLimiterOptions } from "./stores/LambderDdbRateLimiter.js";
 export { LambderMemoryRateLimiter } from "./stores/LambderMemoryRateLimiter.js";
 
+// One-shot secrets: codes and tokens handed out once and taken back once, the
+// store interface they live in, and the DynamoDB and in-memory stores
+export { LambderOneShotSecrets } from "./secrets/LambderOneShotSecrets.js";
+export type {
+    LambderOneShotSecretKind,
+    LambderOneShotSecretsOptions,
+    LambderOneShotIssueResult,
+    LambderOneShotRedeemResult,
+    LambderOneShotCodeKindNames,
+    LambderOneShotTokenKindNames,
+} from "./secrets/LambderOneShotSecrets.js";
+export type {
+    LambderOneShotSecretStore,
+    LambderOneShotSecretRecord,
+    LambderOneShotSecretDraft,
+    LambderOneShotSecretShape,
+    LambderOneShotIssueOutcome,
+} from "./shared/contracts/LambderOneShotSecretStore.js";
+export { LambderDdbOneShotSecretStore } from "./stores/LambderDdbOneShotSecretStore.js";
+export type { LambderDdbOneShotSecretStoreOptions } from "./stores/LambderDdbOneShotSecretStore.js";
+export { LambderMemoryOneShotSecretStore } from "./stores/LambderMemoryOneShotSecretStore.js";
+
 // Idempotency records: the store interface, the DynamoDB store and the in-memory one
 export type {
     LambderIdempotencyStore,
@@ -298,6 +327,20 @@ export type {
     LambderRateLimitOptionValue,
     LambderApiIdempotencyOption,
 } from "./shared/wire/LambderApiOptionValues.js";
+
+// The declared options as plain data: what apiOptionEntries() reports and
+// writeApiOptions writes, and the readers over the generated tables.
+export { apiGuardParam } from "./shared/wire/LambderApiOptionEntries.js";
+export type {
+    LambderApiOptionEntries,
+    LambderApiOptionEntry,
+    LambderRateLimitPolicyEntry,
+    LambderGuardDeclarationEntry,
+    LambderApisWithGuard,
+    LambderApisGuardedBy,
+    LambderApisWithMode,
+    LambderGuardParamOf,
+} from "./shared/wire/LambderApiOptionEntries.js";
 
 // Typed translations (standalone, isomorphic)
 export { createLambderI18n } from "./shared/LambderI18n.js";
