@@ -9,6 +9,11 @@ export { buildTransportEnvelope, LambderTransportFailure, isLambderTransportFail
 export { lambderCookieJarTransport } from "./shared/transport/lambderCookieJarTransport.js";
 export { LambderCookieJar, parseSetCookie } from "./shared/transport/LambderCookieJar.js";
 export { LambderExpiringMap, LambderExpiringMapFullError } from "./shared/util/LambderExpiringMap.js";
+// Waiting longer after each failure, once: what the upload runner and an app's own retrying code climb.
+export { LambderBackoffTimer } from "./shared/util/LambderBackoffTimer.js";
+// Signed claims tokens, and the keyed digest and random secret for the secrets an app stores.
+export { LambderSignedClaims, keyedDigest, randomSecret } from "./shared/util/LambderSignedClaims.js";
+export { constantTimeEquals } from "./shared/util/LambderTextDigest.js";
 export { lambderHandlerTransport } from "./invoke/lambderHandlerTransport.js";
 export { synthesizeLambdaHttpEvent, decodeLambdaHttpResult, localLambdaContext, LAMBDER_INVOKE_HEADER, LAMBDER_INVOKED_BY_HEADER, LAMBDER_INVOKE_PROTOCOL, } from "./invoke/LambderLambdaEvent.js";
 // The API core: the request, answer, envelope and pipeline both the server and the mock runtime run
@@ -71,6 +76,11 @@ export { LambderMemoryCache } from "./stores/LambderMemoryCache.js";
 export { RATE_LIMIT_WINDOWS } from "./shared/contracts/LambderRateLimiter.js";
 export { LambderDdbRateLimiter } from "./stores/LambderDdbRateLimiter.js";
 export { LambderMemoryRateLimiter } from "./stores/LambderMemoryRateLimiter.js";
+// One-shot secrets: codes and tokens handed out once and taken back once, the
+// store interface they live in, and the DynamoDB and in-memory stores
+export { LambderOneShotSecrets } from "./secrets/LambderOneShotSecrets.js";
+export { LambderDdbOneShotSecretStore } from "./stores/LambderDdbOneShotSecretStore.js";
+export { LambderMemoryOneShotSecretStore } from "./stores/LambderMemoryOneShotSecretStore.js";
 export { LambderDdbIdempotencyStore } from "./stores/LambderDdbIdempotencyStore.js";
 export { LambderMemoryIdempotencyStore } from "./stores/LambderMemoryIdempotencyStore.js";
 // Declarative per-API policies: guards
@@ -78,6 +88,9 @@ export { lambderGuard, lambderRateLimitKey } from "./core/LambderPolicyBuilders.
 export { lambderGuardBuilder } from "./api/LambderApiGuards.js";
 // Declarative per-API policies: rate limits
 export { lambderRateLimitKeyBuilder, rateLimitRefusal, DEFAULT_RATE_LIMIT_REFUSAL } from "./api/LambderApiRateLimits.js";
+// The declared options as plain data: what apiOptionEntries() reports and
+// writeApiOptions writes, and the readers over the generated tables.
+export { apiGuardParam } from "./shared/wire/LambderApiOptionEntries.js";
 // Typed translations (standalone, isomorphic)
 export { createLambderI18n } from "./shared/LambderI18n.js";
 export { resolveApiOutcome } from "./shared/wire/LambderApiOutcome.js";

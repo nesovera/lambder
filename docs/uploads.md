@@ -231,9 +231,10 @@ Along the way the runner reports its phase (`hashing`, `requesting`,
 `uploading` with the bytes sent, `confirming`). A dropped connection, a 5xx,
 a refusal a retry can cure (S3's `RequestTimeout`, `SlowDown`) or a post that
 moves nothing for a minute (`stallTimeoutMs`) is tried again after a random
-wait whose ceiling grows with each attempt, with the same ticket, so a flaky
-connection does not leave the app a record per attempt; `storageRetry` sets
-the attempts and the bounds of the wait. A ticket storage calls expired, or
+wait whose ceiling grows with each attempt (a `LambderBackoffTimer`, see
+[Secrets and retries](./secrets.md#retrying-with-a-backoff)), with the same
+ticket, so a flaky connection does not leave the app a record per attempt;
+`storageRetry` sets the attempts and the bounds of the wait. A ticket storage calls expired, or
 whose signing credentials it calls expired (S3's `ExpiredToken`), is replaced
 with a new one at once, spending no attempt, up to twice. The runner
 posts over XMLHttpRequest, the one way a browser reports how much of a body

@@ -13,8 +13,9 @@ type MemoryIdempotencyRecord =
  * Idempotency records held in memory: the same claim, settle and replay
  * semantics as LambderDdbIdempotencyStore (owner tokens, pending expiry, lost
  * claims as silent no-ops), over a LambderExpiringMap in place of the table
- * and its TTL. For tests and for the mock runtime; tests/store-conformance
- * drives this and the DynamoDB store through one set of rules.
+ * and its TTL. For tests and for the mock runtime; the conformance suite
+ * (lambderIdempotencyStoreConformance) drives this and the DynamoDB store
+ * through one set of rules.
  *
  * `maxBodyBytes` stands in for the DynamoDB item budget, so the "too-large"
  * path can be exercised; unbounded by default. `now` is injectable so a test

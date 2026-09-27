@@ -48,10 +48,11 @@ export type LambderUploadRunnerOptions<Reference, Receipt> = {
     /**
      * How storage is tried again when it cannot be reached, stalls, or answers
      * a failure a retry can cure (a 5xx, RequestTimeout, SlowDown). Each wait
-     * is a random time between `baseDelayMs` and a ceiling of twice that,
-     * doubling with every failed attempt and never past `maxDelayMs`, so many
-     * browsers dropped together do not come back in step, not even the first
-     * time. Default: 4 attempts, waits from one second to 15.
+     * is `baseDelayMs` plus a random share of a ceiling that starts at
+     * `baseDelayMs` and doubles with every failed attempt, the whole never
+     * past `maxDelayMs` (the ladder of LambderBackoffTimer), so many browsers
+     * dropped together do not come back in step, not even the first time.
+     * Default: 4 attempts, waits from one second to 15.
      */
     storageRetry?: {
         attempts?: number;
@@ -69,8 +70,8 @@ export type LambderUploadRunnerOptions<Reference, Receipt> = {
 export declare class LambderUploadRunner<Reference, Receipt> {
     private readonly options;
     private readonly attempts;
-    private readonly baseDelayMs;
-    private readonly maxDelayMs;
+    /** The ladder one upload's waits climb; each upload() builds a timer of its own from it, so two uploads never share a count. */
+    private readonly backoff;
     private readonly stallTimeoutMs;
     constructor(options: LambderUploadRunnerOptions<Reference, Receipt>);
     /** For a file input's `accept`, so the picker only offers what the rule takes. */
@@ -90,7 +91,6 @@ export declare class LambderUploadRunner<Reference, Receipt> {
     }): Promise<Receipt>;
     /** Forgets a confirmed upload through the app's endpoint, when it declared one. */
     discard(receipt: Receipt): Promise<void>;
-    private waitBeforeRetry;
     /** One post of the file to storage. Never throws: every ending is an outcome. */
     private post;
 }

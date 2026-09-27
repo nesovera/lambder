@@ -113,9 +113,11 @@ transforms run, and
 guard and rate-limit slices over the payload are checked against the form a
 client posts.
 
-A client that keeps its own map of what an API needs, to decide whether to
-render a screen before calling, pins that map to the declarations with
-`satisfies` instead of a test that reads the server source:
+A client that decides whether to render a screen before calling, by what an
+API needs, can read that from a generated file of the guard's parameters
+([one guard's parameters, for a browser](#one-guards-parameters-for-a-browser)).
+One that keeps its own map pins it to the declarations with `satisfies`
+instead of a test that reads the server source:
 
 ```typescript
 type PermissionNeededBy<K extends keyof ApiContractType> =
@@ -234,6 +236,140 @@ the generator says so when it finds a 7. Reading
 the contract compiles the server once, and a write that changes the file
 compiles it twice; give a large server's generator a heap to match
 (`node --max-old-space-size=8192`).
+
+## The options as a generated file
+
+The contract carries every endpoint's `guards`, `rateLimit` and
+`idempotency` options as types, which is what pins a client-side copy of a
+declaration to the server's. Code that has to decide something at runtime
+needs the same fact as a value: a mock restating the server's declarations, a
+test walking the public surface, a screen asking which permission an endpoint
+needs before it offers a control. Without one they copy the declarations by
+hand and hold the copies honest with tests that read the source. The file
+below is for the first two, which run in development and in tests; a screen
+in production reads the smaller file of [one guard's
+parameters](#one-guards-parameters-for-a-browser), because this one names
+every endpoint.
+
+`writeApiOptions` from `lambder/build` writes the declarations out once, as
+three `as const` tables of plain data in a module that imports only types, and
+runs beside `writeApiSignatures` in the same generator script:
+
+```typescript
+import { writeApiOptions } from "lambder/build";
+
+const result = await writeApiOptions({
+    module: "backend/index.ts",   // export const lambder = initLambder()...
+    exportName: "lambder",
+    file: "shared/generated/apiOptions.generated.ts",
+    check: process.argv.includes("--check"),
+});
+console.log(result.lines.join("\n"));
+process.exit(result.ok ? 0 : 1);
+```
+
+```typescript
+// shared/generated/apiOptions.generated.ts, as written
+export const apiOptions = {
+    "orders.list": { "mode": "session", "guards": { "store": "ORDERS.MANAGE" } },
+    "code.send": { "mode": "public", "guards": "captcha", "rateLimit": { "authPerIp": { "perMin": 3 }, "codePerEmail": true } },
+    ...
+} as const satisfies Record<string, LambderApiOptionEntry>;
+
+export const rateLimitPolicies = {
+    "authPerIp": { "perMin": 10, "perHour": 60, "per": "ip" },
+    "codePerEmail": { "perMin": 4, "perDay": 30, "budget": "perPolicy", "per": "custom", "errorMessage": { ... } },
+    ...
+} as const satisfies Record<string, LambderRateLimitPolicyEntry>;
+
+export const guardDeclarations = {
+    "captcha": { "input": "guardInput", "session": false, "runAt": "afterInputValidation" },
+    "store": { "input": "guardInput", "session": true, "runAt": "beforeInputValidation" },
+    ...
+} as const satisfies Record<string, LambderGuardDeclarationEntry>;
+```
+
+The tables come from `lambder.apiOptionEntries()`, which the generator calls
+on the instance the module exports: every API's mode and its three options
+exactly as written, every rate-limit policy less its key handler, and every
+guard's input mode, session requirement and place in the call, each table
+sorted by name so the file diffs by endpoint and never moves when
+registrations are reordered.
+
+Nothing in the file is code, by construction. A guard's parameter is written
+as the JSON it is, so it has to be plain data (a permission string, a list of
+them, a reason); a parameter that is a function, a class instance such as a
+zod schema, or anything else JSON would rewrite fails the write and names the
+API. A policy's key handler is never written: its `per` says `"custom"` and
+no more. A guard's input schema is never written either; its declaration says
+only which of the three input modes it has. So no secret can reach the file,
+because nothing that could hold one is written.
+
+What reads it derives instead of copying. The tables are `as const`, so the
+readers in `lambder/client` answer with literals: `LambderApisWithGuard<typeof
+apiOptions, "store">` is the union of the APIs naming that guard,
+`LambderApisGuardedBy<typeof apiOptions, "platformAdmin">` the APIs whose
+guards option is exactly that, `LambderApisWithMode` the APIs of one mode, and
+`apiGuardParam(apiOptions, name, "store")` the parameter the API gave the
+guard, typed as the literal it was declared with (`true` for a guard named
+without one, `undefined` when the API does not declare it). A test's list of
+the APIs behind a guard is then a type rather than a list somebody keeps. The
+mock runtime reads its entries' declarations off
+the table, rebuilds the policies from it through `lambderMockPoliciesFrom`,
+and holds its guards to the declarations; see [the mock
+runtime](./mock.md#declarations-policies-and-guards-from-the-generated-options).
+
+With `check: true` the call writes nothing and fails when the file on disk
+does not hold what the instance reports now, the gate for a CI step; either
+way the result names what moved per table (`~ apiOptions orders.list`, `+
+rateLimitPolicies codePerEmail`, `- guardDeclarations device`). The tables
+are compared as the data the file holds, so re-indentation or a checkout's
+line endings change nothing and a current file is left as it is; the tables
+are JSON, double quotes included, whatever the project's style, and each
+carries a `// prettier-ignore` line, because a formatter that swapped the
+quotes would leave the file unreadable to the check. There is no
+fresh-process pass: nothing here is digested, so nothing can differ per
+process. `header` and `semicolons` shape the rest of the file.
+
+### One guard's parameters, for a browser
+
+The options file holds every declaration, which is what a mock and a test
+need, and more than a browser should carry. A screen that imports
+`apiOptions` as a value ships every endpoint's name, its mode and every
+guard's parameter, the reason beside an open endpoint included, to every
+visitor, which undoes what the contract's type-only import and the
+signatures' hashed keys keep out of the bundle. A screen that gates on one
+guard needs that guard's parameter and nothing else, and `writeApiGuardParams`
+writes exactly that, beside the options file:
+
+```typescript
+import { writeApiGuardParams } from "lambder/build";
+
+const result = await writeApiGuardParams({
+    module: "backend/index.ts",
+    exportName: "lambder",
+    guard: "store",
+    file: "web/src/generated/storeGuardParams.generated.ts",
+    check: process.argv.includes("--check"),
+});
+```
+
+```typescript
+// web/src/generated/storeGuardParams.generated.ts, as written
+export const guardParams = {
+    "orders.list": "ORDERS.MANAGE",
+    "staff.invite": ["STAFF.MANAGE", "ORDERS.MANAGE"],
+} as const;
+```
+
+One entry per API that declares the guard, holding the parameter as declared
+(`true` for the guard named without one), and no import. The table is `as
+const`, so a client reads its types straight off it: `keyof typeof
+guardParams` is the APIs behind the guard, and `(typeof
+guardParams)["orders.list"]` the literal that API declared. The names in it
+are the ones a client gating on the guard calls, and so names in its own code
+already. A guard the server does not declare fails the write; `check`,
+`header` and `semicolons` work as they do for the options file.
 
 ## Modular APIs with `use()`
 

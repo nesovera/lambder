@@ -23,6 +23,7 @@ import { LambderMemorySessionStore } from '../src/stores/LambderMemorySessionSto
 import type { LambderSessionStore } from '../src/shared/contracts/LambderSessionStore.js';
 import type { LambderApiTransport } from '../src/shared/transport/LambderApiTransport.js';
 import { assertApiSuccess, assertApiFailure } from '../src/shared/wire/LambderOutcomeAssertions.js';
+import type { LambderApiOptionEntry } from '../src/shared/wire/LambderApiOptionEntries.js';
 
 type SessionData = { userId: string; tenants: { tenantId: string; role: 'reader' | 'writer' }[] };
 
@@ -1472,5 +1473,114 @@ describe('LambderMockApp - idempotency carries the server\'s own options', () =>
         expect(() => mock.create({ ...requiredOptions, idempotency: { defaultPendingTtlSeconds: 0 } }))
             .toThrow(/defaultPendingTtlSeconds/);
         expect(() => mock.create({ ...requiredOptions, idempotency: { defaultPendingTtlSeconds: 900 } })).not.toThrow();
+    });
+});
+
+describe('LambderMockApp - declarations read off the apiOptions table', () => {
+    /** The table writeApiOptions would write for this file's contract: `as const`, as the generated module is. */
+    const contractOptions = {
+        'user.get': { mode: 'public' },
+        'login': { mode: 'public' },
+        'logout': { mode: 'session' },
+        'me': { mode: 'session' },
+        'order.create': { mode: 'session', guards: { tenant: 'writer' }, idempotency: true },
+        'limited': { mode: 'public', rateLimit: 'tight' },
+        'ticket.buy': { mode: 'public', idempotency: true },
+        'echo': { mode: 'public' },
+        'admin.run': { mode: 'public' },
+        'admin.audit': { mode: 'session' },
+    } as const satisfies Record<string, LambderApiOptionEntry>;
+
+    const createDerivedApp = () => {
+        const app = mock.create({ ...requiredOptions, apiOptions: contractOptions });
+        let ticketRuns = 0;
+        app.register(
+            app.apiSlice(
+                app.publicApi('user.get', async ({ payload }) => ({ id: payload.userId, name: 'Ada' })),
+                app.publicApi('login', async () => ({ ok: true })),
+                app.sessionApi('logout', async () => ({ ok: true })),
+                app.sessionApi('me', async ({ session }) => ({ userId: session.data.userId })),
+                // Its handler alone, and guardData is still typed from the contract's guards.
+                app.sessionApi('order.create', async ({ payload, guardData }) => ({ orderId: `o-${guardData.tenant.tenantId}`, qty: payload.qty })),
+                app.publicApi('limited', async () => ({ n: 1 })),
+                app.publicApi('ticket.buy', { handler: async ({ payload }) => { ticketRuns += 1; return { ticketId: `t-${payload.seat}-${ticketRuns}` }; } }),
+                app.publicApi('echo', { input: z.object({ notes: z.array(z.string()) }), handler: async ({ payload }) => ({ count: payload.notes.length }) }),
+            ),
+            app.restNotMocked('not mocked yet'),
+        );
+        return app;
+    };
+
+    const callerOf = (app: { transport(options?: { cookies?: LambderCookieJar }): LambderApiTransport }, jar?: LambderCookieJar) =>
+        new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false, transport: app.transport(jar ? { cookies: jar } : {}) });
+
+    it('runs the guards, the rate limit and the idempotency the table declares, with entries that restate none of them', async () => {
+        const app = createDerivedApp();
+
+        // The rate limit: tight allows two a minute.
+        expect((await callerOf(app).apiOutcome('limited', {})).ok).toBe(true);
+        expect((await callerOf(app).apiOutcome('limited', {})).ok).toBe(true);
+        assertApiFailure(await callerOf(app).apiOutcome('limited', {}), 'errorMessage', { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
+
+        // The idempotency: a retry with the same key replays the first answer.
+        const key = createIdempotencyKey();
+        const first = await callerOf(app).api('ticket.buy', { seat: 'A1' }, { idempotencyKey: key });
+        expect(await callerOf(app).api('ticket.buy', { seat: 'A1' }, { idempotencyKey: key })).toEqual(first);
+        expect(app.calls.at(-1)?.outcome).toBe('replayed');
+
+        // The guard: a member who is not a writer is refused, a writer is not.
+        const jar = new LambderCookieJar();
+        await app.signIn('lin', { userId: 'lin', tenants: [{ tenantId: 't1', role: 'reader' }] }, { jar });
+        const reader = await callerOf(app, jar).apiOutcome('order.create', { qty: 1 }, { guardInputs: { tenant: { tenantId: 't1' } }, idempotencyKey: createIdempotencyKey() });
+        assertApiFailure(reader);
+        expect(reader.errorMessage).toMatchObject({ code: 'app/read-only' });
+        const writerJar = new LambderCookieJar();
+        await app.signIn('ada', { userId: 'ada', tenants: [{ tenantId: 't1', role: 'writer' }] }, { jar: writerJar });
+        expect(await callerOf(app, writerJar).api('order.create', { qty: 2 }, { guardInputs: { tenant: { tenantId: 't1' } }, idempotencyKey: createIdempotencyKey() })).toEqual({ orderId: 'o-t1', qty: 2 });
+        expect(app.calls.at(-1)?.guardsRun).toEqual(['tenant']);
+    });
+
+    it('refuses an entry that restates an option the table declares, at compile time and at runtime', () => {
+        const app = mock.create({ ...requiredOptions, apiOptions: contractOptions });
+        // @ts-expect-error the table declares the guards: a restatement is a second copy of the server's declaration.
+        expect(() => app.sessionApi('order.create', { guards: { tenant: 'writer' }, handler: async () => ({ orderId: 'o', qty: 1 }) }))
+            .toThrow('LambderMockApp: "order.create" restates its guards option, which the apiOptions table given to create() already declares. Leave it out of the entry.');
+        // @ts-expect-error nor the rate limit.
+        expect(() => app.publicApi('limited', { rateLimit: 'tight', handler: async () => ({ n: 1 }) })).toThrow(/restates its rateLimit option/);
+    });
+
+    it('holds the table to the contract: every endpoint, each under its mode', () => {
+        const { me: _me, ...missingMe } = contractOptions;
+        // @ts-expect-error the table has no entry for me, so it predates the contract.
+        mock.create({ ...requiredOptions, apiOptions: missingMe });
+        // @ts-expect-error the table calls me public where the contract says session.
+        mock.create({ ...requiredOptions, apiOptions: { ...contractOptions, me: { mode: 'public' } } as const });
+
+        // What a stale table meets at runtime, for a caller the compiler did not see.
+        const stale = mock.create({ ...requiredOptions, apiOptions: missingMe as typeof contractOptions });
+        expect(() => stale.sessionApi('me', async () => ({ userId: 'x' })))
+            .toThrow('LambderMockApp: "me" has no entry in the apiOptions table given to create(). The table predates this endpoint: regenerate it with writeApiOptions.');
+        const swapped = mock.create({ ...requiredOptions, apiOptions: { ...contractOptions, me: { mode: 'public' } } as unknown as typeof contractOptions });
+        expect(() => swapped.sessionApi('me', async () => ({ userId: 'x' })))
+            .toThrow('LambderMockApp: "me" is a public endpoint in the apiOptions table, registered here as a session one.');
+    });
+
+    it('answers a rest entry under the mode the table gives the name, so an unmocked session endpoint reads the session first', async () => {
+        const app = createDerivedApp();
+
+        const signedOut = await callerOf(app).apiOutcome('admin.audit', {});
+        assertApiFailure(signedOut, 'sessionExpired');
+        expect(app.calls.at(-1)).toMatchObject({ outcome: 'sessionExpired', mode: 'session' });
+
+        const jar = new LambderCookieJar();
+        await app.signIn('ada', { userId: 'ada', tenants: [] }, { jar });
+        const signedIn = await callerOf(app, jar).apiOutcome('admin.audit', {});
+        assertApiFailure(signedIn);
+        expect(signedIn.errorMessage).toMatchObject({ code: LAMBDER_REFUSAL_CODES.notMocked });
+
+        const publicOne = await callerOf(app).apiOutcome('admin.run', {});
+        assertApiFailure(publicOne);
+        expect(publicOne.errorMessage).toMatchObject({ code: LAMBDER_REFUSAL_CODES.notMocked });
+        expect(app.calls.at(-1)).toMatchObject({ outcome: 'notMocked', mode: 'public' });
     });
 });

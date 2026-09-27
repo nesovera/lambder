@@ -13,8 +13,8 @@ not listed here is internal and may change without a major version.
 - `lambder/testing` puts a real app under test in this process. Server-only,
   and reached by nothing else in the package, so no deployment carries it.
 - `lambder/build` is what a generator script runs at build time: the
-  signature file and the generated contract. Node-only, and reached by
-  nothing else in the package.
+  signature file, the declared options as data, and the generated contract.
+  Node-only, and reached by nothing else in the package.
 
 The **Client** column marks what `lambder/client` also exports; `client only`
 marks the two names it exports that the root entry does not.
@@ -81,11 +81,19 @@ See [Responses](./responses.md).
 | `refusalMessageOf` | yes | An envelope's errorMessage as the message object every reader gets: a plain string becomes `{ type: "error", content }` |
 | `describeCrash` | yes | Describe a thrown error for the envelope's `crash` field: name, message, stack, cause chain, where it happened |
 | `errorFromCrashDetail` | yes | Rebuild an Error (with its cause chain) from a crash detail |
+| `apiGuardParam` | yes | The parameter an API's guards option gives a guard, read off the generated `apiOptions` table with the literal the table pins: the value in the map form, `true` for a guard named without one, `undefined` when the API does not declare it |
 
 Types: `LambderApiContractShape`, `LambderApiEnvelopeBody`, `LambderApiResponseConfig`, `LambderApiNullAnswerConfig`,
 `LambderApiRefusalOptions`, `LambderRefusalMessage` (generic over an app's own
 codes), `LambderAppRefusalMessage`, `LambderRefusalCode`,
-`LambderRefuseOptions`, `LambderCrashDetail`, `LambderCrashCause`.
+`LambderRefuseOptions`, `LambderCrashDetail`, `LambderCrashCause`; and the
+declared options as data (client too), what `lambder.apiOptionEntries()`
+reports and `writeApiOptions` writes: `LambderApiOptionEntries`, its entry
+types `LambderApiOptionEntry`, `LambderRateLimitPolicyEntry` and
+`LambderGuardDeclarationEntry`, and the readers over a generated table
+`LambderApisWithGuard` (the APIs naming a guard), `LambderApisGuardedBy` (the
+APIs whose guards option is exactly this), `LambderApisWithMode` and
+`LambderGuardParamOf`.
 
 See [APIs and refusals](./apis.md).
 
@@ -116,6 +124,30 @@ Types: `LambderSessionOptions`, `LambderSessionStore`, `LambderSessionRecord`
 `LambderDdbSessionStoreOptions`.
 
 See [Sessions](./sessions.md).
+
+## Signed claims and one-shot secrets
+
+| Export | Client | Description |
+| --- | --- | --- |
+| `LambderSignedClaims` | yes | One kind of signed token: `sign(claims)` writes `<version>.<base64url claims>.<base64url HMAC-SHA256>` over the claims a zod schema accepted, `verify(token, { now? })` answers the claims or null for a forged, foreign, malformed, refused or expired token alike; an optional `exp` claim in epoch seconds is judged on every verify |
+| `keyedDigest` | yes | HMAC-SHA256 of a value under the app's secret as 43 characters of base64url: how a secret an app stores and looks up by value (a device secret, a code sent by email) rests, so a copied table cannot be attacked offline |
+| `randomSecret` | yes | A fresh secret from the cryptographic random source as base64url, 32 bytes unless told otherwise |
+| `constantTimeEquals` | yes | Length-aware comparison whose duration says nothing about where two digests differ |
+
+| `LambderOneShotSecrets` | | Codes and tokens an app hands out once and takes back once (a code emailed to an address, an activation link, a pairing code), over a store that settles their races: `issue(kind, scope, { cooldownSeconds?, meta? })`, `redeem(kind, scope, candidate)` for a code, `redeemToken(kind, candidate)` for a token, `retire(scope)` |
+| `LambderDdbOneShotSecretStore` | | The secrets as digests in DynamoDB under `OTS#`, sharing the policy table: a code as one item, a token as two written in one transaction |
+| `LambderMemoryOneShotSecretStore` | | The same rules in a `Map`, for tests and development |
+
+Types: `LambderSignedClaimsOptions`; `LambderOneShotSecretsOptions`,
+`LambderOneShotSecretKind` (a `code` of an alphabet and length with a ceiling
+on tries, or a `token` of random bytes or of an alphabet, redeemed by value),
+`LambderOneShotIssueResult`,
+`LambderOneShotRedeemResult`, `LambderOneShotCodeKindNames`,
+`LambderOneShotTokenKindNames`; the store interface `LambderOneShotSecretStore`
+and what it holds, `LambderOneShotSecretRecord`, `LambderOneShotSecretDraft`,
+`LambderOneShotSecretShape`, `LambderOneShotIssueOutcome`; `LambderDdbOneShotSecretStoreOptions`.
+
+See [Secrets and retries](./secrets.md).
 
 ## Declarative policies
 
@@ -158,8 +190,9 @@ implementations ship, and an app may bring its own.
 | `RATE_LIMIT_WINDOWS` | | The fixed windows a policy may cap, with their lengths |
 | `LambderExpiringMap` | | The bounded map every memory store and the memory cache sit on: expiry on read plus an amortized sweep, a ceiling, and `{ evictable }` entries held back from eviction |
 | `LambderExpiringMapFullError` | | Thrown by `set()` when the ceiling is reached and every entry is protected from eviction |
+| `LambderBackoffTimer` | yes | One pending wait at a time, each retry after a failure waiting longer than the last: `retry(run)` and `wait(signal?)` climb a jittered ladder, `after(ms, run)` waits off it, `reset()` and `cancel()`. What the upload runner waits on between tries at storage. See [Secrets and retries](./secrets.md#retrying-with-a-backoff) |
 
-Types: the interfaces `LambderRateLimiter`, `LambderIdempotencyStore`,
+Types: `LambderBackoffTimerOptions`; the interfaces `LambderRateLimiter`, `LambderIdempotencyStore`,
 `LambderCache` (and `LambderSessionStore` above); cache, `LambderCacheKey`,
 `LambderCacheSetOptions`, `LambderCacheListOptions`,
 `LambderMemoryCacheOptions`, `LambderDdbCacheOptions`,
@@ -371,6 +404,7 @@ See [Translations](./i18n.md).
 | --- | --- |
 | `initLambderMock` | Fix the contract and session types, then `guard` and `create(options)` |
 | `LambderMockApp` | The runtime: registry, transports, sessions, failure injection, subscription, call log |
+| `lambderMockPoliciesFrom` | The server's rate-limit policies as the mock restates them, from the generated `rateLimitPolicies` table plus the key handlers the table cannot hold, required for exactly the custom-keyed policies |
 | `lambderMockConsoleLogger` | A ready-made subscriber |
 | `lambderMockMswHandler` | One MSW handler for the whole API path, over the runtime |
 | `LambderMemoryUploadBucket`, `lambderMockUploadMswHandler` | The storage a mock app's uploads go to, and the MSW handler that answers its storage requests the way S3 does |
@@ -390,7 +424,10 @@ Types: `LambderMockAppOptions`, `LambderMockSessionsOptions`,
 `LambderMockLatency`, `LambderMockFailure`, `LambderMockFailureReason`,
 `LambderMockOutcome`, `LambderMockCallEvent`, `LambderMockRequestEvent`,
 `LambderMockResponseEvent`, `LambderMockCallRecord`, `LambderMockListener`,
-`LambderMockRateLimitPolicies`, `LambderMockInputOf`, `LambderMockOutputOf`,
+`LambderMockRateLimitPolicies`, `LambderMockPolicyKeys`,
+`LambderCustomKeyedPolicyNames`, `LambderMockGuardShapeOf` (what a mock guard
+standing in for a declared server guard has to look like, from the generated
+`guardDeclarations`), `LambderMockInputOf`, `LambderMockOutputOf`,
 `LambderMockConsoleLoggerOptions`, `LambderMswModule`, `LambderMockMswTarget`,
 `LambderMemoryUploadBucketOptions`, `LambderMemoryUploadObject`,
 and the event and answer shapes the invoke transport reads and returns,
@@ -414,14 +451,22 @@ See [The mock runtime](./mock.md).
 | --- | --- |
 | `lambderTestApp` | Puts a built Lambder instance under test: memory stores under it in place, simulated browsers in front of it. Returns a `LambderTestApp` |
 | `assertApiSuccess`, `assertApiFailure` | Narrow an `apiOutcome` through an `asserts` signature, and throw a plain Error naming what the outcome was. No test runner is imported |
-| `LambderMemorySessionStore`, `LambderMemoryRateLimiter`, `LambderMemoryIdempotencyStore`, `LambderMemoryCache`, `LambderMemoryUploadBucket`, `LambderLocalFileSource`, `LambderCookieJar`, `LAMBDER_REFUSAL_CODES` | Re-exported for a test's convenience: the stores to inspect or hand in, the cache to swap an app's own for, an upload bucket to put under an app's uploads, a file source over fixtures, a visitor's jar, the codes to assert on |
+| `LambderMemorySessionStore`, `LambderMemoryRateLimiter`, `LambderMemoryIdempotencyStore`, `LambderMemoryOneShotSecretStore`, `LambderMemoryCache`, `LambderMemoryUploadBucket`, `LambderLocalFileSource`, `LambderCookieJar`, `LAMBDER_REFUSAL_CODES` | Re-exported for a test's convenience: the stores to inspect or hand in, the cache to swap an app's own for, an upload bucket to put under an app's uploads, a file source over fixtures, a visitor's jar, the codes to assert on |
+| `lambderSessionStoreConformance`, `lambderIdempotencyStoreConformance`, `lambderRateLimiterConformance`, `lambderOneShotSecretStoreConformance` | The rules each store interface promises, registered as cases with the runner's own `it` and `expect`, for an app to hold a store it writes to the rules Lambder's own stores meet |
 
 Types: `LambderTestApp` and `LambderTestVisitor` (the two classes, reached
 through `lambderTestApp()` and `visitor()` rather than constructed),
 `LambderTestAppOptions`, `LambderTestVisitorOptions`, `LambderTestRequestInit`,
 `LambderTestedInstance` (an instance as `lambderTestApp` takes it),
 `LambderMemoryUploadBucketOptions`, `LambderMemoryUploadObject`,
-`LambderExpectedFailure`, and what a visitor hands back:
+`LambderExpectedFailure`; the suites' options
+(`LambderSessionStoreConformanceOptions`,
+`LambderIdempotencyStoreConformanceOptions`,
+`LambderRateLimiterConformanceOptions`,
+`LambderOneShotSecretStoreConformanceOptions`) and what they take from the
+runner (`LambderConformanceRunner`, `LambderConformanceIt`,
+`LambderConformanceExpect`, `LambderConformanceAssertion`,
+`LambderConformanceSetup`); and what a visitor hands back:
 `LambderLambdaHttpResult` from `request()`, `LambderCreatedSession` from
 `signIn()`, `LambderApiOutcome` and `LambderApiFailureReason` from
 `apiOutcome()`.
@@ -434,12 +479,17 @@ See [Testing](./testing.md).
 | --- | --- |
 | `writeApiSignatures` | Writes the signature module both sides ship from the instance a module exports, or checks the one on disk, naming the endpoints that moved, and verifies it against the module loaded in a fresh process |
 | `writeApiContract` | Writes the server's contract type as plain types in a module that imports nothing, for a client to compile instead of the server, or checks the one on disk, naming the APIs that moved; a write is verified against the contract, entry by entry, before the file is touched |
+| `writeApiOptions` | Writes the declared options of every API, every rate-limit policy less its key handler and every guard's input mode as three `as const` tables of plain data (`apiOptions`, `rateLimitPolicies`, `guardDeclarations`), from the instance a module exports, or checks the one on disk, naming what moved per table. See [the options as a generated file](./apis.md#the-options-as-a-generated-file) |
+| `writeApiGuardParams` | Writes one guard's parameters as an `as const` table (`guardParams`) of the APIs that declare it and what each gives it, and nothing else about any API: the least a browser gating on the guard needs. See [one guard's parameters, for a browser](./apis.md#one-guards-parameters-for-a-browser) |
 
 Types: `LambderApiSignatureSource` (what it reads: anything with
 `apiSignatureEntries()`), `LambderApiSignatureFileOptions`,
 `LambderApiSignatureFileResult`, `LambderApiContractFileOptions`,
 `LambderApiContractFileResult`, `LambderModuleLocation` (how both take the
-module that exports the instance).
+module that exports the instance),
+`LambderApiOptionsSource`, `LambderApiOptionsFileOptions`,
+`LambderApiOptionsFileResult`, `LambderApiGuardParamsFileOptions`,
+`LambderApiGuardParamsFileResult`, `LambderNameChanges`.
 
 See [APIs](./apis.md#signatures-when-a-client-must-update) and
 [the contract as a generated file](./apis.md#the-contract-as-a-generated-file).

@@ -37,22 +37,8 @@ type LambderGuardAnswerCheck<TOutput> = [
 type LambderGuardOf<TOutput, TGuard> = LambderGuardAnswerCheck<TOutput> extends LambderGuardMustNotAnswer ? LambderGuardMustNotAnswer : TGuard;
 /** One guard handler: the adapter's context, the validated input slice (undefined in the no-input mode), and the per-API parameter. */
 type LambderGuardHandler<TCtx, TPayload, TParam, TOutput> = (ctx: TCtx, payload: TPayload, param: TParam) => TOutput | Promise<TOutput>;
-/**
- * When a guard runs, relative to the API's input validation.
- *
- * - "beforeInputValidation" (default): an unauthorized caller learns nothing
- *   about the input, and no async refinement in the schema runs for it.
- * - "afterInputValidation": for a guard that spends something on the
- *   request, such as a single-use captcha token, which a request refused for
- *   a mistyped field would otherwise waste. The API's input schema then runs
- *   for callers this guard would refuse, so keep lookups (an "email is free"
- *   refinement) out of it, in the handler.
- *
- * Guards run in their declared order within each, and the limits keyed by
- * caller data are charged after both unless their policy says otherwise
- * (LambderRateLimitChargeAt).
- */
-export type LambderGuardRunAt = "beforeInputValidation" | "afterInputValidation";
+import type { LambderGuardRunAt } from "../shared/wire/LambderApiOptionEntries.js";
+export type { LambderGuardRunAt };
 /** Where in the call a guard runs: see LambderGuardRunAt. */
 export type LambderGuardPlacement = {
     /** Default: "beforeInputValidation". */
@@ -331,4 +317,3 @@ export declare class LambderApiGuardsEngine {
      */
     run(request: LambderApiRequest, ctx: LambderApiCallContext, guardsOption: LambderGuardsOptionValue | undefined, trace: LambderApiCallTrace, runAt: LambderGuardRunAt): Promise<void>;
 }
-export {};

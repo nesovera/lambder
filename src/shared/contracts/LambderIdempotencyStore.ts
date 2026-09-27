@@ -36,8 +36,9 @@ export type LambderIdempotencyBeginResult =
  * atomically, settled by the claim's owner. LambderDdbIdempotencyStore and
  * LambderMemoryIdempotencyStore implement it; an app may bring its own.
  *
- * tests/store-conformance asserts the rules against every implementation.
- * Four are easy to get wrong:
+ * The conformance suite `lambder/testing` exports
+ * (lambderIdempotencyStoreConformance) asserts the rules, against these two
+ * and against an app's own. Four are easy to get wrong:
  *
  * A read hands back a COPY of the record, never the stored object, because a
  * caller applies its own headers onto what it gets back.

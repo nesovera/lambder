@@ -15,6 +15,7 @@ import { LambderApiPipeline } from "../api/LambderApiPipeline.js";
 import { LAMBDER_BACKEND_SWAP, LAMBDER_CRASH_WATCH } from "../shared/util/LambderTestingDoors.js";
 import { apiSignatureOf } from "../api/LambderApiSignature.js";
 import { apiNameKeyOf } from "../shared/wire/LambderApiSignature.js";
+import { assertPlainData } from "../shared/util/assertPlainData.js";
 import { apiNotFoundAnswer, refusalAnswer, sessionExpiredAnswer, } from "../api/LambderApiEnvelope.js";
 import { bindContextTools, createContext, isV2HttpEvent, } from "./LambderContext.js";
 import { COMPRESSED_PAYLOAD_GZ_FIELD, COMPRESSED_PAYLOAD_BR_FIELD, COMPRESSED_PAYLOAD_BYTES_FIELD } from "../shared/wire/LambderRequestPayload.js";
@@ -80,6 +81,8 @@ export default class Lambder {
     apiDefinitions = new Map();
     /** The guards map given at creation, kept for apiSignatures(): a guard's schema is part of the signature of every endpoint declaring it. */
     guards;
+    /** The rate-limit policies given at creation, kept for apiOptionEntries(), which records each one less its key handler. */
+    rateLimitPolicies;
     hookList = { "beforeRender": [], "afterRender": [], "fallback": [] };
     createdHooks = [];
     initPromise = null;
@@ -122,6 +125,7 @@ export default class Lambder {
         }
         const session = options.session;
         this.guards = options.guards;
+        this.rateLimitPolicies = options.rateLimits?.policies;
         this.pipeline = new LambderApiPipeline({
             apiVersion: this.apiVersion,
             minApiVersion: options.minApiVersion,
@@ -412,6 +416,71 @@ export default class Lambder {
         })));
         entries.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
         return entries;
+    }
+    /**
+     * Every registered API's mode and declared options as plain data, with
+     * the rate-limit policies and guards they name reduced to what is not
+     * code: what writeApiOptions (lambder/build) writes to a module a client,
+     * a mock or a test imports instead of the server. The contract carries
+     * the same options as types; this is the same fact as a value, for code
+     * that decides something at runtime with it.
+     *
+     * Nothing here is a secret or a handler by construction. A guard's
+     * parameter is written as it was declared, so it has to be plain data
+     * (a permission string, a list, a reason); one that is not fails by API
+     * and guard name. A policy's key handler is never written: its `per`
+     * says "custom" and no more. A guard's input schema is never written
+     * either; its declaration says only which of the three input modes it
+     * has. Every table is sorted by name, so the module diffs by endpoint
+     * and never moves when registrations are reordered.
+     */
+    apiOptionEntries() {
+        const apis = {};
+        for (const name of [...this.apiDefinitions.keys()].sort()) {
+            const { mode, guards, rateLimit, idempotency } = this.apiDefinitions.get(name);
+            const entry = { mode };
+            if (guards !== undefined) {
+                assertPlainData(guards, `the guards option of API "${name}"`);
+                entry.guards = guards;
+            }
+            if (rateLimit !== undefined) {
+                assertPlainData(rateLimit, `the rateLimit option of API "${name}"`);
+                entry.rateLimit = rateLimit;
+            }
+            if (idempotency !== undefined)
+                entry.idempotency = idempotency;
+            apis[name] = entry;
+        }
+        const rateLimitPolicies = {};
+        for (const name of Object.keys(this.rateLimitPolicies ?? {}).sort()) {
+            const { per, budget, chargeAt, errorMessage, ...windows } = this.rateLimitPolicies[name];
+            const entry = {};
+            for (const [window, limit] of Object.entries(windows)) {
+                if (limit !== undefined)
+                    entry[window] = limit;
+            }
+            if (per !== undefined)
+                entry.per = per === "ip" || per === "session" ? per : "custom";
+            if (budget !== undefined)
+                entry.budget = budget;
+            if (chargeAt !== undefined)
+                entry.chargeAt = chargeAt;
+            if (errorMessage !== undefined) {
+                assertPlainData(errorMessage, `the errorMessage of rate-limit policy "${name}"`);
+                entry.errorMessage = errorMessage;
+            }
+            rateLimitPolicies[name] = entry;
+        }
+        const guards = {};
+        for (const name of Object.keys(this.guards ?? {}).sort()) {
+            const guard = this.guards[name];
+            guards[name] = {
+                input: guard.apiInput ? "apiInput" : guard.guardInput ? "guardInput" : "none",
+                session: guard.session === true,
+                runAt: guard.runAt ?? "beforeInputValidation",
+            };
+        }
+        return { apis, rateLimitPolicies, guards };
     }
     getResponseBuilder(ctx) {
         return new LambderResponseBuilder({

@@ -113,10 +113,10 @@ The package ships five entry points; pick by where the code runs:
 | Entry | Runs in | Carries |
 | --- | --- | --- |
 | `lambder` | Server (Lambda) | The full framework: pipeline, sessions, DDB stores, policies, plus the API core's building blocks and everything from `lambder/client` except the two request-compression helpers, `compressPayloadGzip` and `isRequestCompressionAvailable`, which stay on the client entry where a payload is compressed |
-| `lambder/client` | Browser and isomorphic shared code | `LambderCaller`, `LambderApiRefusal`/`refuse`, the API contract and envelope types, `html`/`xml` tagged templates, `createLambderI18n` |
+| `lambder/client` | Browser and isomorphic shared code | `LambderCaller`, `LambderApiRefusal`/`refuse`, the API contract and envelope types, `LambderUploadRunner`, `LambderBackoffTimer`, `LambderSignedClaims`, `html`/`xml` tagged templates, `createLambderI18n` |
 | `lambder/mock` | Browser and Node, in development and tests | `LambderMockApp`, the mock runtime: your typed contract served from mock handlers over the real API pipeline and memory stores |
-| `lambder/testing` | Node, in tests | `lambderTestApp`: your real instance under test in this process, memory stores put under it in place, simulated browsers with typed callers in front of it, and the outcome assertions |
-| `lambder/build` | Node, in a build step | `writeApiSignatures`: the signature file both sides ship, written or checked from your instance; `writeApiContract`: the contract as plain types a client compiles instead of the server |
+| `lambder/testing` | Node, in tests | `lambderTestApp`: your real instance under test in this process, memory stores put under it in place, simulated browsers with typed callers in front of it, and the outcome assertions; the store conformance suites, to hold a store you write to the rules Lambder's own meet |
+| `lambder/build` | Node, in a build step | `writeApiSignatures`: the signature file both sides ship, written or checked from your instance; `writeApiOptions`: every API's declared options, policies and guard declarations as plain data, for the code that decides with them; `writeApiGuardParams`: one guard's parameters and nothing else, what a browser gating on that guard carries; `writeApiContract`: the contract as plain types a client compiles instead of the server |
 
 Frontends and shared isomorphic packages should import from `lambder/client`
 only; the entry's module graph contains no AWS SDK, Node built-ins, or server
@@ -126,14 +126,15 @@ tree-shaking.
 Source layout mirrors this: `src/api/` (the isomorphic API core: request,
 answer, envelope, pipeline, and the declarative policies the pipeline runs),
 `src/core/` (the Lambda server adapter: routes, files, hooks, finalization),
-`src/session/` (the session manager, controller and crypto), `src/stores/`
+`src/session/` (the session manager, controller and crypto), `src/secrets/`
+(one-shot secrets over their store), `src/stores/`
 (every store and file-source implementation, DynamoDB and in-memory alike,
 and the helpers the two caches share), `src/client/`,
 `src/invoke/` (the lambda-to-lambda caller and the in-process handler
-transport), `src/mock/` (the mock runtime), `src/testing/` (the test app),
+transport), `src/mock/` (the mock runtime), `src/testing/` (the test app and the store conformance suites),
 `src/build/` (what a generator script runs at build time), and `src/shared/`
 (isomorphic modules every entry re-exports, grouped into `wire/` for the
-format both sides speak, `contracts/` for the five store and source
+format both sides speak, `contracts/` for the six store and source
 interfaces, `transport/` for the caller-to-server seam, and `util/` for
 helpers).
 Directories are layers and imports only ever point down;
@@ -156,7 +157,7 @@ guide that matches what you are building. The full index lives in
 | [Sessions](./docs/sessions.md) | Sessions over a store, cookie scope, secrets at rest, `dataRefresh`, the controller API |
 | [API policies](./docs/api-policies.md) | Declarative rate limits, guards and idempotency, and mandatory authorization declarations |
 | [Calling another lambda](./docs/invoke.md) | `LambderInvokeCaller`: invoking a Lambder app in another function, its contract, failures and compression |
-| [Testing](./docs/testing.md) | `lambderTestApp`: the real instance under test with no HTTP and no AWS, visitors, sign-in without a login endpoint, outcome assertions, crashes, time |
+| [Testing](./docs/testing.md) | `lambderTestApp`: the real instance under test with no HTTP and no AWS, visitors, sign-in without a login endpoint, outcome assertions, crashes, time, store conformance suites |
 | [The API core](./docs/api-core.md) | `LambderApiPipeline`: the one pipeline the server and the mock runtime run, the store interfaces, the transports |
 | [Frontend client](./docs/client.md) | `LambderCaller`: typed calls, failure outcomes, timeouts, guard inputs, request compression, transports |
 | [Frontend hosting](./docs/frontend-hosting.md) | File sources, `servePublicFiles`, `serveIndexHtml`, `res.templateFile` |

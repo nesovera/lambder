@@ -11,16 +11,7 @@
  * not a table anybody can leak, so hashing there protects nothing.
  */
 import { getCrypto } from "../shared/util/LambderNodeModules.js";
-import { bytesToHexString, resolveWebCrypto, sha256HexOf } from "../shared/util/LambderTextDigest.js";
-/** Length-aware, timing-neutral string comparison: no early exit on the first differing character. */
-const constantTimeEqual = (a, b) => {
-    if (a.length !== b.length)
-        return false;
-    let difference = 0;
-    for (let i = 0; i < a.length; i += 1)
-        difference |= a.charCodeAt(i) ^ b.charCodeAt(i);
-    return difference === 0;
-};
+import { bytesToHexString, constantTimeEquals, hmacSha256Of, resolveWebCrypto, sha256HexOf } from "../shared/util/LambderTextDigest.js";
 /** True when this runtime offers WebCrypto's subtle API (secure contexts in browsers; Node 20+). */
 export const isWebCryptoAvailable = () => typeof globalThis.crypto?.subtle?.digest === "function" && typeof globalThis.crypto.getRandomValues === "function";
 /** sha256 and HMAC through crypto.subtle and randomness through getRandomValues: the default. */
@@ -62,10 +53,9 @@ export class LambderWebCrypto {
         return await sha256HexOf(value);
     }
     async hmacSha256Hex(key, value) {
-        const webCrypto = await this.ready();
-        const encoder = new TextEncoder();
-        const hmacKey = await webCrypto.subtle.importKey("raw", encoder.encode(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-        return bytesToHexString(new Uint8Array(await webCrypto.subtle.sign("HMAC", hmacKey, encoder.encode(value))));
+        // ready() first, as for sha256Hex; the HMAC is the one every layer shares.
+        await this.ready();
+        return bytesToHexString(await hmacSha256Of(key, value));
     }
     async randomHex(bytes) {
         const webCrypto = await this.ready();
@@ -82,7 +72,7 @@ export class LambderWebCrypto {
             if (left.length === right.length)
                 return nodeCrypto.timingSafeEqual(left, right);
         }
-        return constantTimeEqual(a, b);
+        return constantTimeEquals(a, b);
     }
 }
 /**
@@ -110,6 +100,6 @@ export class LambderPlainSessionCrypto {
         return bytesToHexString(random);
     }
     constantTimeEqual(a, b) {
-        return constantTimeEqual(a, b);
+        return constantTimeEquals(a, b);
     }
 }

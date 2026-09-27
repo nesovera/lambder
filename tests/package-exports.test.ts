@@ -236,6 +236,7 @@ describe('The published entry points', () => {
         expect(typeof testing.assertApiSuccess).toBe('function');
         expect(typeof testing.assertApiFailure).toBe('function');
         expect(typeof testing.LambderMemorySessionStore).toBe('function');
+        expect(typeof testing.lambderOneShotSecretStoreConformance).toBe('function');
     });
 
     it('keeps the testing entry out of every other entry, so no deployment or bundle carries it', () => {
@@ -319,6 +320,9 @@ const MAY_IMPORT: Record<string, readonly string[]> = {
     shared: ['shared'],
     stores: ['shared', 'stores'],
     session: ['shared', 'session'],
+    // secrets/ is the one-shot secrets class over its store interface, a
+    // sibling of session/: over shared/ alone, and reached by the root entry.
+    secrets: ['shared', 'secrets'],
     api: ['shared', 'session', 'api'],
     client: ['shared', 'client'],
     core: ['shared', 'stores', 'session', 'api', 'core'],
@@ -336,7 +340,7 @@ const MAY_IMPORT: Record<string, readonly string[]> = {
     build: ['shared', 'api', 'build'],
     // The entries. The root one is the whole framework minus the mock
     // runtime, which is its own entry and stays out of a server bundle.
-    'index.ts': ['shared', 'stores', 'session', 'api', 'client', 'core', 'invoke'],
+    'index.ts': ['shared', 'stores', 'session', 'secrets', 'api', 'client', 'core', 'invoke'],
     'client.ts': ['shared', 'client'],
     'mock.ts': ['shared', 'stores', 'session', 'api', 'mock'],
     'testing.ts': ['shared', 'stores', 'session', 'invoke', 'testing'],

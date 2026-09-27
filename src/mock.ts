@@ -45,6 +45,11 @@ export type {
     LambderMockOutputOf,
     LambderMockOverride,
 } from "./mock/LambderMockTypes.js";
+// The server's rate-limit policies as the mock restates them, from the
+// generated options module plus the key handlers the module cannot hold.
+export { lambderMockPoliciesFrom } from "./mock/lambderMockPoliciesFrom.js";
+export type { LambderCustomKeyedPolicyNames, LambderMockPolicyKeys } from "./mock/lambderMockPoliciesFrom.js";
+export type { LambderMockGuardShapeOf } from "./mock/LambderMockCreateOptions.js";
 export { lambderMockConsoleLogger } from "./mock/lambderMockConsoleLogger.js";
 export type { LambderMockConsoleLoggerOptions } from "./mock/lambderMockConsoleLogger.js";
 export { lambderMockMswHandler } from "./mock/lambderMockMswHandler.js";

@@ -1,6 +1,6 @@
 # DynamoDB tables
 
-Four Lambder systems store data in DynamoDB, and all four use the same table
+Five Lambder systems store data in DynamoDB, and all five use the same table
 shape: a string hash key `pk`, a string range key `sk`, and TTL on an
 `expiresAt` attribute.
 
@@ -10,13 +10,14 @@ shape: a string hash key `pk`, a string range key `sk`, and TTL on an
 | [`LambderDdbCache`](./ddb-cache.md) | `CACHE#` | Cached values |
 | [`LambderDdbRateLimiter`](./ddb-rate-limiter.md) | `RL#` | Rate-limit counters |
 | [`LambderDdbIdempotencyStore`](./ddb-idempotency.md) | `IDEM#` | Idempotency claims and replays |
+| [`LambderDdbOneShotSecretStore`](./secrets.md#one-shot-secrets) | `OTS#` | Codes and tokens handed out once, as digests |
 
 ## How many tables
 
-The three non-session systems prefix their keys, so **they can share one
+The four non-session systems prefix their keys, so **they can share one
 table** without collisions. That is the common setup: one `app-policies` table
-for rate limits and idempotency, and either the same table or a dedicated one
-for the cache.
+for rate limits, idempotency and one-shot secrets, and either the same table
+or a dedicated one for the cache.
 
 **Keep sessions in their own table.** Not because of key collisions, but so
 IAM can be scoped to it separately: the session table is the one whose contents
@@ -30,7 +31,7 @@ region), then the shared config file, then the rest of the chain. That is
 usually what you want, since the table is normally in the region the function
 runs in.
 
-All four follow the same chain, so they land in the same region unless told
+All five follow the same chain, so they land in the same region unless told
 otherwise. Name `region` only for a table that lives somewhere other than the
 function.
 
@@ -90,6 +91,7 @@ Grant only what the systems on that table actually use.
 | `LambderDdbCache` | `GetItem`, `PutItem`, `DeleteItem`, `Query`, `BatchWriteItem` |
 | `LambderDdbRateLimiter` | `UpdateItem`, `GetItem` |
 | `LambderDdbIdempotencyStore` | `GetItem`, `PutItem`, `DeleteItem` |
+| `LambderDdbOneShotSecretStore` | `GetItem`, `PutItem`, `UpdateItem`, `DeleteItem` |
 
 A session-table policy, for example:
 
