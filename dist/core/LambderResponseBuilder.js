@@ -1,18 +1,18 @@
-import { serializeCookie, serializeClearCookie } from "../shared/wire/LambderCookie.js";
 import { LambderResponse } from "./LambderResponse.js";
 import { buildApiEnvelope } from "../api/LambderApiEnvelope.js";
-import { LambderApiOutputValidationError } from "../api/LambderApiOutputValidationError.js";
+/**
+ * Builds the responses of routes, hooks and error handlers. An API handler
+ * never holds one: it returns its output or refuses, and writes headers and
+ * cookies through its context (LambderResponseTools).
+ */
 export default class LambderResponseBuilder {
     files;
     apiVersion;
     ctx;
-    /** The output schema of the API this builder answers, which every success payload is parsed through; null outside an API handler. */
-    apiOutput;
-    constructor({ files, apiVersion, ctx, apiOutput }) {
+    constructor({ files, apiVersion, ctx }) {
         this.files = files ?? null;
         this.apiVersion = apiVersion ?? null;
         this.ctx = ctx;
-        this.apiOutput = apiOutput ?? null;
     }
     ;
     buildResponse(statusCode, contentType, body, options, defaults) {
@@ -37,49 +37,6 @@ export default class LambderResponseBuilder {
             throw new Error(`Lambder: ${method} requires the files option at creation (e.g. files: new LambderLocalFileSource({ root }))`);
         return this.files;
     }
-    /** Appends a response header; applied onto the response once the handler has one, in call order. */
-    addHeader(key, value) {
-        if (!this.ctx)
-            throw new Error("Lambder: res.addHeader needs the request context, and this response builder was created without one.");
-        this.ctx.responseHeaders.add(key, value);
-    }
-    ;
-    /** Replaces a response header; applied onto the response once the handler has one, in call order. */
-    setHeader(key, value) {
-        if (!this.ctx)
-            throw new Error("Lambder: res.setHeader needs the request context, and this response builder was created without one.");
-        this.ctx.responseHeaders.set(key, value);
-    }
-    ;
-    /**
-     * Adds a Set-Cookie header. A function-form `domain` is resolved against
-     * the request hostname. Defaults: Path=/, SameSite=Lax, Secure, not
-     * HttpOnly, browser-session lifetime.
-     */
-    setCookie(name, value, options) {
-        if (!this.ctx)
-            throw new Error("Lambder: res.setCookie needs the request context, and this response builder was created without one.");
-        this.addHeader("Set-Cookie", serializeCookie(name, value, options, this.ctx.host));
-    }
-    ;
-    /**
-     * Adds a Set-Cookie header that deletes the cookie. Pass the same
-     * `domain` and `path` the cookie was set with: a cookie's identity is
-     * (name, domain, path), and a deletion under a different scope targets a
-     * different cookie and deletes nothing.
-     */
-    clearCookie(name, options) {
-        if (!this.ctx)
-            throw new Error("Lambder: res.clearCookie needs the request context, and this response builder was created without one.");
-        this.addHeader("Set-Cookie", serializeClearCookie(name, options, this.ctx.host));
-    }
-    ;
-    logToApiResponse(input) {
-        if (!this.ctx)
-            throw new Error("Lambder: res.logToApiResponse needs the request context, and this response builder was created without one.");
-        this.ctx.logList.push(input);
-    }
-    ;
     raw(init) {
         return new LambderResponse({
             statusCode: init.statusCode,
@@ -177,58 +134,17 @@ export default class LambderResponseBuilder {
         return this.buildResponse(200, "text/html; charset=utf-8", template.render(data), options);
     }
     ;
-    api(payload, config = {}, options) {
-        // The envelope is the core's (one writer for both the server and the
-        // mock runtime); the logList channel is what this request accumulated
-        // unless the config names its own.
-        const envelope = buildApiEnvelope(this.apiVersion, this.declaredPayload(payload), { ...config, logList: config.logList || this.ctx?.logList });
-        return this.json(envelope, options);
-    }
-    ;
     /**
-     * A payload as the API's output schema declares it. The type system
-     * accepts a value that carries more than the schema (a row read straight
-     * from a table is assignable to a narrower object type), and without this
-     * the extra fields, a password hash included, would reach the client.
-     * zod strips what the schema does not declare, fills its defaults and
-     * applies its transforms, so the wire and the idempotency store only see
-     * the declared shape. A refusal's payload beside an errorMessage or a
-     * flag is parsed the same way; only null passes as it is. Only an API
-     * handler's own resolver holds the schema: a hook, a validation handler
-     * or an error handler answers in shapes of its own, a cached answer in
-     * its wire form, and is sent as given.
-     *
-     * The payload is the schema's input form (what a handler writes before
-     * the transforms), so a transform runs exactly once. A payload the schema
-     * rejects is a handler breaking its contract, answered as a crash rather
-     * than sent (LambderApiOutputValidationError, which an idempotency key
-     * records as its answer, since the handler has already run).
-     *
-     * The parse is synchronous, so an output schema cannot be async: zod
-     * throws from a synchronous parse that meets an async refinement or
-     * transform, and a transform may throw of its own accord. Either throw
-     * becomes the same LambderApiOutputValidationError, carrying what was
-     * thrown as its cause. Left to escape as it is, it would read as the
-     * handler crashing before its answer: the idempotency engine would
-     * release the key's claim and every retry would run the operation again.
+     * An API envelope written by hand: what a hook, an input validation
+     * handler or a global error handler answers an API call with (a refusal
+     * flag, an errorMessage, a crash). The payload goes out as given; an API
+     * handler's own output is parsed through its schema by the instance
+     * instead. The logList channel is what the request accumulated unless the
+     * config names its own.
      */
-    declaredPayload(payload) {
-        if (!this.apiOutput || payload === null)
-            return payload;
-        const apiName = this.ctx?.apiName ?? "?";
-        let parsed;
-        try {
-            parsed = this.apiOutput.safeParse(payload);
-        }
-        catch (thrown) {
-            throw new LambderApiOutputValidationError(apiName, { thrown });
-        }
-        if (parsed.success)
-            return parsed.data;
-        throw new LambderApiOutputValidationError(apiName, { zodError: parsed.error });
-    }
-    apiBinary(payload, config = {}, options) {
-        return this.api(payload, config, { ...options, compress: true });
+    api(payload, config = {}, options) {
+        const envelope = buildApiEnvelope(this.apiVersion, payload, { ...config, logList: config.logList || this.ctx?.logList });
+        return this.json(envelope, options);
     }
     ;
 }

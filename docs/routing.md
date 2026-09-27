@@ -190,7 +190,8 @@ A refusal is an answer, not a crash, and never reaches the reporter. A global
 error handler that throws while answering a crash is reported too, as a second
 crash whose `cause` is what it threw. A reporter that throws is logged and
 swallowed: the request is answered either way. An event's error is rethrown to
-Lambda after the report, so retries and dead-letter queues see it as before.
+Lambda after the report, so retries and dead-letter queues see it as they would
+with no reporter.
 
 With no reporter, a crash nothing else answered is logged by the framework's
 own 500 with `console.error`, so it is never silent: that invocation succeeds
@@ -227,11 +228,11 @@ A `beforeRender` hook that returns a new object (`{ ...ctx, tenant }`)
 replaces the context for the rest of the request: the handler, the later
 hooks, the `afterRender` hooks, the global error handler and `crashes` all
 receive the replacement, and the session a session route or API reads lands
-on it. The context's tools (`ctx.sessionController`, `ctx.rateLimit`) are
-bound onto it again.
+on it. The context's tools (`ctx.sessionController`, `ctx.rateLimit`, the
+response tools such as `ctx.setResponseHeader`) are bound onto it again.
 
-A header a `beforeRender` hook writes with `res.setHeader` belongs to the
-call, so it rides on every answer the call ends in, a crash answer and a
+A header a `beforeRender` hook writes with `ctx.setResponseHeader` belongs to
+the call, so it rides on every answer the call ends in, a crash answer and a
 refusal included. `afterRender` does not run for a crash, so security headers
 (`Strict-Transport-Security`, `X-Content-Type-Options`) written there are
 missing from exactly the 500s; write them in `beforeRender`.
@@ -240,6 +241,7 @@ missing from exactly the 500s; write them in `beforeRender`.
 lambder
     .addHook("beforeRender", async (ctx, res) => {
         console.log("Request received:", ctx.path);
+        ctx.setResponseHeader("X-Content-Type-Options", "nosniff");   // on every answer, a crash's included
         return ctx;   // the (modified) ctx continues; a response short-circuits
     })
     .addHook("afterRender", async (ctx, res, response) => {

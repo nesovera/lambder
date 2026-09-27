@@ -4,7 +4,7 @@ import { base64ToText } from "../shared/util/LambderBase64.js";
 import { LambderAnswerHeaders } from "../shared/wire/LambderAnswerHeaders.js";
 import { DEFAULT_API_PATH } from "../shared/wire/LambderDefaultApiPath.js";
 import { LAMBDER_INVOKE_API_ID, LAMBDER_LOCAL_API_ID } from "../shared/wire/LambderInvokeApiId.js";
-import { bindCallTools } from "../api/LambderApiCallContext.js";
+import { bindCallTools, responseToolsOf } from "../api/LambderApiCallContext.js";
 import { decodeRequestPath } from "./LambderRequestPath.js";
 /** True for API Gateway HTTP API / Lambda Function URL (payload v2) events. */
 export const isV2HttpEvent = (event) => !!event && typeof event === "object"
@@ -23,6 +23,7 @@ export const bindContextTools = (ctx, tools) => {
         methods: {
             rateLimit: async (policy, key) => { await tools.chargeRateLimit(bound, policy, key, true); },
             isRateLimited: (policy, key) => tools.chargeRateLimit(bound, policy, key, false),
+            ...responseToolsOf(bound, bound.host),
         },
     });
     return bound;

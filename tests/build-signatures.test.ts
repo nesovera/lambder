@@ -42,8 +42,8 @@ const write = async (app: LambderApiSignatureSource, options: Omit<LambderApiSig
     writeApiSignatures({ module: await moduleFor(app), verifyInFreshProcess: false, ...options });
 
 const appWith = (echoOutput: z.ZodType) => initLambder().create({ apiPath: '/api' })
-    .addApi('echo', { input: z.object({ text: z.string() }), output: echoOutput }, async (_ctx, res) => res.api(null as never))
-    .addApi('ping', { input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (_ctx, res) => res.api({ ok: true }));
+    .addApi('echo', { input: z.object({ text: z.string() }), output: echoOutput }, async (_ctx) => null as never)
+    .addApi('ping', { input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (_ctx) => ({ ok: true }));
 
 describe('writeApiSignatures', () => {
     it('writes a module exporting the same map the instance digests', async () => {
@@ -66,8 +66,8 @@ describe('writeApiSignatures', () => {
         await write(appWith(z.object({ text: z.string() })), { file });
 
         const reshaped = initLambder().create({ apiPath: '/api' })
-            .addApi('echo', { input: z.object({ text: z.string() }), output: z.object({ text: z.string(), at: z.number() }) }, async (_ctx, res) => res.api(null as never))
-            .addApi('added', { input: z.object({}), output: z.object({}) }, async (_ctx, res) => res.api({}));
+            .addApi('echo', { input: z.object({ text: z.string() }), output: z.object({ text: z.string(), at: z.number() }) }, async (_ctx) => null as never)
+            .addApi('added', { input: z.object({}), output: z.object({}) }, async (_ctx) => ({}));
         const result = await write(reshaped, { file });
 
         expect(result.changed).toEqual(['echo']);

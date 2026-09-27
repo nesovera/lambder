@@ -13,7 +13,7 @@ export type LambderApiEnvelopeConfig = LambderApiResponseConfig & {
  * plain success is `{ apiVersion, payload }` and nothing else; an empty
  * logList is omitted.
  */
-export declare const buildApiEnvelope: <T>(apiVersion: string | null | undefined, payload: T | null, { versionExpired, sessionExpired, notAuthorized, message, errorMessage, logList, crash, }?: LambderApiEnvelopeConfig) => LambderApiEnvelopeBody<T>;
+export declare const buildApiEnvelope: <T>(apiVersion: string | null | undefined, payload: T | null, { versionExpired, sessionExpired, notAuthorized, errorMessage, logList, crash, }?: LambderApiEnvelopeConfig) => LambderApiEnvelopeBody<T>;
 /** An envelope as an answer: JSON body, JSON content type, the status and headers given (200 and none by default). */
 export declare const envelopeAnswer: (envelope: LambderApiEnvelopeBody<unknown>, options?: {
     statusCode?: number;

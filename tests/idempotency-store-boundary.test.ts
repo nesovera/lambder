@@ -39,9 +39,9 @@ describe('The scope key a store is handed', () => {
                 callerIdentity: (_ctx, request) => request.headers['x-device-token'] ?? null,
             },
         }).addApi('order.place', { input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true },
-            async (ctx, res) => {
+            async (ctx) => {
                 placed.push(ctx.apiPayload.qty);
-                return res.api({ placed: ctx.apiPayload.qty });
+                return { placed: ctx.apiPayload.qty };
             });
         const app = lambderTestApp(lambder, { idempotency: { store } });
         const partitionKeys = () => [...table.items.values()].map((item) => item.pk!.S!);
@@ -93,7 +93,7 @@ describe('The fingerprint a request is claimed under', () => {
             idempotency: { store: new LambderMemoryIdempotencyStore() },
             crashes: { report: (error) => { crashes.push(error); } },
         }).addApi('order.place', { input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true },
-            async (_ctx, res) => { handlerRuns += 1; return res.api({ placed: 1 }); }));
+            async (_ctx) => { handlerRuns += 1; return { placed: 1 }; }));
         // Sorting the keys recurses per level; the schema would strip the
         // field, but the fingerprint is taken before it runs.
         const depth = 200_000;
@@ -151,11 +151,11 @@ describe('The stored answer a replay is built from', () => {
         const lambder = initLambder().create({ apiPath: '/api', idempotency: { store } })
             .addHook('beforeRender', async (ctx, res) => {
                 visits += 1;
-                res.setCookie('visit', String(visits));
+                ctx.setCookie('visit', String(visits));
                 return ctx;
             })
             .addApi('order.place', { input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true },
-                async (ctx, res) => res.api({ placed: ctx.apiPayload.qty }));
+                async (ctx) => ({ placed: ctx.apiPayload.qty }));
         const app = lambderTestApp(lambder, { idempotency: { store } });
 
         for(const clientIp of ['203.0.113.1', '203.0.113.2', '203.0.113.3']){

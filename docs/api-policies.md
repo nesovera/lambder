@@ -177,17 +177,17 @@ policies: {
     pairPerIp: { perMin: 5, per: "ip" },
 },
 
-lambder.addSessionApi("org.invite", { input, output, guards }, async (ctx, res) => {
+lambder.addSessionApi("org.invite", { input, output, guards }, async (ctx) => {
     // ...the refusals that mean nothing goes out come first; then:
     await ctx.rateLimit("invitesPerRecipient", `${orgId}:${email.toLowerCase()}`);
     await sendInvitation(orgId, email);
-    return res.api({ sent: true });
+    return { sent: true };
 });
 
 // A handler whose output has its own way of saying "too many" asks instead:
-lambder.addApi("device.pair", { input, output }, async (ctx, res) => {
+lambder.addApi("device.pair", { input, output }, async (ctx) => {
     const limited = await ctx.isRateLimited("pairPerIp");
-    if (limited) return res.api({ error: "too-many-attempts", retryAfterSeconds: limited.retryAfterSeconds });
+    if (limited) return { error: "too-many-attempts", retryAfterSeconds: limited.retryAfterSeconds };
     // ...
 });
 ```
@@ -539,19 +539,19 @@ operation with `createIdempotencyKey()` and reuse it on retries.
   path (its rate limits are charged and its guards run) before the 409, since
   there is no stored answer to find yet.
 - **Repeats of a completed request** replay the stored response verbatim until
-  the TTL, response headers included, so headers set via `res.setHeader` and
-  `res.addHeader` replay too.
+  the TTL, response headers included, so headers the handler wrote with
+  `ctx.setResponseHeader` and `ctx.addResponseHeader` replay too.
 - **A crashed original** releases its claim, so a retry actually retries.
   The exception is an answer its output schema rejects or throws on
   (`LambderApiOutputValidationError`, an async output schema and a transform
   that throws included): the handler ran to its answer, so the framework's
   crash answer is stored as the key's answer and replayed to retries, rather
   than the operation running again on each one.
-- **The replay rule for failures**: RESPONSES are stored and replayed, refusals
-  returned as envelopes (`res.api(null, { errorMessage })`) and thrown
-  responses (`res.die.*`) included; EXCEPTIONS are not, so a thrown
-  `LambderApiRefusal` or `refuse()` releases the claim and a retry re-executes
-  and decides afresh.
+- **The replay rule for refusals**: ANSWERS, the outputs a handler returned,
+  are stored and replayed; refusals are not. A handler refuses by throwing
+  (`refuse()` or a `LambderApiRefusal`), and a throw releases the claim, so a
+  retry under the same key runs the handler again, which decides afresh: a
+  refusal because an item was out of stock does not outlive the restock.
 - **Stored bodies** of 1KB or more are Brotli-compressed by default (the same
   scheme and `compression` option as `LambderDdbCache`: `true`, `false`, or
   `{ minBytes, quality }`, default `{ minBytes: 1024, quality: 5 }`; records of
@@ -560,11 +560,13 @@ operation with `createIdempotencyKey()` and reuse it on retries.
   ~350KB item budget applies to the COMPRESSED bytes, so even large responses
   usually stay replayable.
 - **Never stored**: responses with status >= 500 (bar the output-schema crash
-  above), bodies over the budget even
-  compressed, binary bodies (a base64 answer from `res.file()` or `res.raw()`,
-  which no store carries), and responses that set cookies (replaying one
-  request's Set-Cookie, session tokens for instance, into another would be
-  wrong; such APIs still get in-flight 409 dedupe, just not replays).
+  above), bodies over the budget even compressed, binary bodies (which no
+  store carries, and which an API handler's envelope never is; only an
+  adapter's own `exec` over the pipeline can answer one), and responses that
+  set cookies, with `ctx.setCookie` or by creating or rotating a session
+  (replaying one request's Set-Cookie, session tokens for instance, into
+  another would be wrong; such APIs still get in-flight 409 dedupe, just not
+  replays).
 - **The record is the engine's copy**, both ways: the headers handed to the
   store cannot be changed by anything the call does afterwards, and a replay
   is built from a copy of what the store hands back, so a cookie written
@@ -635,7 +637,7 @@ lambder.addSessionApi("secure.order.create", {
     rateLimit: { writePerUser: { perMin: 10 } },
     guards: { orgPermission: "ORDERS.CREATE" },
     idempotency: true,   // or { ttlSeconds: 3600 }
-}, async (ctx, res) => {
+}, async (ctx) => {
     const { organizationId } = ctx.guardData.orgPermission;   // typed guard output
     // ...
 });

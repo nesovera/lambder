@@ -9,6 +9,78 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [9.0.1] - 2026-09-27
+
+A major that gives an API handler one shape. It takes its context and returns
+its output; it says no with `refuse()`; it writes headers, cookies and log
+entries through the context. The response builder stays with routes, hooks,
+fallbacks and error handlers, which build HTTP responses. An API is typed data
+in and typed data out, and a handler that has no response builder cannot
+answer any other way, so the two ways a handler used to refuse (throwing, or
+answering null beside a reason) are one, and the untyped side channels are
+gone. A server handler and its mock twin now read alike.
+
+### Changed (breaking)
+
+- **An API handler returns its output.** `addApi` and `addSessionApi` take
+  `async (ctx) => output` instead of `async (ctx, res) => res.api(output)`.
+  The return is checked against the output schema's input form and parsed
+  through the schema before it is sent, as `res.api()`'s payload was:
+  undeclared fields are stripped, defaults filled, transforms run once, and
+  an output the schema rejects is answered as a crash
+  (`LambderApiOutputValidationError`). A literal in a returned object keeps
+  its type (`{ status: "open" }` is checked as `"open"`, not `string`), which
+  is why the handler's return is its own `const` type parameter; arrays in a
+  returned literal are read as readonly, which is all an answer needs.
+  - To move: drop the second parameter and return what was passed to
+    `res.api()`. An answer that was `res.api(null, { errorMessage })`,
+    `{ notAuthorized }` or `{ sessionExpired }` becomes `refuse(content, {
+    notAuthorized, sessionExpired, code, type })`. A handler that answered
+    null where the output does not allow null no longer compiles; it refuses
+    instead, or the output becomes nullable.
+- **A refusal is never stored for replay.** Only an answer (a returned
+  output) is stored under an idempotency key; a refusal is thrown, the claim
+  is released, and a retry runs the handler again, which decides afresh. A
+  corrected request after a refusal goes through under the same key instead
+  of being refused as a reused key.
+- **Response headers and cookies are written through the context.**
+  `ctx.setResponseHeader(key, value)`, `ctx.addResponseHeader(key, value)`,
+  `ctx.setCookie(name, value, options?)` and `ctx.clearCookie(name,
+  options?)` (the type `LambderResponseTools`) are on every context: routes,
+  API handlers, hooks, and mock handlers alike. `res.setHeader`,
+  `res.addHeader`, `res.setCookie` and `res.clearCookie` are removed. The
+  writers say "Response" because `ctx.header(name)` reads a request header.
+- **The log channel is `ctx.logList`.** `res.logToApiResponse(entry)` is
+  removed; push the entry onto `ctx.logList`, which the mock's context has
+  always had.
+- **Answer compression is declared per API.** `addApi` and `addSessionApi`
+  take `compress?: boolean | "auto"` beside the other options: "auto" (the
+  default) compresses for an accepting caller when the body is large enough,
+  false never (an answer carrying base64 bytes), true always. It covers
+  refusals and replayed answers too, and is a transport setting of the
+  server, not part of the contract. `res.apiBinary()` and the per-answer
+  response options of an API handler (status code, compression, cache
+  headers) are removed; a header goes through `ctx.setResponseHeader`.
+- **`res.api()` writes an envelope by hand, for code outside an API
+  handler.** A hook, the input validation handler or a global error handler
+  answering an API call still uses it; the payload goes out as given. The
+  typed overloads and `LambderResolver`'s output type parameter are removed,
+  with the types `LambderResolverApiMethod` and `LambderApiNullAnswerConfig`.
+  A binary or file answer is a route's job.
+
+### Removed
+
+- **The `message` envelope channel.** The untyped `message` field of the
+  envelope and of `LambderApiResponseConfig`, `LambderCaller`'s
+  `messageHandler` option and per-call override, and the mock's
+  `ctx.envelope`. What a success says belongs in the output schema, where it
+  is typed and parsed.
+
+### Added
+
+- `LambderResponseTools`, the type of the four response writers every
+  context carries, exported from `lambder`.
+
 ## [8.3.1] - 2026-09-27
 
 Six additions, each a thing an app otherwise writes for itself once per kind

@@ -16,7 +16,8 @@ import { LAMBDER_BACKEND_SWAP, LAMBDER_CRASH_WATCH } from "../shared/util/Lambde
 import { apiSignatureOf } from "../api/LambderApiSignature.js";
 import { apiNameKeyOf } from "../shared/wire/LambderApiSignature.js";
 import { assertPlainData } from "../shared/util/assertPlainData.js";
-import { apiNotFoundAnswer, refusalAnswer, sessionExpiredAnswer, } from "../api/LambderApiEnvelope.js";
+import { apiNotFoundAnswer, buildApiEnvelope, envelopeAnswer, refusalAnswer, sessionExpiredAnswer, } from "../api/LambderApiEnvelope.js";
+import { LambderApiOutputValidationError } from "../api/LambderApiOutputValidationError.js";
 import { bindContextTools, createContext, isV2HttpEvent, } from "./LambderContext.js";
 import { COMPRESSED_PAYLOAD_GZ_FIELD, COMPRESSED_PAYLOAD_BR_FIELD, COMPRESSED_PAYLOAD_BYTES_FIELD } from "../shared/wire/LambderRequestPayload.js";
 import { coerceToError } from "../shared/wire/LambderCrashDetail.js";
@@ -263,12 +264,16 @@ export default class Lambder {
         return this;
     }
     // Typed API with Zod
-    addApi(name, schema, handler) {
+    addApi(name, schema, 
+    /** Answers the call by returning its output (parsed through `output` before it is sent), or refuses it with refuse(). */
+    handler) {
         this.registerApi(name, "public", schema, handler);
         return this;
     }
     // Typed Session API with Zod
-    addSessionApi(name, schema, handler) {
+    addSessionApi(name, schema, 
+    /** Answers the call by returning its output (parsed through `output` before it is sent), or refuses it with refuse(). */
+    handler) {
         this.registerApi(name, "session", schema, handler);
         return this;
     }
@@ -303,7 +308,7 @@ export default class Lambder {
         this.apiDefinitions.set(name, definition);
         this.actionList.push({
             match: (ctx) => ctx.apiName === name ? {} : false,
-            actionFn: (ctx) => this.runApi(ctx, definition, handler),
+            actionFn: (ctx) => this.runApi(ctx, definition, schema.output, schema.compress ?? "auto", handler),
         });
     }
     addHook(hookEvent, hookFn, priority = 0) {
@@ -700,8 +705,8 @@ export default class Lambder {
             catch (err) {
                 response = (await this.answerThrown(err, ctx, resolver)).copy();
             }
-            // Only what the hooks themselves wrote (res.setHeader inside a
-            // hook) is left to apply, which leaves their overrides standing.
+            // Only what the hooks themselves wrote (ctx.setResponseHeader
+            // inside a hook) is left to apply, which leaves their overrides standing.
             // A hook that answered with a different response takes the whole
             // set instead: headers belong to the call, not to the response
             // that first carried them, so the call's session cookie must
@@ -883,48 +888,52 @@ export default class Lambder {
     }
     /**
      * One API call through the core: the pipeline runs the protocol steps and
-     * calls back for the handler, whose LambderResponse (returned, or thrown
-     * via res.die.*) becomes the answer the pipeline stores and hands back.
-     * The context is the pipeline's context, so a session it fetched is on
-     * ctx.session and the validated payload is on ctx.apiPayload when the
-     * handler runs. The handler's resolver knows the API's output schema, so
-     * every success payload is parsed through it before it is sent.
+     * calls back for the handler, whose returned output becomes the answer
+     * the pipeline stores and hands back. The context is the pipeline's
+     * context, so a session it fetched is on ctx.session and the validated
+     * payload is on ctx.apiPayload when the handler runs.
+     *
+     * The output goes out as the API's schema declares it. The type system
+     * accepts a value that carries more than the schema (a row read straight
+     * from a table is assignable to a narrower object type), and without the
+     * parse the extra fields, a password hash included, would reach the
+     * client. zod strips what the schema does not declare, fills its defaults
+     * and applies its transforms, so the wire and the idempotency store only
+     * see the declared shape. The handler returns the schema's input form, so
+     * a transform runs exactly once.
+     *
+     * An output the schema rejects is the handler breaking its contract,
+     * answered as a crash rather than sent (LambderApiOutputValidationError,
+     * which an idempotency key records as its answer, since the handler has
+     * already run). The parse is synchronous, so an output schema cannot be
+     * async: zod throws from a synchronous parse that meets an async
+     * refinement or transform, and a transform may throw of its own accord.
+     * Either throw becomes the same error, carrying what was thrown as its
+     * cause. Left to escape as it is, it would read as the handler crashing
+     * before its answer: the idempotency engine would release the key's claim
+     * and every retry would run the operation again.
      */
-    async runApi(ctx, definition, handler) {
+    async runApi(ctx, definition, output, compress, handler) {
         const request = ctx.api;
         if (!request)
             throw new Error(`Lambder: API "${definition.name}" was matched by a request that is not an API call.`);
-        const resolver = new LambderResolver({ files: this.files, apiVersion: this.apiVersion, ctx, apiOutput: definition.output });
-        // What the handler produced, in both forms: the answer went to the
-        // pipeline, and the response is kept so it can carry on unchanged.
-        const handled = { output: null };
         const { answer } = await this.pipeline.run(request, ctx, definition, async () => {
             ctx.apiPayload = request.payload;
-            let response;
+            const returned = await handler(ctx);
+            let parsed;
             try {
-                response = await handler(ctx, resolver);
+                parsed = output.safeParse(returned);
             }
-            catch (err) {
-                // A thrown LambderResponse IS the response (res.die.*): an
-                // answer like a returned one, stored and replayed alike.
-                if (err instanceof LambderResponse)
-                    response = err;
-                else
-                    throw err;
+            catch (thrown) {
+                throw new LambderApiOutputValidationError(definition.name, { thrown });
             }
-            handled.output = { response, answer: answerFromResponse(response) };
-            return handled.output.answer;
+            if (!parsed.success)
+                throw new LambderApiOutputValidationError(definition.name, { zodError: parsed.error });
+            return envelopeAnswer(buildApiEnvelope(this.apiVersion, parsed.data, { logList: ctx.logList }));
         });
-        // When the pipeline answered with the handler's own answer, its
-        // response carries on rather than a rebuild. An answer holds a Buffer
-        // body base64-encoded (the plain shape the idempotency store
-        // persists), and a response rebuilt from it would hand finalization a
-        // base64 string it must pass through uncompressed. Identity decides,
-        // since the pipeline may have answered with a stored replay or a
-        // refusal instead.
-        if (handled.output?.answer === answer)
-            return handled.output.response;
-        return responseFromAnswer(answer);
+        // The API's compress option, on whatever answer the call ended with:
+        // a replayed one comes back from its store without the hint.
+        return responseFromAnswer({ ...answer, compress });
     }
     /** A thrown LambderApiRefusal (from a hook, say) as the structured API envelope: the core's one mapping. */
     apiErrorResponse(err, ctx) {

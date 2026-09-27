@@ -2,7 +2,7 @@ import type { z } from "zod";
 import type { LambderApiContractShape, LambderApiMode } from "../shared/wire/LambderApiContract.js";
 import { LambderApiPipeline } from "../api/LambderApiPipeline.js";
 import { readApiEnvelope, type LambderApiRequest, type LambderApiRequestInfo, cookieValuesByName, lowercaseHeaderNames } from "../api/LambderApiRequest.js";
-import { bindCallTools, createApiCallContext, type LambderApiCallTrace } from "../api/LambderApiCallContext.js";
+import { bindCallTools, createApiCallContext, responseToolsOf, type LambderApiCallTrace } from "../api/LambderApiCallContext.js";
 import { toHttpAnswer, type LambderApiAnswer } from "../api/LambderApiAnswer.js";
 import { getAnswerHeader } from "../shared/wire/LambderAnswerHeaders.js";
 import {
@@ -658,7 +658,6 @@ export class LambderMockApp<
             apiName: request.apiName,
             request,
             signal: request.signal ?? new AbortController().signal,
-            envelope: {} as { message?: string },
             payload: request.payload,
             guardInputs: request.guardInputs,
             // The key as a handler can use it. A non-string is not a key: the
@@ -685,6 +684,7 @@ export class LambderMockApp<
             methods: {
                 rateLimit: async (policy: string, key?: string) => { await chargeRateLimit(policy, key, true); },
                 isRateLimited: (policy: string, key?: string) => chargeRateLimit(policy, key, false),
+                ...responseToolsOf(ctx, request.host),
             },
         });
         return ctx;
@@ -779,7 +779,6 @@ export class LambderMockApp<
                         (callCtx as unknown as { payload: unknown }).payload = request.payload;
                         const payload = await handler(callCtx);
                         return envelopeAnswer(buildApiEnvelope(this.apiVersion, payload === undefined ? null : payload, {
-                            message: (callCtx as LambderMockCallContext<S>).envelope.message,
                             logList: callCtx.logList,
                         }));
                     }

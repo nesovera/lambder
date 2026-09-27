@@ -12,7 +12,7 @@
  */
 
 import { z } from "zod";
-import { initLambder, LambderDdbSessionStore, lambderGuard, html } from "../src/index.js";
+import { initLambder, LambderDdbSessionStore, lambderGuard, html, refuse } from "../src/index.js";
 
 type SessionData = {
     userId: string;
@@ -67,16 +67,16 @@ const lambder = lambderApp
 // Example: Login API with session regeneration
 .addApi("user.login", {
     input: z.object({ username: z.string(), password: z.string() }),
-    output: z.object({ success: z.boolean(), csrfToken: z.string().optional(), error: z.string().optional() }),
+    output: z.object({ csrfToken: z.string() }),
     guards: { open: "signing in is how a visitor gets a session; the password check here IS the control" },
-}, async (ctx, resolver) => {
+}, async (ctx) => {
     const { username, password } = ctx.apiPayload;
 
-    // Validate credentials (implement your own logic)
+    // Validate credentials (implement your own logic). Wrong ones are a
+    // refusal rather than an output: the caller's errorMessageHandler shows
+    // the message, and the output schema describes a signed-in answer only.
     const user = await authenticateUser(username, password);
-    if (!user) {
-        return resolver.api({ success: false, error: "Invalid credentials" });
-    }
+    if (!user) refuse("Wrong username or password.");
 
     // Create new session. issueSession is createSession plus the raw tokens:
     // the cookies are set either way, and the CSRF token is handed back so a
@@ -88,41 +88,36 @@ const lambder = lambderApp
         role: user.role,
     });
 
-    return resolver.api({
-        success: true,
-        csrfToken: created.csrfToken,
-    });
+    return { csrfToken: created.csrfToken };
 })
 // Example: Protected API that requires session
 .addSessionApi("user.profile", {
     input: z.void(),
     output: z.object({ userId: z.string(), username: z.string(), role: z.string() }),
     guards: "sessionOnly",
-}, async (ctx, resolver) => {
+}, async (ctx) => {
     // Session is automatically fetched and validated
     const sessionData = ctx.session.data;
 
-    return resolver.api({
+    return {
         userId: sessionData.userId,
         username: sessionData.username,
         role: sessionData.role,
-    });
+    };
 })
 // Example: Sensitive operation that replaces every session of the user
 .addSessionApi("user.changePassword", {
     input: z.object({ oldPassword: z.string(), newPassword: z.string() }),
-    output: z.object({ success: z.boolean(), message: z.string().optional(), csrfToken: z.string().optional(), error: z.string().optional() }),
+    output: z.object({ csrfToken: z.string() }),
     guards: "sessionOnly",
-}, async (ctx, resolver) => {
+}, async (ctx) => {
     const { oldPassword, newPassword } = ctx.apiPayload;
     const { sessionController } = ctx;
     const { userId, username, role } = ctx.session.data;
 
     // Validate old password
     const isValid = await validatePassword(userId, oldPassword);
-    if (!isValid) {
-        return resolver.api({ success: false, error: "Invalid password" });
-    }
+    if (!isValid) refuse("The current password is wrong.");
 
     // Update password
     await updatePassword(userId, newPassword);
@@ -137,18 +132,14 @@ const lambder = lambderApp
     await sessionController.endSessionAll();
     const renewed = await sessionController.issueSession(userId, { userId, username, role });
 
-    return resolver.api({
-        success: true,
-        message: "Password changed successfully",
-        csrfToken: renewed.csrfToken, // Send new CSRF token
-    });
+    return { csrfToken: renewed.csrfToken }; // Send new CSRF token
 })
 // Example: Update session data
 .addSessionApi("user.updatePreferences", {
     input: z.object({ theme: z.string(), language: z.string() }),
     output: z.object({ success: z.boolean(), message: z.string() }),
     guards: "sessionOnly",
-}, async (ctx, resolver) => {
+}, async (ctx) => {
     const { theme, language } = ctx.apiPayload;
     const { sessionController } = ctx;
 
@@ -159,42 +150,42 @@ const lambder = lambderApp
         preferences: { theme, language },
     });
 
-    return resolver.api({
+    return {
         success: true,
         message: "Preferences updated",
-    });
+    };
 })
 // Example: Logout
 .addSessionApi("user.logout", {
     input: z.void(),
     output: z.object({ success: z.boolean(), message: z.string() }),
     guards: "sessionOnly",
-}, async (ctx, resolver) => {
+}, async (ctx) => {
     const { sessionController } = ctx;
 
     // End current session
     await sessionController.endSession();
 
-    return resolver.api({
+    return {
         success: true,
         message: "Logged out successfully",
-    });
+    };
 })
 // Example: Logout from all devices
 .addSessionApi("user.logoutAll", {
     input: z.void(),
     output: z.object({ success: z.boolean(), message: z.string() }),
     guards: "sessionOnly",
-}, async (ctx, resolver) => {
+}, async (ctx) => {
     const { sessionController } = ctx;
 
     // End all sessions for this user (same sessionKey)
     await sessionController.endSessionAll();
 
-    return resolver.api({
+    return {
         success: true,
         message: "Logged out from all devices",
-    });
+    };
 })
 // Example: Optional session (check if logged in)
 .addApi("user.checkAuth", {
@@ -205,22 +196,22 @@ const lambder = lambderApp
         username: z.string().optional(),
     }),
     guards: { open: "reports whether the caller's own cookie names a live session, and nothing else" },
-}, async (ctx, resolver) => {
+}, async (ctx) => {
     const { sessionController } = ctx;
 
     // Try to fetch session without throwing error
     const session = await sessionController.fetchSessionIfExists();
 
     if (session) {
-        return resolver.api({
+        return {
             authenticated: true,
             userId: session.data.userId,
             username: session.data.username,
-        });
+        };
     } else {
-        return resolver.api({
+        return {
             authenticated: false,
-        });
+        };
     }
 })
 // Example: Route with session, rendering a form that posts back

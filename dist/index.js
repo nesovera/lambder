@@ -99,5 +99,5 @@ export { createContext, isV2HttpEvent } from "./core/LambderContext.js";
 export { COMPRESSED_PAYLOAD_GZ_FIELD, COMPRESSED_PAYLOAD_BR_FIELD, COMPRESSED_PAYLOAD_BYTES_FIELD, DEFAULT_REQUEST_COMPRESSION_SETTINGS, DEFAULT_MAX_RESTORED_PAYLOAD_BYTES, 
 // The Brotli twin of the browser's compressPayloadGzip, and its defaults.
 DEFAULT_INVOKE_REQUEST_COMPRESSION_SETTINGS, compressPayloadBrotli, } from "./shared/wire/LambderRequestPayload.js";
-// Cookies (res.setCookie / res.clearCookie build on these; exported for code holding a LambderResponse)
+// Cookies (ctx.setCookie / ctx.clearCookie build on these; exported for code holding a LambderResponse)
 export { serializeCookie, serializeClearCookie, resolveCookieDomain } from "./shared/wire/LambderCookie.js";

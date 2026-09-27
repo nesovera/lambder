@@ -28,10 +28,9 @@ export type LambderApiRefusalOptions = {
 /**
  * A typed refusal: "this request is denied/invalid" as opposed to "the server
  * crashed". Throw it from anywhere in an API call's call stack (handlers,
- * hooks, or nested helpers with no access to the per-request resolver) and
- * the render pipeline maps it onto the structured API envelope
- * (`res.api(null, { errorMessage, notAuthorized, sessionExpired })`) instead
- * of routing it through setGlobalErrorHandler, so refusals never reach crash
+ * hooks, guards or nested helpers) and the render pipeline maps it onto the
+ * structured API envelope (its errorMessage, notAuthorized and
+ * sessionExpired) instead of routing it through setGlobalErrorHandler, so refusals never reach crash
  * logging and clients receive a parseable response.
  *
  * Thrown outside an API call (e.g. in a route handler) it behaves like any

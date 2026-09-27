@@ -42,19 +42,19 @@ describe('The rateLimit option is non-empty by construction, like the guards opt
     it('rejects the three empty forms at the type level', () => {
         const lambder = createApp();
         // @ts-expect-error an empty map declares no policy
-        expect(() => lambder.addApi('a', { ...testSchema, rateLimit: {} }, async (_ctx, res) => res.api(null))).toThrow();
+        expect(() => lambder.addApi('a', { ...testSchema, rateLimit: {} }, async (_ctx) => null)).toThrow();
         // @ts-expect-error an empty list declares no policy
-        expect(() => lambder.addApi('b', { ...testSchema, rateLimit: [] }, async (_ctx, res) => res.api(null))).toThrow();
+        expect(() => lambder.addApi('b', { ...testSchema, rateLimit: [] }, async (_ctx) => null)).toThrow();
         // @ts-expect-error a named policy with an undefined value declares nothing
-        expect(() => lambder.addApi('c', { ...testSchema, rateLimit: { perIp: undefined } }, async (_ctx, res) => res.api(null))).toThrow();
+        expect(() => lambder.addApi('c', { ...testSchema, rateLimit: { perIp: undefined } }, async (_ctx) => null)).toThrow();
     });
 
     it('still accepts every non-empty form', () => {
         expect(() => createApp()
-            .addApi('one', { ...testSchema, rateLimit: 'perIp' }, async (_ctx, res) => res.api({ result: 'ok' }))
-            .addApi('list', { ...testSchema, rateLimit: ['perIp'] }, async (_ctx, res) => res.api({ result: 'ok' }))
-            .addApi('map', { ...testSchema, rateLimit: { perIp: true } }, async (_ctx, res) => res.api({ result: 'ok' }))
-            .addApi('tuned', { ...testSchema, rateLimit: { perIp: { perMin: 1 } } }, async (_ctx, res) => res.api({ result: 'ok' })))
+            .addApi('one', { ...testSchema, rateLimit: 'perIp' }, async (_ctx) => ({ result: 'ok' }))
+            .addApi('list', { ...testSchema, rateLimit: ['perIp'] }, async (_ctx) => ({ result: 'ok' }))
+            .addApi('map', { ...testSchema, rateLimit: { perIp: true } }, async (_ctx) => ({ result: 'ok' }))
+            .addApi('tuned', { ...testSchema, rateLimit: { perIp: { perMin: 1 } } }, async (_ctx) => ({ result: 'ok' })))
             .not.toThrow();
     });
 });
@@ -81,20 +81,20 @@ describe('A payload slice is held to a union input whole, not member by member',
             output: z.object({}),
             // @ts-expect-error a `kind: "b"` payload carries no email for the guard's slice
             guards: 'emailOwner',
-        }, async (_ctx, res) => res.api({}));
+        }, async (_ctx) => ({}));
         app.addApi('limited', {
             input: eitherKind,
             output: z.object({}),
             // @ts-expect-error a `kind: "b"` payload carries no email for the key's slice
             rateLimit: 'perEmail',
-        }, async (_ctx, res) => res.api({}));
+        }, async (_ctx) => ({}));
     });
 
     it('accepts a slice every member carries, and a plain input that carries it', () => {
         const everyKind = z.discriminatedUnion('kind', [z.object({ kind: z.literal('a'), email: z.string() }), z.object({ kind: z.literal('b'), email: z.string() })]);
         expect(() => createSliceApp()
-            .addApi('union', { input: everyKind, output: z.object({}), guards: 'emailOwner', rateLimit: 'perEmail' }, async (_ctx, res) => res.api({}))
-            .addApi('plain', { input: z.object({ email: z.string(), name: z.string() }), output: z.object({}), guards: 'emailOwner', rateLimit: 'perEmail' }, async (_ctx, res) => res.api({})))
+            .addApi('union', { input: everyKind, output: z.object({}), guards: 'emailOwner', rateLimit: 'perEmail' }, async (_ctx) => ({}))
+            .addApi('plain', { input: z.object({ email: z.string(), name: z.string() }), output: z.object({}), guards: 'emailOwner', rateLimit: 'perEmail' }, async (_ctx) => ({})))
             .not.toThrow();
     });
 });

@@ -25,8 +25,8 @@ marks the two names it exports that the root entry does not.
 | --- | --- | --- |
 | `initLambder` | | Curried creator: fix the session data type, then `create(options)`, `guard(...)` and `rateLimitKey(...)` typed to it. The canonical entry. See [Configuration](./configuration.md) |
 | `Lambder` (default) | | The class itself. Use `initLambder` instead; a direct `new` widens the inferred policy types |
-| `LambderResolver` | | The `res` object handlers receive |
-| `LambderResponseBuilder` | | Builds resolvers; reachable via `lambder.getResponseBuilder(ctx?)` |
+| `LambderResolver` | | The `res` object routes, hooks and fallback handlers receive: the response builder plus `res.die.*`, which throws what it builds |
+| `LambderResponseBuilder` | | The response builder a resolver extends and a global error handler receives; reachable via `lambder.getResponseBuilder(ctx?)` |
 | `createContext` | | Build a render context from a raw Lambda event, given `{ apiPath?, trustedClientIpHeaders?, trustedHostHeaders? }` (`LambderContextOptions`, optional; `apiPath` defaults to `"/api"` as at `create()`) |
 | `isV2HttpEvent` | | Whether an event uses payload format v2 |
 
@@ -83,7 +83,7 @@ See [Responses](./responses.md).
 | `errorFromCrashDetail` | yes | Rebuild an Error (with its cause chain) from a crash detail |
 | `apiGuardParam` | yes | The parameter an API's guards option gives a guard, read off the generated `apiOptions` table with the literal the table pins: the value in the map form, `true` for a guard named without one, `undefined` when the API does not declare it |
 
-Types: `LambderApiContractShape`, `LambderApiEnvelopeBody`, `LambderApiResponseConfig`, `LambderApiNullAnswerConfig`,
+Types: `LambderApiContractShape`, `LambderApiEnvelopeBody`, `LambderApiResponseConfig`,
 `LambderApiRefusalOptions`, `LambderRefusalMessage` (generic over an app's own
 codes), `LambderAppRefusalMessage`, `LambderRefusalCode`,
 `LambderRefuseOptions`, `LambderCrashDetail`, `LambderCrashCause`; and the
@@ -335,13 +335,13 @@ See [Frontend client](./client.md) and [The API core](./api-core.md#transports).
 | `createApiCallContext` | | A fresh call context |
 | `API_ANSWER_CONTENT_TYPE` | | The content type every API answer carries (`application/json; charset=utf-8`) |
 | `LambderApiValidationRefusal`, `isLambderApiValidationRefusal` | | Input validation as a typed throw |
-| `LambderApiOutputValidationError` | | The crash a handler's answer causes when its API's output schema does not accept it (`apiName`; `zodError` when the schema rejected the payload, null when parsing threw; what was thrown as `cause`); an idempotency key records it as the key's answer |
+| `LambderApiOutputValidationError` | | The crash a handler's returned output causes when its API's output schema does not accept it (`apiName`; `zodError` when the schema rejected the output, null when parsing threw; what was thrown as `cause`); an idempotency key records it as the key's answer |
 | `answerFromResponse`, `responseFromAnswer` | | The server adapter's conversions between a `LambderResponse` and an answer |
 | `synthesizeLambdaHttpEvent`, `decodeLambdaHttpResult`, `localLambdaContext` | | The Lambda event conversions the invoke caller and the handler transport share. The event is payload format 2.0 unless `eventFormat: "v1"` asks for a REST API's |
 
 Types: `LambderApiRequest`, `LambderApiRequestInfo`, `LambderCompressedPayloadFields`,
-`LambderRestorePayloadResult`, `LambderApiAnswer`, `LambderResolverApiMethod`,
-`LambderApiCallContext`, `LambderApiCallTrace`,
+`LambderRestorePayloadResult`, `LambderApiAnswer`,
+`LambderApiCallContext`, `LambderApiCallTrace`, `LambderResponseTools`,
 `LambderApiDefinition`, `LambderApiSignatureMap` (client too),
 `LambderApiIdempotencyOption`, `LambderApiPipelineOptions`,
 `LambderApiSessionsConfig`, `LambderApiInputRefusal`, `LambderApiRunResult`,

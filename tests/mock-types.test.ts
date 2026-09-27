@@ -40,17 +40,17 @@ const _server = initLambder<SessionData>().create({
     rateLimits: { limiter: new LambderMemoryRateLimiter(), policies: { tight: { perMin: 5, per: 'ip' } } },
     idempotency: { store: { peek: async () => null, begin: async () => ({ state: 'new', ownerToken: 'x' }), complete: async () => 'stored', abandon: async () => {} } },
 })
-    .addApi('user.get', { input: z.object({ userId: z.string() }), output: z.object({ id: z.string(), name: z.string() }), guards: { open: 'public profile' } }, async (_ctx, res) => res.api({ id: '1', name: 'Ada' }))
-    .addApi('feedback.submit', { input: z.object({ text: z.string() }), output: z.object({ code: z.string() }), guards: 'captcha', idempotency: true }, async (_ctx, res) => res.api({ code: 'c' }))
-    .addSessionApi('users.remove', { input: z.object({ userId: z.string() }), output: z.object({ removed: z.boolean() }), guards: { orgPermission: 'USERS.MANAGE' } }, async (_ctx, res) => res.api({ removed: true }))
-    .addSessionApi('me', { input: z.object({}), output: z.object({ userId: z.string() }), guards: 'sessionOnly' }, async (ctx, res) => res.api({ userId: ctx.session.data.userId }))
-    .addApi('admin.exportOrders', { input: z.object({ sql: z.string() }), output: z.any(), guards: { open: 'signed' } }, async (_ctx, res) => res.api(null))
+    .addApi('user.get', { input: z.object({ userId: z.string() }), output: z.object({ id: z.string(), name: z.string() }), guards: { open: 'public profile' } }, async (_ctx) => ({ id: '1', name: 'Ada' }))
+    .addApi('feedback.submit', { input: z.object({ text: z.string() }), output: z.object({ code: z.string() }), guards: 'captcha', idempotency: true }, async (_ctx) => ({ code: 'c' }))
+    .addSessionApi('users.remove', { input: z.object({ userId: z.string() }), output: z.object({ removed: z.boolean() }), guards: { orgPermission: 'USERS.MANAGE' } }, async (_ctx) => ({ removed: true }))
+    .addSessionApi('me', { input: z.object({}), output: z.object({ userId: z.string() }), guards: 'sessionOnly' }, async (ctx) => ({ userId: ctx.session.data.userId }))
+    .addApi('admin.exportOrders', { input: z.object({ month: z.string() }), output: z.any(), guards: { open: 'signed' } }, async (_ctx) => null)
     // Declares no guards, which is the one shape the bare-handler form is for.
-    .addApi('health', { input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (_ctx, res) => res.api({ ok: true }))
+    .addApi('health', { input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (_ctx) => ({ ok: true }))
     // No guards, but a declaration each, which the bare-handler form cannot
     // restate.
-    .addApi('ticket.buy', { input: z.object({ seat: z.string() }), output: z.object({ ticketId: z.string() }), idempotency: true }, async (_ctx, res) => res.api({ ticketId: 't1' }))
-    .addApi('limited', { input: z.object({}), output: z.object({ n: z.number() }), rateLimit: 'tight' }, async (_ctx, res) => res.api({ n: 1 }));
+    .addApi('ticket.buy', { input: z.object({ seat: z.string() }), output: z.object({ ticketId: z.string() }), idempotency: true }, async (_ctx) => ({ ticketId: 't1' }))
+    .addApi('limited', { input: z.object({}), output: z.object({ n: z.number() }), rateLimit: 'tight' }, async (_ctx) => ({ n: 1 }));
 
 type Contract = typeof _server.ApiContract;
 
@@ -93,8 +93,8 @@ describe('Mock registry types - builders', () => {
 
     it('an endpoint whose output is void is mocked by a handler that answers nothing', () => {
         const _voidServer = initLambder().create({ apiPath: '/api' })
-            .addApi('ping', { input: z.object({}), output: z.void() }, async (_ctx, res) => res.api())
-            .addApi('maybe', { input: z.object({}), output: z.string().optional() }, async (_ctx, res) => res.api(undefined));
+            .addApi('ping', { input: z.object({}), output: z.void() }, async (_ctx) => {})
+            .addApi('maybe', { input: z.object({}), output: z.string().optional() }, async (_ctx) => undefined);
         type Output<K extends keyof typeof _voidServer.ApiContract> = (typeof _voidServer.ApiContract)[K]['output'];
         expectTypeOf<Output<'ping'>>().toEqualTypeOf<void>();
         expectTypeOf<Output<'maybe'>>().toEqualTypeOf<string | undefined>();
@@ -610,8 +610,8 @@ describe("A mock entry's input schema is pinned in both directions", () => {
 
     it('takes the server\'s own schema restated, a default included, and refuses a transform the handler is not typed for', () => {
         const _server = initLambder().create({ apiPath: '/api' })
-            .addApi('search', { input: z.object({ q: z.string(), page: z.number().default(1) }), output: z.object({ hits: z.number() }) }, async (_ctx, res) => res.api({ hits: 0 }))
-            .addApi('lookup', { input: z.object({ id: z.string().transform(Number) }), output: z.object({ hits: z.number() }) }, async (_ctx, res) => res.api({ hits: 0 }));
+            .addApi('search', { input: z.object({ q: z.string(), page: z.number().default(1) }), output: z.object({ hits: z.number() }) }, async (_ctx) => ({ hits: 0 }))
+            .addApi('lookup', { input: z.object({ id: z.string().transform(Number) }), output: z.object({ hits: z.number() }) }, async (_ctx) => ({ hits: 0 }));
         const app = initLambderMock<typeof _server.ApiContract>().create({});
         app.publicApi('search', { input: z.object({ q: z.string(), page: z.number().default(1) }), handler: async () => ({ hits: 1 }) });
         app.publicApi('lookup', {

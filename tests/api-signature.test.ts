@@ -172,9 +172,9 @@ const createServer = (apiSignatures?: LambderApiSignatureMap) => {
         guards,
     });
     return app
-        .addApi('user.get', { input: userInput, output: userOutput }, async (ctx, res) => res.api({ id: ctx.apiPayload.id, name: 'Ada' }))
-        .addApi('org.get', { input: z.object({}), output: z.object({ ok: z.boolean() }), guards: 'org' }, async (_ctx, res) => res.api({ ok: true }))
-        .addSessionApi('me', { input: z.void(), output: z.object({ userId: z.string() }) }, async (ctx, res) => res.api({ userId: ctx.session.data.userId }));
+        .addApi('user.get', { input: userInput, output: userOutput }, async (ctx) => ({ id: ctx.apiPayload.id, name: 'Ada' }))
+        .addApi('org.get', { input: z.object({}), output: z.object({ ok: z.boolean() }), guards: 'org' }, async (_ctx) => ({ ok: true }))
+        .addSessionApi('me', { input: z.void(), output: z.object({ userId: z.string() }) }, async (ctx) => ({ userId: ctx.session.data.userId }));
 };
 
 describe('The server and its map', () => {

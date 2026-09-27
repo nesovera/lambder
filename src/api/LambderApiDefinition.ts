@@ -13,8 +13,8 @@ import type {
  * because the mock has none; when input is present, validation runs and the
  * handler sees the parsed payload. Output is part of the endpoint's
  * signature (apiSignatureOf), which is what a client's build is checked
- * against; the server's resolver also parses every payload a handler
- * answers through it before it is sent.
+ * against; the server also parses every output a handler returns through it
+ * before it is sent.
  */
 export type LambderApiDefinition = {
     name: string;

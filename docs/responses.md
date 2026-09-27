@@ -1,9 +1,12 @@
 # Responses
 
-Every handler receives the request context (`ctx`) and a resolver (`res`), and
-returns a response built by the resolver. Responses are finalized once at the
-end of the request: compression, ETag and the size guard are applied there, not
-per call site.
+A route, a hook or a fallback handler receives the request context (`ctx`)
+and a resolver (`res`), and returns a response built by the resolver. An API
+handler receives the context alone and returns its output, which the framework
+wraps in the API envelope (see [APIs](./apis.md#defining-apis)). Either way,
+headers, cookies and debugging entries are written through the context.
+Responses are finalized once at the end of the request: compression, ETag and
+the size guard are applied there, not per call site.
 
 ## Render context (ctx)
 
@@ -30,14 +33,19 @@ per call site.
 | `session` | The session record, or `null` where none was read or created. Non-null on `addSessionApi` and `addSessionRoute` | |
 | `api` | The parsed API request on an API call, `null` on a route | |
 | `eventFormat` | Which payload format the event arrived in | `"v1"`, `"v2"` |
-| `responseHeaders` | Headers written during the call (`res.setHeader`, `res.addHeader`, session cookies), applied onto the response at the end | |
-| `logList` | Entries for the envelope's `logList` channel (`res.logToApiResponse`) | |
+| `responseHeaders` | Headers written during the call (the response tools below, session cookies), applied onto the response at the end | |
+| `logList` | Entries for the envelope's `logList` channel, for debugging: push what the caller's log should show | `ctx.logList.push({ step: "priced", total })` |
+| `setResponseHeader`, `addResponseHeader`, `setCookie`, `clearCookie` | The response tools: write a header or a cookie onto whatever answer the request ends with (see [Headers and cookies](#headers-and-cookies)) | `ctx.setCookie("theme", "dark")` |
 | `sessionController` | The request's session controller: create, rotate, refresh and end sessions (see [Sessions](./sessions.md)) | `ctx.sessionController.createSession(userId, data)` |
 | `rateLimit(policy, key?)`, `isRateLimited(policy, key?)` | Charge a named rate-limit policy from code: refuse with a 429 when it is over, or answer the verdict (see [API policies](./api-policies.md#charging-a-policy-from-code)) | `await ctx.rateLimit("invitesPerRecipient", email)` |
 
 ## Response methods
 
-All accept an options object: `{ statusCode?, headers?, cacheControl?, compress?, etag? }`.
+The resolver (`res`) builds responses and writes nothing onto the call. Routes,
+hooks, fallback handlers, the input validation handler and actions receive
+one; the global error handler receives its base, a `LambderResponseBuilder`,
+with the same build methods. All accept an options object:
+`{ statusCode?, headers?, cacheControl?, compress?, etag? }`.
 
 | Method | Description |
 | --- | --- |
@@ -53,18 +61,27 @@ All accept an options object: `{ statusCode?, headers?, cacheControl?, compress?
 | `res.fileBase64(base64, mimeType, options?)` | File from base64 content |
 | `await res.file(path, options?)` | Serve a file from the `files` source (404 when missing) |
 | `await res.templateFile(path, data?, options?)` | Render an HTML file via `LambderTemplatingEngine` (cached; throws when missing) |
-| `res.api(payload, config?, options?)` | Standardized API response |
-| `res.apiBinary(payload, config?, options?)` | API response with forced compression |
+| `res.api(payload, config?, options?)` | An API envelope written by hand, for code that answers an API call outside its handler; the payload is sent as given |
 
-`res.api` is overloaded on its payload: the output the API declared, or
-`null` beside a config that says why (a refusal flag, an `errorMessage`, a
-`message`). A bare `res.api(null)` compiles only when the output schema
-itself allows null, so a success payload is always the declared output,
-which is what lets a typed caller promise it. Untyped resolvers (routes,
-hooks, `getResponseBuilder`) accept anything.
+`res.api` writes the answers an API handler does not give: what a hook, the
+API fallback, the input validation handler or the global error handler
+answers an API call with, usually `null` beside a refusal flag, an
+`errorMessage` or a crash. Nothing parses its payload through an output
+schema, so what it is handed is what goes out. An API handler never holds a
+resolver: it returns its output, parsed through its schema by the framework,
+or throws `refuse()`.
+
+```typescript
+lambder.setGlobalErrorHandler((err, ctx, res) => {
+    // An API call is answered in its envelope, which a caller reads as a failure of the server.
+    if (ctx?.api) return res.api(null, { errorMessage: "Something went wrong. Please try again." }, { statusCode: 500 });
+    return res.status(500, "Internal Server Error");
+});
+```
 
 **API config options** (the second argument of `res.api`):
-`{ notAuthorized, message, errorMessage, versionExpired, sessionExpired, logList, crash }`.
+`{ notAuthorized, errorMessage, versionExpired, sessionExpired, logList, crash }`.
+`logList` defaults to what the request accumulated on `ctx.logList`.
 
 `crash` carries a failure described in full (name, message, stack, cause chain,
 and the request id it happened under), built with `describeCrash(err, ctx)`.
@@ -91,15 +108,34 @@ signature, an IAM-only path), not by a header. See
 
 ## Headers and cookies
 
-Call these before returning the response:
+Headers and cookies are written through the context, on every context a
+handler receives: an API handler's, a route's, a hook's, a guard's, and a mock
+handler's alike, so a server handler and its mock twin read the same. What
+they write is collected on `ctx.responseHeaders` and applied to whatever
+answer the request ends with, a refusal and a crash answer included:
 
 | Method | Description |
 | --- | --- |
-| `res.addHeader(key, value)` | Add a header value (repeatable for the same key) |
-| `res.setHeader(key, value)` | Set a header, replacing existing values |
-| `res.setCookie(name, value, options?)` | Add a Set-Cookie header |
-| `res.clearCookie(name, options?)` | Add a Set-Cookie header that deletes the cookie |
-| `res.logToApiResponse(data)` | Add data to `logList` in API responses (debugging) |
+| `ctx.addResponseHeader(key, value)` | Add a header value (repeatable for the same key) |
+| `ctx.setResponseHeader(key, value)` | Set a header, replacing existing values |
+| `ctx.setCookie(name, value, options?)` | Add a Set-Cookie header |
+| `ctx.clearCookie(name, options?)` | Add a Set-Cookie header that deletes the cookie |
+| `ctx.logList.push(entry)` | Add an entry to the envelope's `logList` (debugging) |
+
+The writers are named for the response because `ctx.header(name)` reads a
+request header. A header set this way replaces one the response itself
+carries (a `Content-Type`, say), and an added one is appended to it, exactly
+as if written on the response directly.
+
+```typescript
+lambder.addSessionApi("orders.export", { input, output, guards }, async (ctx) => {
+    const orders = await listOrders(ctx.session.data.storeId);
+    ctx.setResponseHeader("Cache-Control", "private, max-age=60");
+    ctx.setCookie("lastExport", new Date().toISOString(), { maxAge: 30 * 24 * 3600 });
+    ctx.logList.push({ exported: orders.length });
+    return { orders };
+});
+```
 
 `setCookie` options: `domain` (a string, or a `(hostname) => string | undefined`
 function resolved against the request host), `path` (default `/`), `sameSite`
@@ -118,10 +154,10 @@ exported for code holding a `LambderResponse` directly.
 ## Die methods
 
 `res.die.*` builds the response and throws it, immediately halting the request
-at any call depth (handlers, hooks, nested helper functions). Plain
-`throw res.html(...)` works the same way. For refusals raised from shared
-helpers that do not hold a resolver, use
-[`refuse()`](./apis.md#refusals) instead.
+at any call depth of a route or a hook (the handler, a nested helper function
+it calls). Plain `throw res.html(...)` works the same way. An API call says no
+with [`refuse()`](./apis.md#refusals) instead, which needs no resolver and
+works from any depth of the call.
 
 ## The response pipeline
 
@@ -147,7 +183,8 @@ Responses are finalized once at the end of the request:
 - **A clear error** when the body would exceed Lambda's ~6MB cap
   (`maxResponseBytes`, default 5,500,000).
 
-Override per response with `compress: true | false` and `etag: false`.
+Override per response with `compress: true | false` and `etag: false`. An
+API's answers follow the API's declared `compress` option instead (below).
 
 ### Compression
 
@@ -178,6 +215,33 @@ for the API's `binaryMediaTypes`, so turn it on together with
 `minimumCompressionSize`. HTTP APIs and Function URLs pass base64 through
 and compress by default.
 
+An API's answers compress by these rules on their own, and an API that needs
+otherwise says so where it is declared, with `compress` beside its schemas:
+
+```typescript
+lambder.addApi("invoices.download", {
+    input: z.object({ invoiceId: z.uuid() }),
+    output: z.object({ fileName: z.string(), pdfBase64: z.string() }),
+    // A base64 body gains little from compression: see below.
+    compress: false,
+}, async ({ apiPayload }) => await loadInvoicePdf(apiPayload.invoiceId));
+```
+
+`"auto"`, the default, is the behavior above. `false` never compresses the
+API's answers, and `true` compresses them for every caller that accepts an
+encoding, below `minBytes` too and on an instance whose `compression` is off.
+
+A body of base64 bytes (a PDF, an image) is what `false` is for. Compression
+takes back the quarter that base64 added, but a compressed body leaves the
+function base64-encoded, so the answer is no smaller under the ~6MB cap or to
+a caller invoking the function directly (see
+[Calling another lambda](./invoke.md#compression)). Only a browser, behind a
+gateway that decodes the body, receives it about a quarter smaller, and pays
+for that with compression time on the server and decompression on its side.
+The option covers whatever the call is answered with short of a crash, a
+refusal and a replayed answer included, and is not part of the API's
+contract or its signature.
+
 `compression` is the same option vocabulary the DynamoDB stores, sessions and
 the request-payload path use: `true` for that site's defaults, `false` for off,
 an object to override, `minBytes` as the threshold, `quality` as the Brotli
@@ -204,6 +268,6 @@ to what the gateway hands the function and what the function returns.
 that needs to build a response without being a handler (a hook helper, a
 shared error mapper). It has every build method a resolver has and no
 `res.die.*`: throwing a response short-circuits the request, and the code
-calling this is not inside one. Pass `ctx` for the methods that read or write
-the call (`setHeader`, `setCookie`, `logToApiResponse`); without it they
-throw.
+calling this is not inside one. Pass `ctx` so that `res.api()` carries the
+`logList` the request accumulated; headers and cookies go through the context
+itself.

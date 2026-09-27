@@ -72,27 +72,27 @@ const createApp = () => {
         },
     })
         .addApi('echo', { input: z.object({ text: z.string() }), output: z.object({ text: z.string(), ip: z.string(), host: z.string(), country: z.string().nullable() }) },
-            async (ctx, res) => res.api({ text: ctx.apiPayload.text, ip: ctx.ip, host: ctx.host, country: ctx.headers['x-country'] ?? null }))
+            async (ctx) => ({ text: ctx.apiPayload.text, ip: ctx.ip, host: ctx.host, country: ctx.headers['x-country'] ?? null }))
         // The handler closes over the instance, as an app's login does.
         .addApi('login', { input: z.object({ user: z.string() }), output: z.object({ ok: z.boolean() }) },
-            async (ctx, res) => { await app.getSessionController(ctx).createSession(ctx.apiPayload.user, { userId: ctx.apiPayload.user, role: 'member' }); return res.api({ ok: true }); })
+            async (ctx) => { await app.getSessionController(ctx).createSession(ctx.apiPayload.user, { userId: ctx.apiPayload.user, role: 'member' }); return { ok: true }; })
         .addSessionApi('me', { input: z.object({}), output: z.object({ userId: z.string(), refreshed: z.boolean() }) },
-            async (ctx, res) => res.api({ userId: ctx.session.data.userId, refreshed: ctx.session.data.refreshed === true }))
+            async (ctx) => ({ userId: ctx.session.data.userId, refreshed: ctx.session.data.refreshed === true }))
         .addSessionApi('admin.only', { input: z.object({}), output: z.object({ ok: z.boolean() }), guards: { role: 'admin' } },
-            async (_ctx, res) => res.api({ ok: true }))
+            async (_ctx) => ({ ok: true }))
         .addApi('tenant.name', { input: z.object({}), output: z.object({ tenantId: z.string() }), guards: { tenant: true } },
-            async (ctx, res) => res.api({ tenantId: ctx.guardData.tenant.tenantId }))
+            async (ctx) => ({ tenantId: ctx.guardData.tenant.tenantId }))
         .addApi('limited', { input: z.object({}), output: z.object({ ok: z.boolean() }), rateLimit: 'oncePerMinute' },
-            async (_ctx, res) => res.api({ ok: true }))
+            async (_ctx) => ({ ok: true }))
         .addApi('order.create', { input: z.object({ sku: z.string() }), output: z.object({ orderNumber: z.number() }), idempotency: true },
-            async (_ctx, res) => { ordersCreated += 1; return res.api({ orderNumber: ordersCreated }); })
+            async (_ctx) => { ordersCreated += 1; return { orderNumber: ordersCreated }; })
         .addApi('crash', { input: z.object({}), output: z.any() }, async () => { throw new Error('boom'); })
         .addApi('slow.ok', { input: z.object({}), output: z.object({ ok: z.boolean() }) },
-            async (_ctx, res) => { await new Promise((resolve) => setTimeout(resolve, 20)); return res.api({ ok: true }); })
+            async (_ctx) => { await new Promise((resolve) => setTimeout(resolve, 20)); return { ok: true }; })
         .addRoute('/broken', () => { throw new Error('the page broke'); })
         .addRoute('/hello/:name', (ctx, res) => res.html(`<p>Hello ${ctx.pathParams.name}, q=${ctx.get.q ?? ''}, country=${ctx.headers['x-country'] ?? ''}</p>`))
         .addRoute('/old', (_ctx, res) => res.redirect('/hello/moved'))
-        .addRoute('/remember', (_ctx, res) => { res.setCookie('theme', 'dark'); return res.html('ok'); })
+        .addRoute('/remember', (_ctx, res) => { _ctx.setCookie('theme', 'dark'); return res.html('ok'); })
         .addRoute('/theme', (ctx, res) => res.json({ theme: ctx.cookie.theme ?? null }))
         .addRoute({ method: 'POST', path: '/form' }, (ctx, res) => res.json({ got: ctx.post }))
         .addSessionRoute('/account', (ctx, res) => res.html(`account of ${ctx.session.data.userId}`))
@@ -137,7 +137,7 @@ describe('lambderTestApp: the stores under the instance', () => {
     });
 
     it('reports null for a subsystem the app never configured, and refuses signIn without sessions', async () => {
-        const bare = lambderTestApp(initLambder().create({}).addApi('ping', { input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (_ctx, res) => res.api({ ok: true })));
+        const bare = lambderTestApp(initLambder().create({}).addApi('ping', { input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (_ctx) => ({ ok: true })));
         expect(bare.sessionStore).toBeNull();
         expect(bare.rateLimiter).toBeNull();
         expect(bare.idempotencyStore).toBeNull();
@@ -494,7 +494,7 @@ describe('lambderTestApp: hosts, cookie domains and cookie names', () => {
                 csrfCookieKey: 'APPCSRF',
             },
         }).addSessionApi('me', { input: z.object({}), output: z.object({ userId: z.string() }) },
-            async (ctx, res) => res.api({ userId: ctx.session.data.userId }));
+            async (ctx) => ({ userId: ctx.session.data.userId }));
         return scoped;
     };
 

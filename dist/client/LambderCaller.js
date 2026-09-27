@@ -33,7 +33,6 @@ export default class LambderCaller {
     get isLoading() { return this.fetchTrackerList.length > 0; }
     versionExpiredHandler;
     sessionExpiredHandler;
-    messageHandler;
     errorMessageHandler;
     notAuthorizedHandler;
     errorHandler;
@@ -50,7 +49,7 @@ export default class LambderCaller {
     constructor(options) {
         // The conditional provider option is resolved per instantiation;
         // inside the class it is read through the plain shape.
-        const { apiPath, apiVersion, apiSignatures, isCorsEnabled, timeoutMs, versionExpiredHandler, sessionExpiredHandler, messageHandler, errorMessageHandler, notAuthorizedHandler, errorHandler, logListHandler, fetchStartedHandler, fetchEndedHandler, apiInputValidationErrorHandler, sessionCookieDomain, requestCompression, guardInputsProvider, transport, } = options;
+        const { apiPath, apiVersion, apiSignatures, isCorsEnabled, timeoutMs, versionExpiredHandler, sessionExpiredHandler, errorMessageHandler, notAuthorizedHandler, errorHandler, logListHandler, fetchStartedHandler, fetchEndedHandler, apiInputValidationErrorHandler, sessionCookieDomain, requestCompression, guardInputsProvider, transport, } = options;
         this.apiPath = apiPath;
         this.apiVersion = apiVersion;
         this.apiSignatures = apiSignatures;
@@ -61,7 +60,6 @@ export default class LambderCaller {
         this.transport = transport ?? lambderFetchTransport({ cors: isCorsEnabled });
         this.versionExpiredHandler = versionExpiredHandler;
         this.sessionExpiredHandler = sessionExpiredHandler;
-        this.messageHandler = messageHandler;
         this.errorMessageHandler = errorMessageHandler;
         this.notAuthorizedHandler = notAuthorizedHandler;
         this.errorHandler = errorHandler;
@@ -100,7 +98,6 @@ export default class LambderCaller {
         // Per-call overrides win over the constructor handlers.
         const versionExpiredHandler = options?.versionExpiredHandler ?? this.versionExpiredHandler;
         const sessionExpiredHandler = options?.sessionExpiredHandler ?? this.sessionExpiredHandler;
-        const messageHandler = options?.messageHandler ?? this.messageHandler;
         const errorMessageHandler = options?.errorMessageHandler ?? this.errorMessageHandler;
         const notAuthorizedHandler = options?.notAuthorizedHandler ?? this.notAuthorizedHandler;
         const errorHandler = options?.errorHandler ?? this.errorHandler;
@@ -327,11 +324,6 @@ export default class LambderCaller {
                     await reportError(new Error("Not Authorized;"));
                 }
                 return outcome;
-            }
-            // Presence, not truthiness: the envelope keeps a message an app
-            // spelled out as the empty string, so the handler runs for it.
-            if (data.message !== undefined && messageHandler) {
-                await messageHandler(data.message);
             }
             if (!outcome.ok && outcome.reason === 'errorMessage') {
                 if (errorMessageHandler && outcome.errorMessage !== undefined) {

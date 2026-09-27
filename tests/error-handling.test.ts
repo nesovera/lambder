@@ -47,8 +47,8 @@ describe('Error Handling - Global Error Handler', () => {
         })
             .setGlobalErrorHandler((err, ctx, res) => res.raw({ statusCode: 500, body: `Error: ${err.message}` }))
             .addRoute('/boom', (ctx, res) => {
-                res.setHeader('X-Written-During-Call', 'yes');
-                res.addHeader('Set-Cookie', 'session=abc; Path=/');
+                ctx.setResponseHeader('X-Written-During-Call', 'yes');
+                ctx.addResponseHeader('Set-Cookie', 'session=abc; Path=/');
                 throw new Error('after the header');
             });
 
@@ -78,7 +78,7 @@ describe('Error Handling - Global Error Handler', () => {
             .addApi('errorApi', {
                 input: z.object({ value: z.string() }),
                 output: z.object({ result: z.string() })
-            }, async (ctx, res) => {
+            }, async (ctx) => {
                 throw new Error('API handler error');
             });
 
@@ -179,7 +179,7 @@ describe('Error Handling - Custom Error Responses', () => {
             .addApi('testApi', {
                 input: z.void(),
                 output: z.object({ success: z.boolean(), error: z.string().optional() })
-            }, async (ctx, res) => {
+            }, async (ctx) => {
                 throw new Error('Custom error message');
             });
 
@@ -421,8 +421,8 @@ describe('Error Handling - Input Validation Errors', () => {
                     age: z.number().positive()
                 }),
                 output: z.object({ success: z.boolean() })
-            }, async (ctx, res) => {
-                return res.api({ success: true });
+            }, async (ctx) => {
+                return { success: true };
             });
 
         const handler = lambder.getHandler();
@@ -447,8 +447,8 @@ describe('Error Handling - Input Validation Errors', () => {
             .addApi('testApi', {
                 input: z.object({ value: z.string().min(5) }),
                 output: z.object({ result: z.string() })
-            }, async (ctx, res) => {
-                return res.api({ result: 'success' });
+            }, async (ctx) => {
+                return { result: 'success' };
             });
 
         const handler = lambder.getHandler();
@@ -559,7 +559,7 @@ describe('Error Handling - Complex Error Scenarios', () => {
             .addApi('errorApi', {
                 input: z.void(),
                 output: z.object({ error: z.string() })
-            }, async (ctx, res) => {
+            }, async (ctx) => {
                 throw new Error('API error');
             });
 
@@ -622,7 +622,7 @@ describe('Error Handling - A session that ended while the request held it', () =
             })
             .addRoute('/members/area', (ctx, res) => res.text('members'))
             .addRoute('/refreshed', (ctx, res) => res.text('refreshed'))
-            .addApi('membersOnly', { input: z.object({}), output: z.object({}) }, async (ctx, res) => res.api({}));
+            .addApi('membersOnly', { input: z.object({}), output: z.object({}) }, async (ctx) => ({}));
         if(sessionExpiredRouteHandler) lambder.setSessionExpiredRouteHandler(sessionExpiredRouteHandler);
         return { app: lambderTestApp(lambder), reported };
     };
@@ -691,8 +691,8 @@ describe('Error Handling - Session cookies that name more than one live session'
             .addRoute('/me', async (ctx, res) => res.text(`hi ${(await ctx.sessionController.fetchSession()).sessionKey}`))
             .addRoute('/members/area', (ctx, res) => res.text('members'))
             .addApi('whoAmI', { input: z.object({}), output: z.object({ sessionKey: z.string() }) },
-                async (ctx, res) => res.api({ sessionKey: (await ctx.sessionController.fetchSession()).sessionKey }))
-            .addApi('membersOnly', { input: z.object({}), output: z.object({}) }, async (ctx, res) => res.api({}));
+                async (ctx) => ({ sessionKey: (await ctx.sessionController.fetchSession()).sessionKey }))
+            .addApi('membersOnly', { input: z.object({}), output: z.object({}) }, async (ctx) => ({}));
         return { lambder, reported };
     };
 

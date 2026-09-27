@@ -117,7 +117,7 @@ describe('A response object kept between requests', () => {
         let kept: LambderResponse | null = null;
         const lambder = new Lambder({ files: testPublicFiles(), compression: true })
             .addRoute('/kept', (ctx, res) => {
-                res.setCookie('visitor', ctx.get.name ?? '');
+                ctx.setCookie('visitor', ctx.get.name ?? '');
                 kept ??= res.html(bigHtml);
                 return kept;
             });

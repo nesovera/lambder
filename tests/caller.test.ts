@@ -98,16 +98,6 @@ describe('LambderCaller - outcomes', () => {
         expect(errorMessageHandler).toHaveBeenCalledWith({ type: 'error', content: '' });
     });
 
-    it('a message an app spelled out as the empty string still reaches messageHandler', async () => {
-        stubFetch(async () => mockResponse({ apiVersion: '1', payload: 'ok', message: '' }));
-        const messageHandler = vi.fn();
-        const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, messageHandler });
-
-        const outcome = await caller.apiOutcome('doThing', {});
-
-        expect(outcome.ok).toBe(true);
-        expect(messageHandler).toHaveBeenCalledWith('');
-    });
 
     it('sessionExpired envelope: reason sessionExpired, handler called, api() null', async () => {
         stubFetch(async () => mockResponse({ apiVersion: '1', sessionExpired: true }));
@@ -684,8 +674,7 @@ describe('LambderCaller - answers that are not Lambder\'s', () => {
         // would look saved and errorHandler would never run.
         stubFetch(async () => mockResponse({ message: 'Request Too Long' }, { status: 413, statusText: 'Payload Too Large' }));
         const errorHandler = vi.fn();
-        const messageHandler = vi.fn();
-        const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, errorHandler, messageHandler });
+        const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, errorHandler });
 
         const outcome = await caller.apiOutcome('doc.save', {});
 
@@ -693,7 +682,6 @@ describe('LambderCaller - answers that are not Lambder\'s', () => {
         if(outcome.ok || outcome.reason !== 'server') throw new Error('unreachable');
         expect(outcome.error.message).toContain('Request Too Long');
         expect(errorHandler).toHaveBeenCalledOnce();
-        expect(messageHandler).not.toHaveBeenCalled();
     });
 
     it('never reads a non-2xx answer as a success, even when it is an envelope that names no reason', async () => {
@@ -883,8 +871,8 @@ describe('LambderCaller - a stale bundle that the reload brings back', () => {
     it('stops after the second load for a version below the server\'s floor, where no signature is sent', async () => {
         stubTabStorage();
         const server = initLambder().create({ apiPath: '/api', apiVersion: '2.0.0', minApiVersion: '2.0.0' })
-            .addApi('me', { input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (_ctx, res) => res.api({ ok: true }))
-            .addApi('config', { input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (_ctx, res) => res.api({ ok: true }));
+            .addApi('me', { input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (_ctx) => ({ ok: true }))
+            .addApi('config', { input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (_ctx) => ({ ok: true }));
         const versionExpiredHandler = vi.fn();
         const errors: Error[] = [];
         const loadPage = async () => {

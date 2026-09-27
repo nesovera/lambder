@@ -1,4 +1,5 @@
 import { LambderAnswerHeaders } from "../shared/wire/LambderAnswerHeaders.js";
+import { serializeCookie, serializeClearCookie } from "../shared/wire/LambderCookie.js";
 /** A fresh call context: no session, no guard data, nothing pending. */
 export const createApiCallContext = () => ({
     session: null,
@@ -9,6 +10,13 @@ export const createApiCallContext = () => ({
     guardData: Object.create(null),
     responseHeaders: new LambderAnswerHeaders(),
     logList: [],
+});
+/** The response tools of one context, writing into its own responseHeaders; `host` resolves a function-form cookie domain. */
+export const responseToolsOf = (ctx, host) => ({
+    setResponseHeader: (key, value) => { ctx.responseHeaders.set(key, value); },
+    addResponseHeader: (key, value) => { ctx.responseHeaders.add(key, value); },
+    setCookie: (name, value, options) => { ctx.responseHeaders.add("Set-Cookie", serializeCookie(name, value, options, host)); },
+    clearCookie: (name, options) => { ctx.responseHeaders.add("Set-Cookie", serializeClearCookie(name, options, host)); },
 });
 /**
  * Binds an adapter's tools onto one call context: `getters` run when read

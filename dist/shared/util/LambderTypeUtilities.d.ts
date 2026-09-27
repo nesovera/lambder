@@ -13,6 +13,24 @@
  */
 export type MaybePromise<T> = T | Promise<T>;
 /**
+ * T with every object and array readonly, all the way down: what an API
+ * handler's returned answer is checked against.
+ *
+ * An answer is a return value, and TypeScript widens the literals of a
+ * return value whose expected type is still generic (`{ kind: "a" }` reads
+ * as `{ kind: string }`), where a call argument keeps them. The handler's
+ * return is therefore its own `const` type parameter, which keeps literals;
+ * `const` also makes array literals readonly, which a schema's mutable arrays
+ * would refuse, so the bound is this readonly view of the output. Nothing
+ * writes to an answer (it is parsed and sent), so readonly costs nothing.
+ * Functions and Dates pass through whole. Eight levels deep and no further,
+ * because an output may be recursive (`z.json()`), and past that depth the
+ * type is left as it is.
+ */
+export type LambderReadonlyDeep<T, TDepth extends unknown[] = []> = TDepth["length"] extends 8 ? T : T extends (...args: never[]) => unknown ? T : T extends Date ? T : T extends object ? {
+    readonly [K in keyof T]: LambderReadonlyDeep<T[K], [...TDepth, unknown]>;
+} : T;
+/**
  * A declaration map with AT LEAST ONE entry: the union, over every declarable
  * name, of "this one required and the rest optional".
  *

@@ -50,9 +50,9 @@ const testSchema = { input: z.object({ value: z.string() }), output: z.object({ 
 describe('ApiContract - the guards option on the contract', () => {
     it('carries the declared guards option verbatim, in each of its three forms', () => {
         const app = createApp()
-            .addApi('single', { ...testSchema, guards: 'notBanned' }, async (_ctx, res) => res.api({ result: 'ok' }))
-            .addApi('list', { ...testSchema, guards: ['notBanned', 'captcha'] }, async (_ctx, res) => res.api({ result: 'ok' }))
-            .addApi('map', { ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } }, async (_ctx, res) => res.api({ result: 'ok' }));
+            .addApi('single', { ...testSchema, guards: 'notBanned' }, async (_ctx) => ({ result: 'ok' }))
+            .addApi('list', { ...testSchema, guards: ['notBanned', 'captcha'] }, async (_ctx) => ({ result: 'ok' }))
+            .addApi('map', { ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } }, async (_ctx) => ({ result: 'ok' }));
 
         type Contract = typeof app.ApiContract;
 
@@ -71,10 +71,10 @@ describe('ApiContract - the guards option on the contract', () => {
 
     it('lists the endpoints that declare one guard, in any of the three forms, beside other guards or alone', () => {
         const _app = createApp()
-            .addApi('single', { ...testSchema, guards: 'notBanned' }, async (_ctx, res) => res.api({ result: 'ok' }))
-            .addApi('list', { ...testSchema, guards: ['notBanned', 'captcha'] }, async (_ctx, res) => res.api({ result: 'ok' }))
-            .addApi('map', { ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } }, async (_ctx, res) => res.api({ result: 'ok' }))
-            .addApi('open', testSchema, async (_ctx, res) => res.api({ result: 'ok' }));
+            .addApi('single', { ...testSchema, guards: 'notBanned' }, async (_ctx) => ({ result: 'ok' }))
+            .addApi('list', { ...testSchema, guards: ['notBanned', 'captcha'] }, async (_ctx) => ({ result: 'ok' }))
+            .addApi('map', { ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } }, async (_ctx) => ({ result: 'ok' }))
+            .addApi('open', testSchema, async (_ctx) => ({ result: 'ok' }));
 
         type Contract = typeof _app.ApiContract;
 
@@ -95,17 +95,17 @@ describe('ApiContract - the guards option on the contract', () => {
             .addApi('typed', {
                 input: z.object({ page: z.number().default(1), id: z.string().transform(Number) }),
                 output: z.object({ at: z.date(), total: z.number(), tags: z.array(z.string()), note: z.string().optional() }),
-            }, async (ctx, res) => {
+            }, async (ctx) => {
                 // The handler's side: parsed input, and the output as authored.
                 expectTypeOf(ctx.apiPayload).toEqualTypeOf<{ page: number; id: number }>();
-                return res.api({ at: new Date(), total: ctx.apiPayload.id, tags: [] });
+                return { at: new Date(), total: ctx.apiPayload.id, tags: [] };
             })
             .addApi('scoped', {
                 // Parsed, `org` is a number; posted, it is the string the guard reads.
                 input: z.object({ org: z.string().transform((value) => value.length), body: z.string() }),
                 output: z.object({}),
                 guards: 'lowercaseOrg',
-            }, async (_ctx, res) => res.api({}));
+            }, async (_ctx) => ({}));
 
         type Contract = typeof _app.ApiContract;
 
@@ -123,8 +123,8 @@ describe('ApiContract - the guards option on the contract', () => {
             .addApi('loose', {
                 input: z.object({}),
                 output: z.object({ data: z.unknown(), meta: z.record(z.string(), z.unknown()), doc: z.json(), cells: z.array(z.string().optional()) }),
-            }, async (_ctx, res) => res.api({ data: 1, meta: {}, doc: null, cells: [] }))
-            .addApi('anything', { input: z.object({}), output: z.unknown() }, async (_ctx, res) => res.api(1));
+            }, async (_ctx) => ({ data: 1, meta: {}, doc: null, cells: [] }))
+            .addApi('anything', { input: z.object({}), output: z.unknown() }, async (_ctx) => 1);
 
         type Contract = typeof _app.ApiContract;
         type Loose = Contract['loose']['output'];
@@ -150,7 +150,7 @@ describe('ApiContract - the guards option on the contract', () => {
                     visits: z.map(z.string(), z.number()),
                     tags: z.set(z.string()),
                 }),
-            }, async (_ctx, res) => res.api({ name: 'Ada', nickname: null, visits: new Map([['home', 2]]), tags: new Set(['a']) }));
+            }, async (_ctx) => ({ name: 'Ada', nickname: null, visits: new Map([['home', 2]]), tags: new Set(['a']) }));
 
         type Contract = typeof app.ApiContract;
         expectTypeOf<Contract['profile']['output']>().toEqualTypeOf<{ name: string; bio?: string; nickname?: string; visits: {}; tags: {} }>();
@@ -180,7 +180,7 @@ describe('ApiContract - the guards option on the contract', () => {
 
     it('an API that declares no guards has no guards entry at all', () => {
         const _app = createApp()
-            .addApi('open', testSchema, async (_ctx, res) => res.api({ result: 'ok' }));
+            .addApi('open', testSchema, async (_ctx) => ({ result: 'ok' }));
 
         type Contract = typeof _app.ApiContract;
 
@@ -193,7 +193,7 @@ describe('ApiContract - the guards option on the contract', () => {
     it('a guardInput-mode guard lands on both guardInputs and guards', () => {
         const _app = createApp()
             .addApi('contact', { ...testSchema, guards: { captcha: true, orgPermission: 'BILLING.MANAGE' } },
-                async (_ctx, res) => res.api({ result: 'ok' }));
+                async (_ctx) => ({ result: 'ok' }));
 
         type Entry = (typeof _app.ApiContract)['contact'];
 
@@ -211,8 +211,8 @@ describe('ApiContract - the guards option on the contract', () => {
             guards,
             requireSessionApiGuards: true,
         })
-            .addSessionApi('me', { ...testSchema, guards: 'sessionOnly' }, async (_ctx, res) => res.api({ result: 'ok' }))
-            .addSessionApi('users.list', { ...testSchema, guards: { orgPermission: 'USERS.VIEW' } }, async (_ctx, res) => res.api({ result: 'ok' }));
+            .addSessionApi('me', { ...testSchema, guards: 'sessionOnly' }, async (_ctx) => ({ result: 'ok' }))
+            .addSessionApi('users.list', { ...testSchema, guards: { orgPermission: 'USERS.VIEW' } }, async (_ctx) => ({ result: 'ok' }));
 
         type Contract = typeof _app.ApiContract;
 
@@ -226,15 +226,15 @@ describe('ApiContract - the guards option on the contract', () => {
         // (every declarable name) rather than the literal. If it ever were,
         // ctx.guardData would claim guards that never ran and the contract
         // would demand guardInputs the call does not need, both silently.
-        createApp().addApi('narrow', { ...testSchema, guards: { orgPermission: 'USERS.VIEW' } }, async (ctx, res) => {
+        createApp().addApi('narrow', { ...testSchema, guards: { orgPermission: 'USERS.VIEW' } }, async (ctx) => {
             expectTypeOf<typeof ctx.guardData>().toEqualTypeOf<{ orgPermission: { permission: Permission } }>();
             // captcha is declarable here and was not declared: it must not appear.
             expectTypeOf<typeof ctx.guardData>().not.toHaveProperty('captcha');
-            return res.api({ result: ctx.guardData.orgPermission.permission });
+            return { result: ctx.guardData.orgPermission.permission };
         });
 
         const _app = createApp()
-            .addApi('narrowContract', { ...testSchema, guards: { orgPermission: 'USERS.VIEW' } }, async (_ctx, res) => res.api({ result: 'ok' }));
+            .addApi('narrowContract', { ...testSchema, guards: { orgPermission: 'USERS.VIEW' } }, async (_ctx) => ({ result: 'ok' }));
         // No declared guardInput guard, so the contract asks the client for nothing.
         expectTypeOf<(typeof _app.ApiContract)['narrowContract']>().not.toHaveProperty('guardInputs');
     });
@@ -242,7 +242,7 @@ describe('ApiContract - the guards option on the contract', () => {
     it('guards survive plugin composition through .use()', () => {
         const usersPlugin = <T>(lambder: Lambder<T, {}, any, LambderGuardMetaMap<typeof guards>, any, any>) =>
             lambder.addApi('users.remove', { ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } },
-                async (_ctx, res) => res.api({ result: 'ok' }));
+                async (_ctx) => ({ result: 'ok' }));
 
         const _app = createApp().use(usersPlugin);
         type Contract = typeof _app.ApiContract;
@@ -253,10 +253,10 @@ describe('ApiContract - the guards option on the contract', () => {
 
 describe('ApiContract - pinning a client-side needs map to the declarations', () => {
     const _app = createApp()
-        .addApi('users.list', { ...testSchema, guards: { orgPermission: 'USERS.VIEW' } }, async (_ctx, res) => res.api({ result: 'ok' }))
-        .addApi('users.remove', { ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } }, async (_ctx, res) => res.api({ result: 'ok' }))
-        .addApi('billing.pay', { ...testSchema, guards: { orgPermission: 'BILLING.MANAGE', captcha: true } }, async (_ctx, res) => res.api({ result: 'ok' }))
-        .addApi('ping', testSchema, async (_ctx, res) => res.api({ result: 'ok' }));
+        .addApi('users.list', { ...testSchema, guards: { orgPermission: 'USERS.VIEW' } }, async (_ctx) => ({ result: 'ok' }))
+        .addApi('users.remove', { ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } }, async (_ctx) => ({ result: 'ok' }))
+        .addApi('billing.pay', { ...testSchema, guards: { orgPermission: 'BILLING.MANAGE', captcha: true } }, async (_ctx) => ({ result: 'ok' }))
+        .addApi('ping', testSchema, async (_ctx) => ({ result: 'ok' }));
 
     type Contract = typeof _app.ApiContract;
     /** What the server itself says the API needs; never for an API that declares no such guard. */
@@ -331,9 +331,9 @@ describe('ApiContract - pinning a client-side needs map to the declarations', ()
 
 describe('ApiContract - a guards entry changes nothing for consumers', () => {
     const _app = createApp()
-        .addApi('open', testSchema, async (_ctx, res) => res.api({ result: 'ok' }))
-        .addApi('guarded', { ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } }, async (_ctx, res) => res.api({ result: 'ok' }))
-        .addApi('captchaed', { ...testSchema, guards: 'captcha' }, async (_ctx, res) => res.api({ result: 'ok' }));
+        .addApi('open', testSchema, async (_ctx) => ({ result: 'ok' }))
+        .addApi('guarded', { ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } }, async (_ctx) => ({ result: 'ok' }))
+        .addApi('captchaed', { ...testSchema, guards: 'captcha' }, async (_ctx) => ({ result: 'ok' }));
 
     type Contract = typeof _app.ApiContract;
 
@@ -409,7 +409,7 @@ describe('ApiContract - the declaration is what runs', () => {
             },
         })
             .addApi('users.remove', { ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } },
-                async (_ctx, res) => res.api({ result: 'removed' }));
+                async (_ctx) => ({ result: 'removed' }));
 
         type Declared = (typeof app.ApiContract)['users.remove']['guards']['orgPermission'];
         expectTypeOf<Declared>().toEqualTypeOf<'USERS.MANAGE'>();
@@ -428,9 +428,9 @@ describe('ApiContract - the declaration is what runs', () => {
 
 describe('ApiContract - the shape every consumer is checked against', () => {
     const _app = createApp()
-        .addApi('open', testSchema, async (_ctx, res) => res.api({ result: 'ok' }))
-        .addApi('guarded', { ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } }, async (_ctx, res) => res.api({ result: 'ok' }))
-        .addSessionApi('member', { ...testSchema, guards: 'sessionOnly' }, async (_ctx, res) => res.api({ result: 'ok' }));
+        .addApi('open', testSchema, async (_ctx) => ({ result: 'ok' }))
+        .addApi('guarded', { ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } }, async (_ctx) => ({ result: 'ok' }))
+        .addSessionApi('member', { ...testSchema, guards: 'sessionOnly' }, async (_ctx) => ({ result: 'ok' }));
 
     type Contract = typeof _app.ApiContract;
 

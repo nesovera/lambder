@@ -21,7 +21,7 @@ import type { LambderApiRateLimitPolicyConfig, LambderRateLimitOption } from "..
 import type { LambderApiIdempotencyConfig } from "../api/LambderApiIdempotency.js";
 import type { LambderContractEntry, LambderJsonOutputOf, LambderMergeContract } from "../shared/wire/LambderApiContract.js";
 import { type LambderHttpEvent, type LambderRenderContext, type LambderSessionRenderContext } from "./LambderContext.js";
-import type { MaybePromise } from "../shared/util/LambderTypeUtilities.js";
+import type { LambderReadonlyDeep, MaybePromise } from "../shared/util/LambderTypeUtilities.js";
 import { type LambderRouteHandler, type LambderInputValidationHandler, type LambderFallbackHandler, type LambderGlobalErrorHandler, type LambderAfterRenderHook, type LambderBeforeRenderHook, type LambderFallbackHook, type LambderActionTools, type LambderCreateOptions, type LambderGivenOption, type LambderHandler, type LambderNestedOptionChecks, type LambderNoExtraKeys, type LambderRequirableGuardsField, type LambderSessionEnabledInstance, type LambderSessionRouteHandler } from "./LambderCreateOptions.js";
 /** Everything `lambder/testing` may put under a built instance: the pipeline's stores, and the source its files are read from. */
 export type LambderInstanceBackends = LambderPipelineBackends & {
@@ -155,7 +155,7 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
     addRoute(condition: RegExp | LambderRouteConditionFn | LambderRouteMatcher, actionFn: LambderRouteHandler): this;
     addSessionRoute<TPath extends LambderRoutePath>(condition: TPath, actionFn: ((ctx: LambderSessionRenderContext<any, TSessionData, LambderPathParamsOf<TPath>, {}, _TRateLimitPolicies>, resolver: LambderResolver) => MaybePromise<LambderResponse>) & LambderSessionEnabledInstance<_TSessionsEnabled>): this;
     addSessionRoute(condition: RegExp | LambderRouteConditionFn | LambderRouteMatcher, actionFn: LambderSessionRouteHandler<TSessionData> & LambderSessionEnabledInstance<_TSessionsEnabled>): this;
-    addApi<TName extends string, TInput extends z.ZodType, TOutput extends z.ZodType, const TRateOpt extends LambderRateLimitOption<_TRateLimitPolicies, z.input<TInput>, false> = never, const TGuardsOpt extends LambderGuardsOption<_TGuards, z.input<TInput>, false> = never, const TIdempotencyOpt extends LambderApiIdempotencyOption = never>(name: TName, schema: {
+    addApi<TName extends string, TInput extends z.ZodType, TOutput extends z.ZodType, const TAnswer extends LambderReadonlyDeep<z.input<TOutput>>, const TRateOpt extends LambderRateLimitOption<_TRateLimitPolicies, z.input<TInput>, false> = never, const TGuardsOpt extends LambderGuardsOption<_TGuards, z.input<TInput>, false> = never, const TIdempotencyOpt extends LambderApiIdempotencyOption = never>(name: TName, schema: {
         input: TInput;
         output: TOutput;
     } & {
@@ -163,8 +163,18 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
         rateLimit?: TRateOpt;
         /** Replay-protect this API per client idempotencyKey. Requires the idempotency option at creation. */
         idempotency?: _TIdempotencyEnabled extends true ? TIdempotencyOpt : never;
-    } & LambderRequirableGuardsField<_TPublicGuardsRequired, TGuardsOpt>, handler: (ctx: LambderRenderContext<z.infer<TInput>, Record<string, string>, LambderGuardDataOf<_TGuards, TGuardsOpt>, TSessionData, _TRateLimitPolicies>, resolver: LambderResolver<z.input<TOutput>>) => MaybePromise<LambderResponse>): Lambder<TSessionData, LambderMergeContract<_TContract, TName, LambderContractEntry<z.input<TInput>, LambderJsonOutputOf<z.output<TOutput>>, "public", LambderGuardInputsOf<_TGuards, TGuardsOpt>, TGuardsOpt, TRateOpt, TIdempotencyOpt>>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired, _TPublicGuardsRequired, _TSessionsEnabled>;
-    addSessionApi<TName extends string, TInput extends z.ZodType, TOutput extends z.ZodType, const TRateOpt extends LambderRateLimitOption<_TRateLimitPolicies, z.input<TInput>, true> = never, const TGuardsOpt extends LambderGuardsOption<_TGuards, z.input<TInput>, true> = never, const TIdempotencyOpt extends LambderApiIdempotencyOption = never>(name: TName, schema: {
+        /**
+         * Whether this API's answers are compressed for a caller that accepts it: "auto" (the default) when the
+         * body is large enough to gain, false never, true always. false suits an answer of base64 bytes: once
+         * compressed it leaves the function base64-encoded again, so it is no smaller under Lambda's response
+         * cap or to a lambda caller, and a browser gets it only about a quarter smaller for the time spent at
+         * both ends. A transport setting of this server's, not part of the API's contract.
+         */
+        compress?: boolean | "auto";
+    } & LambderRequirableGuardsField<_TPublicGuardsRequired, TGuardsOpt>, 
+    /** Answers the call by returning its output (parsed through `output` before it is sent), or refuses it with refuse(). */
+    handler: (ctx: LambderRenderContext<z.infer<TInput>, Record<string, string>, LambderGuardDataOf<_TGuards, TGuardsOpt>, TSessionData, _TRateLimitPolicies>) => MaybePromise<TAnswer>): Lambder<TSessionData, LambderMergeContract<_TContract, TName, LambderContractEntry<z.input<TInput>, LambderJsonOutputOf<z.output<TOutput>>, "public", LambderGuardInputsOf<_TGuards, TGuardsOpt>, TGuardsOpt, TRateOpt, TIdempotencyOpt>>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired, _TPublicGuardsRequired, _TSessionsEnabled>;
+    addSessionApi<TName extends string, TInput extends z.ZodType, TOutput extends z.ZodType, const TAnswer extends LambderReadonlyDeep<z.input<TOutput>>, const TRateOpt extends LambderRateLimitOption<_TRateLimitPolicies, z.input<TInput>, true> = never, const TGuardsOpt extends LambderGuardsOption<_TGuards, z.input<TInput>, true> = never, const TIdempotencyOpt extends LambderApiIdempotencyOption = never>(name: TName, schema: {
         input: TInput;
         output: TOutput;
     } & {
@@ -172,7 +182,17 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
         rateLimit?: TRateOpt;
         /** Replay-protect this API per client idempotencyKey. Requires the idempotency option at creation. */
         idempotency?: _TIdempotencyEnabled extends true ? TIdempotencyOpt : never;
-    } & LambderRequirableGuardsField<_TSessionGuardsRequired, TGuardsOpt> & LambderSessionEnabledInstance<_TSessionsEnabled>, handler: (ctx: LambderSessionRenderContext<z.infer<TInput>, TSessionData, Record<string, string>, LambderGuardDataOf<_TGuards, TGuardsOpt>, _TRateLimitPolicies>, resolver: LambderResolver<z.input<TOutput>>) => MaybePromise<LambderResponse>): Lambder<TSessionData, LambderMergeContract<_TContract, TName, LambderContractEntry<z.input<TInput>, LambderJsonOutputOf<z.output<TOutput>>, "session", LambderGuardInputsOf<_TGuards, TGuardsOpt>, TGuardsOpt, TRateOpt, TIdempotencyOpt>>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired, _TPublicGuardsRequired, _TSessionsEnabled>;
+        /**
+         * Whether this API's answers are compressed for a caller that accepts it: "auto" (the default) when the
+         * body is large enough to gain, false never, true always. false suits an answer of base64 bytes: once
+         * compressed it leaves the function base64-encoded again, so it is no smaller under Lambda's response
+         * cap or to a lambda caller, and a browser gets it only about a quarter smaller for the time spent at
+         * both ends. A transport setting of this server's, not part of the API's contract.
+         */
+        compress?: boolean | "auto";
+    } & LambderRequirableGuardsField<_TSessionGuardsRequired, TGuardsOpt> & LambderSessionEnabledInstance<_TSessionsEnabled>, 
+    /** Answers the call by returning its output (parsed through `output` before it is sent), or refuses it with refuse(). */
+    handler: (ctx: LambderSessionRenderContext<z.infer<TInput>, TSessionData, Record<string, string>, LambderGuardDataOf<_TGuards, TGuardsOpt>, _TRateLimitPolicies>) => MaybePromise<TAnswer>): Lambder<TSessionData, LambderMergeContract<_TContract, TName, LambderContractEntry<z.input<TInput>, LambderJsonOutputOf<z.output<TOutput>>, "session", LambderGuardInputsOf<_TGuards, TGuardsOpt>, TGuardsOpt, TRateOpt, TIdempotencyOpt>>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired, _TPublicGuardsRequired, _TSessionsEnabled>;
     /**
      * What registering an API is, for addApi and addSessionApi alike: the
      * checks that can refuse it, then its definition recorded (what
@@ -267,7 +287,7 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
      * and never moves when registrations are reordered.
      */
     apiOptionEntries(): LambderApiOptionEntries;
-    getResponseBuilder(ctx?: LambderRenderContext): LambderResponseBuilder<any>;
+    getResponseBuilder(ctx?: LambderRenderContext): LambderResponseBuilder;
     private getResolver;
     getHandler(): LambderHandler;
     /** True when the Lambda event is an API Gateway HTTP event (REST API v1 or HTTP API / Function URL v2). */
@@ -365,12 +385,30 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
     private inputValidationRefusal;
     /**
      * One API call through the core: the pipeline runs the protocol steps and
-     * calls back for the handler, whose LambderResponse (returned, or thrown
-     * via res.die.*) becomes the answer the pipeline stores and hands back.
-     * The context is the pipeline's context, so a session it fetched is on
-     * ctx.session and the validated payload is on ctx.apiPayload when the
-     * handler runs. The handler's resolver knows the API's output schema, so
-     * every success payload is parsed through it before it is sent.
+     * calls back for the handler, whose returned output becomes the answer
+     * the pipeline stores and hands back. The context is the pipeline's
+     * context, so a session it fetched is on ctx.session and the validated
+     * payload is on ctx.apiPayload when the handler runs.
+     *
+     * The output goes out as the API's schema declares it. The type system
+     * accepts a value that carries more than the schema (a row read straight
+     * from a table is assignable to a narrower object type), and without the
+     * parse the extra fields, a password hash included, would reach the
+     * client. zod strips what the schema does not declare, fills its defaults
+     * and applies its transforms, so the wire and the idempotency store only
+     * see the declared shape. The handler returns the schema's input form, so
+     * a transform runs exactly once.
+     *
+     * An output the schema rejects is the handler breaking its contract,
+     * answered as a crash rather than sent (LambderApiOutputValidationError,
+     * which an idempotency key records as its answer, since the handler has
+     * already run). The parse is synchronous, so an output schema cannot be
+     * async: zod throws from a synchronous parse that meets an async
+     * refinement or transform, and a transform may throw of its own accord.
+     * Either throw becomes the same error, carrying what was thrown as its
+     * cause. Left to escape as it is, it would read as the handler crashing
+     * before its answer: the idempotency engine would release the key's claim
+     * and every retry would run the operation again.
      */
     private runApi;
     /** A thrown LambderApiRefusal (from a hook, say) as the structured API envelope: the core's one mapping. */

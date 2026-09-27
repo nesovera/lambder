@@ -1,6 +1,6 @@
 import { LambderApiPipeline } from "../api/LambderApiPipeline.js";
 import { readApiEnvelope, cookieValuesByName, lowercaseHeaderNames } from "../api/LambderApiRequest.js";
-import { bindCallTools, createApiCallContext } from "../api/LambderApiCallContext.js";
+import { bindCallTools, createApiCallContext, responseToolsOf } from "../api/LambderApiCallContext.js";
 import { toHttpAnswer } from "../api/LambderApiAnswer.js";
 import { getAnswerHeader } from "../shared/wire/LambderAnswerHeaders.js";
 import { buildApiEnvelope, envelopeAnswer, crashAnswer, } from "../api/LambderApiEnvelope.js";
@@ -562,7 +562,6 @@ export class LambderMockApp {
             apiName: request.apiName,
             request,
             signal: request.signal ?? new AbortController().signal,
-            envelope: {},
             payload: request.payload,
             guardInputs: request.guardInputs,
             // The key as a handler can use it. A non-string is not a key: the
@@ -591,6 +590,7 @@ export class LambderMockApp {
             methods: {
                 rateLimit: async (policy, key) => { await chargeRateLimit(policy, key, true); },
                 isRateLimited: (policy, key) => chargeRateLimit(policy, key, false),
+                ...responseToolsOf(ctx, request.host),
             },
         });
         return ctx;
@@ -683,7 +683,6 @@ export class LambderMockApp {
                         callCtx.payload = request.payload;
                         const payload = await handler(callCtx);
                         return envelopeAnswer(buildApiEnvelope(this.apiVersion, payload === undefined ? null : payload, {
-                            message: callCtx.envelope.message,
                             logList: callCtx.logList,
                         }));
                     }

@@ -36,7 +36,7 @@ type ApiContractType = {
         guardInputs: { orgPermission: { organizationId: string } };
         idempotency: true;
     };
-    "admin.exportOrders": { input: { sql: string }; output: unknown; mode: "public" };
+    "admin.exportOrders": { input: { month: string }; output: unknown; mode: "public" };
 };
 
 // ---------------------------------------------------------------------------

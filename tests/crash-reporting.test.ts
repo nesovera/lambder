@@ -24,12 +24,12 @@ afterEach(() => { vi.restoreAllMocks(); });
 type Report = { message: string; site: LambderCrashSite };
 
 const createApp = (crashes: LambderCrashOptions = {}) => initLambder().create({ apiPath: '/api', crashes })
-    .addApi('crash', { input: z.object({}), output: z.object({}) }, async (ctx, res) => {
-        res.logToApiResponse({ before: 'the throw' });
+    .addApi('crash', { input: z.object({}), output: z.object({}) }, async (ctx) => {
+        ctx.logList.push({ before: 'the throw' });
         throw new Error('boom');
     })
     .addApi('refused', { input: z.object({}), output: z.object({}) }, async () => refuse('No.'))
-    .addApi('fine', { input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (_ctx, res) => res.api({ ok: true }))
+    .addApi('fine', { input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (_ctx) => ({ ok: true }))
     .addRoute('/broken', async () => { throw new Error('the page broke'); })
     .addAction((event): event is { source: 'nightly' } => (event as { source?: string })?.source === 'nightly', async () => {
         throw new Error('the job broke');

@@ -2,8 +2,9 @@
  * LambderApiRefusal: typed refusals mapped onto the API envelope.
  *
  * - Thrown anywhere in an API call's stack (handler, hooks, nested helpers
- *   with no resolver access), it becomes res.api(null, { errorMessage,
- *   notAuthorized, sessionExpired }) and never reaches the global error handler.
+ *   that hold nothing of the request), it becomes the refusal envelope
+ *   ({ errorMessage, notAuthorized, sessionExpired }) and never reaches the
+ *   global error handler.
  * - Thrown outside an API call it stays a normal error.
  * - Detection is brand-based (isLambderApiRefusal) so refusals survive duplicate
  *   lambder installs.
@@ -54,14 +55,14 @@ describe('LambderApiRefusal - envelope mapping on API calls', () => {
         expect(body.errorMessage).toEqual({ type: 'error', content: 'You are not a member of an organization.' });
     });
 
-    it('works from nested helpers that have no resolver access', async () => {
+    it('works from nested helpers that hold nothing of the request', async () => {
         const requireAdmin = (role: string) => {
             if(role !== 'admin') throw new LambderApiRefusal('Permission denied.', { notAuthorized: true });
         };
         const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
-            .addApi('guarded', testSchema, async (ctx, res) => {
+            .addApi('guarded', testSchema, async (ctx) => {
                 requireAdmin('member');
-                return res.api({ result: 'never' });
+                return { result: 'never' };
             });
 
         const result = await lambder.render(createApiEvent('guarded', { value: 'x' }), createMockContext());
@@ -115,9 +116,9 @@ describe('LambderApiRefusal - envelope mapping on API calls', () => {
             if(ctx.apiName === 'guarded') throw new LambderApiRefusal('Blocked by hook');
             return ctx;
         });
-        lambder.addApi('guarded', testSchema, async (ctx, res) => {
+        lambder.addApi('guarded', testSchema, async (ctx) => {
             handlerRan = true;
-            return res.api({ result: 'never' });
+            return { result: 'never' };
         });
 
         const result = await lambder.render(createApiEvent('guarded', { value: 'x' }), createMockContext());
@@ -129,7 +130,7 @@ describe('LambderApiRefusal - envelope mapping on API calls', () => {
 
     it('maps refusals thrown from afterRender hooks on API calls', async () => {
         const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
-            .addApi('ok', testSchema, async (ctx, res) => res.api({ result: 'fine' }));
+            .addApi('ok', testSchema, async (ctx) => ({ result: 'fine' }));
         lambder.addHook('afterRender', () => {
             throw new LambderApiRefusal('Rejected after render');
         });
@@ -226,9 +227,9 @@ describe('refuse() - the standard refusal shape', () => {
                 globalHandlerCalled = true;
                 return res.raw({ statusCode: 500, body: 'crash' });
             })
-            .addApi('guarded', testSchema, async (ctx, res) => {
+            .addApi('guarded', testSchema, async (ctx) => {
                 assertPositive(-1);
-                return res.api({ result: 'never' });
+                return { result: 'never' };
             });
 
         const result = await lambder.render(createApiEvent('guarded', { value: 'x' }), createMockContext());

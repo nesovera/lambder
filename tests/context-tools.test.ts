@@ -65,50 +65,50 @@ const createApp = () => {
         },
     })
         .addHook('beforeRender', async (ctx) => (ctx.path === '/spread' ? { ...ctx, pathParams: { spread: 'yes' } } : ctx))
-        .addApi('login', { input: z.object({ user: z.string() }), output: z.object({ ok: z.boolean() }) }, async (ctx, res) => {
+        .addApi('login', { input: z.object({ user: z.string() }), output: z.object({ ok: z.boolean() }) }, async (ctx) => {
             await ctx.sessionController.createSession(ctx.apiPayload.user, { userId: ctx.apiPayload.user, role: 'member' });
-            return res.api({ ok: ctx.session?.data.userId === ctx.apiPayload.user });
+            return { ok: ctx.session?.data.userId === ctx.apiPayload.user };
         })
-        .addApi('whoAmI', { input: z.object({}), output: z.object({ userId: z.string().nullable() }) }, async (ctx, res) => {
+        .addApi('whoAmI', { input: z.object({}), output: z.object({ userId: z.string().nullable() }) }, async (ctx) => {
             const session = await ctx.sessionController.fetchSessionIfExists();
-            return res.api({ userId: session?.data.userId ?? null });
+            return { userId: session?.data.userId ?? null };
         })
         .addSessionApi('guarded', { input: z.object({}), output: z.object({ userId: z.string() }), guards: 'signedInAs' },
-            async (ctx, res) => res.api({ userId: ctx.guardData.signedInAs.userId }))
-        .addApi('invite', { input: z.object({ email: z.string() }), output: z.object({ sent: z.boolean() }) }, async (ctx, res) => {
+            async (ctx) => ({ userId: ctx.guardData.signedInAs.userId }))
+        .addApi('invite', { input: z.object({ email: z.string() }), output: z.object({ sent: z.boolean() }) }, async (ctx) => {
             await ctx.rateLimit('invitesPerRecipient', ctx.apiPayload.email);
-            return res.api({ sent: true });
+            return { sent: true };
         })
-        .addApi('inviteAgain', { input: z.object({ email: z.string() }), output: z.object({ sent: z.boolean() }) }, async (ctx, res) => {
+        .addApi('inviteAgain', { input: z.object({ email: z.string() }), output: z.object({ sent: z.boolean() }) }, async (ctx) => {
             await ctx.rateLimit('invitesPerRecipient', ctx.apiPayload.email);
-            return res.api({ sent: true });
+            return { sent: true };
         })
-        .addApi('inviteShared', { input: z.object({ email: z.string() }), output: z.object({ sent: z.boolean() }) }, async (ctx, res) => {
+        .addApi('inviteShared', { input: z.object({ email: z.string() }), output: z.object({ sent: z.boolean() }) }, async (ctx) => {
             await ctx.rateLimit('invitesShared', ctx.apiPayload.email);
-            return res.api({ sent: true });
+            return { sent: true };
         })
-        .addApi('inviteSharedAgain', { input: z.object({ email: z.string() }), output: z.object({ sent: z.boolean() }) }, async (ctx, res) => {
+        .addApi('inviteSharedAgain', { input: z.object({ email: z.string() }), output: z.object({ sent: z.boolean() }) }, async (ctx) => {
             await ctx.rateLimit('invitesShared', ctx.apiPayload.email);
-            return res.api({ sent: true });
+            return { sent: true };
         })
         // A handler that says "too many" in its own output shape.
-        .addApi('pair', { input: z.object({}), output: z.object({ error: z.string().nullable(), retryAfterSeconds: z.number().nullable() }) }, async (ctx, res) => {
+        .addApi('pair', { input: z.object({}), output: z.object({ error: z.string().nullable(), retryAfterSeconds: z.number().nullable() }) }, async (ctx) => {
             const verdict = await ctx.isRateLimited('pairPerIp');
-            return res.api(verdict ? { error: 'too-many-attempts', retryAfterSeconds: verdict.retryAfterSeconds } : { error: null, retryAfterSeconds: null });
+            return verdict ? { error: 'too-many-attempts', retryAfterSeconds: verdict.retryAfterSeconds } : { error: null, retryAfterSeconds: null };
         })
         // The same policy, declared: the charge from code lands on the same counter.
-        .addApi('pairDeclared', { input: z.object({}), output: z.object({ ok: z.boolean() }), rateLimit: 'pairPerIp' }, async (_ctx, res) => res.api({ ok: true }))
-        .addSessionApi('remind', { input: z.object({}), output: z.object({ ok: z.boolean() }), guards: 'signedInAs' }, async (ctx, res) => {
+        .addApi('pairDeclared', { input: z.object({}), output: z.object({ ok: z.boolean() }), rateLimit: 'pairPerIp' }, async (_ctx) => ({ ok: true }))
+        .addSessionApi('remind', { input: z.object({}), output: z.object({ ok: z.boolean() }), guards: 'signedInAs' }, async (ctx) => {
             await ctx.rateLimit('remindPerSession');
-            return res.api({ ok: true });
+            return { ok: true };
         })
-        .addApi('misuse', { input: z.object({ how: z.string() }), output: z.object({ ok: z.boolean() }) }, async (ctx, res) => {
+        .addApi('misuse', { input: z.object({ how: z.string() }), output: z.object({ ok: z.boolean() }) }, async (ctx) => {
             const loose = ctx.rateLimit as (policy: string, key?: string) => Promise<void>;
             if(ctx.apiPayload.how === 'keyForIp') await loose('pairPerIp', 'someone');
             if(ctx.apiPayload.how === 'noKey') await loose('invitesPerRecipient');
             if(ctx.apiPayload.how === 'unknown') await loose('nope', 'x');
             if(ctx.apiPayload.how === 'payloadKeyed') await loose('loginPerEmail');
-            return res.api({ ok: true });
+            return { ok: true };
         })
         .addRoute('/unsubscribe/:email', async (ctx, res) => {
             await ctx.rateLimit('invitesPerRecipient', ctx.pathParams.email);
@@ -122,7 +122,7 @@ const createApp = () => {
 
     // Compile-time: the policy names are the app's, the key is required where
     // the policy has no per and refused where the request supplies it.
-    app.addApi('types', { input: z.object({}), output: z.object({}) }, async (ctx, res) => {
+    app.addApi('types', { input: z.object({}), output: z.object({}) }, async (ctx) => {
         if(Math.random() > 2){
             // @ts-expect-error an unknown policy
             await ctx.rateLimit('nope', 'x');
@@ -134,7 +134,7 @@ const createApp = () => {
             await ctx.rateLimit('loginPerEmail');
             expectTypeOf(await ctx.isRateLimited('pairPerIp')).toEqualTypeOf<LambderRateLimitCheckResult>();
         }
-        return res.api({});
+        return {};
     });
     return app;
 };
@@ -169,7 +169,7 @@ describe('ctx.sessionController', () => {
 
     it('says the session option is missing when the instance has none', async () => {
         const app = lambderTestApp(initLambder().create({ apiPath: '/api' })
-            .addApi('touch', { input: z.object({}), output: z.object({}) }, async (ctx, res) => { await ctx.sessionController.fetchSessionIfExists(); return res.api({}); }));
+            .addApi('touch', { input: z.object({}), output: z.object({}) }, async (ctx) => { await ctx.sessionController.fetchSessionIfExists(); return {}; }));
 
         const outcome = await app.visitor().apiOutcome('touch', {});
         assertApiFailure(outcome, 'server');
@@ -280,9 +280,9 @@ describe('ctx.rateLimit and ctx.isRateLimited', () => {
     it('fails open the way a declared limit does, and refuses to when failOpen is off', async () => {
         const failing: LambderRateLimiter = { isRateLimited: async () => { throw new Error('limiter down'); } };
         const build = (failOpen: boolean) => lambderInit.create({ apiPath: '/api', rateLimits: { limiter: failing, failOpen, policies } })
-            .addApi('invite', { input: z.object({ email: z.string() }), output: z.object({ sent: z.boolean() }) }, async (ctx, res) => {
+            .addApi('invite', { input: z.object({ email: z.string() }), output: z.object({ sent: z.boolean() }) }, async (ctx) => {
                 await ctx.rateLimit('invitesPerRecipient', ctx.apiPayload.email);
-                return res.api({ sent: true });
+                return { sent: true };
             });
         const error = vi.spyOn(console, 'error').mockImplementation(() => {});
 
@@ -315,13 +315,13 @@ describe('ctx.rateLimit and ctx.isRateLimited', () => {
     it('takes a policy typed as the general config wherever its per may fit', () => {
         const general: { perIp: LambderApiRateLimitPolicyConfig } = { perIp: { perMin: 1, per: 'ip' } };
         initLambder().create({ apiPath: '/api', rateLimits: { limiter: productionRateLimiter, policies: general } })
-            .addApi('limited', { input: z.object({}), output: z.object({}), rateLimit: 'perIp' }, async (ctx, res) => {
+            .addApi('limited', { input: z.object({}), output: z.object({}), rateLimit: 'perIp' }, async (ctx) => {
                 if(Math.random() > 2){
                     // The type cannot say whether the policy takes a key.
                     await ctx.rateLimit('perIp');
                     await ctx.rateLimit('perIp', 'key');
                 }
-                return res.api({});
+                return {};
             });
     });
 

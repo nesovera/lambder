@@ -10,14 +10,14 @@ export const lambder = storeApp()
         input: z.object({ orderId: z.string(), expand: z.boolean().default(false) }),
         output: z.object({ orderId: z.string(), placedAt: z.date(), total: z.number(), status: z.enum(["open", "paid"]), note: z.string().optional() }),
         guards: { storePermission: "orders.read" },
-    }, async (_ctx, res) => res.api(null as never))
+    }, async (_ctx) => null as never)
     .addSessionApi("orders.refund", {
         input: z.object({ orderId: z.string(), amount: z.number() }),
         output: z.object({ refunded: z.boolean() }),
         guards: { storePermission: "orders.manage" },
-    }, async (_ctx, res) => res.api({ refunded: true }))
+    }, async (_ctx) => ({ refunded: true }))
     .addApi("store.hours", {
         input: z.void(),
         output: z.array(z.object({ day: z.string(), opens: z.string().nullable() })),
         guards: ["captcha"],
-    }, async (_ctx, res) => res.api([]));
+    }, async (_ctx) => []);

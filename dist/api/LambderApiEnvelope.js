@@ -4,8 +4,8 @@ import { setAnswerHeader } from "../shared/wire/LambderAnswerHeaders.js";
  * The one place the API envelope is written, and the one mapping from each
  * kind of protocol outcome onto an answer: a success, a thrown refusal, a
  * rejected input, an unknown name, a missing session, a stale client, a
- * malformed compressed payload, and the last-resort crash. The server's
- * res.api(), the mock runtime and the pipeline all build through these
+ * malformed compressed payload, and the last-resort crash. The server's API
+ * path and res.api(), the mock runtime and the pipeline all build through these
  * functions, so server and mock cannot drift on a single byte of the wire
  * format. Pure: no Node built-ins, no response classes.
  */
@@ -15,7 +15,7 @@ export const API_ANSWER_CONTENT_TYPE = "application/json; charset=utf-8";
  * plain success is `{ apiVersion, payload }` and nothing else; an empty
  * logList is omitted.
  */
-export const buildApiEnvelope = (apiVersion, payload, { versionExpired, sessionExpired, notAuthorized, message, errorMessage, logList, crash, } = {}) => ({
+export const buildApiEnvelope = (apiVersion, payload, { versionExpired, sessionExpired, notAuthorized, errorMessage, logList, crash, } = {}) => ({
     apiVersion: apiVersion ?? null,
     payload,
     ...(versionExpired ? { versionExpired } : {}),
@@ -26,7 +26,6 @@ export const buildApiEnvelope = (apiVersion, payload, { versionExpired, sessionE
     // flags above are booleans, where false and absent mean the same. An
     // errorMessage goes out as a message object whatever form it was written
     // in, so every reader meets one shape.
-    ...(message !== undefined ? { message } : {}),
     ...(errorMessage !== undefined ? { errorMessage: refusalMessageOf(errorMessage) } : {}),
     ...(crash !== undefined ? { crash } : {}),
     ...(logList?.length ? { logList } : {}),

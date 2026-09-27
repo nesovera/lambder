@@ -332,12 +332,12 @@ without the `session` option, touching `ctx.sessionController` throws and says s
 | `reissueSession()` | The same, handing back the raw tokens, for a client that holds its CSRF token rather than reading `document.cookie` |
 
 ```typescript
-lambder.addApi("login", { input: LoginSchema, output: z.object({ ok: z.boolean() }) }, async (ctx, res) => {
+lambder.addApi("login", { input: LoginSchema, output: z.object({ ok: z.boolean() }) }, async (ctx) => {
     const user = await authenticate(ctx.apiPayload);
     if (!user) refuse("Wrong email or password.");
 
     await ctx.sessionController.createSession(user.id, { userId: user.id });
-    return res.api({ ok: true });
+    return { ok: true };
 });
 ```
 

@@ -46,7 +46,7 @@ describe('servePublicFiles + templateFile fallback (frontend hosting recipe)', (
      */
     it('makes an asset that carries a cookie private, the 304 included, and leaves a cookieless one public', async () => {
         const host = buildHost().addHook('beforeRender', (ctx, res) => {
-            if(!ctx.header('cookie')) res.setCookie('guest', 'visitor-1', { path: '/' });
+            if(!ctx.header('cookie')) ctx.setCookie('guest', 'visitor-1', { path: '/' });
             return ctx;
         });
 

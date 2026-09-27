@@ -4,10 +4,10 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { brotliDecompressSync } from 'node:zlib';
 import { z } from 'zod';
 import Lambder, { initLambder } from '../src/core/Lambder.js';
 import { decodeBody, gunzipBody, brotliBody, createMockEvent, createMockEventV2, createApiEvent, createMockContext, testPublicFiles } from './helpers.js';
+
 describe('Compression (Brotli / gzip)', () => {
     const bigHtml = '<p>' + 'lambder '.repeat(500) + '</p>';
 
@@ -131,6 +131,19 @@ describe('Compression (Brotli / gzip)', () => {
         expect(gunzipBody(result)).toBe('<x/>');
     });
 
+    it('an API declared with compress: true is gzipped even below the size threshold', async () => {
+        const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
+            .addApi('tiny', { input: z.object({}), output: z.object({ ok: z.boolean() }), compress: true }, async (_ctx) => ({ ok: true }));
+
+        const result = await lambder.render(
+            createApiEvent({ apiName: 'tiny', payload: {} }, { headers: { 'Accept-Encoding': 'gzip' } }),
+            createMockContext(),
+        );
+
+        expect(result.multiValueHeaders?.['Content-Encoding']).toEqual(['gzip']);
+        expect(JSON.parse(gunzipBody(result)).payload).toEqual({ ok: true });
+    });
+
     it('compress: false opts out entirely', async () => {
         const lambder = new Lambder({ files: testPublicFiles() })
             .addRoute('/opt-out', (ctx, res) => res.html(bigHtml, { compress: false }));
@@ -155,18 +168,6 @@ describe('Compression (Brotli / gzip)', () => {
         expect(result.multiValueHeaders?.['Content-Encoding']).toBeUndefined();
     });
 
-    it('apiBinary responses are gzipped for accepting clients', async () => {
-        const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
-            .addRoute('/bin', (ctx, res) => res.apiBinary({ ok: true }));
-
-        const result = await lambder.render(
-            createMockEvent('/bin', { headers: { Host: 'localhost', 'Accept-Encoding': 'gzip' } }),
-            createMockContext(),
-        );
-
-        expect(result.multiValueHeaders?.['Content-Encoding']).toEqual(['gzip']);
-        expect(JSON.parse(gunzipBody(result)).payload).toEqual({ ok: true });
-    });
 });
 
 describe('ETag / conditional requests', () => {
@@ -202,8 +203,8 @@ describe('ETag / conditional requests', () => {
             files: testPublicFiles(),
             cors: { origins: ['https://app.example.com'], credentials: true },
         }).addRoute('/page', (ctx, res) => {
-            res.setCookie('LMDRSESSIONTKID', 'slid', { path: '/' });
-            res.setHeader('X-Request-Id', 'abc');
+            ctx.setCookie('LMDRSESSIONTKID', 'slid', { path: '/' });
+            ctx.setResponseHeader('X-Request-Id', 'abc');
             return res.html('<p>etag me</p>', { cacheControl: 'private, max-age=0, must-revalidate' });
         });
 
@@ -229,20 +230,20 @@ describe('ETag / conditional requests', () => {
     it('keeps an answer that sets a cookie out of shared caches in both gateway formats, the crash path included', async () => {
         const lambder = initLambder().create({ files: testPublicFiles() })
             .addRoute('/shared', (ctx, res) => {
-                res.setCookie('guest', 'visitor-1', { path: '/' });
+                ctx.setCookie('guest', 'visitor-1', { path: '/' });
                 return res.html('<p>hi</p>', { cacheControl: 'public, max-age=600, s-maxage=86400, stale-while-revalidate=30' });
             })
             .addRoute('/unsaid', (ctx, res) => {
-                res.setCookie('guest', 'visitor-1', { path: '/' });
+                ctx.setCookie('guest', 'visitor-1', { path: '/' });
                 return res.html('<p>hi</p>');
             })
             .addRoute('/stored-nowhere', (ctx, res) => {
-                res.setCookie('guest', 'visitor-1', { path: '/' });
+                ctx.setCookie('guest', 'visitor-1', { path: '/' });
                 return res.html('<p>hi</p>', { cacheControl: 'no-store' });
             })
             .addRoute('/broken', (ctx, res) => {
-                res.setCookie('guest', 'visitor-1', { path: '/' });
-                res.setHeader('Cache-Control', 'public, max-age=60');
+                ctx.setCookie('guest', 'visitor-1', { path: '/' });
+                ctx.setResponseHeader('Cache-Control', 'public, max-age=60');
                 throw new Error('the page broke');
             });
         const error = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -286,72 +287,6 @@ describe('ETag / conditional requests', () => {
     });
 });
 
-
-/**
- * An API handler's binary body reaches finalization as the Buffer the handler
- * returned, not as the base64 the core carries it in. The base64 hop exists
- * so the idempotency store can persist an answer as plain data; letting it
- * reach the wire would ship a third more bytes, uncompressed, and a body near
- * the Lambda response cap would cross it.
- */
-describe('Binary bodies from an API handler', () => {
-    const wasm = Buffer.from('lambder '.repeat(500), 'utf8');
-
-    const binaryApp = () => new Lambder({ files: testPublicFiles(), apiPath: '/api' })
-        .addApi('download', { input: z.any(), output: z.any() }, (ctx, res) => res.raw({
-            statusCode: 200,
-            headers: { 'Content-Type': 'application/wasm' },
-            body: wasm,
-            compress: true,
-        }))
-        .addRoute('/download', (ctx, res) => res.raw({
-            statusCode: 200,
-            headers: { 'Content-Type': 'application/wasm' },
-            body: wasm,
-            compress: true,
-        }));
-
-    const accepting = { Host: 'localhost', 'Accept-Encoding': 'br, gzip' };
-
-    it('compresses, exactly as the same body returned from a route does', async () => {
-        const fromApi = await binaryApp().render(
-            createApiEvent({ apiName: 'download', payload: {} }, { headers: accepting }),
-            createMockContext(),
-        );
-        const fromRoute = await binaryApp().render(
-            createMockEvent('/download', { headers: accepting }),
-            createMockContext(),
-        );
-
-        expect(fromApi.multiValueHeaders?.['Content-Encoding']).toEqual(['br']);
-        expect(fromRoute.multiValueHeaders?.['Content-Encoding']).toEqual(['br']);
-        expect(fromApi.body).toBe(fromRoute.body);
-        expect(brotliDecompressSync(Buffer.from(fromApi.body || '', 'base64'))).toEqual(wasm);
-        // The point of it: the encoded body is far smaller than the base64 of
-        // the raw bytes.
-        expect((fromApi.body || '').length).toBeLessThan(wasm.toString('base64').length / 4);
-    });
-
-    it('still passes a body the handler pre-encoded through untouched', async () => {
-        const preEncoded = wasm.toString('base64');
-        const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
-            .addApi('download', { input: z.any(), output: z.any() }, (ctx, res) => res.raw({
-                statusCode: 200,
-                headers: { 'Content-Type': 'application/wasm' },
-                body: preEncoded,
-                isBase64Encoded: true,
-            }));
-
-        const result = await lambder.render(
-            createApiEvent({ apiName: 'download', payload: {} }, { headers: accepting }),
-            createMockContext(),
-        );
-
-        expect(result.multiValueHeaders?.['Content-Encoding']).toBeUndefined();
-        expect(result.isBase64Encoded).toBe(true);
-        expect(result.body).toBe(preEncoded);
-    });
-});
 
 describe('The response size guard', () => {
     /**
