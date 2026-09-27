@@ -22,7 +22,7 @@
  */
 import type { APIGatewayProxyEventV2, Context } from "aws-lambda";
 import { type LambderInvokeFailure, type LambderInvokeOutcome } from "./LambderInvokeOutcome.js";
-import { type LambderApiSignatureMap } from "../shared/wire/LambderApiSignature.js";
+import { type LambderApiSignatureMap } from "../shared/wire/LambderApiSignatureMap.js";
 import type { LambdaClient, LambdaClientConfig } from "@aws-sdk/client-lambda";
 import type { LambderApiContractShape } from "../shared/wire/LambderApiContract.js";
 import { type LambderCallArgs, type LambderContractOutputOf, type LambderGuardInputsProviderOption, type LambderSharedCallOptions } from "../shared/wire/LambderCallOptions.js";

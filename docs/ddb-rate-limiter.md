@@ -168,7 +168,7 @@ failing open on storage errors turns into no limit at all.
 ## Table setup
 
 Same shape as every other Lambder DynamoDB store; see
-[DynamoDB tables](./dynamodb-tables.md) for the Terraform, TTL setting and IAM
+[DynamoDB tables](./ddb-tables.md) for the Terraform, TTL setting and IAM
 policy. Required IAM actions on the table: `dynamodb:UpdateItem`, and
 `dynamodb:GetItem` for the read on a throttled partition (without it, every
 key-range throttle is passed on for `failOpen` to decide).

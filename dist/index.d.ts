@@ -34,8 +34,8 @@ export type { LambderApiCallContext, LambderApiCallTrace, LambderResponseTools }
 export type { LambderApiDefinition } from "./api/LambderApiDefinition.js";
 export { apiSignatureOf } from "./api/LambderApiSignature.js";
 export type { LambderApiSignatureEntry } from "./api/LambderApiSignature.js";
-export { apiNameKeyOf, lookupApiSignature, readApiSignature, API_SIGNATURE_HEX_LENGTH, extensibleEnum } from "./shared/wire/LambderApiSignature.js";
-export type { LambderApiSignatureMap } from "./shared/wire/LambderApiSignature.js";
+export { apiNameKeyOf, lookupApiSignature, readApiSignature, API_SIGNATURE_HEX_LENGTH, extensibleEnum } from "./shared/wire/LambderApiSignatureMap.js";
+export type { LambderApiSignatureMap } from "./shared/wire/LambderApiSignatureMap.js";
 export { RELOAD_LOOP_WINDOW_MS } from "./client/LambderReloadLoopBreaker.js";
 export { compareDottedVersions, isDottedVersion } from "./shared/wire/LambderVersionOrder.js";
 export { buildApiEnvelope, envelopeAnswer, refusalAnswer, validationAnswer, apiNotFoundAnswer, sessionExpiredAnswer, versionExpiredAnswer, invalidPayloadAnswer, crashAnswer, API_ANSWER_CONTENT_TYPE, } from "./api/LambderApiEnvelope.js";

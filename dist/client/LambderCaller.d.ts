@@ -4,7 +4,7 @@ import type { LambderApiContractShape } from '../shared/wire/LambderApiContract.
 import { type LambderApiOutcome, type LambderValidationError } from '../shared/wire/LambderApiOutcome.js';
 import { type LambderCallArgs, type LambderContractOutputOf, type LambderGuardInputsProviderOption, type LambderSharedCallOptions } from '../shared/wire/LambderCallOptions.js';
 import { type LambderApiTransport } from '../shared/transport/LambderApiTransport.js';
-import { type LambderApiSignatureMap } from '../shared/wire/LambderApiSignature.js';
+import { type LambderApiSignatureMap } from '../shared/wire/LambderApiSignatureMap.js';
 export type { LambderApiOutcome, LambderApiFailureReason, LambderValidationError } from '../shared/wire/LambderApiOutcome.js';
 export type { LambderProvidedGuardInputs, LambderGuardInputsProvider } from '../shared/wire/LambderCallOptions.js';
 /** A handler told that something happened, with nothing to hand it. */

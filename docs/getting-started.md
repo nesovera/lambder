@@ -59,7 +59,7 @@ const lambder = initLambder<SessionData>().create({
 ```
 
 Sessions rest in a store of your choosing; `LambderDdbSessionStore` needs a
-DynamoDB table, and [DynamoDB tables](./dynamodb-tables.md) has the Terraform,
+DynamoDB table, and [DynamoDB tables](./ddb-tables.md) has the Terraform,
 the TTL setting and the IAM policy. Drop the `session` option entirely if you
 do not need sessions yet.
 

@@ -23,7 +23,7 @@ import { createCallAbort, type LambderCallAbortStage } from '../shared/util/Lamb
 import { coerceToError } from '../shared/wire/LambderCrashDetail.js';
 import { isLambderTransportFailure, type LambderApiTransport } from '../shared/transport/LambderApiTransport.js';
 import { DEFAULT_SESSION_TOKEN_COOKIE_KEY, DEFAULT_SESSION_CSRF_COOKIE_KEY } from '../shared/wire/LambderSessionCookieNames.js';
-import { readApiSignature, type LambderApiSignatureMap } from '../shared/wire/LambderApiSignature.js';
+import { readApiSignature, type LambderApiSignatureMap } from '../shared/wire/LambderApiSignatureMap.js';
 import { LambderReloadLoopBreaker, RELOAD_LOOP_WINDOW_MS } from './LambderReloadLoopBreaker.js';
 import { lambderFetchTransport } from './lambderFetchTransport.js';
 

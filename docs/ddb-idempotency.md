@@ -169,7 +169,7 @@ sessions in their own table so IAM can be scoped to them separately.
 
 ## Table setup
 
-See [DynamoDB tables](./dynamodb-tables.md) for the Terraform, TTL setting and
+See [DynamoDB tables](./ddb-tables.md) for the Terraform, TTL setting and
 IAM policy. Required IAM actions on the table: `dynamodb:GetItem`, `PutItem`,
 `DeleteItem`.
 

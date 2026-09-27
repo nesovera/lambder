@@ -1,5 +1,5 @@
 import type { z } from "zod";
-import type { LambderApiSignatureMap } from "../shared/wire/LambderApiSignature.js";
+import type { LambderApiSignatureMap } from "../shared/wire/LambderApiSignatureMap.js";
 import type { Context } from "aws-lambda";
 import type LambderResolver from "./LambderResolver.js";
 import type LambderResponseBuilder from "./LambderResponseBuilder.js";

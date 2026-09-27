@@ -4,7 +4,7 @@ import type { LambderApiAnswer } from "./LambderApiAnswer.js";
 import type { LambderApiCallContext } from "./LambderApiCallContext.js";
 import type { LambderApiCallTrace } from "./LambderApiCallContext.js";
 import type { LambderApiDefinition } from "./LambderApiDefinition.js";
-import { type LambderApiSignatureMap } from "../shared/wire/LambderApiSignature.js";
+import { type LambderApiSignatureMap } from "../shared/wire/LambderApiSignatureMap.js";
 import { type LambderApiGuard } from "./LambderApiGuards.js";
 import { type LambderApiRateLimitPolicyConfig, type LambderApiRateLimitsConfig, type LambderRateLimitChargeResult, type LambderRateLimitChargeSubject } from "./LambderApiRateLimits.js";
 import { type LambderApiIdempotencyConfig } from "./LambderApiIdempotency.js";

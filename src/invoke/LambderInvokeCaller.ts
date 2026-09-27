@@ -34,7 +34,7 @@ import {
     type LambderInvokeOutcome,
 } from "./LambderInvokeOutcome.js";
 import { DEFAULT_SESSION_TOKEN_COOKIE_KEY } from "../shared/wire/LambderSessionCookieNames.js";
-import { readApiSignature, type LambderApiSignatureMap } from "../shared/wire/LambderApiSignature.js";
+import { readApiSignature, type LambderApiSignatureMap } from "../shared/wire/LambderApiSignatureMap.js";
 import type { LambdaClient, LambdaClientConfig } from "@aws-sdk/client-lambda";
 import type { LambderApiContractShape, LambderApiEnvelopeBody } from "../shared/wire/LambderApiContract.js";
 import { resolveApiOutcome, type LambderValidationError } from "../shared/wire/LambderApiOutcome.js";

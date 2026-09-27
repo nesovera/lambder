@@ -30,7 +30,7 @@ import type { LambderFileSource } from "../shared/contracts/LambderFileSource.js
 import { LAMBDER_BACKEND_SWAP, LAMBDER_CRASH_WATCH } from "../shared/util/LambderTestingDoors.js";
 import type { LambderApiDefinition } from "../api/LambderApiDefinition.js";
 import { apiSignatureOf, type LambderApiSignatureEntry } from "../api/LambderApiSignature.js";
-import { apiNameKeyOf, type LambderApiSignatureMap } from "../shared/wire/LambderApiSignature.js";
+import { apiNameKeyOf, type LambderApiSignatureMap } from "../shared/wire/LambderApiSignatureMap.js";
 import type { LambderApiOptionEntries, LambderApiOptionEntry, LambderGuardDeclarationEntry, LambderRateLimitPolicyEntry } from "../shared/wire/LambderApiOptionEntries.js";
 import { assertPlainData } from "../shared/util/assertPlainData.js";
 import type { LambderApiMode } from "../shared/wire/LambderApiContract.js";

@@ -14,7 +14,7 @@ import { isLambderApiRefusal } from "../shared/wire/LambderApiRefusal.js";
 import { LambderApiPipeline } from "../api/LambderApiPipeline.js";
 import { LAMBDER_BACKEND_SWAP, LAMBDER_CRASH_WATCH } from "../shared/util/LambderTestingDoors.js";
 import { apiSignatureOf } from "../api/LambderApiSignature.js";
-import { apiNameKeyOf } from "../shared/wire/LambderApiSignature.js";
+import { apiNameKeyOf } from "../shared/wire/LambderApiSignatureMap.js";
 import { assertPlainData } from "../shared/util/assertPlainData.js";
 import { apiNotFoundAnswer, buildApiEnvelope, envelopeAnswer, refusalAnswer, sessionExpiredAnswer, } from "../api/LambderApiEnvelope.js";
 import { LambderApiOutputValidationError } from "../api/LambderApiOutputValidationError.js";

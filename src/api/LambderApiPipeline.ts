@@ -5,7 +5,7 @@ import type { LambderApiAnswer } from "./LambderApiAnswer.js";
 import type { LambderApiCallContext } from "./LambderApiCallContext.js";
 import type { LambderApiCallTrace } from "./LambderApiCallContext.js";
 import type { LambderApiDefinition } from "./LambderApiDefinition.js";
-import { lookupApiSignature, type LambderApiSignatureMap } from "../shared/wire/LambderApiSignature.js";
+import { lookupApiSignature, type LambderApiSignatureMap } from "../shared/wire/LambderApiSignatureMap.js";
 import {
     apiNotFoundAnswer,
     invalidPayloadAnswer,

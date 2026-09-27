@@ -9,6 +9,24 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [9.0.2] - 2026-09-27
+
+Nothing a handler or a caller does changes; the package, its docs and its
+tests are easier to find one's way in.
+
+### Changed
+
+- **The README names the one v9 break the compiler cannot find.** A refusal
+  is no longer stored under an idempotency key, so a retry after one runs the
+  handler again (the 9.0.1 entry has the detail).
+- **The signature map's module is `shared/wire/LambderApiSignatureMap`.** It
+  shared its file name with `api/LambderApiSignature`, which computes the
+  digests. The entries export the same names as before, so no import changes.
+- **Docs.** `docs/dynamodb-tables.md` is `docs/ddb-tables.md`, beside the
+  other `ddb-*` pages. `docs/responses.md` says that `compress: true` behind a
+  REST API needs `binaryMediaTypes: ["*/*"]`, as its compression does.
+- **Tests** sit in folders that mirror `src/`.
+
 ## [9.0.1] - 2026-09-27
 
 A major that gives an API handler one shape. It takes its context and returns

@@ -13,7 +13,7 @@ import { type LambderPipelineBackends, type LambderPipelineBackendSwap } from ".
 import type { LambderFileSource } from "../shared/contracts/LambderFileSource.js";
 import { LAMBDER_BACKEND_SWAP, LAMBDER_CRASH_WATCH } from "../shared/util/LambderTestingDoors.js";
 import { type LambderApiSignatureEntry } from "../api/LambderApiSignature.js";
-import { type LambderApiSignatureMap } from "../shared/wire/LambderApiSignature.js";
+import { type LambderApiSignatureMap } from "../shared/wire/LambderApiSignatureMap.js";
 import type { LambderApiOptionEntries } from "../shared/wire/LambderApiOptionEntries.js";
 import type { LambderApiIdempotencyOption } from "../shared/wire/LambderApiOptionValues.js";
 import type { LambderApiGuard, LambderGuardMetaMap, LambderGuardsOption, LambderGuardDataOf, LambderGuardInputsOf } from "../api/LambderApiGuards.js";
