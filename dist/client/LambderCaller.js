@@ -8,7 +8,7 @@ import { createCallAbort } from '../shared/util/LambderCallAbort.js';
 import { coerceToError } from '../shared/wire/LambderCrashDetail.js';
 import { isLambderTransportFailure } from '../shared/transport/LambderApiTransport.js';
 import { DEFAULT_SESSION_TOKEN_COOKIE_KEY, DEFAULT_SESSION_CSRF_COOKIE_KEY } from '../shared/wire/LambderSessionCookieNames.js';
-import { readApiSignature } from '../shared/wire/LambderApiSignature.js';
+import { readApiSignature } from '../shared/wire/LambderApiSignatureMap.js';
 import { LambderReloadLoopBreaker, RELOAD_LOOP_WINDOW_MS } from './LambderReloadLoopBreaker.js';
 import { lambderFetchTransport } from './lambderFetchTransport.js';
 /**

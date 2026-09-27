@@ -230,6 +230,10 @@ lambder.addApi("invoices.download", {
 `"auto"`, the default, is the behavior above. `false` never compresses the
 API's answers, and `true` compresses them for every caller that accepts an
 encoding, below `minBytes` too and on an instance whose `compression` is off.
+That includes a REST API (payload v1), where compression is otherwise off, so
+there `true` needs the `binaryMediaTypes: ["*/*"]` the REST API note above
+asks for: without it the gateway hands the caller the compressed bytes' base64 text
+instead of the body.
 
 A body of base64 bytes (a PDF, an image) is what `false` is for. Compression
 takes back the quarter that base64 added, but a compressed body leaves the

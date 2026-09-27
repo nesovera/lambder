@@ -13,7 +13,7 @@ import type { LambderApiTransport } from "../shared/transport/LambderApiTranspor
 import { LambderCookieJar } from "../shared/transport/LambderCookieJar.js";
 import { lambderCookieJarTransport } from "../shared/transport/lambderCookieJarTransport.js";
 import type { LambderApiContractShape } from "../shared/wire/LambderApiContract.js";
-import type { LambderApiSignatureMap } from "../shared/wire/LambderApiSignature.js";
+import type { LambderApiSignatureMap } from "../shared/wire/LambderApiSignatureMap.js";
 import type { LambderGuardInputsProviderOption } from "../shared/wire/LambderCallOptions.js";
 import { DEFAULT_MAX_RESTORED_PAYLOAD_BYTES } from "../shared/wire/LambderRequestPayload.js";
 

@@ -16,7 +16,7 @@ export { LambderCookieJar, parseSetCookie } from "./shared/transport/LambderCook
 export { resolveApiOutcome } from "./shared/wire/LambderApiOutcome.js";
 // The per-endpoint signature map a build ships with, how a caller reads it, the
 // mark a shared schema sets on an enum its readers let grow, and the reload-loop window.
-export { apiNameKeyOf, lookupApiSignature, readApiSignature, API_SIGNATURE_HEX_LENGTH, extensibleEnum } from "./shared/wire/LambderApiSignature.js";
+export { apiNameKeyOf, lookupApiSignature, readApiSignature, API_SIGNATURE_HEX_LENGTH, extensibleEnum } from "./shared/wire/LambderApiSignatureMap.js";
 export { RELOAD_LOOP_WINDOW_MS } from "./client/LambderReloadLoopBreaker.js";
 export { compareDottedVersions, isDottedVersion } from "./shared/wire/LambderVersionOrder.js";
 export { createIdempotencyKey, createIdempotencyKeyScope } from "./shared/wire/LambderIdempotencyKeyScope.js";

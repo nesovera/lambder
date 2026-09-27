@@ -167,7 +167,7 @@ guide that matches what you are building. The full index lives in
 | [Templating](./docs/templating.md) | `html`/`xml` tagged templates and `LambderTemplatingEngine` |
 | [Translations](./docs/i18n.md) | `createLambderI18n`: typed keys, extension, detection, on-demand languages, runtime dictionaries |
 | [The mock runtime](./docs/mock.md) | `LambderMockApp`: the typed contract served from mock handlers over the real pipeline, in the browser and in tests |
-| [DynamoDB tables](./docs/dynamodb-tables.md) | Table shapes, TTL and IAM for sessions, cache, rate limits and idempotency |
+| [DynamoDB tables](./docs/ddb-tables.md) | Table shapes, TTL and IAM for sessions, cache, rate limits and idempotency |
 | [Exports reference](./docs/exports.md) | Every name the five entry points export, grouped by purpose |
 
 ## Standalone modules
@@ -192,7 +192,9 @@ handler one shape: it takes its context and returns its output, says no with
 `refuse()`, and writes headers, cookies and log entries through the context,
 while the response builder stays with routes, hooks and error handlers. Every
 break and what to do about it is in the 9.0.1 entry, and the compiler finds
-most of them. An app still on v7 goes through the 8.0.2 entry first, which
+most of them. The one it cannot is a change of behavior: a refusal is no
+longer stored under an idempotency key, so a retry after one runs the handler
+again. An app still on v7 goes through the 8.0.2 entry first, which
 names the breaks of v8 the compiler cannot find, and one on v6 through the
 7.0.0 entry before that.
 

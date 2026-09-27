@@ -1,5 +1,5 @@
 import type { z } from "zod";
-import type { LambderApiSignatureMap } from "../shared/wire/LambderApiSignature.js";
+import type { LambderApiSignatureMap } from "../shared/wire/LambderApiSignatureMap.js";
 import type { LambderApiResponseConfig } from "../shared/wire/LambderApiContract.js";
 import type { LambderHttpStatusCode } from "../shared/wire/LambderHttpStatus.js";
 import type { MaybePromise } from "../shared/util/LambderTypeUtilities.js";

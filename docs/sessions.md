@@ -256,7 +256,7 @@ new LambderDdbSessionStore({
 ```
 
 The table shape, TTL setting and IAM policy are in
-[DynamoDB tables](./dynamodb-tables.md). The SDK is loaded on the first table
+[DynamoDB tables](./ddb-tables.md). The SDK is loaded on the first table
 access, so an app that keeps no sessions never loads it.
 
 `session.data` is stored Brotli-compressed by default: the item carries the

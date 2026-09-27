@@ -5,7 +5,7 @@ import { type LambderLambdaHttpResult } from "../invoke/LambderLambdaEvent.js";
 import type { LambderCreatedSession } from "../session/LambderSessionManager.js";
 import { LambderCookieJar } from "../shared/transport/LambderCookieJar.js";
 import type { LambderApiContractShape } from "../shared/wire/LambderApiContract.js";
-import type { LambderApiSignatureMap } from "../shared/wire/LambderApiSignature.js";
+import type { LambderApiSignatureMap } from "../shared/wire/LambderApiSignatureMap.js";
 import type { LambderGuardInputsProviderOption } from "../shared/wire/LambderCallOptions.js";
 /**
  * How one visitor differs from the next. Everything is optional: a visitor

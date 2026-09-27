@@ -1,0 +1,376 @@
+/**
+ * Frontend hosting: servePublicFiles (terminal file slot), serveIndexHtml (gated shell slot) and res.templateFile.
+ */
+
+import { describe, it, expect } from 'vitest';
+import path from 'node:path';
+import Lambder from '../../src/core/Lambder.js';
+import { LambderLocalFileSource } from '../../src/stores/LambderLocalFileSource.js';
+import { html, jsonScript } from '../../src/shared/LambderHtml.js';
+import { decodeBody, createMockEvent, createMockContext } from '../helpers.js';
+describe('servePublicFiles + templateFile fallback (frontend hosting recipe)', () => {
+    const spaRoot = path.resolve('./tests/fixtures/spa');
+
+    // The recipe: real files from the terminal slot, everything else decided in
+    // the app's own fallback (404 for file-like paths, shell for GET pages).
+    const buildHost = () => new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
+        .servePublicFiles()
+        .setRouteFallbackHandler(async (ctx, res) => {
+            if(ctx.method !== 'GET' && ctx.method !== 'HEAD') return res.status404('Not found');
+            if((ctx.path.split('/').pop() ?? '').includes('.')) return res.status404('Not found');
+            return res.templateFile('index.html', {
+                title: `Page ${ctx.path}`,
+                head: html`<link rel="canonical" href="https://example.com${ctx.path}" />`,
+            }, { cacheControl: 'no-cache', htmlVirtualSlots: true });
+        });
+
+    it('serves existing static files with mime type and default cache headers', async () => {
+        const result = await buildHost().render(createMockEvent('/style.css'), createMockContext());
+        expect(result.statusCode).toBe(200);
+        expect(result.multiValueHeaders?.['Content-Type']?.[0]).toBe('text/css; charset=utf-8');
+        expect(result.multiValueHeaders?.['Cache-Control']).toEqual(['public, max-age=3600']);
+        expect(decodeBody(result)).toContain('color: red');
+    });
+
+    it('serves content-hashed assets with immutable cache headers', async () => {
+        const result = await buildHost().render(createMockEvent('/assets/index-Ab3dE5fG7h.js'), createMockContext());
+        expect(result.statusCode).toBe(200);
+        expect(result.multiValueHeaders?.['Cache-Control']).toEqual(['public, max-age=31536000, immutable']);
+    });
+
+    /**
+     * Pins the bug where a hook that issues a per-visitor cookie (a guest
+     * session, a session read that slides the cookies) sent it on an asset
+     * marked `public, max-age=31536000, immutable`, which a shared cache
+     * keeps, Set-Cookie included, and hands to everyone.
+     */
+    it('makes an asset that carries a cookie private, the 304 included, and leaves a cookieless one public', async () => {
+        const host = buildHost().addHook('beforeRender', (ctx, res) => {
+            if(!ctx.header('cookie')) ctx.setCookie('guest', 'visitor-1', { path: '/' });
+            return ctx;
+        });
+
+        const first = await host.render(createMockEvent('/assets/index-Ab3dE5fG7h.js'), createMockContext());
+        expect(first.statusCode).toBe(200);
+        expect(first.multiValueHeaders?.['Set-Cookie']?.[0]).toContain('guest=visitor-1');
+        expect(first.multiValueHeaders?.['Cache-Control']).toEqual(['private, max-age=31536000']);
+
+        const etag = first.multiValueHeaders?.['ETag']?.[0];
+        const revalidated = await host.render(createMockEvent('/assets/index-Ab3dE5fG7h.js', { headers: { Host: 'localhost', 'If-None-Match': etag! } }), createMockContext());
+        expect(revalidated.statusCode).toBe(304);
+        expect(revalidated.multiValueHeaders?.['Set-Cookie']?.[0]).toContain('guest=visitor-1');
+        expect(revalidated.multiValueHeaders?.['Cache-Control']).toEqual(['private, max-age=31536000']);
+
+        const returning = await host.render(createMockEvent('/assets/index-Ab3dE5fG7h.js', { headers: { Host: 'localhost', Cookie: 'guest=visitor-1' } }), createMockContext());
+        expect(returning.multiValueHeaders?.['Set-Cookie']).toBeUndefined();
+        expect(returning.multiValueHeaders?.['Cache-Control']).toEqual(['public, max-age=31536000, immutable']);
+    });
+
+    it('falls through to the fallback shell for page routes', async () => {
+        const result = await buildHost().render(createMockEvent('/some/spa/route'), createMockContext());
+        expect(result.statusCode).toBe(200);
+        expect(result.multiValueHeaders?.['Content-Type']?.[0]).toContain('text/html');
+        expect(result.multiValueHeaders?.['Cache-Control']).toEqual(['no-cache']);
+        const body = decodeBody(result);
+        expect(body).toContain('<div id="app">');
+        expect(body).toContain('<title>Page /some/spa/route</title>');
+        expect(body).toContain('<link rel="canonical" href="https://example.com/some/spa/route" />');
+    });
+
+    it('404s missing file-looking paths via the fallback policy', async () => {
+        const result = await buildHost().render(createMockEvent('/missing-image.png'), createMockContext());
+        expect(result.statusCode).toBe(404);
+    });
+
+    it('rejects path traversal (not served, falls to fallback)', async () => {
+        const result = await buildHost().render(createMockEvent('/../package.json'), createMockContext());
+        expect(result.statusCode).toBe(404);
+    });
+
+    it('renders marker-based shells with slots, conditionals and json data', async () => {
+        const payload = { message: '</script><script>alert(1)</script>', count: 2 };
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
+            .servePublicFiles()
+            .setRouteFallbackHandler((ctx, res) => res.templateFile('marked.html', {
+                title: 'My <Page> & Co',
+                head: jsonScript('app-data', payload),
+                showBanner: ctx.get.beta === '1',
+            }));
+
+        const withBanner = await lambder.render(
+            createMockEvent('/page', { queryStringParameters: { beta: '1' } }),
+            createMockContext(),
+        );
+        const body = decodeBody(withBanner);
+        expect(body).toContain('<title>My &lt;Page&gt; &amp; Co</title>');
+        expect(body).toContain('<div class="banner">Beta</div>');
+        expect(body).toContain('<script type="application/json" id="app-data">');
+        expect(body).not.toContain('</script><script>alert(1)');
+        const jsonMatch = body.match(/id="app-data">([\s\S]*?)<\/script>/);
+        expect(JSON.parse(jsonMatch![1]!)).toEqual(payload);
+
+        const withoutBanner = await lambder.render(createMockEvent('/page'), createMockContext());
+        expect(decodeBody(withoutBanner)).not.toContain('banner');
+    });
+
+    it('keeps shell defaults when data omits a slot', async () => {
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
+            .servePublicFiles()
+            .setRouteFallbackHandler((ctx, res) => res.templateFile('marked.html', {}));
+
+        const result = await lambder.render(createMockEvent('/page'), createMockContext());
+        expect(decodeBody(result)).toContain('<title>Default Title</title>');
+    });
+
+    it('supports per-tenant roots through the path mapper', async () => {
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
+            .servePublicFiles({
+                path: (ctx, filePath) => ctx.host.startsWith('brandx.') ? `brandx${filePath}` : filePath,
+            })
+            .setRouteFallbackHandler((ctx, res) => res.templateFile(
+                ctx.host.startsWith('brandx.') ? 'brandx/index.html' : 'index.html',
+                { head: html`<title>${ctx.host}</title>` },
+                { htmlVirtualSlots: true },
+            ));
+
+        const brandResult = await lambder.render(
+            createMockEvent('/page', { headers: { Host: 'brandx.example.com' } }),
+            createMockContext(),
+        );
+        expect(decodeBody(brandResult)).toContain('BrandX');
+        expect(decodeBody(brandResult)).toContain('<title>brandx.example.com</title>');
+
+        const defaultResult = await lambder.render(createMockEvent('/page'), createMockContext());
+        expect(decodeBody(defaultResult)).toContain('<div id="app">');
+    });
+
+    it('never shadows routes registered after servePublicFiles', async () => {
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
+            .servePublicFiles()
+            .addRoute('/registered-later', (ctx, res) => res.html('Later Route'));
+
+        const result = await lambder.render(createMockEvent('/registered-later'), createMockContext());
+        expect(decodeBody(result)).toBe('Later Route');
+    });
+
+    it('templateFile throws on missing files (server config error, not a 404)', async () => {
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
+            .setGlobalErrorHandler((err, ctx, res) => res.status(500, err.message))
+            .setRouteFallbackHandler((ctx, res) => res.templateFile('nope.html'));
+
+        const result = await lambder.render(createMockEvent('/page'), createMockContext());
+        expect(result.statusCode).toBe(500);
+        expect(decodeBody(result)).toContain('res.templateFile found no such file');
+    });
+
+    it('serves cached static files identically on repeat requests', async () => {
+        const lambder = buildHost();
+        const first = await lambder.render(createMockEvent('/style.css'), createMockContext());
+        const second = await lambder.render(createMockEvent('/style.css'), createMockContext());
+        expect(second.statusCode).toBe(200);
+        expect(second.body).toBe(first.body);
+        expect(second.multiValueHeaders?.['ETag']).toEqual(first.multiValueHeaders?.['ETag']);
+    });
+
+    it('compress option: function decides per file (force small css, skip js)', async () => {
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
+            .servePublicFiles({
+                compress: (ctx) => ctx.path.endsWith('.css'),
+            });
+
+        // style.css is tiny, below the auto threshold: forcing still compresses it.
+        const css = await lambder.render(
+            createMockEvent('/style.css', { headers: { Host: 'localhost', 'Accept-Encoding': 'gzip' } }),
+            createMockContext(),
+        );
+        expect(css.multiValueHeaders?.['Content-Encoding']).toEqual(['gzip']);
+
+        // js files return false: never compressed.
+        const js = await lambder.render(
+            createMockEvent('/assets/index-Ab3dE5fG7h.js', { headers: { Host: 'localhost', 'Accept-Encoding': 'gzip' } }),
+            createMockContext(),
+        );
+        expect(js.multiValueHeaders?.['Content-Encoding']).toBeUndefined();
+    });
+});
+
+describe('serveIndexHtml', () => {
+    const spaRoot = path.resolve('./tests/fixtures/spa');
+
+    it('zero-config: serves index.html with no-cache for GET page routes', async () => {
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
+            .servePublicFiles()
+            .serveIndexHtml();
+
+        const result = await lambder.render(createMockEvent('/some/spa/route'), createMockContext());
+        expect(result.statusCode).toBe(200);
+        expect(result.multiValueHeaders?.['Content-Type']?.[0]).toContain('text/html');
+        expect(result.multiValueHeaders?.['Cache-Control']).toEqual(['no-cache']);
+        expect(decodeBody(result)).toContain('<div id="app">');
+    });
+
+    it('gates on method: non-GET/HEAD falls through to the route fallback', async () => {
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
+            .serveIndexHtml()
+            .setRouteFallbackHandler((ctx, res) => res.status(405, 'nope'));
+
+        const result = await lambder.render(createMockEvent('/page', { httpMethod: 'POST' }), createMockContext());
+        expect(result.statusCode).toBe(405);
+    });
+
+    it('a narrowed methods list still accepts HEAD, as a route matcher does', async () => {
+        // HEAD is a GET whose body finalization strips. Refusing HEAD because
+        // the list names only GET would make these slots disagree with
+        // compileRouteMatcher about what a method means.
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
+            .serveIndexHtml(undefined, { methods: ['GET'] })
+            .setRouteFallbackHandler((ctx, res) => res.status(405, 'nope'));
+
+        expect((await lambder.render(createMockEvent('/page', { httpMethod: 'HEAD' }), createMockContext())).statusCode).toBe(200);
+        expect((await lambder.render(createMockEvent('/page', { httpMethod: 'POST' }), createMockContext())).statusCode).toBe(405);
+    });
+
+    it('does not guess at files: a missing dotted path reaches the shell', async () => {
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
+            .servePublicFiles()
+            .serveIndexHtml();
+
+        const result = await lambder.render(createMockEvent('/missing-image.png'), createMockContext());
+        expect(result.statusCode).toBe(200);
+        expect(decodeBody(result)).toContain('<div id="app">');
+    });
+
+    it('skipFilePaths: true opts back into 404s for dotted paths', async () => {
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
+            .servePublicFiles()
+            .serveIndexHtml(undefined, { skipFilePaths: true });
+
+        const result = await lambder.render(createMockEvent('/missing-image.png'), createMockContext());
+        expect(result.statusCode).toBe(404);
+    });
+
+    it('dotted app routes reach the shell', async () => {
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
+            .servePublicFiles()
+            .serveIndexHtml((ctx, res) => res.html(`page ${ctx.path}`));
+
+        const paths = [
+            '/birth-report/eyJhbGci.eyJ2IjoxfQ.sIgNaTuRe', // JWT
+            '/planetarium/41.0082,28.9784', // coordinates
+            '/whois/example.com', // domain name
+            '/docs/v1.2.3', // version number
+            '/us/missouri/st.-louis', // place slug
+        ];
+        for (const path of paths) {
+            const result = await lambder.render(createMockEvent(path), createMockContext());
+            expect(decodeBody(result)).toBe(`page ${path}`);
+        }
+    });
+
+    it('real files still win over the shell', async () => {
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
+            .servePublicFiles()
+            .serveIndexHtml((ctx, res) => res.html(`page ${ctx.path}`));
+
+        const result = await lambder.render(createMockEvent('/style.css'), createMockContext());
+        expect(result.multiValueHeaders?.['Content-Type']?.[0]).toBe('text/css; charset=utf-8');
+        expect(decodeBody(result)).toContain('color: red');
+    });
+
+    it('custom handler has full control (templating, per-brand shells)', async () => {
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
+            .serveIndexHtml((ctx, res) => res.templateFile('marked.html', {
+                title: `Page ${ctx.path}`,
+                showBanner: true,
+            }));
+
+        const result = await lambder.render(createMockEvent('/city/zurich'), createMockContext());
+        const body = decodeBody(result);
+        expect(body).toContain('<title>Page /city/zurich</title>');
+        expect(body).toContain('<div class="banner">Beta</div>');
+    });
+
+    it('redirectTrailingSlash is off by default, and 301s with query when enabled', async () => {
+        const noRedirect = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) }).serveIndexHtml();
+        const kept = await noRedirect.render(createMockEvent('/about/'), createMockContext());
+        expect(kept.statusCode).toBe(200);
+
+        const withRedirect = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
+            .serveIndexHtml(undefined, { redirectTrailingSlash: true });
+        const redirected = await withRedirect.render(
+            createMockEvent('/about/', { queryStringParameters: { a: '1' } }),
+            createMockContext(),
+        );
+        expect(redirected.statusCode).toBe(301);
+        expect(redirected.multiValueHeaders?.['Location']).toEqual(['/about?a=1']);
+    });
+
+    /**
+     * The redirect target is built from the request path, which the caller
+     * writes. `//evil.example` is a protocol-relative URL and `/\evil.example`
+     * becomes one the moment a browser normalizes the backslash, so echoing
+     * either into Location would hand anybody who can get a link clicked a
+     * redirect off this origin, from a path that never has to exist.
+     */
+    it('never redirects off-origin, whichever leading slashes the caller writes', async () => {
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
+            .serveIndexHtml(undefined, { redirectTrailingSlash: true });
+
+        for(const attack of ['//evil.example/', '/\\evil.example/', '//\\evil.example/', '/\\/evil.example/']){
+            const result = await lambder.render(createMockEvent(attack), createMockContext());
+            const location = result.multiValueHeaders?.['Location']?.[0];
+            if(location !== undefined){
+                expect(location.startsWith('/')).toBe(true);
+                expect(location.startsWith('//')).toBe(false);
+                expect(location.startsWith('/\\')).toBe(false);
+            }
+        }
+    });
+
+    it('still redirects an ordinary trailing-slash path', async () => {
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
+            .serveIndexHtml(undefined, { redirectTrailingSlash: true });
+
+        const result = await lambder.render(createMockEvent('/docs/'), createMockContext());
+        expect(result.statusCode).toBe(301);
+        expect(result.multiValueHeaders?.['Location']).toEqual(['/docs']);
+    });
+
+    it('indexFile option picks the shell per request', async () => {
+        const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
+            .serveIndexHtml(undefined, {
+                indexFile: (ctx) => ctx.host.startsWith('brandx.') ? 'brandx/index.html' : 'index.html',
+            });
+
+        const brandResult = await lambder.render(
+            createMockEvent('/page', { headers: { Host: 'brandx.example.com' } }),
+            createMockContext(),
+        );
+        expect(decodeBody(brandResult)).toContain('BrandX');
+    });
+
+    it('compress option forces or disables shell compression, like servePublicFiles', async () => {
+        // The fixture shell is tiny (below the auto threshold): compress: true still gzips it.
+        const forced = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) }).serveIndexHtml(undefined, { compress: true });
+        const forcedResult = await forced.render(
+            createMockEvent('/page', { headers: { Host: 'localhost', 'Accept-Encoding': 'gzip' } }),
+            createMockContext(),
+        );
+        expect(forcedResult.multiValueHeaders?.['Content-Encoding']).toEqual(['gzip']);
+
+        // compress also applies to custom handlers, and functions decide per request.
+        const perRequest = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
+            .serveIndexHtml((ctx, res) => res.templateFile('index.html'), { compress: (ctx) => ctx.get.z === '1' });
+        const off = await perRequest.render(
+            createMockEvent('/page', { headers: { Host: 'localhost', 'Accept-Encoding': 'gzip' } }),
+            createMockContext(),
+        );
+        expect(off.multiValueHeaders?.['Content-Encoding']).toBeUndefined();
+        const on = await perRequest.render(
+            createMockEvent('/page', { headers: { Host: 'localhost', 'Accept-Encoding': 'gzip' }, queryStringParameters: { z: '1' } }),
+            createMockContext(),
+        );
+        expect(on.multiValueHeaders?.['Content-Encoding']).toEqual(['gzip']);
+    });
+});
+

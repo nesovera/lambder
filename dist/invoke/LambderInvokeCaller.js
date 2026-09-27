@@ -22,7 +22,7 @@
  */
 import { classifyDeliveryFailure, describeFailure, errorFromFunctionError, LambderInvokeError, parseFunctionError, } from "./LambderInvokeOutcome.js";
 import { DEFAULT_SESSION_TOKEN_COOKIE_KEY } from "../shared/wire/LambderSessionCookieNames.js";
-import { readApiSignature } from "../shared/wire/LambderApiSignature.js";
+import { readApiSignature } from "../shared/wire/LambderApiSignatureMap.js";
 import { resolveApiOutcome } from "../shared/wire/LambderApiOutcome.js";
 import { mergeGuardInputs, } from "../shared/wire/LambderCallOptions.js";
 import { beginIdempotentAttempt, IDEMPOTENT_ATTEMPT_NOT_SENT } from "../shared/wire/LambderIdempotencyKeyScope.js";

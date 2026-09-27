@@ -1,5 +1,5 @@
 import { restoreCompressedPayload } from "./LambderApiRequest.js";
-import { lookupApiSignature } from "../shared/wire/LambderApiSignature.js";
+import { lookupApiSignature } from "../shared/wire/LambderApiSignatureMap.js";
 import { apiNotFoundAnswer, invalidPayloadAnswer, refusalAnswer, sessionExpiredAnswer, validationAnswer, versionExpiredAnswer, } from "./LambderApiEnvelope.js";
 import { LambderApiValidationRefusal, isLambderApiValidationRefusal } from "./LambderApiValidationRefusal.js";
 import { isLambderApiRefusal } from "../shared/wire/LambderApiRefusal.js";

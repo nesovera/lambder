@@ -190,7 +190,7 @@ a text that never came.
 
 `LambderDdbOneShotSecretStore` keeps its items under `OTS#` in the same table
 as the rate limiter and the idempotency store (see [DynamoDB
-tables](./dynamodb-tables.md)): a code as its scope's record, one conditional
+tables](./ddb-tables.md)): a code as its scope's record, one conditional
 write per issue, and a token as its scope's record and the digest pointing at
 it, both written in one transaction, so an issue never leaves a record its
 value cannot find. `LambderMemoryOneShotSecretStore` is the same rules in a

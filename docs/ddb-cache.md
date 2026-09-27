@@ -75,7 +75,7 @@ CACHE#v1#39bd0f5294832…         sk#1700:1900#chunk#m8x2k1-a1b2#000001
 
 A plain string key uses the bare item keys (`meta`, `chunk#...`), so both forms can share a partition: `cache.set("store:nyc-01", summary)` and `cache.set({ pk: "store:nyc-01", sk: "1700:1800" }, window)` coexist, and deleting either leaves the other alone. `deletePartition` removes both, since it drops everything stored under that `pk`.
 
-The `meta` item holds either the entry's value (its manifest) or, while a `getOrSet` fills a missing entry, only that fill's lease; readers take a lease with no value as a miss. [DynamoDB tables](./dynamodb-tables.md#cache-item-structure) lists the attributes of each item.
+The `meta` item holds either the entry's value (its manifest) or, while a `getOrSet` fills a missing entry, only that fill's lease; readers take a lease with no value as a miss. [DynamoDB tables](./ddb-tables.md#cache-item-structure) lists the attributes of each item.
 
 ### What to know before grouping
 
@@ -86,7 +86,7 @@ The `meta` item holds either the entry's value (its manifest) or, while a `getOr
 
 ## Table setup
 
-Same shape as every other Lambder DynamoDB store. It can share a table with the rate limiter and the idempotency store (key prefixes prevent collisions); see [DynamoDB tables](./dynamodb-tables.md).
+Same shape as every other Lambder DynamoDB store. It can share a table with the rate limiter and the idempotency store (key prefixes prevent collisions); see [DynamoDB tables](./ddb-tables.md).
 
 ```hcl
 resource "aws_dynamodb_table" "myapp-cache" {

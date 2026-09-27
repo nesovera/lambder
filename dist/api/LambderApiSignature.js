@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { toGuardEntries } from "./LambderApiGuards.js";
-import { API_SIGNATURE_HEX_LENGTH, EXTENSIBLE_ENUM_META_KEY } from "../shared/wire/LambderApiSignature.js";
+import { API_SIGNATURE_HEX_LENGTH, EXTENSIBLE_ENUM_META_KEY } from "../shared/wire/LambderApiSignatureMap.js";
 import { sha256HexOf } from "../shared/util/LambderTextDigest.js";
 import { canonicalJson } from "../shared/util/canonicalJson.js";
 /*
