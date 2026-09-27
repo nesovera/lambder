@@ -25,13 +25,24 @@ export const LambderUploadFileFactsSchema = z.object({
     sha256Base64: z.string().regex(/^[A-Za-z0-9+/]{43}=$/),
 });
 
-export const LambderUploadTicketSchema = z.object({
-    uploadUrl: z.url(),
-    /** Sent as form fields ahead of the file, which storage wants last. */
-    formFields: z.record(z.string(), z.string()),
-    /** Epoch milliseconds after which storage refuses the ticket. */
-    expiresAt: z.number().int(),
-});
+export const LambderUploadTicketSchema = z.discriminatedUnion("method", [
+    z.object({
+        method: z.literal("POST"),
+        uploadUrl: z.url(),
+        /** Sent as form fields ahead of the file, which storage wants last. */
+        formFields: z.record(z.string(), z.string()),
+        /** Epoch milliseconds after which storage refuses the ticket. */
+        expiresAt: z.number().int(),
+    }),
+    z.object({
+        method: z.literal("PUT"),
+        uploadUrl: z.url(),
+        /** Sent exactly as given, each one signed into the URL. */
+        headers: z.record(z.string(), z.string()),
+        /** Epoch milliseconds after which storage refuses the ticket. */
+        expiresAt: z.number().int(),
+    }),
+]);
 
 type Exactly<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 type Assert<T extends true> = T;

@@ -4,7 +4,7 @@
  *
  * An API payload tops out near a few megabytes once a file is base64, and a
  * Lambda's request body at six, so anything larger (a scanned lease, a
- * signed PDF, a video) is posted by the browser to the bucket itself, with a
+ * signed PDF, a video) is sent by the browser to the bucket itself, with a
  * ticket the server signed beforehand. The ticket pins everything about the
  * upload: the key, the exact byte size, the content type and the SHA-256 of
  * the bytes, all enforced by the storage, so the browser can only ever store
@@ -12,7 +12,7 @@
  *
  * The conversation is the same three steps whatever the app stores: the
  * browser describes the file (LambderUploadFileFacts), the app's endpoint
- * answers with a ticket (LambderUploadTicket), and after the post the app's
+ * answers with a ticket (LambderUploadTicket), and after the upload the app's
  * confirm endpoint asks the bucket what arrived before its record counts as
  * uploaded. The server half is a LambderUploadBucket, the browser half is
  * LambderUploadRunner.
@@ -39,14 +39,32 @@ export type LambderUploadFileFacts = {
     sha256Base64: string;
 };
 
-/** Everything the browser needs to post one file to storage, and until when. */
-export type LambderUploadTicket = {
-    uploadUrl: string;
-    /** Sent as form fields ahead of the file, which storage wants last. */
-    formFields: Record<string, string>;
-    /** Epoch milliseconds after which storage refuses the ticket. */
-    expiresAt: number;
-};
+/**
+ * Everything the browser needs to send one file to storage, and until when,
+ * in one of the two forms a store signs. `POST` is a form (S3's presigned
+ * POST), `PUT` the file as the body of a signed URL (a presigned PUT, which
+ * Cloudflare R2 and other stores without POST policies take).
+ */
+export type LambderUploadTicket =
+    | {
+        method: "POST";
+        uploadUrl: string;
+        /** Sent as form fields ahead of the file, which storage wants last. */
+        formFields: Record<string, string>;
+        /** Epoch milliseconds after which storage refuses the ticket. */
+        expiresAt: number;
+    }
+    | {
+        method: "PUT";
+        uploadUrl: string;
+        /** Sent exactly as given, each one signed into the URL; the browser adds the length itself. */
+        headers: Record<string, string>;
+        /** Epoch milliseconds after which storage refuses the ticket. */
+        expiresAt: number;
+    };
+
+/** How a bucket's tickets send a file: the `method` of the tickets it signs. */
+export type LambderUploadMethod = LambderUploadTicket["method"];
 
 /** What a bucket holds under a key, compared with what the browser said it would upload. */
 export type LambderUploadVerdict =
@@ -63,7 +81,7 @@ export type LambderUploadContentDisposition = {
 
 /**
  * What storage keeps beside an object's bytes. A ticket pins every one of
- * these in its signed policy, so the browser posts them unchanged.
+ * these in its signature, so the browser sends them unchanged.
  */
 export type LambderUploadObjectOptions = {
     /**
@@ -145,7 +163,7 @@ export interface LambderUploadBucket {
      * Signs a ticket for exactly the file the browser described, or refuses
      * (a LambderApiRefusal, code `lambder/upload-empty`,
      * `lambder/upload-type-rejected` or `lambder/upload-too-large`) when the
-     * rule does not accept it. Storage then enforces every fact: the post
+     * rule does not accept it. Storage then enforces every fact: the upload
      * fails unless the body has that byte size, that content type and that
      * SHA-256, so what verifies later is what was described here. `object`
      * is what the stored object carries besides, pinned the same way, and

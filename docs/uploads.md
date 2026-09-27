@@ -5,7 +5,7 @@ through the app's function.
 
 An API payload tops out near a few megabytes once a file is base64, and a
 Lambda's request body at six, so anything larger (a scanned contract, a
-signed PDF, a video) is posted by the browser to the bucket itself, with a
+signed PDF, a video) is sent by the browser to the bucket itself, with a
 ticket the server signed beforehand. The ticket pins everything about the
 upload: the key, the exact byte size, the content type and the SHA-256 of
 the bytes, and storage enforces all of it, so the browser can only ever store
@@ -16,7 +16,8 @@ The conversation is the same three steps whatever an app stores:
 1. The browser describes the file (`LambderUploadFileFacts`: name, type, size,
    SHA-256) to the app's ticket endpoint, which signs a ticket for exactly
    that file (`LambderUploadTicket`) under a key the app chose.
-2. The browser posts the file to storage with the ticket.
+2. The browser sends the file to storage with the ticket: a form post or a
+   PUT, as the ticket says.
 3. The browser asks the app's confirm endpoint to take it, and the server asks
    the bucket what arrived before its record counts as uploaded. The browser
    saying "done" proves nothing.
@@ -130,8 +131,8 @@ await invoiceFiles.issueUploadTicket({
 });
 ```
 
-A ticket pins each of these in its signed policy, as it pins the key and the
-checksum, so the browser posts them unchanged or not at all. Names and sizes
+A ticket pins each of these in its signature, as it pins the key and the
+checksum, so the browser sends them unchanged or not at all. Names and sizes
 S3 would not keep (more than ten tags, a metadata name with a space, non-ASCII
 metadata, more than 2 KB of it) throw where the app writes them.
 
@@ -159,8 +160,30 @@ encoded for the header whatever it holds.
 A ticket is an S3 presigned POST whose policy carries the key, the content
 type, a `content-length-range` of exactly the size, and the SHA-256 checksum
 fields, so S3 refuses any other file. That needs S3's POST policies with
-checksum fields: S3 itself, or a store that implements them. Cloudflare R2
-does not take presigned POSTs.
+checksum fields: S3 itself, or a store that implements them.
+
+A store without POST policies, Cloudflare R2 among them, takes presigned PUTs
+instead:
+
+```typescript
+export const publicFiles = new LambderS3UploadBucket({
+    bucket: "public-files",
+    clientConfig: { region: "auto", endpoint: "https://<account>.r2.cloudflarestorage.com", credentials },
+    uploadMethod: "PUT",
+});
+```
+
+A PUT ticket (`method: "PUT"`) is a URL whose signature covers the length,
+the content type and the SHA-256 checksum as headers, and whatever the object
+carries (`x-amz-meta-*`, `x-amz-tagging`, `cache-control`,
+`content-disposition`) the same way, so the store refuses any other file just
+as S3 refuses a post against its policy. The ticket hands the browser those
+headers to send; the browser sets the length from the body itself. The bucket
+checks, where it signs, that the URL is signed for exactly the headers the
+ticket sends, and throws otherwise. `uploadMethod` has no way to be guessed:
+an endpoint does not say whether the store behind it takes POST policies, so
+a store that refuses them is named. The default is `"POST"`. Object tags need
+a store that keeps them; R2 does not.
 
 `LambderS3UploadBucket` needs `@aws-sdk/client-s3`,
 `@aws-sdk/s3-presigned-post` and `@aws-sdk/s3-request-presigner`, optional
@@ -181,8 +204,10 @@ function's role needs, on the bucket:
 - With SSE-KMS, `kms:GenerateDataKey` for the writes and `kms:Decrypt` for the
   reads and the checksum.
 
-The bucket also needs a CORS rule allowing `POST` from the app's origins, and
-`GET` if the browser fetches download links rather than navigating to them.
+The bucket also needs a CORS rule allowing `POST` from the app's origins (for
+PUT tickets, `PUT` and the headers the tickets send: `content-type`,
+`x-amz-checksum-sha256` and any object headers), and `GET` if the browser
+fetches download links rather than navigating to them.
 
 ## The browser
 
@@ -237,9 +262,10 @@ ticket, so a flaky connection does not leave the app a record per attempt;
 `storageRetry` sets the attempts and the bounds of the wait. A ticket storage calls expired, or
 whose signing credentials it calls expired (S3's `ExpiredToken`), is replaced
 with a new one at once, spending no attempt, up to twice. The runner
-posts over XMLHttpRequest, the one way a browser reports how much of a body
-has been sent; where only fetch exists it posts over fetch, without progress
-or the stall watch.
+sends over XMLHttpRequest, the one way a browser reports how much of a body
+has been sent; where only fetch exists it sends over fetch, without progress
+or the stall watch. A POST ticket is sent as a form, its fields ahead of the
+file; a PUT ticket as the file itself, with the ticket's headers.
 
 The runner reads the whole file to hash it, since WebCrypto digests a buffer
 rather than a stream, so a rule's `maxBytes` should stay within what a
@@ -257,7 +283,10 @@ the way S3 checks a presigned POST (every field the ticket carries with its
 value and no other, ahead of the file; a ticket it issued and not expired; a
 body of exactly the size; bytes with that SHA-256) and refuses otherwise with
 the status and XML error S3 answers with, so a runner, or any other client,
-takes the same path against it as against S3. Its tickets and
+takes the same path against it as against S3. With `uploadMethod: "PUT"` it
+signs PUT tickets and checks a PUT the way a store checks a presigned one:
+every signed header with its value, no unsigned `x-amz-` header, the signed
+length, a URL not expired, and the checksum against the bytes. Its tickets and
 links point under `baseUrl`, a host of its own that cannot resolve unless
 something answers for it, and `handleStorageRequest(request)` is what answers:
 a fetch `Request` in, a `Response` out, or null for a request that is not the
@@ -301,6 +330,7 @@ same runner and endpoints. Its `issueUploadTicket` refuses a file the rule
 does not take with the three `lambder/upload-*` codes: call
 `refuseUnacceptedUpload(uploadRule, fileFacts)` before signing, as both of
 Lambder's buckets do, and `checkUploadRule` for the verdict alone. What the
-browser posts is up to the ticket: the runner sends `formFields` as form
-fields ahead of the file, to `uploadUrl`, and reads a refusal written as S3
-writes one.
+browser sends is up to the ticket: for `method: "POST"` the runner posts
+`formFields` as form fields ahead of the file to `uploadUrl`, for
+`method: "PUT"` it puts the file to `uploadUrl` with `headers`, and either
+way it reads a refusal written as S3 writes one.

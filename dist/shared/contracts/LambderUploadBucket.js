@@ -4,7 +4,7 @@
  *
  * An API payload tops out near a few megabytes once a file is base64, and a
  * Lambda's request body at six, so anything larger (a scanned lease, a
- * signed PDF, a video) is posted by the browser to the bucket itself, with a
+ * signed PDF, a video) is sent by the browser to the bucket itself, with a
  * ticket the server signed beforehand. The ticket pins everything about the
  * upload: the key, the exact byte size, the content type and the SHA-256 of
  * the bytes, all enforced by the storage, so the browser can only ever store
@@ -12,7 +12,7 @@
  *
  * The conversation is the same three steps whatever the app stores: the
  * browser describes the file (LambderUploadFileFacts), the app's endpoint
- * answers with a ticket (LambderUploadTicket), and after the post the app's
+ * answers with a ticket (LambderUploadTicket), and after the upload the app's
  * confirm endpoint asks the bucket what arrived before its record counts as
  * uploaded. The server half is a LambderUploadBucket, the browser half is
  * LambderUploadRunner.

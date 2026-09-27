@@ -60,9 +60,9 @@ export type LambderUploadRunnerOptions<Reference, Receipt> = {
         maxDelayMs?: number;
     };
     /**
-     * How long a post may be open and move nothing before it counts as
-     * dropped. Default: 60 seconds. Watched where XMLHttpRequest exists,
-     * which reports a body's progress; a runtime with only fetch posts
+     * How long an upload to storage may be open and move nothing before it
+     * counts as dropped. Default: 60 seconds. Watched where XMLHttpRequest exists,
+     * which reports a body's progress; a runtime with only fetch uploads
      * unwatched.
      */
     stallTimeoutMs?: number;
@@ -91,6 +91,6 @@ export declare class LambderUploadRunner<Reference, Receipt> {
     }): Promise<Receipt>;
     /** Forgets a confirmed upload through the app's endpoint, when it declared one. */
     discard(receipt: Receipt): Promise<void>;
-    /** One post of the file to storage. Never throws: every ending is an outcome. */
-    private post;
+    /** One upload of the file to storage, in the ticket's form. Never throws: every ending is an outcome. */
+    private send;
 }

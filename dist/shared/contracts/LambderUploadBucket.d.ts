@@ -13,14 +13,29 @@ export type LambderUploadFileFacts = {
     /** SHA-256 of the file's bytes as base64, the form storage checks an upload against: 43 characters and one pad. */
     sha256Base64: string;
 };
-/** Everything the browser needs to post one file to storage, and until when. */
+/**
+ * Everything the browser needs to send one file to storage, and until when,
+ * in one of the two forms a store signs. `POST` is a form (S3's presigned
+ * POST), `PUT` the file as the body of a signed URL (a presigned PUT, which
+ * Cloudflare R2 and other stores without POST policies take).
+ */
 export type LambderUploadTicket = {
+    method: "POST";
     uploadUrl: string;
     /** Sent as form fields ahead of the file, which storage wants last. */
     formFields: Record<string, string>;
     /** Epoch milliseconds after which storage refuses the ticket. */
     expiresAt: number;
+} | {
+    method: "PUT";
+    uploadUrl: string;
+    /** Sent exactly as given, each one signed into the URL; the browser adds the length itself. */
+    headers: Record<string, string>;
+    /** Epoch milliseconds after which storage refuses the ticket. */
+    expiresAt: number;
 };
+/** How a bucket's tickets send a file: the `method` of the tickets it signs. */
+export type LambderUploadMethod = LambderUploadTicket["method"];
 /** What a bucket holds under a key, compared with what the browser said it would upload. */
 export type LambderUploadVerdict = {
     verified: true;
@@ -38,7 +53,7 @@ export type LambderUploadContentDisposition = {
 };
 /**
  * What storage keeps beside an object's bytes. A ticket pins every one of
- * these in its signed policy, so the browser posts them unchanged.
+ * these in its signature, so the browser sends them unchanged.
  */
 export type LambderUploadObjectOptions = {
     /**
@@ -91,7 +106,7 @@ export interface LambderUploadBucket {
      * Signs a ticket for exactly the file the browser described, or refuses
      * (a LambderApiRefusal, code `lambder/upload-empty`,
      * `lambder/upload-type-rejected` or `lambder/upload-too-large`) when the
-     * rule does not accept it. Storage then enforces every fact: the post
+     * rule does not accept it. Storage then enforces every fact: the upload
      * fails unless the body has that byte size, that content type and that
      * SHA-256, so what verifies later is what was described here. `object`
      * is what the stored object carries besides, pinned the same way, and

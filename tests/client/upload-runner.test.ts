@@ -1,10 +1,11 @@
 /**
  * A direct upload end to end, as a mock app runs it: LambderUploadRunner in
  * front, a LambderMemoryUploadBucket as the storage, and
- * lambderMockUploadMswHandler between them, so the runner's posts and a
+ * lambderMockUploadMswHandler between them, so the runner's uploads and a
  * download link's GET travel over fetch through MSW to the bucket. Node has
- * no XMLHttpRequest, so the runner posts over fetch here; the bucket answers
- * those posts the way S3 answers the XHR ones.
+ * no XMLHttpRequest, so the runner uploads over fetch here; the bucket answers
+ * them the way the store answers the XHR ones. One bucket signs POST tickets,
+ * as S3 does, and one PUT tickets, as a store without POST policies does.
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -15,16 +16,18 @@ import { lambderMockUploadMswHandler } from '../../src/mock/lambderMockUploadMsw
 import { LambderUploadError, LambderUploadRunner, type LambderUploadProgress, type LambderUploadRunnerOptions } from '../../src/client/LambderUploadRunner.js';
 import { LambderUploadFileFactsSchema, LambderUploadTicketSchema } from '../../src/shared/wire/LambderUploadSchemas.js';
 import { sha256Base64Of } from '../../src/shared/util/LambderTextDigest.js';
-import type { LambderUploadFileFacts, LambderUploadRule } from '../../src/shared/contracts/LambderUploadBucket.js';
+import type { LambderUploadFileFacts, LambderUploadRule, LambderUploadTicket } from '../../src/shared/contracts/LambderUploadBucket.js';
 
 let clock = 1_790_000_000_000;
 const bucket = new LambderMemoryUploadBucket({ now: () => clock });
-const server = setupServer(lambderMockUploadMswHandler(bucket, { msw }));
+const putBucket = new LambderMemoryUploadBucket({ now: () => clock, uploadMethod: 'PUT' });
+const server = setupServer(lambderMockUploadMswHandler(bucket, { msw }), lambderMockUploadMswHandler(putBucket, { msw }));
 
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
 afterEach(() => {
     server.resetHandlers();
     bucket.reset();
+    putBucket.reset();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
 });
@@ -63,6 +66,23 @@ const runnerFor = (overrides: Partial<LambderUploadRunnerOptions<string, { objec
     });
     return { runner, calls };
 };
+
+/** A POST ticket's form fields, for a case that posts by hand. */
+const formFieldsOf = (ticket: LambderUploadTicket) => {
+    if(ticket.method !== 'POST') throw new Error(`expected a POST ticket, got ${ticket.method}`);
+    return ticket.formFields;
+};
+
+/** A PUT ticket's headers, for a case that puts by hand. */
+const headersOf = (ticket: LambderUploadTicket) => {
+    if(ticket.method !== 'PUT') throw new Error(`expected a PUT ticket, got ${ticket.method}`);
+    return ticket.headers;
+};
+
+/** The facts a runner would send for a file. */
+const factsOf = async (file: File): Promise<LambderUploadFileFacts> => ({
+    fileName: file.name, mimeType: file.type, byteSize: file.size, sha256Base64: await sha256Base64Of(new Uint8Array(await file.arrayBuffer())),
+});
 
 const failureOf = async (pending: Promise<unknown>) => {
     const error = await pending.then(() => null, (err: unknown) => err);
@@ -424,7 +444,7 @@ describe('LambderMemoryUploadBucket', () => {
             const response = await fetch(ticket.uploadUrl, { method: 'POST', body: form });
             return { status: response.status, text: await response.text() };
         };
-        const withFields = (form: FormData) => { for(const [name, value] of Object.entries(ticket.formFields)) form.append(name, value); };
+        const withFields = (form: FormData) => { for(const [name, value] of Object.entries(formFieldsOf(ticket))) form.append(name, value); };
 
         const extra = await post((form) => { withFields(form); form.append('acl', 'public-read'); form.append('file', file); });
         expect(extra.status).toBe(403);
@@ -432,7 +452,7 @@ describe('LambderMemoryUploadBucket', () => {
 
         // A field after the file is not read, as S3 reads none: the pinned checksum is then missing.
         const late = await post((form) => {
-            for(const [name, value] of Object.entries(ticket.formFields)) if(name !== 'x-amz-checksum-sha256') form.append(name, value);
+            for(const [name, value] of Object.entries(formFieldsOf(ticket))) if(name !== 'x-amz-checksum-sha256') form.append(name, value);
             form.append('file', file);
             form.append('x-amz-checksum-sha256', facts.sha256Base64);
         });
@@ -495,7 +515,7 @@ describe('LambderMemoryUploadBucket', () => {
 
         clock += 6_000;
         const form = new FormData();
-        for(const [name, value] of Object.entries(ticket.formFields)) form.append(name, value);
+        for(const [name, value] of Object.entries(formFieldsOf(ticket))) form.append(name, value);
         form.append('file', file);
         const late = await shortLived.handleStorageRequest(new Request(shortLived.baseUrl, { method: 'POST', body: form }));
         expect(late?.status).toBe(403);
@@ -510,5 +530,109 @@ describe('LambderMemoryUploadBucket', () => {
     it('answers only for its own base URL, leaving any other request to the caller', async () => {
         expect(await bucket.handleStorageRequest(new Request('https://elsewhere.invalid/a.pdf'))).toBeNull();
         expect(new LambderMemoryUploadBucket({ baseUrl: 'https://uploads.example.invalid/shop' }).baseUrl).toBe('https://uploads.example.invalid/shop/');
+    });
+});
+
+describe('LambderUploadRunner over a bucket that signs PUT tickets', () => {
+    /** A runner over the PUT bucket, its endpoints as the POST one's. */
+    const putRunner = (object?: Parameters<LambderMemoryUploadBucket['issueUploadTicket']>[0]['object']) => new LambderUploadRunner<string, { objectKey: string }>({
+        uploadRule: PDF_RULE,
+        requestTicket: async (fileFacts) => {
+            const objectKey = 'stores/store-7/invoices/put.pdf';
+            const ticket = LambderUploadTicketSchema.parse(await putBucket.issueUploadTicket({ objectKey, fileFacts, uploadRule: PDF_RULE, object }));
+            return { ticket, reference: objectKey };
+        },
+        confirmUpload: async (objectKey) => ({ objectKey }),
+    });
+
+    it('puts the bytes under the ticket\'s URL with its headers, and keeps what the object carries', async () => {
+        const file = invoice();
+        const receipt = await putRunner({ metadata: { invoice: '1042' }, cacheControl: 'private, max-age=60', contentDisposition: { disposition: 'inline' } }).upload(file);
+
+        expect(receipt).toEqual({ objectKey: 'stores/store-7/invoices/put.pdf' });
+        expect(putBucket.inspectObject('stores/store-7/invoices/put.pdf')).toEqual({
+            byteSize: file.size, mimeType: 'application/pdf', sha256Base64: (await factsOf(file)).sha256Base64,
+            metadata: { invoice: '1042' }, cacheControl: 'private, max-age=60', contentDisposition: { disposition: 'inline' },
+        });
+    });
+
+    it('signs a PUT ticket for the object\'s key, with the headers that pin the file', async () => {
+        const facts = await factsOf(invoice());
+        const ticket = await putBucket.issueUploadTicket({
+            objectKey: 'stores/store-7/invoices/7.pdf', fileFacts: facts, uploadRule: PDF_RULE,
+            object: { tags: { retention: '30d' }, metadata: { Invoice: '7' } },
+        });
+
+        expect(ticket.method).toBe('PUT');
+        expect(ticket.uploadUrl.startsWith(`${putBucket.baseUrl}stores/store-7/invoices/7.pdf?`)).toBe(true);
+        expect(headersOf(ticket)).toEqual({
+            'content-type': 'application/pdf',
+            'x-amz-checksum-sha256': facts.sha256Base64,
+            'x-amz-tagging': 'retention=30d',
+            'x-amz-meta-invoice': '7',
+        });
+    });
+
+    it('is refused by storage when the bytes are not the ones the ticket was signed for', async () => {
+        const other = await sha256Base64Of(new TextEncoder().encode('another file'));
+        const runner = new LambderUploadRunner<string, string>({
+            uploadRule: PDF_RULE,
+            requestTicket: async (fileFacts) => {
+                const ticket = await putBucket.issueUploadTicket({ objectKey: 'a.pdf', fileFacts: { ...fileFacts, sha256Base64: other }, uploadRule: PDF_RULE });
+                return { ticket, reference: 'a.pdf' };
+            },
+            confirmUpload: async (objectKey) => objectKey,
+        });
+
+        const failure = await failureOf(runner.upload(invoice()));
+
+        expect(failure.message).toBe('storageRejected: BadDigest: The SHA256 you specified did not match the calculated checksum.');
+        expect(putBucket.listObjectKeys()).toEqual([]);
+    });
+
+    it('asks for a new ticket when storage says the URL expired', async () => {
+        let issued = 0;
+        const runner = new LambderUploadRunner<string, string>({
+            uploadRule: PDF_RULE,
+            requestTicket: async (fileFacts) => {
+                issued++;
+                const ticket = await putBucket.issueUploadTicket({ objectKey: `renewed-${issued}.pdf`, fileFacts, uploadRule: PDF_RULE });
+                if(issued === 1) clock += 601_000;
+                return { ticket, reference: `renewed-${issued}.pdf` };
+            },
+            confirmUpload: async (objectKey) => objectKey,
+        });
+
+        expect(await runner.upload(invoice())).toBe('renewed-2.pdf');
+        expect(putBucket.listObjectKeys()).toEqual(['renewed-2.pdf']);
+    });
+
+    it('holds a PUT to a presigned URL\'s rules: the signed headers as signed, no unsigned x-amz- header, the signed length', async () => {
+        const file = invoice();
+        const ticket = await putBucket.issueUploadTicket({ objectKey: 'strict.pdf', fileFacts: await factsOf(file), uploadRule: PDF_RULE });
+        const put = async (headers: Record<string, string>, body: BodyInit = file, url = ticket.uploadUrl) => {
+            const response = await fetch(url, { method: 'PUT', headers, body });
+            return { status: response.status, text: await response.text() };
+        };
+        const signed = headersOf(ticket);
+
+        const retyped = await put({ ...signed, 'content-type': 'text/plain' });
+        expect(retyped.status).toBe(403);
+        expect(retyped.text).toContain('<Code>SignatureDoesNotMatch</Code>');
+
+        const unsigned = await put({ ...signed, 'x-amz-acl': 'public-read' });
+        expect(unsigned.status).toBe(403);
+        expect(unsigned.text).toContain('not signed: x-amz-acl');
+
+        const longer = await put(signed, new Blob([file, 'x']));
+        expect(longer.status).toBe(403);
+        expect(longer.text).toContain('<Code>SignatureDoesNotMatch</Code>');
+
+        const elsewhere = await put(signed, file, ticket.uploadUrl.replace('strict.pdf', 'other.pdf'));
+        expect(elsewhere.status).toBe(403);
+        expect(putBucket.listObjectKeys()).toEqual([]);
+
+        expect((await put(signed)).status).toBe(200);
+        expect(putBucket.listObjectKeys()).toEqual(['strict.pdf']);
     });
 });

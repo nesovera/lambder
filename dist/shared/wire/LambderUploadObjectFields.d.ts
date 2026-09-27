@@ -1,6 +1,6 @@
 import type { LambderUploadObjectOptions } from "../contracts/LambderUploadBucket.js";
 /**
- * What a ticket's form carries for the stored object, in the fields S3's
+ * What a POST ticket's form carries for the stored object, in the fields S3's
  * presigned POST reads them from: the tag set as the XML `tagging` field,
  * each metadata entry as `x-amz-meta-<name>` (lowercased, as S3 keeps it),
  * `Cache-Control` and `Content-Disposition`. Both buckets build their
@@ -8,3 +8,12 @@ import type { LambderUploadObjectOptions } from "../contracts/LambderUploadBucke
  * every field is pinned by the ticket like the key and the checksum.
  */
 export declare const uploadObjectFormFields: (object: LambderUploadObjectOptions | undefined) => Record<string, string>;
+/**
+ * What a PUT ticket's headers carry for the stored object, as a presigned
+ * PUT sends them: the tag set as the URL-encoded `x-amz-tagging`, each
+ * metadata entry as `x-amz-meta-<name>` (lowercased), `cache-control` and
+ * `content-disposition`. Names are lowercase, as a signature lists them. Both
+ * buckets build their PUT tickets' headers with this, and every one is signed
+ * into the URL like the checksum.
+ */
+export declare const uploadObjectHeaders: (object: LambderUploadObjectOptions | undefined) => Record<string, string>;

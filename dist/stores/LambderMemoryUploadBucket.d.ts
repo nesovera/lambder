@@ -1,4 +1,4 @@
-import { type LambderUploadBucket, type LambderUploadContentDisposition, type LambderUploadFileFacts, type LambderUploadObjectOptions, type LambderUploadRule, type LambderUploadTicket, type LambderUploadVerdict } from "../shared/contracts/LambderUploadBucket.js";
+import { type LambderUploadBucket, type LambderUploadContentDisposition, type LambderUploadFileFacts, type LambderUploadMethod, type LambderUploadObjectOptions, type LambderUploadRule, type LambderUploadTicket, type LambderUploadVerdict } from "../shared/contracts/LambderUploadBucket.js";
 export type LambderMemoryUploadBucketOptions = {
     /**
      * The URL tickets and download links point under, which a mock's MSW
@@ -14,6 +14,8 @@ export type LambderMemoryUploadBucketOptions = {
     downloadLifetimeSeconds?: number;
     /** The clock tickets and links expire by, injectable so a test can move past an expiry without waiting. Default: Date.now. */
     now?: () => number;
+    /** How the browser sends a file, as LambderS3UploadBucket's option: a `POST` form or a `PUT`. Default: `POST`. */
+    uploadMethod?: LambderUploadMethod;
 };
 /** What the memory bucket holds under a key, for a test to assert on: the object's facts and what it carries. */
 export type LambderMemoryUploadObject = {
@@ -34,7 +36,11 @@ export type LambderMemoryUploadObject = {
  * expired" for a late one, EntityTooSmall, EntityTooLarge, BadDigest), so any
  * client, a LambderUploadRunner or another, takes the same path against it as
  * against S3: an expired ticket is asked for again, a wrong file is refused.
- * A download link reads the object until it expires.
+ * With `uploadMethod: "PUT"` it holds a PUT to the rules a store holds a
+ * presigned PUT to: every header the ticket carries with its value, no other
+ * `x-amz-` header, a body of the signed length (SignatureDoesNotMatch
+ * otherwise), a URL not yet expired ("Request has expired"), and bytes with
+ * the SHA-256 (BadDigest). A download link reads the object until it expires.
  *
  * Storage requests reach it through handleStorageRequest(), which answers a
  * fetch Request with a Response: lambderMockUploadMswHandler plugs that into
@@ -47,11 +53,12 @@ export declare class LambderMemoryUploadBucket implements LambderUploadBucket {
     readonly baseUrl: string;
     private readonly ticketLifetimeSeconds;
     private readonly downloadLifetimeSeconds;
+    private readonly uploadMethod;
     private readonly now;
     private readonly objects;
     private readonly tickets;
     private readonly links;
-    constructor({ baseUrl, ticketLifetimeSeconds, downloadLifetimeSeconds, now }?: LambderMemoryUploadBucketOptions);
+    constructor({ baseUrl, ticketLifetimeSeconds, downloadLifetimeSeconds, now, uploadMethod }?: LambderMemoryUploadBucketOptions);
     issueUploadTicket({ objectKey, fileFacts, uploadRule, lifetimeSeconds, object }: {
         objectKey: string;
         fileFacts: LambderUploadFileFacts;
@@ -88,12 +95,19 @@ export declare class LambderMemoryUploadBucket implements LambderUploadBucket {
     /** Forgets every object, ticket and link. */
     reset(): void;
     /**
-     * Answers a request to storage the way S3 answers it: a post under a
-     * ticket stores its file, a GET or HEAD through a download link reads an
-     * object. A request outside baseUrl answers null, for the caller to hand
-     * on.
+     * Answers a request to storage the way S3 answers it: a post or a PUT
+     * under a ticket stores its file, a GET or HEAD through a download link
+     * reads an object. A request outside baseUrl answers null, for the caller
+     * to hand on.
      */
     handleStorageRequest(request: Request): Promise<Response | null>;
     private acceptUpload;
+    /**
+     * A PUT under a ticket's signed URL. A header the signature covers with
+     * another value, or a body of another length, does not match the
+     * signature; an `x-amz-` header it does not cover is refused as a store
+     * refuses one; the checksum is held against the bytes.
+     */
+    private acceptPut;
     private serveDownload;
 }

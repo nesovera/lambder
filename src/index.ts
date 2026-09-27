@@ -190,6 +190,7 @@ export type {
     LambderUploadRule,
     LambderUploadFileFacts,
     LambderUploadTicket,
+    LambderUploadMethod,
     LambderUploadVerdict,
     LambderUploadRuleVerdict,
     LambderUploadObjectOptions,

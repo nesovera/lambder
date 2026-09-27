@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CopyObjectCommand, DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { LambderS3UploadBucket } from '../../src/stores/LambderS3UploadBucket.js';
 import { LAMBDER_REFUSAL_CODES, LambderApiRefusal } from '../../src/shared/wire/LambderApiRefusal.js';
-import type { LambderUploadFileFacts, LambderUploadRule } from '../../src/shared/contracts/LambderUploadBucket.js';
+import type { LambderUploadFileFacts, LambderUploadRule, LambderUploadTicket } from '../../src/shared/contracts/LambderUploadBucket.js';
 
 const BUCKET = 'shop-invoices';
 const OBJECT_KEY = 'stores/store-7/invoices/1042.pdf';
@@ -36,9 +36,32 @@ const makeBucket = () => {
     return { bucket: new LambderS3UploadBucket({ bucket: BUCKET, client }), send };
 };
 
-/** The signed policy, decoded: what S3 will actually enforce. */
-const readPolicy = (formFields: Record<string, string>) =>
-    JSON.parse(Buffer.from(formFields.Policy ?? '', 'base64').toString('utf8')) as { expiration: string; conditions: unknown[] };
+/** A POST ticket's form fields. */
+const formFieldsOf = (ticket: LambderUploadTicket) => {
+    if(ticket.method !== 'POST') throw new Error(`expected a POST ticket, got ${ticket.method}`);
+    return ticket.formFields;
+};
+
+/** A PUT ticket, narrowed. */
+const putTicketOf = (ticket: LambderUploadTicket) => {
+    if(ticket.method !== 'PUT') throw new Error(`expected a PUT ticket, got ${ticket.method}`);
+    return ticket;
+};
+
+/** The signed policy of a POST ticket, decoded: what S3 will actually enforce. */
+const readPolicy = (ticket: LambderUploadTicket) =>
+    JSON.parse(Buffer.from(formFieldsOf(ticket).Policy ?? '', 'base64').toString('utf8')) as { expiration: string; conditions: unknown[] };
+
+/** What a PUT ticket's URL is signed for, and until when. */
+const readSignedUrl = (ticket: LambderUploadTicket) => {
+    const url = new URL(putTicketOf(ticket).uploadUrl);
+    return {
+        path: url.pathname,
+        signedHeaders: url.searchParams.get('X-Amz-SignedHeaders')?.split(';'),
+        expiresSeconds: Number(url.searchParams.get('X-Amz-Expires')),
+        query: [...url.searchParams.keys()],
+    };
+};
 
 /** The refusal a rejected promise carried, for its code. */
 const refusalOf = async (pending: Promise<unknown>) => {
@@ -57,7 +80,7 @@ describe('LambderS3UploadBucket.issueUploadTicket', () => {
         const { bucket, send } = makeBucket();
         const ticket = await bucket.issueUploadTicket({ objectKey: OBJECT_KEY, fileFacts: INVOICE_FACTS, uploadRule: PDF_RULE });
 
-        const { conditions } = readPolicy(ticket.formFields);
+        const { conditions } = readPolicy(ticket);
         expect(conditions).toContainEqual({ key: OBJECT_KEY });
         expect(conditions).toContainEqual({ bucket: BUCKET });
         expect(conditions).toContainEqual(['content-length-range', INVOICE_FACTS.byteSize, INVOICE_FACTS.byteSize]);
@@ -66,7 +89,7 @@ describe('LambderS3UploadBucket.issueUploadTicket', () => {
         expect(conditions).toContainEqual({ 'x-amz-checksum-sha256': INVOICE_FACTS.sha256Base64 });
 
         // The browser sends the same values the policy pins.
-        expect(ticket.formFields).toMatchObject({ key: OBJECT_KEY, 'Content-Type': 'application/pdf', 'x-amz-checksum-sha256': INVOICE_FACTS.sha256Base64 });
+        expect(formFieldsOf(ticket)).toMatchObject({ key: OBJECT_KEY, 'Content-Type': 'application/pdf', 'x-amz-checksum-sha256': INVOICE_FACTS.sha256Base64 });
         expect(ticket.uploadUrl).toContain(BUCKET);
         expect(send).not.toHaveBeenCalled();
     });
@@ -77,7 +100,7 @@ describe('LambderS3UploadBucket.issueUploadTicket', () => {
         const ticket = await bucket.issueUploadTicket({ objectKey: OBJECT_KEY, fileFacts: INVOICE_FACTS, uploadRule: PDF_RULE });
 
         expect(ticket.expiresAt).toBe(NOW + 120_000);
-        expect(Date.parse(readPolicy(ticket.formFields).expiration)).toBe(NOW + 120_000);
+        expect(Date.parse(readPolicy(ticket).expiration)).toBe(NOW + 120_000);
     });
 
     it('refuses what the rule does not accept, with a code a client can translate, and accepts a file exactly at the limit', async () => {
@@ -102,13 +125,13 @@ describe('LambderS3UploadBucket.issueUploadTicket', () => {
             },
         });
 
-        const { conditions } = readPolicy(ticket.formFields);
+        const { conditions } = readPolicy(ticket);
         const tagging = '<Tagging><TagSet><Tag><Key>retention</Key><Value>30d</Value></Tag><Tag><Key>store</Key><Value>store-7</Value></Tag></TagSet></Tagging>';
         expect(conditions).toContainEqual({ tagging });
         expect(conditions).toContainEqual({ 'x-amz-meta-invoice': '1042' });
         expect(conditions).toContainEqual({ 'Cache-Control': 'private, max-age=3600' });
         expect(conditions).toContainEqual({ 'Content-Disposition': 'attachment; filename="Invoice 1042.pdf"; filename*=UTF-8\'\'Invoice%201042.pdf' });
-        expect(ticket.formFields).toMatchObject({ tagging, 'x-amz-meta-invoice': '1042', 'Cache-Control': 'private, max-age=3600' });
+        expect(formFieldsOf(ticket)).toMatchObject({ tagging, 'x-amz-meta-invoice': '1042', 'Cache-Control': 'private, max-age=3600' });
     });
 
     it('signs a ticket for its own lifetime when given one, within S3\'s seven days', async () => {
@@ -117,7 +140,7 @@ describe('LambderS3UploadBucket.issueUploadTicket', () => {
         const ticket = await bucket.issueUploadTicket({ objectKey: OBJECT_KEY, fileFacts: INVOICE_FACTS, uploadRule: PDF_RULE, lifetimeSeconds: 60 });
 
         expect(ticket.expiresAt).toBe(NOW + 60_000);
-        expect(Date.parse(readPolicy(ticket.formFields).expiration)).toBe(NOW + 60_000);
+        expect(Date.parse(readPolicy(ticket).expiration)).toBe(NOW + 60_000);
         await expect(bucket.issueUploadTicket({ objectKey: OBJECT_KEY, fileFacts: INVOICE_FACTS, uploadRule: PDF_RULE, lifetimeSeconds: 8 * 24 * 3600 })).rejects.toThrow(RangeError);
         expect(() => new LambderS3UploadBucket({ bucket: BUCKET, ticketLifetimeSeconds: 0 })).toThrow(RangeError);
         expect(() => new LambderS3UploadBucket({ bucket: BUCKET, downloadLifetimeSeconds: 8 * 24 * 3600 })).toThrow(/seven days/);
@@ -273,5 +296,71 @@ describe('LambderS3UploadBucket links, reads, writes, copies and deletes', () =>
 
         expect(url.hostname).toBe(`${BUCKET}.s3.us-east-1.amazonaws.com`);
         expect(url.searchParams.get('X-Amz-Expires')).toBe('300');
+    });
+});
+
+describe('LambderS3UploadBucket.issueUploadTicket with uploadMethod PUT', () => {
+    const makePutBucket = (options: { endpoint?: string; ticketLifetimeSeconds?: number } = {}) => {
+        const client = options.endpoint
+            ? new S3Client({ region: 'auto', endpoint: options.endpoint, credentials: { accessKeyId: 'AKIATESTTESTTESTTEST', secretAccessKey: 'test-secret' } })
+            : makeClient();
+        const send = vi.spyOn(client, 'send');
+        return { bucket: new LambderS3UploadBucket({ bucket: BUCKET, client, uploadMethod: 'PUT', ticketLifetimeSeconds: options.ticketLifetimeSeconds }), send };
+    };
+
+    it('signs a PUT for the key whose signature covers the length, the type and the checksum as headers', async () => {
+        const { bucket, send } = makePutBucket();
+        const ticket = putTicketOf(await bucket.issueUploadTicket({ objectKey: OBJECT_KEY, fileFacts: INVOICE_FACTS, uploadRule: PDF_RULE }));
+        const signed = readSignedUrl(ticket);
+
+        expect(signed.path).toBe(`/${OBJECT_KEY}`);
+        expect(signed.signedHeaders).toEqual(['content-length', 'content-type', 'host', 'x-amz-checksum-sha256']);
+        // The checksum stays a header the store checks the body against, never a query parameter.
+        expect(signed.query).not.toContain('x-amz-checksum-sha256');
+        expect(ticket.headers).toEqual({ 'content-type': 'application/pdf', 'x-amz-checksum-sha256': INVOICE_FACTS.sha256Base64 });
+        expect(send).not.toHaveBeenCalled();
+    });
+
+    it('signs what the stored object carries as headers too: tags, metadata, cache and disposition', async () => {
+        const { bucket } = makePutBucket();
+        const ticket = putTicketOf(await bucket.issueUploadTicket({
+            objectKey: OBJECT_KEY, fileFacts: INVOICE_FACTS, uploadRule: PDF_RULE,
+            object: {
+                tags: { retention: '30d', store: 'store-7' },
+                metadata: { Invoice: '1042' },
+                cacheControl: 'private, max-age=3600',
+                contentDisposition: { disposition: 'attachment', fileName: 'Invoice 1042.pdf' },
+            },
+        }));
+
+        expect(readSignedUrl(ticket).signedHeaders).toEqual([
+            'cache-control', 'content-disposition', 'content-length', 'content-type', 'host',
+            'x-amz-checksum-sha256', 'x-amz-meta-invoice', 'x-amz-tagging',
+        ]);
+        expect(ticket.headers).toEqual({
+            'content-type': 'application/pdf',
+            'x-amz-checksum-sha256': INVOICE_FACTS.sha256Base64,
+            'x-amz-tagging': 'retention=30d&store=store-7',
+            'x-amz-meta-invoice': '1042',
+            'cache-control': 'private, max-age=3600',
+            'content-disposition': 'attachment; filename="Invoice 1042.pdf"; filename*=UTF-8\'\'Invoice%201042.pdf',
+        });
+    });
+
+    it('signs for a store behind its own endpoint the same way, and expires with the ticket', async () => {
+        vi.useFakeTimers({ now: NOW });
+        const { bucket } = makePutBucket({ endpoint: 'https://account.r2.cloudflarestorage.com', ticketLifetimeSeconds: 120 });
+        const ticket = putTicketOf(await bucket.issueUploadTicket({ objectKey: OBJECT_KEY, fileFacts: INVOICE_FACTS, uploadRule: PDF_RULE }));
+
+        expect(new URL(ticket.uploadUrl).host).toBe(`${BUCKET}.account.r2.cloudflarestorage.com`);
+        expect(readSignedUrl(ticket).signedHeaders).toEqual(['content-length', 'content-type', 'host', 'x-amz-checksum-sha256']);
+        expect(readSignedUrl(ticket).expiresSeconds).toBe(120);
+        expect(ticket.expiresAt).toBe(NOW + 120_000);
+    });
+
+    it('refuses what the rule does not accept before signing, as a POST bucket does', async () => {
+        const { bucket } = makePutBucket();
+        expect((await refusalOf(bucket.issueUploadTicket({ objectKey: OBJECT_KEY, fileFacts: { ...INVOICE_FACTS, mimeType: 'image/png' }, uploadRule: PDF_RULE }))).errorMessage)
+            .toMatchObject({ code: LAMBDER_REFUSAL_CODES.uploadTypeRejected });
     });
 });

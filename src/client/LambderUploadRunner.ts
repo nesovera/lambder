@@ -15,7 +15,8 @@ import { sha256Base64Of } from "../shared/util/LambderTextDigest.js";
  * An app builds one runner from its rule and its own endpoints, and from then
  * on uploading is `await runner.upload(file)`. Everything in between is the
  * runner's: checking the file against the rule, hashing it, asking for a
- * ticket, posting the bytes to storage with progress, waiting out a dropped
+ * ticket, sending the bytes to storage with progress (a form post or a PUT,
+ * as the ticket says), waiting out a dropped
  * or stalled connection and trying again, asking for a new ticket when
  * storage says the old one ran out, stopping the moment the caller cancels,
  * and having the server confirm what arrived. It ends one of two ways: the
@@ -81,9 +82,9 @@ export type LambderUploadRunnerOptions<Reference, Receipt> = {
      */
     storageRetry?: { attempts?: number; baseDelayMs?: number; maxDelayMs?: number };
     /**
-     * How long a post may be open and move nothing before it counts as
-     * dropped. Default: 60 seconds. Watched where XMLHttpRequest exists,
-     * which reports a body's progress; a runtime with only fetch posts
+     * How long an upload to storage may be open and move nothing before it
+     * counts as dropped. Default: 60 seconds. Watched where XMLHttpRequest exists,
+     * which reports a body's progress; a runtime with only fetch uploads
      * unwatched.
      */
     stallTimeoutMs?: number;
@@ -184,7 +185,7 @@ export class LambderUploadRunner<Reference, Receipt> {
         for(;;){
             stopIfCancelled();
             report("uploading");
-            const outcome = await this.post(issued.ticket, file, signal, (sentBytes) => report("uploading", sentBytes));
+            const outcome = await this.send(issued.ticket, file, signal, (sentBytes) => report("uploading", sentBytes));
             if(outcome.kind === "stored") break;
             if(outcome.kind === "cancelled") throw new LambderUploadError("cancelled");
             if(outcome.kind === "rejected"){
@@ -216,21 +217,30 @@ export class LambderUploadRunner<Reference, Receipt> {
         await this.options.discardUpload?.(receipt);
     }
 
-    /** One post of the file to storage. Never throws: every ending is an outcome. */
-    private post(ticket: LambderUploadTicket, file: File, signal: AbortSignal | undefined, onSent: (sentBytes: number) => void): Promise<StorageOutcome> {
+    /** One upload of the file to storage, in the ticket's form. Never throws: every ending is an outcome. */
+    private send(ticket: LambderUploadTicket, file: File, signal: AbortSignal | undefined, onSent: (sentBytes: number) => void): Promise<StorageOutcome> {
         if(signal?.aborted) return Promise.resolve({ kind: "cancelled" });
-        const form = new FormData();
-        for(const [name, value] of Object.entries(ticket.formFields)) form.append(name, value);
-        // Storage ignores every field that comes after the file.
-        form.append("file", file);
+        let request: StorageRequest;
+        if(ticket.method === "PUT"){
+            request = { method: "PUT", url: ticket.uploadUrl, body: file, headers: ticket.headers };
+        }else{
+            const form = new FormData();
+            for(const [name, value] of Object.entries(ticket.formFields)) form.append(name, value);
+            // Storage ignores every field that comes after the file.
+            form.append("file", file);
+            request = { method: "POST", url: ticket.uploadUrl, body: form, headers: {} };
+        }
         return typeof XMLHttpRequest === "function"
-            ? postWithXhr(ticket.uploadUrl, form, file.size, this.stallTimeoutMs, signal, onSent)
-            : postWithFetch(ticket.uploadUrl, form, file.size, signal, onSent);
+            ? sendWithXhr(request, file.size, this.stallTimeoutMs, signal, onSent)
+            : sendWithFetch(request, file.size, signal, onSent);
     }
 }
 
+/** What goes to storage: a form posted, or the file itself put, with the ticket's headers. */
+type StorageRequest = { method: "POST" | "PUT"; url: string; body: FormData | File; headers: Record<string, string> };
+
 /** XMLHttpRequest rather than fetch where it exists: fetch cannot report how much of a request body has been sent. */
-const postWithXhr = (url: string, form: FormData, fileBytes: number, stallTimeoutMs: number, signal: AbortSignal | undefined, onSent: (sentBytes: number) => void) =>
+const sendWithXhr = ({ method, url, body, headers }: StorageRequest, fileBytes: number, stallTimeoutMs: number, signal: AbortSignal | undefined, onSent: (sentBytes: number) => void) =>
     new Promise<StorageOutcome>((resolve) => {
         const request = new XMLHttpRequest();
         let stalled = false;
@@ -251,7 +261,7 @@ const postWithXhr = (url: string, form: FormData, fileBytes: number, stallTimeou
 
         request.upload.onprogress = (event) => {
             watchForStall();
-            // `loaded` counts the form's own framing too, a little over the file.
+            // A form's `loaded` counts its own framing too, a little over the file.
             onSent(Math.min(event.loaded, fileBytes));
         };
         request.onload = () => {
@@ -265,18 +275,19 @@ const postWithXhr = (url: string, form: FormData, fileBytes: number, stallTimeou
         signal?.addEventListener("abort", cancel, { once: true });
         watchForStall();
         try{
-            request.open("POST", url);
-            request.send(form);
+            request.open(method, url);
+            for(const [name, value] of Object.entries(headers)) request.setRequestHeader(name, value);
+            request.send(body);
         }catch{
             // A URL the browser will not open, or a request it will not send, answers nothing.
             settle({ kind: "unreachable" });
         }
     });
 
-const postWithFetch = async (url: string, form: FormData, fileBytes: number, signal: AbortSignal | undefined, onSent: (sentBytes: number) => void): Promise<StorageOutcome> => {
+const sendWithFetch = async ({ method, url, body, headers }: StorageRequest, fileBytes: number, signal: AbortSignal | undefined, onSent: (sentBytes: number) => void): Promise<StorageOutcome> => {
     let response: Response;
     try{
-        response = await fetch(url, { method: "POST", body: form, signal });
+        response = await fetch(url, { method, body, headers, signal });
     }catch{
         return signal?.aborted ? { kind: "cancelled" } : { kind: "unreachable" };
     }

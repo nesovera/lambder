@@ -5,6 +5,7 @@ import {
     type LambderUploadBucket,
     type LambderUploadContentDisposition,
     type LambderUploadFileFacts,
+    type LambderUploadMethod,
     type LambderUploadObjectOptions,
     type LambderUploadRule,
     type LambderUploadTicket,
@@ -12,7 +13,7 @@ import {
 } from "../shared/contracts/LambderUploadBucket.js";
 import { contentDispositionHeader } from "../shared/util/LambderContentDisposition.js";
 import { escapeXmlText } from "../shared/util/escapeXmlText.js";
-import { uploadObjectFormFields } from "../shared/wire/LambderUploadObjectFields.js";
+import { uploadObjectFormFields, uploadObjectHeaders } from "../shared/wire/LambderUploadObjectFields.js";
 import { refuseUnacceptedUpload } from "../shared/wire/LambderUploadRefusal.js";
 import { sha256Base64Of } from "../shared/util/LambderTextDigest.js";
 
@@ -31,16 +32,19 @@ export type LambderMemoryUploadBucketOptions = {
     downloadLifetimeSeconds?: number;
     /** The clock tickets and links expire by, injectable so a test can move past an expiry without waiting. Default: Date.now. */
     now?: () => number;
+    /** How the browser sends a file, as LambderS3UploadBucket's option: a `POST` form or a `PUT`. Default: `POST`. */
+    uploadMethod?: LambderUploadMethod;
 };
 
 type StoredObject = { body: Uint8Array; mimeType: string; sha256Base64: string; object: LambderUploadObjectOptions };
-type IssuedTicket = { objectKey: string; mimeType: string; byteSize: number; sha256Base64: string; expiresAt: number; formFields: Record<string, string>; object: LambderUploadObjectOptions };
+/** A ticket as issued: for a POST the form fields it pins, for a PUT the headers. */
+type IssuedTicket = { objectKey: string; mimeType: string; byteSize: number; sha256Base64: string; expiresAt: number; pinned: Record<string, string>; object: LambderUploadObjectOptions };
 type IssuedLink = { objectKey: string; expiresAt: number; contentDisposition: LambderUploadContentDisposition | undefined };
 
 /** What the memory bucket holds under a key, for a test to assert on: the object's facts and what it carries. */
 export type LambderMemoryUploadObject = { byteSize: number; mimeType: string; sha256Base64: string } & LambderUploadObjectOptions;
 
-/** The form field that names the ticket a post was signed with: the memory bucket's stand-in for S3's signed policy. */
+/** The form field, or for a PUT the query parameter, that names the ticket an upload was signed with: the memory bucket's stand-in for S3's signature. */
 const TICKET_FIELD = "x-lambder-upload-ticket";
 /** The query parameter that names the link a download was issued with: the stand-in for S3's presigned query string. */
 const LINK_PARAMETER = "x-lambder-download-link";
@@ -58,7 +62,11 @@ const LINK_PARAMETER = "x-lambder-download-link";
  * expired" for a late one, EntityTooSmall, EntityTooLarge, BadDigest), so any
  * client, a LambderUploadRunner or another, takes the same path against it as
  * against S3: an expired ticket is asked for again, a wrong file is refused.
- * A download link reads the object until it expires.
+ * With `uploadMethod: "PUT"` it holds a PUT to the rules a store holds a
+ * presigned PUT to: every header the ticket carries with its value, no other
+ * `x-amz-` header, a body of the signed length (SignatureDoesNotMatch
+ * otherwise), a URL not yet expired ("Request has expired"), and bytes with
+ * the SHA-256 (BadDigest). A download link reads the object until it expires.
  *
  * Storage requests reach it through handleStorageRequest(), which answers a
  * fetch Request with a Response: lambderMockUploadMswHandler plugs that into
@@ -71,12 +79,13 @@ export class LambderMemoryUploadBucket implements LambderUploadBucket {
     readonly baseUrl: string;
     private readonly ticketLifetimeSeconds: number;
     private readonly downloadLifetimeSeconds: number;
+    private readonly uploadMethod: LambderUploadMethod;
     private readonly now: () => number;
     private readonly objects = new Map<string, StoredObject>();
     private readonly tickets = new Map<string, IssuedTicket>();
     private readonly links = new Map<string, IssuedLink>();
 
-    constructor({ baseUrl, ticketLifetimeSeconds = 600, downloadLifetimeSeconds = 300, now = Date.now }: LambderMemoryUploadBucketOptions = {}){
+    constructor({ baseUrl, ticketLifetimeSeconds = 600, downloadLifetimeSeconds = 300, now = Date.now, uploadMethod = "POST" }: LambderMemoryUploadBucketOptions = {}){
         assertSignatureLifetime(ticketLifetimeSeconds, "ticketLifetimeSeconds");
         assertSignatureLifetime(downloadLifetimeSeconds, "downloadLifetimeSeconds");
         const url = new URL(baseUrl ?? `https://upload-bucket-${crypto.randomUUID()}.invalid/`);
@@ -85,6 +94,7 @@ export class LambderMemoryUploadBucket implements LambderUploadBucket {
         this.baseUrl = url.href.endsWith("/") ? url.href : `${url.href}/`;
         this.ticketLifetimeSeconds = ticketLifetimeSeconds;
         this.downloadLifetimeSeconds = downloadLifetimeSeconds;
+        this.uploadMethod = uploadMethod;
         this.now = now;
     }
 
@@ -101,6 +111,19 @@ export class LambderMemoryUploadBucket implements LambderUploadBucket {
         refuseUnacceptedUpload(uploadRule, fileFacts);
         const ticketId = crypto.randomUUID();
         const expiresAt = this.now() + lifetimeSeconds * 1000;
+        const issued = { objectKey, mimeType: fileFacts.mimeType, byteSize: fileFacts.byteSize, sha256Base64: fileFacts.sha256Base64, expiresAt, object };
+        if(this.uploadMethod === "PUT"){
+            // The headers a presigned PUT signs, so a client sends the same ones to either.
+            const headers = {
+                "content-type": fileFacts.mimeType,
+                "x-amz-checksum-sha256": fileFacts.sha256Base64,
+                ...uploadObjectHeaders(object),
+            };
+            this.tickets.set(ticketId, { ...issued, pinned: headers });
+            const uploadUrl = new URL(`${this.baseUrl}${encodeObjectKey(objectKey)}`);
+            uploadUrl.searchParams.set(TICKET_FIELD, ticketId);
+            return { method: "PUT", uploadUrl: uploadUrl.href, headers, expiresAt };
+        }
         // The fields S3's ticket carries, so a client posts the same form to either.
         const formFields = {
             key: objectKey,
@@ -110,8 +133,8 @@ export class LambderMemoryUploadBucket implements LambderUploadBucket {
             ...uploadObjectFormFields(object),
             [TICKET_FIELD]: ticketId,
         };
-        this.tickets.set(ticketId, { objectKey, mimeType: fileFacts.mimeType, byteSize: fileFacts.byteSize, sha256Base64: fileFacts.sha256Base64, expiresAt, formFields, object });
-        return { uploadUrl: this.baseUrl, formFields, expiresAt };
+        this.tickets.set(ticketId, { ...issued, pinned: formFields });
+        return { method: "POST", uploadUrl: this.baseUrl, formFields, expiresAt };
     }
 
     async verifyUploadedObject({ objectKey, fileFacts }: { objectKey: string; fileFacts: Pick<LambderUploadFileFacts, "byteSize" | "sha256Base64"> }): Promise<LambderUploadVerdict> {
@@ -181,10 +204,10 @@ export class LambderMemoryUploadBucket implements LambderUploadBucket {
     }
 
     /**
-     * Answers a request to storage the way S3 answers it: a post under a
-     * ticket stores its file, a GET or HEAD through a download link reads an
-     * object. A request outside baseUrl answers null, for the caller to hand
-     * on.
+     * Answers a request to storage the way S3 answers it: a post or a PUT
+     * under a ticket stores its file, a GET or HEAD through a download link
+     * reads an object. A request outside baseUrl answers null, for the caller
+     * to hand on.
      */
     async handleStorageRequest(request: Request): Promise<Response | null> {
         const url = new URL(request.url);
@@ -196,6 +219,7 @@ export class LambderMemoryUploadBucket implements LambderUploadBucket {
             return storageError(400, "InvalidURI", "Couldn't parse the specified URI.");
         }
         if(request.method === "POST" && objectKey === "") return this.acceptUpload(request);
+        if(request.method === "PUT") return this.acceptPut(request, objectKey, url.searchParams.get(TICKET_FIELD));
         if(request.method === "GET" || request.method === "HEAD") return this.serveDownload(objectKey, url.searchParams.get(LINK_PARAMETER), request.method === "HEAD");
         return storageError(405, "MethodNotAllowed", "The specified method is not allowed against this resource.");
     }
@@ -225,9 +249,9 @@ export class LambderMemoryUploadBucket implements LambderUploadBucket {
         const ticket = ticketId === undefined ? undefined : this.tickets.get(ticketId);
         if(!ticket) return storageError(403, "AccessDenied", "Invalid according to Policy: Policy Condition failed");
         if(this.now() >= ticket.expiresAt) return storageError(403, "AccessDenied", "Invalid according to Policy: Policy expired.");
-        const extra = [...fields.keys()].filter((name) => !(name in ticket.formFields));
+        const extra = [...fields.keys()].filter((name) => !(name in ticket.pinned));
         if(extra.length) return storageError(403, "AccessDenied", `Invalid according to Policy: Extra input fields: ${extra.join(", ")}`);
-        const pinned = Object.entries(ticket.formFields).every(([name, value]) => fields.get(name) === value);
+        const pinned = Object.entries(ticket.pinned).every(([name, value]) => fields.get(name) === value);
         if(!pinned) return storageError(403, "AccessDenied", "Invalid according to Policy: Policy Condition failed");
         const body = new Uint8Array(await file.arrayBuffer());
         if(body.byteLength < ticket.byteSize) return storageError(400, "EntityTooSmall", "Your proposed upload is smaller than the minimum allowed size");
@@ -236,6 +260,28 @@ export class LambderMemoryUploadBucket implements LambderUploadBucket {
         if(sha256Base64 !== ticket.sha256Base64) return storageError(400, "BadDigest", "The SHA256 you specified did not match the calculated checksum.");
         this.objects.set(ticket.objectKey, { body, mimeType: ticket.mimeType, sha256Base64, object: ticket.object });
         return new Response(null, { status: 204 });
+    }
+
+    /**
+     * A PUT under a ticket's signed URL. A header the signature covers with
+     * another value, or a body of another length, does not match the
+     * signature; an `x-amz-` header it does not cover is refused as a store
+     * refuses one; the checksum is held against the bytes.
+     */
+    private async acceptPut(request: Request, objectKey: string, ticketId: string | null): Promise<Response> {
+        const ticket = ticketId === null ? undefined : this.tickets.get(ticketId);
+        const mismatch = () => storageError(403, "SignatureDoesNotMatch", "The request signature we calculated does not match the signature you provided. Check your key and signing method.");
+        if(!ticket || ticket.objectKey !== objectKey) return mismatch();
+        if(this.now() >= ticket.expiresAt) return storageError(403, "AccessDenied", "Request has expired");
+        const unsigned = [...request.headers.keys()].filter((name) => name.startsWith("x-amz-") && !(name in ticket.pinned));
+        if(unsigned.length) return storageError(403, "AccessDenied", `There were headers present in the request which were not signed: ${unsigned.join(", ")}`);
+        if(!Object.entries(ticket.pinned).every(([name, value]) => request.headers.get(name) === value)) return mismatch();
+        const body = new Uint8Array(await request.arrayBuffer());
+        if(body.byteLength !== ticket.byteSize) return mismatch();
+        const sha256Base64 = await sha256Base64Of(body);
+        if(sha256Base64 !== ticket.sha256Base64) return storageError(400, "BadDigest", "The SHA256 you specified did not match the calculated checksum.");
+        this.objects.set(ticket.objectKey, { body, mimeType: ticket.mimeType, sha256Base64, object: ticket.object });
+        return new Response(null, { status: 200 });
     }
 
     private serveDownload(objectKey: string, linkId: string | null, headOnly: boolean): Response {

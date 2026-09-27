@@ -90,7 +90,7 @@ export class LambderUploadRunner {
         for (;;) {
             stopIfCancelled();
             report("uploading");
-            const outcome = await this.post(issued.ticket, file, signal, (sentBytes) => report("uploading", sentBytes));
+            const outcome = await this.send(issued.ticket, file, signal, (sentBytes) => report("uploading", sentBytes));
             if (outcome.kind === "stored")
                 break;
             if (outcome.kind === "cancelled")
@@ -124,22 +124,29 @@ export class LambderUploadRunner {
     async discard(receipt) {
         await this.options.discardUpload?.(receipt);
     }
-    /** One post of the file to storage. Never throws: every ending is an outcome. */
-    post(ticket, file, signal, onSent) {
+    /** One upload of the file to storage, in the ticket's form. Never throws: every ending is an outcome. */
+    send(ticket, file, signal, onSent) {
         if (signal?.aborted)
             return Promise.resolve({ kind: "cancelled" });
-        const form = new FormData();
-        for (const [name, value] of Object.entries(ticket.formFields))
-            form.append(name, value);
-        // Storage ignores every field that comes after the file.
-        form.append("file", file);
+        let request;
+        if (ticket.method === "PUT") {
+            request = { method: "PUT", url: ticket.uploadUrl, body: file, headers: ticket.headers };
+        }
+        else {
+            const form = new FormData();
+            for (const [name, value] of Object.entries(ticket.formFields))
+                form.append(name, value);
+            // Storage ignores every field that comes after the file.
+            form.append("file", file);
+            request = { method: "POST", url: ticket.uploadUrl, body: form, headers: {} };
+        }
         return typeof XMLHttpRequest === "function"
-            ? postWithXhr(ticket.uploadUrl, form, file.size, this.stallTimeoutMs, signal, onSent)
-            : postWithFetch(ticket.uploadUrl, form, file.size, signal, onSent);
+            ? sendWithXhr(request, file.size, this.stallTimeoutMs, signal, onSent)
+            : sendWithFetch(request, file.size, signal, onSent);
     }
 }
 /** XMLHttpRequest rather than fetch where it exists: fetch cannot report how much of a request body has been sent. */
-const postWithXhr = (url, form, fileBytes, stallTimeoutMs, signal, onSent) => new Promise((resolve) => {
+const sendWithXhr = ({ method, url, body, headers }, fileBytes, stallTimeoutMs, signal, onSent) => new Promise((resolve) => {
     const request = new XMLHttpRequest();
     let stalled = false;
     let stallTimer;
@@ -158,7 +165,7 @@ const postWithXhr = (url, form, fileBytes, stallTimeoutMs, signal, onSent) => ne
     };
     request.upload.onprogress = (event) => {
         watchForStall();
-        // `loaded` counts the form's own framing too, a little over the file.
+        // A form's `loaded` counts its own framing too, a little over the file.
         onSent(Math.min(event.loaded, fileBytes));
     };
     request.onload = () => {
@@ -173,18 +180,20 @@ const postWithXhr = (url, form, fileBytes, stallTimeoutMs, signal, onSent) => ne
     signal?.addEventListener("abort", cancel, { once: true });
     watchForStall();
     try {
-        request.open("POST", url);
-        request.send(form);
+        request.open(method, url);
+        for (const [name, value] of Object.entries(headers))
+            request.setRequestHeader(name, value);
+        request.send(body);
     }
     catch {
         // A URL the browser will not open, or a request it will not send, answers nothing.
         settle({ kind: "unreachable" });
     }
 });
-const postWithFetch = async (url, form, fileBytes, signal, onSent) => {
+const sendWithFetch = async ({ method, url, body, headers }, fileBytes, signal, onSent) => {
     let response;
     try {
-        response = await fetch(url, { method: "POST", body: form, signal });
+        response = await fetch(url, { method, body, headers, signal });
     }
     catch {
         return signal?.aborted ? { kind: "cancelled" } : { kind: "unreachable" };

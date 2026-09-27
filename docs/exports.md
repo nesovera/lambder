@@ -225,12 +225,12 @@ See [Frontend hosting](./frontend-hosting.md).
 
 | Export | Client | Description |
 | --- | --- | --- |
-| `LambderS3UploadBucket` | | An S3 bucket browsers post files to with presigned POST tickets, and that the server verifies, reads, writes, copies and deletes through |
+| `LambderS3UploadBucket` | | An S3 bucket browsers upload files to with presigned POST or PUT tickets, and that the server verifies, reads, writes, copies and deletes through |
 | `LambderMemoryUploadBucket` | | The same bucket in memory, answering storage requests the way S3 does, for tests and the mock runtime |
 | `LambderUploadFileFactsSchema`, `LambderUploadTicketSchema` | | The zod schemas an app's ticket endpoint declares its input and output with |
 | `checkUploadRule` | yes | A rule's verdict on a file's type and size, or null when it may be uploaded |
 | `refuseUnacceptedUpload` | | Refuses a ticket for a file the rule does not accept, with the `lambder/upload-*` code; what a bucket of an app's own calls before it signs |
-| `LambderUploadRunner` | yes | The browser half: checks the file against the rule, hashes it, asks for a ticket, posts it with progress, retries and cancellation, and has the server confirm it |
+| `LambderUploadRunner` | yes | The browser half: checks the file against the rule, hashes it, asks for a ticket, sends it with progress, retries and cancellation, and has the server confirm it |
 | `LambderUploadError` | yes | How an upload failed, as a reason a screen can word |
 
 Types: `LambderUploadBucket` (the interface both buckets implement),
@@ -239,7 +239,7 @@ carries: tags, metadata, cache and disposition headers),
 `LambderUploadContentDisposition`, `LambderS3UploadBucketOptions`,
 `LambderMemoryUploadBucketOptions`, `LambderMemoryUploadObject` (what
 `inspectObject` answers); and, the client too, `LambderUploadRule`,
-`LambderUploadFileFacts`, `LambderUploadTicket`, `LambderUploadRuleVerdict`,
+`LambderUploadFileFacts`, `LambderUploadTicket`, `LambderUploadMethod`, `LambderUploadRuleVerdict`,
 `LambderUploadRunnerOptions`, `LambderUploadProgress`, `LambderUploadPhase`,
 `LambderUploadFailureReason`.
 
