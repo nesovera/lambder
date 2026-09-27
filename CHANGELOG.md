@@ -9,6 +9,25 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [9.0.3] - 2026-09-27
+
+An upload bucket can now sign a ticket that sends the file with a PUT instead
+of a form POST, for a store without S3's presigned POST (Cloudflare R2 among
+them).
+
+### Added
+
+- **`LambderUploadTicket` is `{ method: "POST", ... }` or `{ method: "PUT",
+  ... }`.** A POST ticket carries `formFields` as before; a PUT ticket carries
+  `headers`, every one signed into the URL, that `LambderUploadRunner` sends
+  unchanged with the file as the body. `LambderMemoryUploadBucket` and
+  `LambderS3UploadBucket` both take a `uploadMethod` option (default `POST`)
+  and sign whichever kind of ticket that asks for.
+- **`uploadObjectHeaders`** builds a PUT ticket's headers the way
+  `uploadObjectFormFields` builds a POST ticket's fields: the tag set as
+  `x-amz-tagging`, each metadata entry as `x-amz-meta-<name>`, `cache-control`
+  and `content-disposition`.
+
 ## [9.0.2] - 2026-09-27
 
 Nothing a handler or a caller does changes; the package, its docs and its

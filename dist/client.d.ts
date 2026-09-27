@@ -46,4 +46,4 @@ export { constantTimeEquals } from "./shared/util/LambderTextDigest.js";
 export { LambderUploadRunner, LambderUploadError } from "./client/LambderUploadRunner.js";
 export type { LambderUploadRunnerOptions, LambderUploadProgress, LambderUploadPhase, LambderUploadFailureReason } from "./client/LambderUploadRunner.js";
 export { checkUploadRule } from "./shared/contracts/LambderUploadBucket.js";
-export type { LambderUploadRule, LambderUploadFileFacts, LambderUploadTicket, LambderUploadRuleVerdict } from "./shared/contracts/LambderUploadBucket.js";
+export type { LambderUploadRule, LambderUploadFileFacts, LambderUploadTicket, LambderUploadMethod, LambderUploadRuleVerdict } from "./shared/contracts/LambderUploadBucket.js";

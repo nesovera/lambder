@@ -31,7 +31,7 @@ order the first time.
 | --- | --- |
 | [Frontend client](./client.md) | `LambderCaller`: typed calls, `apiOutcome`, timeouts, guard inputs, idempotency keys, request compression, transports |
 | [Frontend hosting](./frontend-hosting.md) | File sources (local, S3, R2, HTTP), `servePublicFiles`, `serveIndexHtml`, `res.templateFile` |
-| [Direct uploads](./uploads.md) | Files the browser posts straight to S3 with tickets the server signs: `LambderS3UploadBucket`, `LambderUploadRunner`, and `LambderMemoryUploadBucket` for tests and the mock |
+| [Direct uploads](./uploads.md) | Files the browser sends straight to S3, or to a store that takes presigned PUTs such as R2, with tickets the server signs: `LambderS3UploadBucket`, `LambderUploadRunner`, and `LambderMemoryUploadBucket` for tests and the mock |
 | [Templating](./templating.md) | `html`/`xml` tagged templates and the comment-only `LambderTemplatingEngine` |
 | [Translations](./i18n.md) | `createLambderI18n`: typed keys, component extension, language detection, on-demand languages, runtime dictionaries |
 | [The mock runtime](./mock.md) | `LambderMockApp`: your typed contract served from mock handlers over the real pipeline, in the browser and in tests |

@@ -6,13 +6,14 @@ import {
     type LambderUploadBucket,
     type LambderUploadContentDisposition,
     type LambderUploadFileFacts,
+    type LambderUploadMethod,
     type LambderUploadObjectOptions,
     type LambderUploadRule,
     type LambderUploadTicket,
     type LambderUploadVerdict,
 } from "../shared/contracts/LambderUploadBucket.js";
 import { contentDispositionHeader } from "../shared/util/LambderContentDisposition.js";
-import { uploadObjectFormFields } from "../shared/wire/LambderUploadObjectFields.js";
+import { uploadObjectFormFields, uploadObjectHeaders } from "../shared/wire/LambderUploadObjectFields.js";
 import { refuseUnacceptedUpload } from "../shared/wire/LambderUploadRefusal.js";
 import { withInstallHint } from "./LambderSdkInstallHint.js";
 
@@ -26,6 +27,14 @@ export type LambderS3UploadBucketOptions = {
     ticketLifetimeSeconds?: number;
     /** How long a download link reads the object, unless a link says otherwise. Default: 300 seconds. */
     downloadLifetimeSeconds?: number;
+    /**
+     * How the browser sends a file: `POST`, a presigned POST, which S3 takes;
+     * or `PUT`, a presigned PUT, for a store that has no POST policies
+     * (Cloudflare R2). Both pin the same facts. Default: `POST`. The bucket
+     * cannot tell S3 from another store behind an endpoint, so a store that
+     * refuses POST is named here.
+     */
+    uploadMethod?: LambderUploadMethod;
 };
 
 /** The S3 error names that mean nothing is stored under the key: HeadObject answers NotFound, the other calls NoSuchKey. */
@@ -41,7 +50,10 @@ type RequestPresignerSdk = typeof import("@aws-sdk/s3-request-presigner");
  * A ticket is an S3 presigned POST whose policy pins the key, the content
  * type, the exact byte size and the SHA-256 checksum, so S3 itself refuses
  * any other file. That needs S3's POST policies with checksum fields: S3, or
- * a store that implements them; Cloudflare R2 does not take presigned POSTs.
+ * a store that implements them. A store without them (Cloudflare R2) takes
+ * `uploadMethod: "PUT"`: a presigned PUT whose signature covers the same
+ * facts as headers (the length, the type and the checksum), so the store
+ * refuses any other file just the same.
  *
  * Signing a ticket or a download link is arithmetic over the function's
  * credentials and reaches nothing; verifying, reading, writing, copying and
@@ -56,13 +68,14 @@ export class LambderS3UploadBucket implements LambderUploadBucket {
     private readonly bucket: string;
     private readonly ticketLifetimeSeconds: number;
     private readonly downloadLifetimeSeconds: number;
+    private readonly uploadMethod: LambderUploadMethod;
     private readonly clientConfig: S3ClientConfig | undefined;
     private client: S3Client | undefined;
     private clientSdk: Promise<ClientSdk> | undefined;
     private presignedPostSdk: Promise<PresignedPostSdk> | undefined;
     private requestPresignerSdk: Promise<RequestPresignerSdk> | undefined;
 
-    constructor({ bucket, client, clientConfig, ticketLifetimeSeconds = 600, downloadLifetimeSeconds = 300 }: LambderS3UploadBucketOptions){
+    constructor({ bucket, client, clientConfig, ticketLifetimeSeconds = 600, downloadLifetimeSeconds = 300, uploadMethod = "POST" }: LambderS3UploadBucketOptions){
         if(!bucket.trim()) throw new Error("bucket is required");
         assertSignatureLifetime(ticketLifetimeSeconds, "ticketLifetimeSeconds");
         assertSignatureLifetime(downloadLifetimeSeconds, "downloadLifetimeSeconds");
@@ -71,6 +84,7 @@ export class LambderS3UploadBucket implements LambderUploadBucket {
         this.clientConfig = clientConfig;
         this.ticketLifetimeSeconds = ticketLifetimeSeconds;
         this.downloadLifetimeSeconds = downloadLifetimeSeconds;
+        this.uploadMethod = uploadMethod;
     }
 
     async issueUploadTicket({ objectKey, fileFacts, uploadRule, lifetimeSeconds = this.ticketLifetimeSeconds, object }: {
@@ -84,6 +98,7 @@ export class LambderS3UploadBucket implements LambderUploadBucket {
         assertSignatureLifetime(lifetimeSeconds, "lifetimeSeconds");
         assertObjectOptions(object);
         refuseUnacceptedUpload(uploadRule, fileFacts);
+        if(this.uploadMethod === "PUT") return this.issuePutTicket(objectKey, fileFacts, lifetimeSeconds, object);
         const [{ client }, { createPresignedPost }] = await Promise.all([this.s3(), this.loadPresignedPostSdk()]);
         const post = await createPresignedPost(client, {
             Bucket: this.bucket,
@@ -98,7 +113,53 @@ export class LambderS3UploadBucket implements LambderUploadBucket {
             },
             Conditions: [["content-length-range", fileFacts.byteSize, fileFacts.byteSize]],
         });
-        return { uploadUrl: post.url, formFields: post.fields, expiresAt: Date.now() + lifetimeSeconds * 1000 };
+        return { method: "POST", uploadUrl: post.url, formFields: post.fields, expiresAt: Date.now() + lifetimeSeconds * 1000 };
+    }
+
+    /**
+     * A presigned PUT. Every header the ticket hands the browser is signed
+     * into the URL, and so is the length, which the browser sets from the
+     * body itself; the `x-amz-` ones are kept as headers rather than moved
+     * into the query, so the store checks the body against the checksum.
+     */
+    private async issuePutTicket(
+        objectKey: string,
+        fileFacts: LambderUploadFileFacts,
+        lifetimeSeconds: number,
+        object: LambderUploadObjectOptions | undefined,
+    ): Promise<LambderUploadTicket> {
+        const headers: Record<string, string> = {
+            "content-type": fileFacts.mimeType,
+            "x-amz-checksum-sha256": fileFacts.sha256Base64,
+            ...uploadObjectHeaders(object),
+        };
+        const [{ sdk, client }, { getSignedUrl }] = await Promise.all([this.s3(), this.loadRequestPresignerSdk()]);
+        const tags = Object.entries(object?.tags ?? {});
+        const metadata = Object.entries(object?.metadata ?? {});
+        const uploadUrl = await getSignedUrl(client, new sdk.PutObjectCommand({
+            Bucket: this.bucket,
+            Key: objectKey,
+            ContentType: fileFacts.mimeType,
+            ContentLength: fileFacts.byteSize,
+            ChecksumSHA256: fileFacts.sha256Base64,
+            ...(tags.length ? { Tagging: new URLSearchParams(tags).toString() } : {}),
+            ...(metadata.length ? { Metadata: Object.fromEntries(metadata.map(([name, value]) => [name.toLowerCase(), value])) } : {}),
+            ...(object?.cacheControl !== undefined ? { CacheControl: object.cacheControl } : {}),
+            ...(object?.contentDisposition ? { ContentDisposition: contentDispositionHeader(object.contentDisposition) } : {}),
+        }), {
+            expiresIn: lifetimeSeconds,
+            signableHeaders: new Set([...Object.keys(headers), "content-length"]),
+            unhoistableHeaders: new Set(Object.keys(headers).filter((name) => name.startsWith("x-amz-"))),
+        });
+        // What the URL is signed for must be what the ticket sends, or the
+        // store refuses every upload with it: said here, where it is written,
+        // rather than as a refused upload in a browser.
+        const signed = (new URL(uploadUrl).searchParams.get("X-Amz-SignedHeaders") ?? "").split(";").filter((name) => name !== "host" && name !== "content-length");
+        const sent = Object.keys(headers);
+        if(signed.length !== sent.length || !sent.every((name) => signed.includes(name))){
+            throw new Error(`LambderS3UploadBucket: a PUT ticket's URL is signed for [${signed.join(", ")}] but the ticket sends [${sent.join(", ")}]`);
+        }
+        return { method: "PUT", uploadUrl, headers, expiresAt: Date.now() + lifetimeSeconds * 1000 };
     }
 
     async verifyUploadedObject({ objectKey, fileFacts }: { objectKey: string; fileFacts: Pick<LambderUploadFileFacts, "byteSize" | "sha256Base64"> }): Promise<LambderUploadVerdict> {

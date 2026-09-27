@@ -88,7 +88,7 @@ export type { LambderS3UploadBucketOptions } from "./stores/LambderS3UploadBucke
 export { LambderMemoryUploadBucket } from "./stores/LambderMemoryUploadBucket.js";
 export type { LambderMemoryUploadBucketOptions, LambderMemoryUploadObject } from "./stores/LambderMemoryUploadBucket.js";
 export { checkUploadRule } from "./shared/contracts/LambderUploadBucket.js";
-export type { LambderUploadBucket, LambderUploadRule, LambderUploadFileFacts, LambderUploadTicket, LambderUploadVerdict, LambderUploadRuleVerdict, LambderUploadObjectOptions, LambderUploadContentDisposition, } from "./shared/contracts/LambderUploadBucket.js";
+export type { LambderUploadBucket, LambderUploadRule, LambderUploadFileFacts, LambderUploadTicket, LambderUploadMethod, LambderUploadVerdict, LambderUploadRuleVerdict, LambderUploadObjectOptions, LambderUploadContentDisposition, } from "./shared/contracts/LambderUploadBucket.js";
 export { LambderUploadFileFactsSchema, LambderUploadTicketSchema } from "./shared/wire/LambderUploadSchemas.js";
 export { refuseUnacceptedUpload } from "./shared/wire/LambderUploadRefusal.js";
 export { LambderUploadRunner, LambderUploadError } from "./client/LambderUploadRunner.js";

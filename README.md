@@ -69,8 +69,9 @@ const company = await caller.api("getCompany", { slug: "acme" });
 - **Frontend hosting.** Serve a build from a folder, S3, R2 or any HTTP
   origin, with an app shell rendered through a build-pipeline-safe template
   engine.
-- **Direct uploads.** Files go from the browser straight to S3 on tickets
-  that pin their size, type and SHA-256, with a browser runner that hashes,
+- **Direct uploads.** Files go from the browser straight to S3, or to R2 on
+  presigned PUTs, on tickets that pin their size, type and SHA-256, with a
+  browser runner that hashes,
   retries and reports progress, and a memory bucket that holds tests and the
   mock to the same rules.
 - **Runs anywhere Lambda does.** API Gateway REST APIs (payload v1), HTTP APIs
@@ -163,7 +164,7 @@ guide that matches what you are building. The full index lives in
 | [The API core](./docs/api-core.md) | `LambderApiPipeline`: the one pipeline the server and the mock runtime run, the store interfaces, the transports |
 | [Frontend client](./docs/client.md) | `LambderCaller`: typed calls, failure outcomes, timeouts, guard inputs, request compression, transports |
 | [Frontend hosting](./docs/frontend-hosting.md) | File sources, `servePublicFiles`, `serveIndexHtml`, `res.templateFile` |
-| [Direct uploads](./docs/uploads.md) | Files the browser posts straight to S3 with tickets the server signs, verified before they count |
+| [Direct uploads](./docs/uploads.md) | Files the browser sends straight to S3 or R2 with tickets the server signs, verified before they count |
 | [Templating](./docs/templating.md) | `html`/`xml` tagged templates and `LambderTemplatingEngine` |
 | [Translations](./docs/i18n.md) | `createLambderI18n`: typed keys, extension, detection, on-demand languages, runtime dictionaries |
 | [The mock runtime](./docs/mock.md) | `LambderMockApp`: the typed contract served from mock handlers over the real pipeline, in the browser and in tests |
