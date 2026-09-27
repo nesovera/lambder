@@ -39,15 +39,15 @@ const createServer = () => {
         session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
     })
         .addApi('echo', { input: z.object({ text: z.string() }), output: z.object({ text: z.string(), ip: z.string(), host: z.string() }) },
-            async (ctx, res) => res.api({ text: ctx.apiPayload.text, ip: ctx.ip, host: ctx.host }))
+            async (ctx) => ({ text: ctx.apiPayload.text, ip: ctx.ip, host: ctx.host }))
         .addApi('big', { input: z.object({}), output: z.object({ rows: z.array(z.string()) }) },
-            async (_ctx, res) => res.api({ rows: Array.from({ length: 400 }, (_, i) => `row-${i} of the same text`) }))
+            async (_ctx) => ({ rows: Array.from({ length: 400 }, (_, i) => `row-${i} of the same text`) }))
         .addApi('login', { input: z.object({ user: z.string() }), output: z.object({ ok: z.boolean() }) },
-            async (ctx, res) => { await app.getSessionController(ctx).createSession(ctx.apiPayload.user, { userId: ctx.apiPayload.user }); return res.api({ ok: true }); })
+            async (ctx) => { await app.getSessionController(ctx).createSession(ctx.apiPayload.user, { userId: ctx.apiPayload.user }); return { ok: true }; })
         .addSessionApi('me', { input: z.object({}), output: z.object({ userId: z.string() }) },
-            async (ctx, res) => res.api({ userId: ctx.session.data.userId }))
+            async (ctx) => ({ userId: ctx.session.data.userId }))
         .addApi('slow', { input: z.object({}), output: z.object({ ok: z.boolean() }) },
-            async (_ctx, res) => { await new Promise((resolve) => setTimeout(resolve, 300)); slowHandlerFinished = true; return res.api({ ok: true }); })
+            async (_ctx) => { await new Promise((resolve) => setTimeout(resolve, 300)); slowHandlerFinished = true; return { ok: true }; })
         .addApi('crash', { input: z.object({}), output: z.any() }, async () => { throw new Error('boom'); });
     return app;
 };
@@ -156,10 +156,8 @@ describe('lambderHandlerTransport failures', () => {
         // is answered by render() with its own 500 envelope and exercises
         // none of this. A handler that throws is a broken app, a failed
         // import or a dead pool at construction time.
-        const messages: unknown[] = [];
         const caller = new LambderCaller<Contract>({
             apiPath: '/api', apiVersion: '1', isCorsEnabled: false,
-            messageHandler: (message) => { messages.push(message); },
             transport: lambderHandlerTransport(async () => { throw new Error('the connection pool is empty'); }),
         });
 
@@ -172,9 +170,6 @@ describe('lambderHandlerTransport failures', () => {
         }else{
             throw new Error(`expected a server failure, got ${outcome.ok ? 'a success' : outcome.reason}`);
         }
-        // Not in the envelope's `message`, which is the field the caller
-        // hands messageHandler as text for a user to read.
-        expect(messages).toEqual([]);
     });
 
     it('calls a callee that did not answer with an HTTP result a server fault, not a network one', async () => {

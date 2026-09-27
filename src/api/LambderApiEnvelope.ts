@@ -9,8 +9,8 @@ import type { LambderApiAnswer } from "./LambderApiAnswer.js";
  * The one place the API envelope is written, and the one mapping from each
  * kind of protocol outcome onto an answer: a success, a thrown refusal, a
  * rejected input, an unknown name, a missing session, a stale client, a
- * malformed compressed payload, and the last-resort crash. The server's
- * res.api(), the mock runtime and the pipeline all build through these
+ * malformed compressed payload, and the last-resort crash. The server's API
+ * path and res.api(), the mock runtime and the pipeline all build through these
  * functions, so server and mock cannot drift on a single byte of the wire
  * format. Pure: no Node built-ins, no response classes.
  */
@@ -30,7 +30,7 @@ export const buildApiEnvelope = <T>(
     payload: T | null,
     {
         versionExpired, sessionExpired, notAuthorized,
-        message, errorMessage, logList, crash,
+        errorMessage, logList, crash,
     }: LambderApiEnvelopeConfig = {},
 ): LambderApiEnvelopeBody<T> => ({
     apiVersion: apiVersion ?? null,
@@ -43,7 +43,6 @@ export const buildApiEnvelope = <T>(
     // flags above are booleans, where false and absent mean the same. An
     // errorMessage goes out as a message object whatever form it was written
     // in, so every reader meets one shape.
-    ...(message !== undefined ? { message } : {}),
     ...(errorMessage !== undefined ? { errorMessage: refusalMessageOf(errorMessage) } : {}),
     ...(crash !== undefined ? { crash } : {}),
     ...(logList?.length ? { logList } : {}),

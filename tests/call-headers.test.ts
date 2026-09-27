@@ -1,8 +1,9 @@
 /**
- * Headers written while a call runs (res.setHeader, res.addHeader, the
- * session controller's Set-Cookie) belong to the CALL, not to the response
- * that first carried them. An afterRender hook may answer with a different
- * response than the handler produced, and they have to travel across to it:
+ * Headers written while a call runs (ctx.setResponseHeader,
+ * ctx.addResponseHeader, the session controller's Set-Cookie) belong to the
+ * CALL, not to the response that first carried them. An afterRender hook may
+ * answer with a different response than the handler produced, and they have
+ * to travel across to it:
  * a login API whose session cookie is dropped on the way out logs nobody in,
  * writes its session record anyway, and reports no error.
  *
@@ -34,10 +35,10 @@ const call = (lambder: Lambder<any, any>, apiName: string) =>
 describe('Headers written during a call', () => {
     it('survive an afterRender hook that answers with a different response', async () => {
         const lambder = app()
-            .addApi('login', { input: z.any(), output: z.any() }, async (ctx, res) => {
+            .addApi('login', { input: z.any(), output: z.any() }, async (ctx) => {
                 await lambder.getSessionController(ctx).createSession('user-1', { role: 'user' });
-                res.setHeader('X-Handler', 'ran');
-                return res.api({ ok: true });
+                ctx.setResponseHeader('X-Handler', 'ran');
+                return { ok: true };
             })
             .addHook('afterRender', (ctx, res) => res.json({ replaced: true }));
 
@@ -53,9 +54,9 @@ describe('Headers written during a call', () => {
 
     it('survive an afterRender hook that throws a refusal over the answer', async () => {
         const lambder = app()
-            .addApi('login', { input: z.any(), output: z.any() }, async (ctx, res) => {
+            .addApi('login', { input: z.any(), output: z.any() }, async (ctx) => {
                 await lambder.getSessionController(ctx).createSession('user-1', { role: 'user' });
-                return res.api({ ok: true });
+                return { ok: true };
             })
             .addHook('afterRender', () => refuse('Nope.', { code: 'app/nope' }));
 
@@ -67,11 +68,11 @@ describe('Headers written during a call', () => {
 
     it('are not doubled when the hooks leave the handler\'s own response in place', async () => {
         const lambder = app()
-            .addApi('thing', { input: z.any(), output: z.any() }, async (ctx, res) => {
-                res.addHeader('Set-Cookie', 'a=1; Path=/');
-                res.addHeader('Set-Cookie', 'b=2; Path=/');
-                res.setHeader('X-Once', 'yes');
-                return res.api({ ok: true });
+            .addApi('thing', { input: z.any(), output: z.any() }, async (ctx) => {
+                ctx.addResponseHeader('Set-Cookie', 'a=1; Path=/');
+                ctx.addResponseHeader('Set-Cookie', 'b=2; Path=/');
+                ctx.setResponseHeader('X-Once', 'yes');
+                return { ok: true };
             })
             .addHook('afterRender', (ctx, res, response) => response);
 
@@ -83,11 +84,11 @@ describe('Headers written during a call', () => {
 
     it('let a hook overwrite what the handler set, because the hook wrote it later', async () => {
         const lambder = app()
-            .addApi('thing', { input: z.any(), output: z.any() }, async (ctx, res) => {
-                res.setHeader('X-Who', 'handler');
-                return res.api({ ok: true });
+            .addApi('thing', { input: z.any(), output: z.any() }, async (ctx) => {
+                ctx.setResponseHeader('X-Who', 'handler');
+                return { ok: true };
             })
-            .addHook('afterRender', (ctx, res, response) => { res.setHeader('X-Who', 'hook'); return response; });
+            .addHook('afterRender', (ctx, res, response) => { ctx.setResponseHeader('X-Who', 'hook'); return response; });
 
         const result = await call(lambder, 'thing');
 
@@ -96,7 +97,7 @@ describe('Headers written during a call', () => {
 
     it('travel onto a replacement response on a route too, as they always have', async () => {
         const lambder = new Lambder({ files: files() })
-            .addRoute('/page', (ctx, res) => { res.setHeader('X-Handler', 'ran'); return res.html('<p>hi</p>'); })
+            .addRoute('/page', (ctx, res) => { ctx.setResponseHeader('X-Handler', 'ran'); return res.html('<p>hi</p>'); })
             .addHook('afterRender', (ctx, res) => res.json({ replaced: true }));
 
         const result = await lambder.render(createMockEvent('/page'), createMockContext());
@@ -117,9 +118,9 @@ describe('Headers written during a call', () => {
             apiPath: '/api',
             cors: { origins: ['https://site.example'] },
             session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt', tokenCookieKey: 'sid', csrfCookieKey: 'csid' },
-        }).addApi('login', { input: z.any(), output: z.any() }, async (ctx, res) => {
+        }).addApi('login', { input: z.any(), output: z.any() }, async (ctx) => {
             await lambder.getSessionController(ctx).createSession('user-1', { role: 'user' });
-            res.setHeader('X-Handler', 'ran');
+            ctx.setResponseHeader('X-Handler', 'ran');
             throw new Error('after the session was written');
         });
 
@@ -147,8 +148,8 @@ describe('An afterRender hook and the headers the handler wrote', () => {
     type AfterRenderHook = (ctx: LambderRenderContext, res: LambderResolver, response: LambderResponse) => LambderResponse;
     const pageWith = (hook: AfterRenderHook) => new Lambder({ files: files() })
         .addRoute('/page', (ctx, res) => {
-            res.setHeader('X-Owner', 'handler');
-            res.setCookie('sid', 'from-handler', { path: '/' });
+            ctx.setResponseHeader('X-Owner', 'handler');
+            ctx.setCookie('sid', 'from-handler', { path: '/' });
             return res.html('page');
         })
         .addHook('afterRender', hook);
@@ -179,7 +180,7 @@ describe('An afterRender hook and the headers the handler wrote', () => {
 
     it('still applies what the hook itself wrote through res', async () => {
         const lambder = pageWith((ctx, res, response) => {
-            res.setHeader('X-Hook', 'wrote-this');
+            ctx.setResponseHeader('X-Hook', 'wrote-this');
             return response;
         });
 

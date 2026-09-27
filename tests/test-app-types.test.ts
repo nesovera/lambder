@@ -23,9 +23,9 @@ const server = initLambder<SessionData>().create({
         tenant: lambderGuard({ guardInput: z.object({ tenantId: z.string() }), handler: (_ctx, input) => ({ tenantId: input.tenantId }) }),
     },
 })
-    .addApi('echo', { input: z.object({ text: z.string() }), output: z.object({ text: z.string() }) }, async (ctx, res) => res.api({ text: ctx.apiPayload.text }))
-    .addSessionApi('me', { input: z.object({}), output: z.object({ userId: z.string() }) }, async (ctx, res) => res.api({ userId: ctx.session.data.userId }))
-    .addApi('tenant.name', { input: z.object({}), output: z.object({ tenantId: z.string() }), guards: 'tenant' }, async (ctx, res) => res.api({ tenantId: ctx.guardData.tenant.tenantId }));
+    .addApi('echo', { input: z.object({ text: z.string() }), output: z.object({ text: z.string() }) }, async (ctx) => ({ text: ctx.apiPayload.text }))
+    .addSessionApi('me', { input: z.object({}), output: z.object({ userId: z.string() }) }, async (ctx) => ({ userId: ctx.session.data.userId }))
+    .addApi('tenant.name', { input: z.object({}), output: z.object({ tenantId: z.string() }), guards: 'tenant' }, async (ctx) => ({ tenantId: ctx.guardData.tenant.tenantId }));
 
 /** The contract as writeApiContract prints it for a large app's clients and tests: plain members. */
 type PrintedContract = {

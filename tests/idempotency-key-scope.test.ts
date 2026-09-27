@@ -9,7 +9,7 @@ import { describe, it, expect } from 'vitest';
 import { z } from 'zod';
 import { initLambder } from '../src/core/Lambder.js';
 import { LambderMemoryIdempotencyStore } from '../src/stores/LambderMemoryIdempotencyStore.js';
-import { LAMBDER_REFUSAL_CODES } from '../src/shared/wire/LambderApiRefusal.js';
+import { LAMBDER_REFUSAL_CODES, refuse } from '../src/shared/wire/LambderApiRefusal.js';
 import { beginIdempotentAttempt, createIdempotencyKeyScope } from '../src/shared/wire/LambderIdempotencyKeyScope.js';
 import { lambderTestApp, assertApiFailure } from '../src/testing.js';
 
@@ -30,15 +30,15 @@ describe('A key scope under a double-tap', () => {
             apiPath: '/api',
             idempotency: { store: new LambderMemoryIdempotencyStore() },
         }).addApi('order.place', { input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true },
-            async (ctx, res) => {
+            async (ctx) => {
                 handlerRuns += 1;
                 if(handlerRuns === 1){
                     firstTapEntered();
                     await firstTapHeld;
                 }
-                if(ctx.apiPayload.qty > 5) return res.api(null, { errorMessage: 'Only 5 in stock.' });
+                if(ctx.apiPayload.qty > 5) refuse('Only 5 in stock.', { code: 'app/out-of-stock' });
                 placed.push(ctx.apiPayload.qty);
-                return res.api({ placed: ctx.apiPayload.qty });
+                return { placed: ctx.apiPayload.qty };
             }));
         const visitor = app.visitor();
         const scope = createIdempotencyKeyScope();

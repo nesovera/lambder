@@ -37,28 +37,30 @@ const lambder = initLambder().create({
     .addApi("getUser", {
         input: z.object({ userId: z.string() }),
         output: UserSchema
-    }, async (ctx, resolver) => {
+    }, async (ctx) => {
         // ctx.apiPayload is typed as { userId: string }
         const { userId } = ctx.apiPayload;
 
-        return resolver.api({
+        // The handler returns its output: checked against UserSchema at
+        // compile time, and parsed through it before it is sent.
+        return {
             id: userId,
             name: "John Doe",
             email: "john@example.com"
-        });
+        };
     })
     .addApi("createUser", {
         input: CreateUserSchema,
         output: UserSchema
-    }, async (ctx, resolver) => {
+    }, async (ctx) => {
         // ctx.apiPayload is typed as { name: string, email: string }
         const { name, email } = ctx.apiPayload;
 
-        return resolver.api({
+        return {
             id: "123",
             name,
             email
-        });
+        };
     });
 
 // 3. Export the inferred contract type for frontend use
@@ -72,9 +74,7 @@ const authApi = (moduleLambder: ChainedApiLambder) => {
     return moduleLambder.addApi("login", {
         input: z.object({ username: z.string(), password: z.string() }),
         output: z.object({ token: z.string() })
-    }, async (ctx, resolver) => {
-        return resolver.api({ token: "abc-123" });
-    });
+    }, async () => ({ token: "abc-123" }));
 };
 
 const _lambderWithAuth = lambder.use(authApi);

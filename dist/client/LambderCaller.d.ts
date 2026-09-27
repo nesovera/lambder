@@ -29,7 +29,6 @@ type FetchEndEventHandler = (params: {
 }) => void | Promise<void>;
 type ErrorHandler = (err: Error) => void | Promise<void>;
 type ValidationErrorHandler = (zodError: LambderValidationError) => (void | false) | Promise<(void | false)>;
-type MessageHandler = (message: LambderAppRefusalMessage | string) => void | Promise<void>;
 /** Handed the refusal as its message object, a plain-string errorMessage having been read as one (refusalMessageOf). */
 type ErrorMessageHandler = (message: LambderAppRefusalMessage) => void | Promise<void>;
 /** The logListHandler option: an answer's logList, success or failure, when it has entries. The invoke caller's onLogList, for a browser. */
@@ -41,7 +40,6 @@ export type LambderLogListHandler = (apiName: string, logList: unknown[]) => voi
 export type LambderCallOptions = LambderSharedCallOptions & {
     versionExpiredHandler?: NotifyHandler;
     sessionExpiredHandler?: NotifyHandler;
-    messageHandler?: MessageHandler;
     errorMessageHandler?: ErrorMessageHandler;
     apiInputValidationErrorHandler?: ValidationErrorHandler;
     notAuthorizedHandler?: NotifyHandler;
@@ -73,7 +71,6 @@ type LambderCallerBaseOptions = {
     timeoutMs?: number;
     versionExpiredHandler?: NotifyHandler;
     sessionExpiredHandler?: NotifyHandler;
-    messageHandler?: MessageHandler;
     errorMessageHandler?: ErrorMessageHandler;
     notAuthorizedHandler?: NotifyHandler;
     errorHandler?: ErrorHandler;
@@ -119,7 +116,6 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
     get isLoading(): boolean;
     private versionExpiredHandler?;
     private sessionExpiredHandler?;
-    private messageHandler?;
     private errorMessageHandler?;
     private notAuthorizedHandler?;
     private errorHandler?;

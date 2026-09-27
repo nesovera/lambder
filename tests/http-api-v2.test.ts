@@ -47,8 +47,8 @@ describe('HTTP API v2 events', () => {
     it('emits v2 responses: single-value headers plus a cookies array', async () => {
         const lambder = new Lambder({ files: testPublicFiles() })
             .addRoute('/set', (ctx, res) => {
-                res.addHeader('Set-Cookie', 'a=1; Path=/');
-                res.addHeader('Set-Cookie', 'b=2; Path=/');
+                ctx.addResponseHeader('Set-Cookie', 'a=1; Path=/');
+                ctx.addResponseHeader('Set-Cookie', 'b=2; Path=/');
                 return res.html('ok', { headers: { 'X-One': 'x' } });
             });
 
@@ -81,7 +81,7 @@ describe('HTTP API v2 events', () => {
             .addApi('echo.name', {
                 input: z.object({ name: z.string() }),
                 output: z.object({ hello: z.string() }),
-            }, async (ctx, res) => res.api({ hello: ctx.apiPayload.name }));
+            }, async (ctx) => ({ hello: ctx.apiPayload.name }));
 
         const event = createMockEventV2('/api', {
             headers: { host: 'localhost', 'content-type': 'application/json' },
@@ -127,8 +127,8 @@ describe('HTTP API v2 events', () => {
     it('applies ETag + If-None-Match 304 on v2 GETs, carrying the call\'s cookies and headers', async () => {
         const lambder = new Lambder({ files: testPublicFiles() })
             .addRoute('/page', (ctx, res) => {
-                res.setCookie('LMDRSESSIONTKID', 'slid', { path: '/' });
-                res.setHeader('X-Request-Id', 'abc');
+                ctx.setCookie('LMDRSESSIONTKID', 'slid', { path: '/' });
+                ctx.setResponseHeader('X-Request-Id', 'abc');
                 return res.html('<p>stable content</p>');
             });
 

@@ -72,12 +72,12 @@ const storeApp = (ordersNeed: Permission | readonly Permission[] = 'ORDERS.MANAG
         },
     },
 })
-    .addApi('order.lookup', { input: z.object({ code: z.string() }), output: z.object({ found: z.boolean() }), guards: { open: 'A lookup code is the whole secret.' }, rateLimit: 'authPerIp' }, async (_ctx, res) => res.api({ found: true }))
-    .addApi('code.send', { input: z.object({ email: z.string() }), output: z.object({ sent: z.boolean() }), guards: 'captcha', rateLimit: { authPerIp: { perMin: 3 }, codePerEmail: true } }, async (_ctx, res) => res.api({ sent: true }))
-    .addApi('device.ping', { input: z.object({ deviceToken: z.string() }), output: z.object({ ok: z.boolean() }), guards: ['device'] }, async (_ctx, res) => res.api({ ok: true }))
-    .addSessionApi('orders.list', { input: z.object({}), output: z.array(z.string()), guards: { store: ordersNeed } }, async (_ctx, res) => res.api([]))
-    .addSessionApi('staff.invite', { input: z.object({ email: z.string() }), output: z.object({ invited: z.boolean() }), guards: { store: ['STAFF.MANAGE', 'ORDERS.MANAGE'] }, rateLimit: 'remindPerSession', idempotency: { ttlSeconds: 600 } }, async (_ctx, res) => res.api({ invited: true }))
-    .addSessionApi('me', { input: z.object({}), output: z.object({ userId: z.string() }), guards: 'owner', idempotency: true }, async (ctx, res) => res.api({ userId: ctx.session.data.userId }));
+    .addApi('order.lookup', { input: z.object({ code: z.string() }), output: z.object({ found: z.boolean() }), guards: { open: 'A lookup code is the whole secret.' }, rateLimit: 'authPerIp' }, async (_ctx) => ({ found: true }))
+    .addApi('code.send', { input: z.object({ email: z.string() }), output: z.object({ sent: z.boolean() }), guards: 'captcha', rateLimit: { authPerIp: { perMin: 3 }, codePerEmail: true } }, async (_ctx) => ({ sent: true }))
+    .addApi('device.ping', { input: z.object({ deviceToken: z.string() }), output: z.object({ ok: z.boolean() }), guards: ['device'] }, async (_ctx) => ({ ok: true }))
+    .addSessionApi('orders.list', { input: z.object({}), output: z.array(z.string()), guards: { store: ordersNeed } }, async (_ctx) => [])
+    .addSessionApi('staff.invite', { input: z.object({ email: z.string() }), output: z.object({ invited: z.boolean() }), guards: { store: ['STAFF.MANAGE', 'ORDERS.MANAGE'] }, rateLimit: 'remindPerSession', idempotency: { ttlSeconds: 600 } }, async (_ctx) => ({ invited: true }))
+    .addSessionApi('me', { input: z.object({}), output: z.object({ userId: z.string() }), guards: 'owner', idempotency: true }, async (ctx) => ({ userId: ctx.session.data.userId }));
 
 describe('Lambder.apiOptionEntries', () => {
     it('reports every API sorted by name, with its mode and options as written', () => {
@@ -115,16 +115,16 @@ describe('Lambder.apiOptionEntries', () => {
 
     it('refuses a guard parameter that is not plain data, naming the API and where it sits', () => {
         const withSchema = initLambder().create({ apiPath: '/api', guards: { shape: lambderGuard({ handler: (_ctx, _payload, _schema: z.ZodType) => {} }) } })
-            .addApi('a', { input: z.object({}), output: z.object({}), guards: { shape: z.object({}) } }, async (_ctx, res) => res.api({}));
+            .addApi('a', { input: z.object({}), output: z.object({}), guards: { shape: z.object({}) } }, async (_ctx) => ({}));
         expect(() => withSchema.apiOptionEntries()).toThrow(/the guards option of API "a" must be plain data .* but shape is an instance of ZodObject/);
 
         const withFunction = initLambder().create({ apiPath: '/api', guards: { pick: lambderGuard({ handler: (_ctx, _payload, _pick: { by: (row: unknown) => boolean }) => {} }) } })
-            .addApi('b', { input: z.object({}), output: z.object({}), guards: { pick: { by: () => true } } }, async (_ctx, res) => res.api({}));
+            .addApi('b', { input: z.object({}), output: z.object({}), guards: { pick: { by: () => true } } }, async (_ctx) => ({}));
         expect(() => withFunction.apiOptionEntries()).toThrow(/API "b" .* but pick\.by is a function/);
     });
 
     it('is the same for an app with no guards and no policies', () => {
-        const bare = initLambder().create({ apiPath: '/api' }).addApi('ping', { input: z.object({}), output: z.object({}) }, async (_ctx, res) => res.api({}));
+        const bare = initLambder().create({ apiPath: '/api' }).addApi('ping', { input: z.object({}), output: z.object({}) }, async (_ctx) => ({}));
         expect(bare.apiOptionEntries()).toEqual({ apis: { ping: { mode: 'public' } }, rateLimitPolicies: {}, guards: {} });
     });
 });
@@ -179,7 +179,7 @@ describe('writeApiOptions', () => {
         expect(await write(storeApp(), { file, check: true })).toMatchObject({ ok: true, written: false });
 
         const fewerPolicies = initLambder().create({ apiPath: '/api', guards: { open: storeGuards.open }, rateLimits: { limiter: new LambderMemoryRateLimiter(), policies: { authPerIp: { perMin: 5, per: 'ip' } } } })
-            .addApi('order.lookup', { input: z.object({}), output: z.object({}), guards: { open: 'A lookup code is the whole secret.' }, rateLimit: 'authPerIp' }, async (_ctx, res) => res.api({}));
+            .addApi('order.lookup', { input: z.object({}), output: z.object({}), guards: { open: 'A lookup code is the whole secret.' }, rateLimit: 'authPerIp' }, async (_ctx) => ({}));
         const stale = await write(fewerPolicies, { file, check: true });
         expect(stale.ok).toBe(false);
         expect(stale.lines[0]).toMatch(/is stale: regenerate it/);

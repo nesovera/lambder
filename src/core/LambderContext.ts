@@ -6,7 +6,7 @@ import { base64ToText } from "../shared/util/LambderBase64.js";
 import { LambderAnswerHeaders } from "../shared/wire/LambderAnswerHeaders.js";
 import { DEFAULT_API_PATH } from "../shared/wire/LambderDefaultApiPath.js";
 import { LAMBDER_INVOKE_API_ID, LAMBDER_LOCAL_API_ID } from "../shared/wire/LambderInvokeApiId.js";
-import { bindCallTools } from "../api/LambderApiCallContext.js";
+import { bindCallTools, responseToolsOf, type LambderResponseTools } from "../api/LambderApiCallContext.js";
 import { decodeRequestPath } from "./LambderRequestPath.js";
 import type LambderSessionController from "../session/LambderSessionController.js";
 import type {
@@ -37,7 +37,9 @@ export const isV2HttpEvent = (event: unknown): event is APIGatewayProxyEventV2 =
  * API core's call context (session, guardData, responseHeaders, logList),
  * which is the part the pipeline and the session controller work on; the
  * rest is the HTTP request as the Lambda event delivered it, plus the tools
- * the instance rendering it binds on (sessionController, rateLimit, isRateLimited).
+ * the instance rendering it binds on (sessionController, rateLimit, isRateLimited)
+ * and the response tools (setResponseHeader, addResponseHeader, setCookie,
+ * clearCookie) that write onto whatever answer the request ends with.
  *
  * TRateLimitPolicies is the app's policies map on a handler registered with
  * addApi, addSessionApi, addRoute or addSessionRoute, so a policy name is
@@ -126,9 +128,9 @@ export type LambderRenderContext<
     lambdaContext: Context;
     /** Which API Gateway payload format the event arrived in, and the response leaves in. */
     eventFormat: LambderHttpEventFormat;
-    /** Response headers written during the request (res.setHeader, res.addHeader, session cookies), applied onto the response at the end. */
+    /** Response headers written during the request (the response tools below, session cookies), applied onto the response at the end. */
     responseHeaders: LambderAnswerHeaders;
-    /** Entries for the API envelope's logList channel (res.logToApiResponse). */
+    /** Entries for the API envelope's logList channel: a handler pushes what it wants the caller's debug log to show. */
     logList: unknown[];
     /**
      * Sessions for this request: read the one it carries
@@ -149,7 +151,7 @@ export type LambderRenderContext<
     rateLimit: LambderContextRateLimit<TRateLimitPolicies>;
     /** The same count as rateLimit, answered instead of thrown: false, or the window that refused and its retryAfterSeconds. */
     isRateLimited: LambderContextRateLimitCheck<TRateLimitPolicies>;
-};
+} & LambderResponseTools;
 
 export type LambderSessionRenderContext<
     TApiPayload = any,
@@ -159,8 +161,8 @@ export type LambderSessionRenderContext<
     TRateLimitPolicies = Record<string, LambderApiRateLimitPolicyConfig>,
 > = Omit<LambderRenderContext<TApiPayload, TPathParams, TGuardData, SessionData, TRateLimitPolicies>, 'session'> & { session: LambderSessionRecord<SessionData> };
 
-/** The members of a render context that belong to the instance rendering the request rather than to its event. */
-type LambderContextToolName = "sessionController" | "rateLimit" | "isRateLimited";
+/** The members of a render context that are bound onto it rather than read from its event. */
+type LambderContextToolName = "sessionController" | "rateLimit" | "isRateLimited" | keyof LambderResponseTools;
 
 /** What an instance binds onto each context it renders: see bindContextTools. */
 export type LambderContextTools = {
@@ -185,6 +187,7 @@ export const bindContextTools = (
         methods: {
             rateLimit: async (policy: string, key?: string): Promise<void> => { await tools.chargeRateLimit(bound, policy, key, true); },
             isRateLimited: (policy: string, key?: string): Promise<LambderRateLimitCheckResult> => tools.chargeRateLimit(bound, policy, key, false),
+            ...responseToolsOf(bound, bound.host),
         },
     });
     return bound;

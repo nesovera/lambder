@@ -5,7 +5,6 @@
  */
 
 import type { LambderCrashDetail } from "./LambderCrashDetail.js";
-import type { LambderNonEmptyOptionMap } from "../util/LambderTypeUtilities.js";
 import type { LambderAppRefusalMessage } from "./LambderApiRefusal.js";
 // The option shapes a contract carries are the real ones the engines read,
 // rather than restatements of them, so `mode: "sesion"` and a misspelled
@@ -43,15 +42,18 @@ export type LambderApiContractShape = Record<string, {
     idempotency?: LambderApiIdempotencyOption;
 }>;
 
-/** Envelope flags/channels the server may set beside (or instead of) the payload. */
+/**
+ * Envelope flags and channels beside (or instead of) the payload: what a
+ * refusal, the pipeline's own answers, a hook or an error handler set. An API
+ * handler sets none of them itself: it returns its output or refuses.
+ */
 export type LambderApiResponseConfig = {
     versionExpired?: boolean;
     sessionExpired?: boolean;
     notAuthorized?: boolean;
-    message?: any;
     /**
-     * A refusal message, or a plain string when writing
-     * (`res.api(null, { errorMessage: "..." })`): the envelope goes out with
+     * A refusal message, or a plain string when writing (a refusal thrown
+     * with refuse(), or an error handler's `res.api(null, { errorMessage })`): the envelope goes out with
      * the message object either way. Read off the wire it can still be a
      * string, or no message at all, wherever a Lambder server did not write
      * the body (a hand-built mock answer, a proxy); refusalMessageOf reads
@@ -70,18 +72,8 @@ export type LambderApiResponseConfig = {
 }
 
 /**
- * The config a null answer carries: at least one of the reason fields, so
- * `res.api(null, {})` is a compile error. A bare null with no flag and no
- * message reaches the caller as a success whose payload is null, which is
- * indistinguishable from an endpoint that answered nothing on purpose.
- */
-export type LambderApiNullAnswerConfig =
-    LambderNonEmptyOptionMap<Pick<LambderApiResponseConfig, "versionExpired" | "sessionExpired" | "notAuthorized" | "errorMessage" | "message">>
-    & LambderApiResponseConfig;
-
-/**
- * The API wire envelope both sides speak: res.api() emits it, LambderCaller
- * parses it. `apiVersion` is always there (null when the server set none):
+ * The API wire envelope both sides speak: the server writes it around a
+ * handler's output or a refusal, LambderCaller parses it. `apiVersion` is always there (null when the server set none):
  * it is how a reader tells a Lambder envelope from another JSON answer, such
  * as API Gateway's own `{ "message": ... }` errors, so an answer without it
  * reads as a server failure.

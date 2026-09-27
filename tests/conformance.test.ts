@@ -65,25 +65,25 @@ const createServer = (gate: ReturnType<typeof makeGate>) => {
     });
     let counter = 0;
     return app
-        .addApi('ok', { input: z.object({ n: z.number() }), output: z.object({ doubled: z.number() }) }, async (ctx, res) => res.api({ doubled: ctx.apiPayload.n * 2 }))
+        .addApi('ok', { input: z.object({ n: z.number() }), output: z.object({ doubled: z.number() }) }, async (ctx) => ({ doubled: ctx.apiPayload.n * 2 }))
         .addApi('refuse', { input: z.object({}), output: z.any() }, async () => refuse('Nope.', { code: 'app/nope', title: 'No' }))
         .addApi('deny', { input: z.object({}), output: z.any() }, async () => refuse('Denied.', { notAuthorized: true }))
         .addApi('login', { input: z.object({ user: z.string(), role: z.enum(['admin', 'member']) }), output: z.object({ ok: z.boolean() }) },
-            async (ctx, res) => { await app.getSessionController(ctx).createSession(ctx.apiPayload.user, { userId: ctx.apiPayload.user, role: ctx.apiPayload.role }); return res.api({ ok: true }); })
-        .addSessionApi('me', { input: z.object({}), output: z.object({ userId: z.string() }) }, async (ctx, res) => res.api({ userId: ctx.session.data.userId }))
-        .addSessionApi('guarded', { input: z.object({}), output: z.object({ role: z.string() }), guards: { role: true } }, async (ctx, res) => res.api({ role: ctx.guardData.role.role }))
-        .addApi('limited', { input: z.object({}), output: z.object({ n: z.number() }), rateLimit: 'tight' }, async (_ctx, res) => res.api({ n: 1 }))
-        .addSessionApi('limitedPerCaller', { input: z.object({}), output: z.object({ n: z.number() }), rateLimit: 'perCaller' }, async (_ctx, res) => res.api({ n: 1 }))
-        .addApi('noted', { input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (ctx, res) => {
+            async (ctx) => { await app.getSessionController(ctx).createSession(ctx.apiPayload.user, { userId: ctx.apiPayload.user, role: ctx.apiPayload.role }); return { ok: true }; })
+        .addSessionApi('me', { input: z.object({}), output: z.object({ userId: z.string() }) }, async (ctx) => ({ userId: ctx.session.data.userId }))
+        .addSessionApi('guarded', { input: z.object({}), output: z.object({ role: z.string() }), guards: { role: true } }, async (ctx) => ({ role: ctx.guardData.role.role }))
+        .addApi('limited', { input: z.object({}), output: z.object({ n: z.number() }), rateLimit: 'tight' }, async (_ctx) => ({ n: 1 }))
+        .addSessionApi('limitedPerCaller', { input: z.object({}), output: z.object({ n: z.number() }), rateLimit: 'perCaller' }, async (_ctx) => ({ n: 1 }))
+        .addApi('noted', { input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (ctx) => {
             ctx.logList.push('a line for the envelope');
-            return res.api({ ok: true }, { message: 'a message beside the payload' });
+            return { ok: true };
         })
-        .addApi('headed', { input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (ctx, res) => {
+        .addApi('headed', { input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (ctx) => {
             ctx.responseHeaders.set('X-Observed', 'from the handler');
-            return res.api({ ok: true });
+            return { ok: true };
         })
-        .addApi('once', { input: z.object({}), output: z.object({ counter: z.number() }), idempotency: true }, async (_ctx, res) => { counter += 1; return res.api({ counter }); })
-        .addApi('slow', { input: z.object({}), output: z.object({ done: z.boolean() }), idempotency: true }, async (_ctx, res) => { gate.enter(); await gate.opened; return res.api({ done: true }); })
+        .addApi('once', { input: z.object({}), output: z.object({ counter: z.number() }), idempotency: true }, async (_ctx) => { counter += 1; return { counter }; })
+        .addApi('slow', { input: z.object({}), output: z.object({ done: z.boolean() }), idempotency: true }, async (_ctx) => { gate.enter(); await gate.opened; return { done: true }; })
         .addApi('crash', { input: z.object({}), output: z.any() }, async () => { throw new Error('boom'); })
         // A handler that writes the call's headers and then throws: the one
         // exit where "the headers belong to the call" is easiest to lose,
@@ -92,7 +92,7 @@ const createServer = (gate: ReturnType<typeof makeGate>) => {
             await app.getSessionController(ctx).createSession('ada', { userId: 'ada', role: 'admin' });
             throw new Error('boom');
         })
-        .addApi('echo', { input: z.object({ notes: z.array(z.string()) }), output: z.object({ count: z.number() }) }, async (ctx, res) => res.api({ count: ctx.apiPayload.notes.length }));
+        .addApi('echo', { input: z.object({ notes: z.array(z.string()) }), output: z.object({ count: z.number() }) }, async (ctx) => ({ count: ctx.apiPayload.notes.length }));
 };
 
 type Contract = ReturnType<typeof createServer>['ApiContract'];
@@ -133,9 +133,8 @@ const createMock = (gate: ReturnType<typeof makeGate>) => {
         mockApp.sessionApi('guarded', { guards: { role: true }, handler: async ({ guardData }) => ({ role: guardData.role.role }) }),
         mockApp.publicApi('limited', { rateLimit: 'tight', handler: async () => ({ n: 1 }) }),
         mockApp.sessionApi('limitedPerCaller', { rateLimit: 'perCaller', handler: async () => ({ n: 1 }) }),
-        mockApp.publicApi('noted', async ({ envelope, logList }) => {
+        mockApp.publicApi('noted', async ({ logList }) => {
             logList.push('a line for the envelope');
-            envelope.message = 'a message beside the payload';
             return { ok: true };
         }),
         mockApp.publicApi('headed', async ({ responseHeaders }) => {
@@ -277,7 +276,7 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
 
     it('a version below minApiVersion: versionExpired on both sides, whatever the signature says', async () => {
         const server = initLambder().create({ files: testPublicFiles(), apiPath: '/api', apiVersion: '1.2.32', minApiVersion: '1.2.10' })
-            .addApi('ok', { input: z.object({ n: z.number() }), output: z.object({ doubled: z.number() }) }, async (ctx, res) => res.api({ doubled: ctx.apiPayload.n * 2 }));
+            .addApi('ok', { input: z.object({ n: z.number() }), output: z.object({ doubled: z.number() }) }, async (ctx) => ({ doubled: ctx.apiPayload.n * 2 }));
         type FloorContract = typeof server.ApiContract;
         const floorMock = initLambderMock<FloorContract>().create({ apiVersion: '1.2.32', minApiVersion: '1.2.10', apiSignatures: await server.apiSignatures() });
         floorMock.register(floorMock.apiSlice(floorMock.publicApi('ok', async ({ payload }) => ({ doubled: payload.n * 2 }))));
@@ -332,14 +331,13 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
         expect(mockOutcome.ok ? '' : mockOutcome.reason).toBe('validation');
     });
 
-    it('the envelope beside the payload: the same message and logList', async () => {
-        // A mock handler returns its payload, so the rest of the envelope goes
-        // on the context: ctx.envelope.message where a server handler passes
-        // res.api(payload, { message }), and ctx.logList either way.
+    it('the envelope beside the payload: the same logList', async () => {
+        // Both handlers return their payload, and what else the envelope
+        // carries goes on the context: ctx.logList on either side.
         const { seen } = await same(createSides(), 'noted', {});
         expect(seen.envelope).toEqual({
             apiVersion: '1', payload: { ok: true },
-            message: 'a message beside the payload', logList: ['a line for the envelope'],
+            logList: ['a line for the envelope'],
         });
     });
 

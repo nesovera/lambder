@@ -282,8 +282,8 @@ export type LambderMockAppOptions<C, S, G, P extends LambderMockRateLimitPolicie
 };
 /**
  * What the server's input validation handler answers, as a mock states it:
- * `res.api(payload, config)` as data, with the status it went out with (200
- * unless named).
+ * the handler's `res.api(payload, config)` as data, with the status it went
+ * out with (200 unless named).
  */
 export type LambderMockInvalidInputAnswer = {
     payload?: unknown;

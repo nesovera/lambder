@@ -30,7 +30,7 @@ the canonical entry.
 
 ```typescript
 // handler.ts
-import { initLambder, LambderLocalFileSource, LambderDdbSessionStore, lambderGuard } from "lambder";
+import { initLambder, LambderLocalFileSource, LambderDdbSessionStore, lambderGuard, refuse } from "lambder";
 import { z } from "zod";
 import * as path from "path";
 
@@ -78,9 +78,10 @@ ones that authorize a caller rather than record a decision.
 ## 2. Define APIs
 
 Zod schemas define the contract. Inputs are validated at runtime and inferred
-at compile time, the output type is checked against what the handler returns,
-and every payload the handler answers is parsed through the output schema
-before it is sent, so fields it does not declare are stripped.
+at compile time. A handler takes the context and returns its output: the type
+is checked against the output schema, and the value is parsed through it
+before it is sent, so fields it does not declare are stripped. A handler that
+has to say no throws `refuse()` instead of returning.
 
 Every registration returns an instance carrying the contract so far, so the
 chain is not a matter of style: calling `lambder.addApi(...)` as its own
@@ -93,21 +94,22 @@ statement discards the instance the contract accumulated onto and leaves
         input: z.object({ companyName: z.string() }),
         output: z.object({ id: z.string(), name: z.string(), description: z.string() }),
         guards: { open: "public company pages" },
-    }, async ({ apiPayload }, res) => {
+    }, async ({ apiPayload }) => {
         // apiPayload is typed { companyName: string } and already validated
-        return res.api(await fetchCompany(apiPayload.companyName));
+        return await fetchCompany(apiPayload.companyName);
     })
     .addApi("loginUser", {
         input: z.object({ email: z.email(), password: z.string() }),
-        output: z.object({ success: z.boolean() }),
+        output: z.object({ username: z.string() }),
         guards: { open: "the password check here IS the control" },
-    }, async (ctx, res) => {
+    }, async (ctx) => {
         const user = await authenticateUser(ctx.apiPayload.email, ctx.apiPayload.password);
-        if (!user) return res.api({ success: false });
+        // A refusal, not an output: the caller's errorMessageHandler shows it.
+        if (!user) refuse("Wrong email or password.");
 
         // ctx.sessionController is this request's session controller, typed SessionData.
         await ctx.sessionController.createSession(user.id, { userId: user.id, username: user.name });
-        return res.api({ success: true });
+        return { username: user.name };
     })
     // Endpoints that require a session use addSessionApi; ctx.session is
     // fetched, validated and typed for you.
@@ -115,7 +117,7 @@ statement discards the instance the contract accumulated onto and leaves
         input: z.void(),
         output: z.object({ userId: z.string(), username: z.string() }),
         guards: "sessionOnly",
-    }, async (ctx, res) => res.api({
+    }, async (ctx) => ({
         userId: ctx.session.data.userId,
         username: ctx.session.data.username,
     }));

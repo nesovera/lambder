@@ -65,7 +65,7 @@ describe('Rate limits and the session read', () => {
                 limiter: new LambderMemoryRateLimiter(),
                 policies: { perIp: { perMin: 1, per: 'ip' } },
             },
-        }).addSessionApi('secure.read', { ...testSchema, rateLimit: 'perIp' }, async (_ctx, res) => res.api({ result: 'ok' }));
+        }).addSessionApi('secure.read', { ...testSchema, rateLimit: 'perIp' }, async (_ctx) => ({ result: 'ok' }));
 
         const bogusCookie = `${'a'.repeat(64)}:${'b'.repeat(64)}.${'c'.repeat(64)}`;
         const call = () => lambder.render(createApiEvent(
@@ -90,7 +90,7 @@ describe('Rate limits and the session read', () => {
                 limiter: new LambderMemoryRateLimiter(),
                 policies: { perUser: { perMin: 1, per: 'session' } },
             },
-        }).addSessionApi('secure.write', { ...testSchema, rateLimit: 'perUser' }, async (_ctx, res) => res.api({ result: 'ok' }));
+        }).addSessionApi('secure.write', { ...testSchema, rateLimit: 'perUser' }, async (_ctx) => ({ result: 'ok' }));
 
         const { sessionToken, csrfToken } = await lambder.getSessionManager().createSession('u1', { role: 'admin' });
         const call = () => lambder.render(createApiEvent(
@@ -113,7 +113,7 @@ describe('Rate limits and the session read', () => {
                 limiter: new LambderMemoryRateLimiter(),
                 policies: { perIp: { perMin: 1, per: 'ip' } },
             },
-        }).addApi('public.ping', { ...testSchema, rateLimit: 'perIp' }, async (_ctx, res) => res.api({ result: 'ok' }));
+        }).addApi('public.ping', { ...testSchema, rateLimit: 'perIp' }, async (_ctx) => ({ result: 'ok' }));
 
         const call = (sourceIp: string) => lambder.render(
             createApiEvent({ apiName: 'public.ping', payload: { value: 'x' } }, { sourceIp }),
@@ -147,7 +147,7 @@ describe('Rate limits and the session read', () => {
                     },
                 },
             },
-        }).addSessionApi('secure.role', { ...testSchema, rateLimit: 'perRole' }, async (_ctx, res) => res.api({ result: 'ok' }));
+        }).addSessionApi('secure.role', { ...testSchema, rateLimit: 'perRole' }, async (_ctx) => ({ result: 'ok' }));
 
         const { sessionToken, csrfToken } = await lambder.getSessionManager().createSession('u1', { role: 'admin' });
         const result = await lambder.render(createApiEvent(
@@ -180,7 +180,7 @@ describe('Custom keys and the guards', () => {
                 captcha: lambderGuard({ guardInput: z.object({ token: z.string() }), handler: async (_ctx, { token }) => { if(token !== 'solved') refuse('Verification failed.'); } }),
             },
         }).addApi('code.send', { input: z.object({ email: z.string() }), output: z.object({ sent: z.boolean() }), rateLimit: 'codePerEmail', guards: 'captcha' },
-            async (_ctx, res) => res.api({ sent: true })));
+            async (_ctx) => ({ sent: true })));
 
         const attacker = app.visitor({ clientIp: '198.51.100.1' });
         for(let attempt = 0; attempt < 5; attempt += 1){
@@ -210,7 +210,7 @@ describe('Custom keys and the guards', () => {
                 emailCode: lambderGuard({ apiInput: z.object({ code: z.string() }), handler: async (_ctx, { code }) => { if(code !== '424242') refuse('Wrong code.'); } }),
             },
         }).addApi('code.verify', { input: z.object({ email: z.string(), code: z.string() }), output: z.object({ verified: z.boolean() }), rateLimit: 'guessPerEmail', guards: 'emailCode' },
-            async (_ctx, res) => res.api({ verified: true })));
+            async (_ctx) => ({ verified: true })));
 
         const guesser = app.visitor({ clientIp: '198.51.100.1' });
         const statuses: Array<number | undefined> = [];
@@ -266,7 +266,7 @@ describe('Guards placed after input validation', () => {
             output: z.object({ sent: z.boolean() }),
             rateLimit: 'codePerEmail',
             guards: ['session', 'captcha'],
-        }, async (_ctx, res) => res.api({ sent: true })));
+        }, async (_ctx) => ({ sent: true })));
         return { app, spent, order };
     };
 
@@ -307,7 +307,7 @@ describe('Guards placed after input validation', () => {
             input: z.object({ amount: z.string().transform(Number) }),
             output: z.object({ amount: z.number() }),
             guards: 'amountCheck',
-        }, async (ctx, res) => res.api({ amount: ctx.apiPayload.amount })));
+        }, async (ctx) => ({ amount: ctx.apiPayload.amount })));
 
         const outcome = await app.visitor().apiOutcome('pay', { amount: '12' });
         assertApiSuccess(outcome);
@@ -354,7 +354,7 @@ describe('Per-IP counters and IPv6', () => {
         const app = lambderTestApp(initLambder().create({
             apiPath: '/api',
             rateLimits: { limiter: new LambderMemoryRateLimiter(), policies: { perIp: { perMin: 2, per: 'ip' } } },
-        }).addApi('ping', { input: z.object({}), output: z.object({ ok: z.boolean() }), rateLimit: 'perIp' }, async (_ctx, res) => res.api({ ok: true })));
+        }).addApi('ping', { input: z.object({}), output: z.object({ ok: z.boolean() }), rateLimit: 'perIp' }, async (_ctx) => ({ ok: true })));
 
         assertApiSuccess(await app.visitor({ clientIp: '2001:db8:1:2::a' }).apiOutcome('ping', {}));
         assertApiSuccess(await app.visitor({ clientIp: '2001:db8:1:2::b' }).apiOutcome('ping', {}));

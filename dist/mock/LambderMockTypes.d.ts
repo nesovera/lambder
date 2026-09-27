@@ -9,7 +9,7 @@ import type { z } from "zod";
 import type { LambderApiMode, LambderContractGuardInput, LambderContractGuardInputNames, LambderContractGuardInputsOf, LambderContractGuardNames, LambderContractGuardsOf, LambderContractIdempotencyOf, LambderContractKeysWithMode, LambderContractMode, LambderContractRateLimitOf } from "../shared/wire/LambderApiContract.js";
 import type { LambderApiGuard, LambderGuardDataOf, LambderGuardMetaMap } from "../api/LambderApiGuards.js";
 import type { LambderApiRateLimitPolicyConfig, LambderContextRateLimit, LambderContextRateLimitCheck } from "../api/LambderApiRateLimits.js";
-import type { LambderApiCallContext } from "../api/LambderApiCallContext.js";
+import type { LambderApiCallContext, LambderResponseTools } from "../api/LambderApiCallContext.js";
 import type { LambderApiRequest } from "../api/LambderApiRequest.js";
 import type { LambderHttpStatusCode } from "../shared/wire/LambderHttpStatus.js";
 import type { LambderApiDefinition } from "../api/LambderApiDefinition.js";
@@ -47,7 +47,7 @@ export type LambderMockSurplusKeys<TOptions, TShape> = [
  * fields: the API core's call context plus the request, a session
  * controller for the call, and the caller's abort signal.
  */
-export type LambderMockCallContext<S = any> = LambderApiCallContext<S> & {
+export type LambderMockCallContext<S = any> = LambderApiCallContext<S> & LambderResponseTools & {
     apiName: string;
     request: LambderApiRequest;
     /** Create, rotate, refresh and end sessions, exactly as a server handler does through its own ctx.sessionController. */
@@ -61,15 +61,6 @@ export type LambderMockCallContext<S = any> = LambderApiCallContext<S> & {
     /** The same count, answered instead of thrown, as ctx.isRateLimited on the server. */
     isRateLimited: LambderContextRateLimitCheck<Record<string, LambderApiRateLimitPolicyConfig>>;
     signal: AbortSignal;
-    /**
-     * The envelope fields that travel beside the payload, the mock's stand-in
-     * for the server's `res.api(payload, config)`: a mock handler returns its
-     * payload, so this is where the rest of the envelope goes. `logList` is
-     * the usual channel and lives on the context itself.
-     */
-    envelope: {
-        message?: string;
-    };
 };
 /** The same, with the session present: what a `session: true` mock guard and a session endpoint's handler see. */
 export type LambderMockSessionCallContext<S = any> = Omit<LambderMockCallContext<S>, "session"> & {

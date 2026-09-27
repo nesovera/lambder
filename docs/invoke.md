@@ -61,7 +61,7 @@ lambder.addApi("sendEmail", {
     input: z.object({ to: z.string(), subject: z.string(), html: z.string() }),
     output: z.object({ messageId: z.string() }),
     guards: "arrivedByInvoke",
-}, async (ctx, res) => res.api(await sendThroughSes(ctx.apiPayload)));
+}, async (ctx) => await sendThroughSes(ctx.apiPayload));
 
 export type GatewayApiContract = typeof lambder.ApiContract;
 export const handler = lambder.getHandler();
@@ -242,14 +242,14 @@ lambda calling a lambda has a failed dependency, which is a failed request. The
 throw carries the whole outcome and reaches the app's own global error handler
 with the callee's error chained as its `cause`, which is what a call site
 would otherwise have had to write by hand. Its result is the output the
-callee declared: `res.api(null)` compiles on the callee only for an output
-that allows null or beside a reason (see [Responses](./responses.md)), so a
-nullable output is where `null` arrives, and a non-nullable one never needs
-a guard.
+callee declared: a callee's handler returns that output, `null` only where the
+output schema allows null, and says no by throwing `refuse()`, which arrives
+here as a failure (see [APIs](./apis.md#defining-apis)). So a nullable output
+is where `null` arrives, and a non-nullable one never needs a guard.
 
 ```typescript
 // Throws on any failure; typed as the declared output, here `{ body, contentType } | null`.
-const file = await gatewayCaller.api("getFileFromR2", { bucketName, filePath });
+const file = await gatewayCaller.api("files.read", { bucketName, filePath });
 ```
 
 `apiOutcome()` never throws and resolves to a discriminated union, for sites
@@ -294,9 +294,6 @@ that wants to annotate one.
 
 `cookies` is the answer's `Set-Cookie` values, empty when no answer came back;
 see [Carrying a user's session](#carrying-a-users-session) for why they matter.
-The envelope's `message` field has no handler here, since there is no UI on
-this side: it is on `outcome.response.message` for a caller that wants it. The
-browser caller routes it to a `messageHandler` instead.
 
 ## Failure reasons
 
@@ -332,12 +329,21 @@ there is nothing to negotiate and either end can be switched on a live pair.
 `accept-encoding: br, gzip`, and the callee's own `compression` option
 (on by default: `{ minBytes: 860, encodings: ["br", "gzip"], quality: 5 }`)
 compresses the body as it would for a browser, so answers arrive Brotli and the
-caller restores them. A handler whose answer will not shrink, a base64 file
-body being the usual case, skips the attempt exactly as an HTTP handler would:
+caller restores them. A compressed answer leaves the callee base64-encoded,
+so an answer that is itself base64 bytes (a file's body, the usual case)
+arrives no smaller for the work: compression takes back only the quarter
+that base64 added, and the encoding adds it again. Such an API declares so
+on the callee, and its answers go plain for this caller as for a browser
+(see [Responses](./responses.md#compression)):
 
 ```typescript
-// Compressing a multi-megabyte base64 body costs tens of milliseconds and saves nothing.
-return res.api(object, {}, { compress: false });
+lambder.addApi("files.read", {
+    input: z.object({ bucketName: z.string(), filePath: z.string() }),
+    output: z.object({ body: z.string(), contentType: z.string() }).nullable(),
+    guards: "arrivedByInvoke",
+    // A multi-megabyte base64 body would cost tens of milliseconds to compress and arrive no smaller.
+    compress: false,
+}, async ({ apiPayload }) => await readStoredFile(apiPayload.bucketName, apiPayload.filePath));
 ```
 
 The restore is capped by `maxResponsePayloadBytes` (default 20,000,000), so a
@@ -447,8 +453,8 @@ An app that reports failures here should skip a `LambderInvokeError` in its
 `if (isLambderInvokeError(error)) return;`. The framework does not skip it for
 you, since a caller without an `onFailure` would then lose it.
 
-On the success path, anything the callee wrote with `res.logToApiResponse`
-arrives as the answer's `logList`. It is on the outcome, and it also goes to
+On the success path, anything the callee pushed onto `ctx.logList` arrives as
+the answer's `logList`. It is on the outcome, and it also goes to
 `onLogList`, which defaults to printing each entry with `console.log` so a
 callee's logs show up in the caller's stream. A site that forwards them into
 its own API response for developers reads `outcome.logList` instead.

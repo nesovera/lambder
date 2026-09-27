@@ -21,8 +21,9 @@ export type LambderHeaderTarget = {
     addHeader(key: string, value: string): unknown;
 };
 /**
- * Response headers written while a call runs (`res.setHeader`, `res.addHeader`,
- * the session controller's Set-Cookie), applied onto the answer once the
+ * Response headers written while a call runs (`ctx.setResponseHeader`,
+ * `ctx.addResponseHeader`, `ctx.setCookie`, the session controller's
+ * Set-Cookie), applied onto the answer once the
  * call has one. Recorded as operations in call order rather than as a map,
  * so `set` replaces what the answer itself carries (a Content-Type, say) and
  * `add` appends to it, exactly as if called on the answer directly.

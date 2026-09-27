@@ -36,7 +36,7 @@ type ApiContractType = {
         guardInputs: { orgPermission: { organizationId: string } };
         idempotency: true;
     };
-    "admin.runSignedQuery": { input: { sql: string }; output: unknown; mode: "public" };
+    "admin.exportOrders": { input: { month: string }; output: unknown; mode: "public" };
 };
 
 // ---------------------------------------------------------------------------
@@ -98,7 +98,7 @@ export const orderMocks = mockApp.apiSlice(
         idempotency: true,
         handler: async ({ payload, guardData }) => ({ orderId: "o_1", organizationId: guardData.orgPermission.organizationId, ...payload }),
     }),
-    mockApp.notMocked("admin.runSignedQuery", "operator endpoint, no client calls it"),
+    mockApp.notMocked("admin.exportOrders", "operator endpoint, no client calls it"),
 );
 
 // Exhaustive over the contract: a missing endpoint or one mocked twice is a compile error.

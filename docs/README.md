@@ -17,7 +17,7 @@ order the first time.
 | --- | --- |
 | [Routing and actions](./routing.md) | `addRoute`, matchers, path params, hooks, fallback and error handlers, crash reporting (`crashes`), gateway differences, and `addAction` for non-HTTP invocations |
 | [APIs and refusals](./apis.md) | `addApi` and `addSessionApi`, the inferred contract, modular APIs with `use()`, `refuse()` and `LambderApiRefusal`, the signature file (`writeApiSignatures` from `lambder/build`), the contract as a generated file for a client (`writeApiContract`), the declared options as a generated file of plain data (`writeApiOptions`), and one guard's parameters for a browser (`writeApiGuardParams`) |
-| [Responses](./responses.md) | The render context, resolver methods, `die`, cookies, compression, ETag, and Lambda's size caps |
+| [Responses](./responses.md) | The render context and its response tools (headers, cookies, log entries), the resolver methods routes and hooks use, `die`, compression (per API too), ETag, and Lambda's size caps |
 | [Sessions](./sessions.md) | Sessions over a store (DynamoDB, memory, your own), cookie scope and migrations, secrets at rest, `dataRefresh`, the session controller |
 | [API policies](./api-policies.md) | Declarative rate limits, guards and idempotency, and making an authorization declaration mandatory |
 | [Secrets and retries](./secrets.md) | `LambderSignedClaims`: signed tokens that are their own record; `keyedDigest` and `randomSecret` for the secrets an app stores; `LambderOneShotSecrets`: codes and tokens handed out once and taken back once, over a store that settles their races; `LambderBackoffTimer`: waiting longer after each failure, once |

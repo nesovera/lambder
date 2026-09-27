@@ -378,10 +378,9 @@ export default class LambderInvokeCaller {
         // The answer's Set-Cookie values, so a session the callee rotated or
         // cleared is visible to whoever is carrying it.
         const cookies = http.cookies;
-        // The declared output, by the callee's own typing: res.api(null)
-        // compiles only for an output that allows null or beside a reason (an
-        // errorMessage is a failure below; a message-only null is the
-        // callee's contract to keep).
+        // The declared output, by the callee's own typing: a handler returns
+        // its output, so a success payload is null only where the output
+        // allows null.
         if (outcome.ok)
             return { ok: true, payload: (outcome.payload ?? null), response: outcome.response, logList, cookies };
         const shared = { status: outcome.status, retryAfterSeconds: outcome.retryAfterSeconds, logList, cookies };

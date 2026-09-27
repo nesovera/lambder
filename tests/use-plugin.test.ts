@@ -27,8 +27,8 @@ describe('Plugin System - Basic Usage', () => {
                 .addApi('getUser', {
                     input: z.object({ userId: z.string() }),
                     output: z.object({ id: z.string(), name: z.string() })
-                }, async (ctx, res) => {
-                    return res.api({ id: ctx.apiPayload.userId, name: 'John Doe' });
+                }, async (ctx) => {
+                    return { id: ctx.apiPayload.userId, name: 'John Doe' };
                 });
         };
 
@@ -50,8 +50,8 @@ describe('Plugin System - Basic Usage', () => {
                 .addApi('getUser', {
                     input: z.object({ userId: z.string() }),
                     output: z.object({ id: z.string(), name: z.string() })
-                }, async (ctx, res) => {
-                    return res.api({ id: ctx.apiPayload.userId, name: 'Test' });
+                }, async (ctx) => {
+                    return { id: ctx.apiPayload.userId, name: 'Test' };
                 });
         };
 
@@ -85,8 +85,8 @@ describe('Plugin System - Multiple Plugins', () => {
                 .addApi('getUser', {
                     input: z.object({ userId: z.string() }),
                     output: z.object({ id: z.string(), name: z.string() })
-                }, async (ctx, res) => {
-                    return res.api({ id: ctx.apiPayload.userId, name: 'John' });
+                }, async (ctx) => {
+                    return { id: ctx.apiPayload.userId, name: 'John' };
                 });
         };
 
@@ -95,12 +95,12 @@ describe('Plugin System - Multiple Plugins', () => {
                 .addApi('getProduct', {
                     input: z.object({ productId: z.string() }),
                     output: z.object({ id: z.string(), title: z.string(), price: z.number() })
-                }, async (ctx, res) => {
-                    return res.api({ 
+                }, async (ctx) => {
+                    return { 
                         id: ctx.apiPayload.productId, 
                         title: 'Test Product', 
                         price: 99.99 
-                    });
+                    };
                 });
         };
 
@@ -109,11 +109,11 @@ describe('Plugin System - Multiple Plugins', () => {
                 .addApi('createOrder', {
                     input: z.object({ userId: z.string(), productId: z.string() }),
                     output: z.object({ orderId: z.string(), status: z.string() })
-                }, async (ctx, res) => {
-                    return res.api({ 
+                }, async (ctx) => {
+                    return { 
                         orderId: 'order-123', 
                         status: 'pending' 
-                    });
+                    };
                 });
         };
 
@@ -146,8 +146,8 @@ describe('Plugin System - Multiple Plugins', () => {
                 .addApi('getUser', {
                     input: z.object({ userId: z.string() }),
                     output: z.object({ id: z.string(), name: z.string() })
-                }, async (ctx, res) => {
-                    return res.api({ id: ctx.apiPayload.userId, name: 'Test' });
+                }, async (ctx) => {
+                    return { id: ctx.apiPayload.userId, name: 'Test' };
                 });
         };
 
@@ -156,8 +156,8 @@ describe('Plugin System - Multiple Plugins', () => {
                 .addApi('getProduct', {
                     input: z.object({ productId: z.string() }),
                     output: z.object({ id: z.string(), title: z.string() })
-                }, async (ctx, res) => {
-                    return res.api({ id: ctx.apiPayload.productId, title: 'Test' });
+                }, async (ctx) => {
+                    return { id: ctx.apiPayload.productId, title: 'Test' };
                 });
         };
 
@@ -194,8 +194,8 @@ describe('Plugin System - Mixed Usage', () => {
                 .addApi('getUser', {
                     input: z.object({ userId: z.string() }),
                     output: z.object({ id: z.string(), name: z.string() })
-                }, async (ctx, res) => {
-                    return res.api({ id: ctx.apiPayload.userId, name: 'John' });
+                }, async (ctx) => {
+                    return { id: ctx.apiPayload.userId, name: 'John' };
                 });
         };
 
@@ -207,8 +207,8 @@ describe('Plugin System - Mixed Usage', () => {
             .addApi('healthCheck', {
                 input: z.void(),
                 output: z.object({ status: z.string() })
-            }, async (ctx, res) => {
-                return res.api({ status: 'ok' });
+            }, async (ctx) => {
+                return { status: 'ok' };
             })
             // Plugin
             .use(userPlugin)
@@ -216,8 +216,8 @@ describe('Plugin System - Mixed Usage', () => {
             .addApi('getVersion', {
                 input: z.void(),
                 output: z.object({ version: z.string() })
-            }, async (ctx, res) => {
-                return res.api({ version: '2.0' });
+            }, async (ctx) => {
+                return { version: '2.0' };
             });
 
         const visitor = browse(lambder);
@@ -272,8 +272,8 @@ describe('Plugin System - Complex Composition', () => {
                 .addApi('base', {
                     input: z.void(),
                     output: z.object({ value: z.string() })
-                }, async (ctx, res) => {
-                    return res.api({ value: 'base' });
+                }, async (ctx) => {
+                    return { value: 'base' };
                 });
         };
 
@@ -283,8 +283,8 @@ describe('Plugin System - Complex Composition', () => {
                 .addApi('extended', {
                     input: z.void(),
                     output: z.object({ value: z.string() })
-                }, async (ctx, res) => {
-                    return res.api({ value: 'extended' });
+                }, async (ctx) => {
+                    return { value: 'extended' };
                 });
         };
 
@@ -307,8 +307,8 @@ describe('Plugin System - Complex Composition', () => {
                 .addApi('shared', {
                     input: z.object({ id: z.string() }),
                     output: z.object({ id: z.string(), source: z.string() })
-                }, async (ctx, res) => {
-                    return res.api({ id: ctx.apiPayload.id, source: 'shared-plugin' });
+                }, async (ctx) => {
+                    return { id: ctx.apiPayload.id, source: 'shared-plugin' };
                 });
         };
 
@@ -340,8 +340,8 @@ describe('Plugin System - Type Safety', () => {
                 .addApi('api1', {
                     input: z.object({ value: z.string() }),
                     output: z.object({ result: z.string() })
-                }, async (ctx, res) => {
-                    return res.api({ result: ctx.apiPayload.value });
+                }, async (ctx) => {
+                    return { result: ctx.apiPayload.value };
                 });
         };
 
@@ -350,8 +350,8 @@ describe('Plugin System - Type Safety', () => {
                 .addApi('api2', {
                     input: z.object({ count: z.number() }),
                     output: z.object({ total: z.number() })
-                }, async (ctx, res) => {
-                    return res.api({ total: ctx.apiPayload.count * 2 });
+                }, async (ctx) => {
+                    return { total: ctx.apiPayload.count * 2 };
                 });
         };
 
@@ -380,11 +380,11 @@ describe('Plugin System - Type Safety', () => {
 
 describe('Plugin System - Non-Generic Plugins', () => {
     it('should accumulate types correctly when using non-generic plugins', () => {
-        const plugin1 = (l: Lambder) => l.addApi('api1', { input: z.void(), output: z.void() }, async (ctx, res) => res.raw({ statusCode: 200, body: '' }));
-        const plugin2 = (l: Lambder) => l.addApi('api2', { input: z.void(), output: z.void() }, async (ctx, res) => res.raw({ statusCode: 200, body: '' }));
+        const plugin1 = (l: Lambder) => l.addApi('api1', { input: z.void(), output: z.void() }, async (_ctx) => {});
+        const plugin2 = (l: Lambder) => l.addApi('api2', { input: z.void(), output: z.void() }, async (_ctx) => {});
 
         const _lambder = new Lambder({ files: new LambderLocalFileSource({ root: '' }), apiPath: '/api' })
-            .addApi('initialApi', { input: z.void(), output: z.void() }, async (ctx, res) => res.raw({ statusCode: 200, body: '' }))
+            .addApi('initialApi', { input: z.void(), output: z.void() }, async (_ctx) => {})
             .use(plugin1)
             .use(plugin2);
 
@@ -427,23 +427,23 @@ describe('Plugin System - Policy generics survive use()', () => {
     it('a plugin typed with the derived app type chains, and the result keeps every policy typing', () => {
         const plugin = (l: App) => l.addSessionApi('secure.me', {
             input: z.object({}), output: z.object({ ok: z.boolean() }), guards: 'sessionOnly',
-        }, async (_ctx, res) => res.api({ ok: true }));
+        }, async (_ctx) => ({ ok: true }));
         const app = makeApp().use(plugin);
         expectTypeOf<typeof app.ApiContract>().toHaveProperty('secure.me');
 
         // requireSessionApiGuards survives use(): guards stay required.
         // @ts-expect-error guards is required on this instance
-        const missing = () => app.addSessionApi('secure.forgot', { input: z.object({}), output: z.object({}) }, async (_ctx, res) => res.api({}));
+        const missing = () => app.addSessionApi('secure.forgot', { input: z.object({}), output: z.object({}) }, async (_ctx) => ({}));
         expect(missing).toThrow(/declares no guards/);
 
         // The guard map survives: names are still checked against it.
         // @ts-expect-error unknown guard name
-        const unknown = () => app.addSessionApi('secure.unknown', { input: z.object({}), output: z.object({}), guards: 'nope' }, async (_ctx, res) => res.api({}));
+        const unknown = () => app.addSessionApi('secure.unknown', { input: z.object({}), output: z.object({}), guards: 'nope' }, async (_ctx) => ({}));
         expect(unknown).toThrow(/unknown guard "nope"/);
 
         // The rate-limit policies and the idempotency flag survive too.
         expect(() => app.addApi('public.once', {
             input: z.object({}), output: z.object({}), rateLimit: 'perIp', idempotency: true,
-        }, async (_ctx, res) => res.api({}))).not.toThrow();
+        }, async (_ctx) => ({}))).not.toThrow();
     });
 });

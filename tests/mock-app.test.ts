@@ -786,12 +786,13 @@ describe('LambderMockApp - overrides, reset, observation', () => {
         expect(form.notes).toEqual(['a']);
     });
 
-    it('carries the envelope message a handler set, beside its payload', async () => {
+    it('carries the logList and the headers and cookies a handler wrote, beside its payload', async () => {
         const mockApp = mock.create({ ...requiredOptions });
         mockApp.registerPartial(mockApp.apiSlice(
-            mockApp.publicApi('echo', async ({ payload, envelope, logList }) => {
-                envelope.message = 'served from the mock';
+            mockApp.publicApi('echo', async ({ payload, logList, setResponseHeader, setCookie }) => {
                 logList.push('note');
+                setResponseHeader('X-Served-By', 'the mock');
+                setCookie('lastEcho', String(payload.notes.length));
                 return { count: payload.notes.length };
             }),
         ));
@@ -802,7 +803,9 @@ describe('LambderMockApp - overrides, reset, observation', () => {
             headers: {}, cookies: {}, ip: '1.2.3.4', host: 'localhost',
         });
 
-        expect(JSON.parse(answer.body)).toEqual({ apiVersion: null, payload: { count: 1 }, message: 'served from the mock', logList: ['note'] });
+        expect(JSON.parse(answer.body)).toEqual({ apiVersion: null, payload: { count: 1 }, logList: ['note'] });
+        expect(answer.headers['X-Served-By']).toEqual(['the mock']);
+        expect(answer.headers['Set-Cookie']).toEqual([expect.stringMatching(/^lastEcho=1; /)]);
     });
 
     it('answers a thrown handler with the message it threw, unless asked for the server\'s wording', async () => {

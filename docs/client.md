@@ -52,7 +52,6 @@ in the frontend's type check. In a large app, import it instead from the file
 | `transport` | fetch | How a call reaches the server; see [Transports](#transports) |
 | `versionExpiredHandler` | none | The server answered `versionExpired`: this build's signature for the endpoint is not the server's. Usually reloads. Asked one at a time per page, whichever of the page's callers hears it: a refusal heard while it runs calls nothing, and one heard after it returned with the page still here asks again. Not called for a bundle the reload brought back, see [The signature map](#the-signature-map) |
 | `sessionExpiredHandler` | none | The session is missing or expired. Called, and the CSRF cookie cleared, only while that cookie is still the one the call sent or is gone: a call sent before a login that answers after it comes back as its `sessionExpired` outcome, with no handler called and nothing touched. Over a cookie jar (the mock's memory mode, `lambder/testing`, `lambderCookieJarTransport`) the jar's CSRF cookie is the one compared, since that session never reaches `document.cookie` |
-| `messageHandler` | none | The envelope carried a `message` |
 | `errorMessageHandler` | none | The envelope carried an `errorMessage` (a refusal), handed over as the message object |
 | `notAuthorizedHandler` | none | The envelope carried `notAuthorized` |
 | `errorHandler` | none | Network, timeout, server or unknown failure |
@@ -188,9 +187,10 @@ trail arrives.
 
 A refusal's `errorMessage` always reaches a reader as the message object,
 `{ type, code?, title?, content }`, on the outcome and in
-`errorMessageHandler` alike. A handler may write a plain string
-(`new LambderApiRefusal("Denied.")`, `res.api(null, { errorMessage: "Denied." })`),
-and the server sends it as `{ type: "error", content: "Denied." }`. The
+`errorMessageHandler` alike. The server may be handed a plain string
+(`new LambderApiRefusal("Denied.")`, or an error handler's
+`res.api(null, { errorMessage: "Denied." })`), and it sends it as
+`{ type: "error", content: "Denied." }`. The
 caller still reads whatever arrives that way before anything sees it, since a
 body no Lambder server wrote (a hand-built mock answer, a proxy) can carry a
 string or no message at all, so no reader narrows.

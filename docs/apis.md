@@ -8,53 +8,73 @@ accumulates every registration into one contract type the frontend imports.
 
 ```typescript
 import { z } from "zod";
+import { refuse } from "lambder";
 
 lambder
     .addApi("getCompanyPage", {
         input: z.object({ companyName: z.string() }),
         output: z.object({ id: z.string(), name: z.string(), description: z.string() }),
-    }, async ({ apiPayload }, res) => {
+    }, async ({ apiPayload }) => {
         // apiPayload is typed and already validated
-        const data = await fetchCompany(apiPayload.companyName);
-        return res.api(data);   // type-checked against `output`, and parsed through it before it is sent
+        const company = await fetchCompany(apiPayload.companyName);
+        if (!company) refuse("No such company.");
+        return company;   // type-checked against `output`, and parsed through it before it is sent
     });
 ```
 
-**The output schema is applied, not only typed.** Every payload `res.api()`
-answers for the API is parsed through `output` before the envelope is built,
-so what reaches the client (and an idempotent replay) is the declared shape:
-zod strips the fields the schema does not declare, fills its defaults and
-runs its transforms. That matters because TypeScript accepts a value carrying
-more than its type: a row read straight from a table, with a password hash
-beside the declared fields, is assignable to a narrower output type, and
-without the parse it went to the client whole. The handler writes the
-schema's input form (`z.input`), what the transforms take, so each transform
-runs once. A refusal's payload beside an `errorMessage` or a flag is parsed
-the same way; only `null` passes as it is. The parse belongs to the handler's
-own resolver: a hook, the input validation handler and the global error
-handler answer in shapes of their own (a cached answer is already in its wire
-form), and what they answer is sent as given. A payload the schema rejects is the
-handler breaking its own contract and is answered as a crash
-(`LambderApiOutputValidationError`, named, with the failing paths but never the
-values), not sent. The handler has run by then, whatever it wrote or charged
-included, so under an idempotency key the crash answer is recorded as the key's
-answer: a retry is told the same thing instead of running the operation again.
-The parse is synchronous, so an output schema cannot be async: an async
-refinement or transform in it makes zod throw, and that throw, or one from a
-transform of your own, is the same `LambderApiOutputValidationError`, with
-what was thrown as its `cause` and `zodError` null (it is set only when the
-schema rejected the payload). Input schemas, guard slices and rate-limit key
-slices are parsed asynchronously and may be async.
+A handler takes the context and nothing else. It answers the call by
+returning its output, and says no by throwing a refusal with
+[`refuse()`](#refusals), from the handler or from anything it calls. Those are
+the only two answers a handler gives: it returns exactly what the API
+declared, `null` only where the output schema allows null, and every "no" goes
+through `refuse()`. Headers, cookies and debugging entries go beside the
+answer, through the context (`ctx.setResponseHeader`, `ctx.setCookie`,
+`ctx.logList.push`; see [Responses](./responses.md#headers-and-cookies)).
+
+**The output schema is applied, not only typed.** What the handler returns is
+parsed through `output` before the envelope is built, so what reaches the
+client (and an idempotent replay) is the declared shape: zod strips the fields
+the schema does not declare, fills its defaults and runs its transforms. That
+matters because TypeScript accepts a value carrying more than its type: a row
+read straight from a table, with a password hash beside the declared fields,
+is assignable to a narrower output type, and without the parse it would go to
+the client whole. The handler returns the schema's input form (`z.input`),
+what the transforms take, so each transform runs once. A refusal carries no
+output, so there is nothing of it to parse. A hook, the input validation
+handler and the global error handler answer in shapes of their own through
+`res.api()` (a cached answer is already in its wire form), and what they
+answer is sent as given.
+
+An output the schema rejects is the handler breaking its own contract and is
+answered as a crash (`LambderApiOutputValidationError`, named, with the
+failing paths but never the values), not sent. The handler has run by then,
+whatever it wrote or charged included, so under an idempotency key the crash
+answer is recorded as the key's answer: a retry is told the same thing instead
+of running the operation again. The parse is synchronous, so an output schema
+cannot be async: an async refinement or transform in it makes zod throw, and
+that throw, or one from a transform of your own, is the same
+`LambderApiOutputValidationError`, with what was thrown as its `cause` and
+`zodError` null (it is set only when the schema rejected the output). Input
+schemas, guard slices and rate-limit key slices are parsed asynchronously and
+may be async.
 
 The options object beside the schemas is where an API declares its policies:
 
 | Field | Purpose |
 | --- | --- |
 | `input` | Zod schema for the payload. `z.void()` for none |
-| `output` | Zod schema for the result. Type-checked against what the handler returns, and every success payload is parsed through it before it is sent |
+| `output` | Zod schema for the result. Type-checked against what the handler returns, and every output is parsed through it before it is sent |
 | `guards` | Named guards to run before the handler. See [API policies](./api-policies.md#guards) |
 | `rateLimit` | Named rate-limit policies. See [API policies](./api-policies.md#rate-limits) |
 | `idempotency` | `true` or `{ ttlSeconds }`. See [API policies](./api-policies.md#idempotency) |
+| `compress` | Whether this API's answers are compressed for a caller that accepts it: `"auto"` (the default) when the body is large enough to gain, `false` never, `true` always. See [Responses](./responses.md#compression) |
+
+`compress` is a transport setting of this server, not part of the API: it is
+not in the contract, the signature or the generated options, and it applies
+to whatever the call is answered with short of a crash, a refusal and a
+replayed answer included. `false` is for an API whose answer compression
+barely helps, such as one carrying a file's bytes as base64 (see
+[Responses](./responses.md#compression) for what it does and does not save).
 
 ## Session-protected APIs
 
@@ -67,12 +87,10 @@ session answers the protocol's `{ sessionExpired: true }` envelope, which
 lambder.addSessionApi("getProfile", {
     input: z.void(),
     output: z.object({ userId: z.string(), username: z.string() }),
-}, async (ctx, res) => {
-    return res.api({
-        userId: ctx.session.data.userId,
-        username: ctx.session.data.username,
-    });
-});
+}, async (ctx) => ({
+    userId: ctx.session.data.userId,
+    username: ctx.session.data.username,
+}));
 ```
 
 Registering the same API name twice throws. Dispatch is first-match, so a
@@ -385,11 +403,11 @@ export const userApi = (lambder: AppLambder) => lambder
     .addApi("getUser", {
         input: z.object({ id: z.string() }),
         output: z.object({ id: z.string(), name: z.string() }),
-    }, async (ctx, res) => res.api({ id: ctx.apiPayload.id, name: "User" }))
+    }, async (ctx) => ({ id: ctx.apiPayload.id, name: "User" }))
     .addApi("createUser", {
         input: z.object({ name: z.string(), email: z.string() }),
         output: z.object({ id: z.string() }),
-    }, async (ctx, res) => res.api({ id: "123" }));
+    }, async () => ({ id: "123" }));
 
 // index.ts
 import { lambderApp } from "./app";
@@ -559,7 +577,7 @@ envelope, which reaches the caller's `versionExpiredHandler` (usually a
 reload). A signed call for a name the map does not hold answers
 `versionExpired` as well, since the client was built against a contract that
 had it. A call carrying no signature is never gated, so a script, a test or a
-client built without the map behaves as before.
+client built without the map is served whatever it was built against.
 
 Both sides read the one file on purpose. Nothing is digested at request time,
 so the two sides cannot disagree on a digest: the only computation is the
@@ -568,10 +586,10 @@ its clients a reload, never a refused endpoint.
 
 What this buys is that a deploy forces a reload only on the clients that call
 an endpoint whose shape actually changed; an open tab whose endpoints are
-unchanged keeps working. `apiVersion` gates nothing on its own any more: it is
-stamped on every answer's envelope so a client can tell which build answered.
+unchanged keeps working. `apiVersion` gates nothing on its own: it is stamped
+on every answer's envelope so a client can tell which build answered.
 
-The one version check left is `minApiVersion`, a floor under the gate: a
+The one version check is `minApiVersion`, a floor under the gate: a
 client naming a version below it is answered `versionExpired` whatever its
 signatures say. That is the lever for a change the digest cannot see, a
 security fix or a field whose meaning changed under the same shape. Set it to
@@ -592,9 +610,17 @@ generate the file as part of the build so it can never be stale.
 
 ## Refusals
 
-A refusal ("you are not allowed", "quota exceeded") is not a crash. `res.die.*`
-covers refusals where you hold the resolver, but shared helpers (permission
-checks, validators) usually do not.
+A refusal ("you are not allowed", "quota exceeded") is not a crash, and it is
+not an output either. An API handler refuses by throwing, with `refuse()` or a
+`LambderApiRefusal`, and the throw may come from anywhere in the call's stack:
+the handler, a guard, a hook, or a shared helper (a permission check, a
+validator) that knows nothing about the request it runs in. It is rendered as
+the refusal envelope by the core's one mapping, the same on the server and in
+the mock runtime.
+
+A refusal is never stored as an idempotent answer: a retry under the same key
+runs the handler again, which decides afresh (see
+[API policies](./api-policies.md#semantics)).
 
 ### `refuse()`
 
@@ -613,6 +639,13 @@ refuse("Too many attempts.", { type: "error", statusCode: 429 });       // custo
 if (exists) refuse("Already reported.", { code: "ALREADY_REPORTED" });  // + machine-readable identity
 // TypeScript applies never-return narrowing: after `if (!row) refuse(...)`, row is defined.
 ```
+
+`refuse(content, options?)` takes `type` (`"warning"` by default, or
+`"error"` or `"info"`), `code`, `title`, the envelope flags `notAuthorized`
+and `sessionExpired`, `statusCode` (200 by default: the envelope is the
+channel, so avoid 5xx, which a caller reads as a crash, and 422, which is
+input validation's), `headers` for the refusal's answer (a `Retry-After`, say)
+and `cause`, kept on the thrown error.
 
 ### Refusal codes
 
@@ -677,7 +710,7 @@ vocabulary), throw `LambderApiRefusal` directly; `refuse()` is sugar over it:
 ```typescript
 import { LambderApiRefusal } from "lambder";
 
-// In any helper, no resolver needed:
+// In any helper, with nothing of the request in hand:
 export const requirePermission = (granted: boolean) => {
     if (!granted) throw new LambderApiRefusal("Permission denied.", {
         notAuthorized: true,                                         // envelope flag -> caller's notAuthorizedHandler

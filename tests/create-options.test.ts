@@ -157,13 +157,13 @@ describe('create(): the require*ApiGuards flags outside a fresh literal', () => 
         // The flag survived the spread: guards is still required here, even
         // though the spread widened `true` to `boolean`.
         // @ts-expect-error guards is required on this instance
-        const missing = () => app.addApi('open', { input: z.object({}), output: z.object({}) }, async (ctx, res) => res.api({}));
+        const missing = () => app.addApi('open', { input: z.object({}), output: z.object({}) }, async (ctx) => ({}));
         expect(missing).toThrow(/declares no guards/);
     });
 
     it('an instance that names neither flag keeps guards optional', () => {
         const app = initLambder().create({ apiPath: '/api', guards: { g: { handler: () => true } } });
-        expect(() => app.addApi('open', { input: z.object({}), output: z.object({}) }, async (ctx, res) => res.api({}))).not.toThrow();
+        expect(() => app.addApi('open', { input: z.object({}), output: z.object({}) }, async (ctx) => ({}))).not.toThrow();
     });
 });
 
@@ -172,7 +172,7 @@ describe('create(): session registrations need the session option', () => {
         const app = initLambder().create({ apiPath: '/api' });
 
         // @ts-expect-error sessions are not configured on this instance
-        expect(() => app.addSessionApi('me', { input: z.any(), output: z.any() }, async (ctx, res) => res.api(null)))
+        expect(() => app.addSessionApi('me', { input: z.any(), output: z.any() }, async (ctx) => null))
             .toThrow(/needs the session option at creation/);
 
         // @ts-expect-error sessions are not configured on this instance
@@ -182,7 +182,7 @@ describe('create(): session registrations need the session option', () => {
     it('accepts both once the session option is there', () => {
         const app = initLambder<{ userId: string }>().create({ apiPath: '/api', session: { store, sessionSalt } });
         expect(() => app
-            .addSessionApi('me', { input: z.any(), output: z.any() }, async (ctx, res) => res.api({ userId: ctx.session.data.userId }))
+            .addSessionApi('me', { input: z.any(), output: z.any() }, async (ctx) => ({ userId: ctx.session.data.userId }))
             .addSessionRoute('/me', async (ctx, res) => res.text(ctx.session.data.userId))).not.toThrow();
     });
 });
@@ -226,7 +226,7 @@ describe('create(): option values checked at construction', () => {
 describe('API registration does not burn the name it refused', () => {
     it('reports the same reason on the second attempt', () => {
         const app = new Lambder({ apiPath: '/api' });
-        const register = () => app.addSessionApi('user.profile', { input: z.any(), output: z.any() }, async (ctx, res) => res.api(null));
+        const register = () => app.addSessionApi('user.profile', { input: z.any(), output: z.any() }, async (ctx) => null);
 
         expect(register).toThrow(/needs the session option at creation/);
         // Not "duplicate API name": the first attempt registered nothing, so
@@ -236,9 +236,9 @@ describe('API registration does not burn the name it refused', () => {
 
     it('still refuses a genuine duplicate', () => {
         const app = new Lambder({ apiPath: '/api' })
-            .addApi('thing', { input: z.any(), output: z.any() }, async (ctx, res) => res.api(null));
+            .addApi('thing', { input: z.any(), output: z.any() }, async (ctx) => null);
 
-        expect(() => app.addApi('thing', { input: z.any(), output: z.any() }, async (ctx, res) => res.api(null)))
+        expect(() => app.addApi('thing', { input: z.any(), output: z.any() }, async (ctx) => null))
             .toThrow(/duplicate API name/);
     });
 });

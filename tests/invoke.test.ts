@@ -72,34 +72,35 @@ const createCallee = () => initLambder().create({
         input: z.object({ text: z.string() }),
         output: z.object({ text: z.string(), ip: z.string(), host: z.string(), invokedBy: z.string().nullable() }),
         guards: 'invokeOnly',
-    }, (ctx, res) => res.api({
+    }, (ctx) => ({
         text: ctx.apiPayload.text, ip: ctx.ip, host: ctx.host,
         invokedBy: ctx.header(LAMBDER_INVOKED_BY_HEADER) ?? null,
     }))
     .addApi('big', {
         input: z.object({ notes: z.array(z.string()) }),
         output: z.object({ notes: z.array(z.string()), count: z.number() }),
-    }, (ctx, res) => res.api({ notes: ctx.apiPayload.notes, count: ctx.apiPayload.notes.length }))
+    }, (ctx) => ({ notes: ctx.apiPayload.notes, count: ctx.apiPayload.notes.length }))
     .addApi('plain', {
         input: z.object({ notes: z.array(z.string()) }),
         output: z.object({ count: z.number(), filler: z.string() }),
-    }, (ctx, res) => res.api({ count: ctx.apiPayload.notes.length, filler: 'x'.repeat(2000) }, {}, { compress: false }))
+        compress: false,
+    }, (ctx) => ({ count: ctx.apiPayload.notes.length, filler: 'x'.repeat(2000) }))
     .addApi('refuse', { input: z.object({}), output: z.null() }, () => refuse('No.', { code: 'app/no', statusCode: 403 }))
-    .addApi('logs', { input: z.object({}), output: z.object({ ok: z.boolean() }) }, (_ctx, res) => {
-        res.logToApiResponse({ step: 1 });
-        res.logToApiResponse({ step: 2 });
-        return res.api({ ok: true });
+    .addApi('logs', { input: z.object({}), output: z.object({ ok: z.boolean() }) }, (_ctx) => {
+        _ctx.logList.push({ step: 1 });
+        _ctx.logList.push({ step: 2 });
+        return { ok: true };
     })
-    .addApi('crash', { input: z.object({}), output: z.null() }, (_ctx, res) => {
-        res.logToApiResponse({ before: 'the throw' });
+    .addApi('crash', { input: z.object({}), output: z.null() }, (_ctx) => {
+        _ctx.logList.push({ before: 'the throw' });
         throw new Error('boom', { cause: new Error('root cause') });
     })
-    .addApi('captchaed', { input: z.object({}), output: z.object({ ok: z.boolean() }), guards: 'captcha' }, (_ctx, res) => res.api({ ok: true }))
-    .addApi('nullAnswer', { input: z.object({}), output: z.object({ n: z.number() }).nullable() }, (_ctx, res) => res.api(null))
+    .addApi('captchaed', { input: z.object({}), output: z.object({ ok: z.boolean() }), guards: 'captcha' }, (_ctx) => ({ ok: true }))
+    .addApi('nullAnswer', { input: z.object({}), output: z.object({ n: z.number() }).nullable() }, (_ctx) => null)
     .addApi('whoami', {
         input: z.object({}),
         output: z.object({ cookie: z.record(z.string(), z.string()), token: z.string() }),
-    }, (ctx, res) => res.api({ cookie: ctx.cookie, token: String(ctx.post.token ?? '') }))
+    }, (ctx) => ({ cookie: ctx.cookie, token: String(ctx.post.token ?? '') }))
     .addRoute('/hello', (ctx, res) => res.text(`hi ${ctx.get.name ?? 'nobody'}`, { headers: { 'X-Seen-Cookie': ctx.cookie.session ?? '' } }))
     .setGlobalErrorHandler((err, ctx, res) =>
         res.api(null, { errorMessage: 'Internal server error.', crash: describeCrash(err, ctx), logList: ctx?.logList }, { statusCode: 500 }));
@@ -266,7 +267,7 @@ describe('LambderInvokeCaller - the synthesized event', () => {
         // still JSON, and a server reads a POST to its API path as an API
         // call only when it says so.
         const app = initLambder().create({ apiPath: '/api' })
-            .addApi('echo', { input: z.object({ text: z.string() }), output: z.object({ text: z.string() }) }, async (ctx, res) => res.api({ text: ctx.apiPayload.text }));
+            .addApi('echo', { input: z.object({ text: z.string() }), output: z.object({ text: z.string() }) }, async (ctx) => ({ text: ctx.apiPayload.text }));
         const caller = new LambderInvokeCaller<typeof app.ApiContract>({ functionName: 'callee', transport: LambderInvokeCaller.localTransport(app.getHandler()) });
         expect(await caller.api('echo', { text: 'hi' }, { headers: { 'content-type': 'application/x-www-form-urlencoded' } })).toEqual({ text: 'hi' });
     });
@@ -312,7 +313,7 @@ describe('LambderInvokeCaller - round trips through a real Lambder app', () => {
             trustedClientIpHeaders: ['x-real-ip'],
             trustedHostHeaders: ['x-forwarded-host'],
         }).addApi('whereFrom', { input: z.object({}), output: z.object({ ip: z.string(), host: z.string() }) },
-            (ctx, res) => res.api({ ip: ctx.ip, host: ctx.host }))
+            (ctx) => ({ ip: ctx.ip, host: ctx.host }))
             .addRoute('/where-from', (ctx, res) => res.json({ ip: ctx.ip, host: ctx.host }));
         const caller = new LambderInvokeCaller<typeof callee.ApiContract>({
             functionName: 'callee-fn',
@@ -539,7 +540,7 @@ describe('LambderInvokeCaller - compression', () => {
         expect(JSON.parse(brotliBody(raw)).payload.count).toBe(400);
     });
 
-    it('a handler that answers with compress: false sends its body plainly', async () => {
+    it('an API declared with compress: false sends its answers plainly', async () => {
         const callee = createCallee();
         const { transport, seen } = capturing(callee);
         const caller = new LambderInvokeCaller<Contract>({ functionName: 'callee-fn', transport });
@@ -1177,10 +1178,10 @@ describe('LambderInvokeCaller - an answer that arrives after the call was given 
         let slowHandlerFinished = false;
         const slowCallee = initLambder().create({ apiPath: '/api' })
             .addApi('slow', { input: z.object({}), output: z.object({ ok: z.boolean() }) },
-                async (_ctx, res) => {
+                async (_ctx) => {
                     await new Promise((resolve) => setTimeout(resolve, 300));
                     slowHandlerFinished = true;
-                    return res.api({ ok: true });
+                    return { ok: true };
                 });
 
         const local = new LambderInvokeCaller<typeof slowCallee.ApiContract>({
@@ -1253,12 +1254,12 @@ describe('LambderInvokeCaller - the answer\'s cookies', () => {
             session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
         })
             .addApi('login', { input: z.object({ user: z.string() }), output: z.object({ ok: z.boolean() }) },
-                async (ctx, res) => { await callee.getSessionController(ctx).createSession(ctx.apiPayload.user, { userId: ctx.apiPayload.user }); return res.api({ ok: true }); })
+                async (ctx) => { await callee.getSessionController(ctx).createSession(ctx.apiPayload.user, { userId: ctx.apiPayload.user }); return { ok: true }; })
             .addSessionApi('me', { input: z.object({}), output: z.object({ userId: z.string() }) },
-                async (ctx, res) => res.api({ userId: ctx.session.data.userId }))
-            .addSessionApi('signOut', { input: z.object({}), output: z.null() }, async (ctx, res) => {
+                async (ctx) => ({ userId: ctx.session.data.userId }))
+            .addSessionApi('signOut', { input: z.object({}), output: z.null() }, async (ctx) => {
                 await callee.getSessionController(ctx).endSession();
-                return res.api(null, { errorMessage: { type: 'info', content: 'Signed out.' } });
+                refuse('Signed out.', { type: 'info' });
             });
         const caller = new LambderInvokeCaller<typeof callee.ApiContract>({
             functionName: 'callee-fn',

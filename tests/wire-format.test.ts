@@ -78,13 +78,13 @@ describe('The response envelope', () => {
         decodeBody(await lambder.render(createApiEvent(body), createMockContext()));
 
     it('answers a success as apiVersion and payload, and nothing else', async () => {
-        const lambder = app().addApi('ok', schema, async (ctx, res) => res.api({ id: 1 }));
+        const lambder = app().addApi('ok', schema, async (ctx) => ({ id: 1 }));
 
         expect(await bodyOf(lambder, 'ok')).toBe('{"apiVersion":"3","payload":{"id":1}}');
     });
 
     it('carries the logList channel when the call wrote to it', async () => {
-        const lambder = app().addApi('logs', schema, async (ctx, res) => { res.logToApiResponse('note'); return res.api(null); });
+        const lambder = app().addApi('logs', schema, async (ctx) => { ctx.logList.push('note'); return null; });
 
         expect(await bodyOf(lambder, 'logs')).toBe('{"apiVersion":"3","payload":null,"logList":["note"]}');
     });
@@ -98,7 +98,7 @@ describe('The response envelope', () => {
     });
 
     it('answers the framework refusals with their own flags and codes', async () => {
-        const lambder = app().addSessionApi('secret', schema, async (ctx, res) => res.api(null));
+        const lambder = app().addSessionApi('secret', schema, async (ctx) => null);
 
         expect(await bodyOf(lambder, 'secret')).toBe('{"apiVersion":"3","payload":null,"sessionExpired":true}');
         expect(await bodyOf(lambder, 'nope')).toBe(
@@ -150,9 +150,9 @@ describe('The session hash construction', () => {
             files: testPublicFiles(),
             apiPath: '/api',
             session: { store, sessionSalt: 'a-salt-value' },
-        }).addApi('login', { input: z.any(), output: z.any() }, async (ctx, res) => {
+        }).addApi('login', { input: z.any(), output: z.any() }, async (ctx) => {
             await lambder.getSessionController(ctx).createSession('user-123', { role: 'user' });
-            return res.api({ ok: true });
+            return { ok: true };
         });
 
         const result = await lambder.render(createApiEvent({ apiName: 'login', payload: {} }), createMockContext());

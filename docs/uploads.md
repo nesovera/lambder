@@ -53,25 +53,25 @@ lambder
     .addSessionApi("invoices.requestUpload", {
         input: z.object({ storeId: z.uuid(), fileFacts: LambderUploadFileFactsSchema }),
         output: z.object({ ticket: LambderUploadTicketSchema, invoiceId: z.uuid() }),
-    }, async ({ apiPayload }, res) => {
+    }, async ({ apiPayload }) => {
         const invoiceId = crypto.randomUUID();
         // The key is the app's, built from its own ids, never the browser's.
         const objectKey = `stores/${apiPayload.storeId}/invoices/${invoiceId}.pdf`;
         // Signed before the record is written: a file the rule refuses leaves nothing behind.
         const ticket = await invoiceFiles.issueUploadTicket({ objectKey, fileFacts: apiPayload.fileFacts, uploadRule: INVOICE_UPLOAD_RULE });
         await invoices.insert({ invoiceId, objectKey, ...apiPayload.fileFacts, uploadedAt: null });
-        return res.api({ ticket, invoiceId });
+        return { ticket, invoiceId };
     })
     .addSessionApi("invoices.confirmUpload", {
         input: z.object({ invoiceId: z.uuid() }),
         output: z.object({ invoiceId: z.uuid(), fileName: z.string() }),
-    }, async ({ apiPayload }, res) => {
+    }, async ({ apiPayload }) => {
         const invoice = await invoices.find(apiPayload.invoiceId);
         if(!invoice) refuse("Invoice not found.");
         const verdict = await invoiceFiles.verifyUploadedObject({ objectKey: invoice.objectKey, fileFacts: invoice });
         if(!verdict.verified) refuse("The upload did not arrive. Please try again.");
         await invoices.markUploaded(invoice.invoiceId);
-        return res.api({ invoiceId: invoice.invoiceId, fileName: invoice.fileName });
+        return { invoiceId: invoice.invoiceId, fileName: invoice.fileName };
     });
 ```
 

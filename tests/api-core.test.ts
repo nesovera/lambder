@@ -92,7 +92,7 @@ describe('The envelope', () => {
     it('buildApiEnvelope carries only the flags that are set and drops an empty logList', () => {
         expect(buildApiEnvelope('1', { a: 1 })).toEqual({ apiVersion: '1', payload: { a: 1 } });
         expect(buildApiEnvelope(undefined, null, { sessionExpired: true, logList: [] })).toEqual({ apiVersion: null, payload: null, sessionExpired: true });
-        expect(buildApiEnvelope(null, null, { errorMessage: 'no', message: 'hi', logList: ['x'] })).toEqual({ apiVersion: null, payload: null, message: 'hi', errorMessage: { type: 'error', content: 'no' }, logList: ['x'] });
+        expect(buildApiEnvelope(null, null, { errorMessage: 'no', logList: ['x'] })).toEqual({ apiVersion: null, payload: null, errorMessage: { type: 'error', content: 'no' }, logList: ['x'] });
     });
 
     it('each answer function renders its outcome with the right status, headers and body', () => {
@@ -178,7 +178,6 @@ describe('The envelope', () => {
         const refusal = refusalAnswer(new LambderApiRefusal('Denied.', { errorMessage: '' }), '1');
         expect(JSON.parse(refusal.body).errorMessage).toEqual({ type: 'error', content: '' });
         expect(JSON.parse(refusalAnswer(new LambderApiRefusal('Denied.'), '1').body).errorMessage).toEqual({ type: 'error', content: 'Denied.' });
-        expect(buildApiEnvelope('1', null, { message: '' })).toEqual({ apiVersion: '1', payload: null, message: '' });
     });
 
     it('toHttpAnswer gives the accessor view resolveApiOutcome reads, Set-Cookie values apart', async () => {

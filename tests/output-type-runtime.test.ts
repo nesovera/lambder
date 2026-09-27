@@ -12,6 +12,7 @@ import { z } from 'zod';
 import Lambder, { initLambder } from '../src/core/Lambder.js';
 import { LambderMemoryIdempotencyStore } from '../src/stores/LambderMemoryIdempotencyStore.js';
 import { lambderTestApp, assertApiFailure } from '../src/testing.js';
+import { refuse } from '../src/shared/wire/LambderApiRefusal.js';
 
 // Mock AWS Lambda event and context
 const createMockEvent = (apiName: string, payload: any): APIGatewayProxyEvent => ({
@@ -57,10 +58,10 @@ describe('Output Type Enforcement - Runtime', () => {
         .addApi('add', {
             input: z.object({ a: z.number(), b: z.number() }),
             output: z.number()
-        }, async (ctx, resolver) => {
+        }, async (ctx) => {
             const { a, b } = ctx.apiPayload;
             const sum = a + b;
-            return resolver.api(sum);
+            return sum;
         });
 
         const event = createMockEvent('add', { a: 5, b: 3 });
@@ -80,13 +81,13 @@ describe('Output Type Enforcement - Runtime', () => {
         .addApi('getUser', {
             input: z.object({ userId: z.string() }),
             output: z.object({ id: z.string(), name: z.string(), age: z.number() })
-        }, async (ctx, resolver) => {
+        }, async (ctx) => {
             const userId = ctx.apiPayload.userId;
-            return resolver.api({
+            return {
                 id: userId,
                 name: 'John Doe',
                 age: 30
-            });
+            };
         });
 
         const event = createMockEvent('getUser', { userId: '123' });
@@ -111,11 +112,11 @@ describe('Output Type Enforcement - Runtime', () => {
         .addApi('listUsers', {
             input: z.void(),
             output: z.array(z.object({ id: z.string(), name: z.string() }))
-        }, async (ctx, resolver) => {
-            return resolver.api([
+        }, async (ctx) => {
+            return [
                 { id: '1', name: 'Alice' },
                 { id: '2', name: 'Bob' }
-            ]);
+            ];
         });
 
         const event = createMockEvent('listUsers', undefined);
@@ -138,12 +139,12 @@ describe('Output Type Enforcement - Runtime', () => {
         .addApi('findUser', {
             input: z.object({ email: z.string() }),
             output: z.object({ id: z.string(), name: z.string() }).nullable()
-        }, async (ctx, resolver) => {
+        }, async (ctx) => {
             const email = ctx.apiPayload.email;
             if (email === 'notfound@example.com') {
-                return resolver.api(null);
+                return null;
             }
-            return resolver.api({ id: '1', name: 'Found User' });
+            return { id: '1', name: 'Found User' };
         });
 
         // Test null case
@@ -173,11 +174,11 @@ describe('Output Type Enforcement - Runtime', () => {
         .addApi('deleteUser', {
             input: z.object({ userId: z.string() }),
             output: z.boolean()
-        }, async (ctx, resolver) => {
+        }, async (ctx) => {
             const userId = ctx.apiPayload.userId;
             // Mock deletion
             const success = userId !== '';
-            return resolver.api(success);
+            return success;
         });
 
         const event = createMockEvent('deleteUser', { userId: '123' });
@@ -187,27 +188,6 @@ describe('Output Type Enforcement - Runtime', () => {
         expect(response.statusCode).toBe(200);
         const body = JSON.parse(response.body || '{}');
         expect(body.payload).toBe(true);
-    });
-
-    it('should work with die.api()', async () => {
-        const lambder = new Lambder({
-            files: testPublicFiles(),
-            apiPath: '/api',
-        })
-        .addApi('echo', {
-            input: z.object({ message: z.string() }),
-            output: z.object({ echo: z.string() })
-        }, async (ctx, resolver) => {
-            return resolver.die.api({ echo: ctx.apiPayload.message });
-        });
-
-        const event = createMockEvent('echo', { message: 'Hello!' });
-        const context = createMockContext();
-        const response = await lambder.render(event, context);
-
-        expect(response.statusCode).toBe(200);
-        const body = JSON.parse(response.body || '{}');
-        expect(body.payload).toEqual({ echo: 'Hello!' });
     });
 
     it('refuses a session API at registration when no session store is configured', () => {
@@ -220,7 +200,7 @@ describe('Output Type Enforcement - Runtime', () => {
         expect(() => lambder.addSessionApi('getUser', {
             input: z.object({ userId: z.string() }),
             output: z.object({ id: z.string(), name: z.string(), age: z.number() })
-        }, async (ctx, resolver) => resolver.api({ id: ctx.apiPayload.userId, name: 'Session User', age: 25 })))
+        }, async (ctx) => ({ id: ctx.apiPayload.userId, name: 'Session User', age: 25 })))
             .toThrow(/session API "getUser" needs the session option at creation/);
     });
 });
@@ -238,11 +218,11 @@ describe('Input Type Enforcement - Runtime', () => {
         .addApi('echo', {
             input: z.object({ message: z.string() }),
             output: z.object({ echo: z.string() })
-        }, async (ctx, resolver) => {
+        }, async (ctx) => {
             // Verify input is correctly typed at runtime
             const message: string = ctx.apiPayload.message;
             expect(typeof message).toBe('string');
-            return resolver.api({ echo: message });
+            return { echo: message };
         });
 
         const event = createMockEvent('echo', { message: 'Test Message' });
@@ -258,10 +238,10 @@ describe('Input Type Enforcement - Runtime', () => {
         .addApi('listUsers', {
             input: z.void(),
             output: z.array(z.any())
-        }, async (ctx, resolver) => {
+        }, async (ctx) => {
             // apiPayload should be undefined for void input
             expect(ctx.apiPayload).toBeUndefined();
-            return resolver.api([]);
+            return [];
         });
 
         const event = createMockEvent('listUsers', undefined);
@@ -277,11 +257,11 @@ describe('Input Type Enforcement - Runtime', () => {
         .addApi('add', {
             input: z.object({ a: z.number(), b: z.number() }),
             output: z.number()
-        }, async (ctx, resolver) => {
+        }, async (ctx) => {
             const { a, b } = ctx.apiPayload;
             expect(typeof a).toBe('number');
             expect(typeof b).toBe('number');
-            return resolver.api(a + b);
+            return a + b;
         });
 
         const event = createMockEvent('add', { a: 10, b: 20 });
@@ -306,8 +286,8 @@ describe('Edge Cases', () => {
         .addApi('listUsers', {
             input: z.void(),
             output: z.array(z.any())
-        }, async (ctx, resolver) => {
-            return resolver.api([]);
+        }, async (ctx) => {
+            return [];
         });
 
         const event = createMockEvent('listUsers', undefined);
@@ -327,8 +307,8 @@ describe('Edge Cases', () => {
         .addApi('add', {
             input: z.object({ a: z.number(), b: z.number() }),
             output: z.number()
-        }, async (ctx, resolver) => {
-            return resolver.api(0);
+        }, async (ctx) => {
+            return 0;
         });
 
         const event = createMockEvent('add', { a: 0, b: 0 });
@@ -348,12 +328,12 @@ describe('Edge Cases', () => {
         .addApi('getUser', {
             input: z.object({ userId: z.string() }),
             output: z.object({ id: z.string(), name: z.string(), age: z.number() })
-        }, async (ctx, resolver) => {
-            return resolver.api({
+        }, async (ctx) => {
+            return {
                 id: '',
                 name: '',
                 age: 0
-            });
+            };
         });
 
         const event = createMockEvent('getUser', { userId: '' });
@@ -374,41 +354,36 @@ describe('Edge Cases', () => {
 // A null answer needs a reason
 // ============================================================================
 
-describe('Output Type Enforcement - a null answer needs a reason', () => {
-    it('res.api(null) compiles only for an output that allows null; beside a reason it always does; the answers run as written', async () => {
+describe('Output Type Enforcement - a handler answers with its output or refuses', () => {
+    it('returns null only for an output that allows null, and says no with refuse()', async () => {
         const lambder = new Lambder({
             files: testPublicFiles(),
             apiPath: '/api',
         })
         .addApi('strict', {
-            input: z.object({ mode: z.enum(['ok', 'refuse', 'message']) }),
+            input: z.object({ mode: z.enum(['ok', 'refuse']) }),
             output: z.object({ id: z.string() }),
-        }, async (ctx, res) => {
-            // @ts-expect-error a bare null is not an answer of this output
-            if(ctx.apiPayload.mode === 'never') return res.api(null);
-            // @ts-expect-error nor through die
-            if(ctx.apiPayload.mode === 'never') res.die.api(null);
-            if(ctx.apiPayload.mode === 'refuse') return res.api(null, { errorMessage: 'Not now.' });
-            if(ctx.apiPayload.mode === 'message') return res.api(null, { message: 'Nothing to report.' });
-            return res.api({ id: '1' });
+        }, async (ctx) => {
+            if(ctx.apiPayload.mode === 'refuse') refuse('Not now.');
+            return { id: '1' };
         })
+        // @ts-expect-error a bare null is not an answer of this output
+        .addApi('never', { input: z.object({}), output: z.object({ id: z.string() }) }, async (_ctx) => null)
         .addApi('maybe', {
             input: z.object({}),
             output: z.object({ id: z.string() }).nullable(),
-        }, async (_ctx, res) => res.api(null));
+        }, async (_ctx) => null);
 
         const context = createMockContext();
         const strictOk = JSON.parse((await lambder.render(createMockEvent('strict', { mode: 'ok' }), context)).body || '{}');
         expect(strictOk.payload).toEqual({ id: '1' });
         const refused = JSON.parse((await lambder.render(createMockEvent('strict', { mode: 'refuse' }), context)).body || '{}');
-        expect(refused).toMatchObject({ payload: null, errorMessage: { type: 'error', content: 'Not now.' } });
-        const messaged = JSON.parse((await lambder.render(createMockEvent('strict', { mode: 'message' }), context)).body || '{}');
-        expect(messaged).toMatchObject({ payload: null, message: 'Nothing to report.' });
+        expect(refused).toMatchObject({ payload: null, errorMessage: { type: 'warning', content: 'Not now.' } });
         const maybe = JSON.parse((await lambder.render(createMockEvent('maybe', {}), context)).body || '{}');
         expect(maybe.payload).toBe(null);
     });
 
-    it('an untyped resolver (any output) accepts a bare null', async () => {
+    it('a route writing an API envelope by hand sends it as given', async () => {
         const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
             .addRoute('/api-shaped', (_ctx, res) => res.api(null));
         const response = await lambder.render({ ...createMockEvent('unused', {}), path: '/api-shaped', httpMethod: 'GET', body: null }, createMockContext());
@@ -423,19 +398,15 @@ describe('Output parsing at runtime: what a success payload reaches the wire as'
         // A row read straight from a table: assignable to the narrower
         // output type, and carrying fields the schema does not declare.
         .addApi('user.get', { input: z.object({}), output: z.object({ id: z.string(), name: z.string() }) },
-            async (_ctx, res) => res.api(userRow))
+            async (_ctx) => userRow)
         .addApi('user.save', { input: z.object({}), output: z.object({ id: z.string(), name: z.string() }), idempotency: true },
-            async (_ctx, res) => res.api(userRow))
+            async (_ctx) => userRow)
         .addApi('stamped', { input: z.object({}), output: z.object({ at: z.date(), label: z.string().default('none'), code: z.string().transform((value) => value.toUpperCase()) }) },
-            async (_ctx, res) => res.api({ at: new Date(0), code: 'ab' }))
+            async (_ctx) => ({ at: new Date(0), code: 'ab' }))
         .addApi('priced', { input: z.object({}), output: z.object({ dollars: z.number().transform((cents) => cents / 100) }) },
-            async (_ctx, res) => res.api({ dollars: 1250 }))
+            async (_ctx) => ({ dollars: 1250 }))
         .addApi('broken', { input: z.object({}), output: z.object({ count: z.number() }) },
-            async (_ctx, res) => res.api({ count: 'many' } as never))
-        .addApi('refused', { input: z.object({}), output: z.object({ id: z.string(), name: z.string() }) },
-            async (_ctx, res) => res.api(userRow, { errorMessage: 'Not now.' }))
-        .addApi('refusedNull', { input: z.object({}), output: z.object({ count: z.number() }) },
-            async (_ctx, res) => res.api(null, { errorMessage: 'Not now.' }));
+            async (_ctx) => ({ count: 'many' } as never));
 
     it('strips the fields the output schema does not declare, secrets included', async () => {
         expect(await lambderTestApp(app()).visitor().api('user.get', {})).toEqual({ id: 'u1', name: 'Ada' });
@@ -461,13 +432,12 @@ describe('Output parsing at runtime: what a success payload reaches the wire as'
 
     it('takes the schema\'s input form from the handler, so a transform runs once', async () => {
         expect(await lambderTestApp(app()).visitor().api('priced', {})).toEqual({ dollars: 12.5 });
+        const iso = { input: z.object({}), output: z.object({ at: z.date().transform((date) => date.toISOString()) }) };
         initLambder().create({ apiPath: '/api' })
-            .addApi('iso', { input: z.object({}), output: z.object({ at: z.date().transform((date) => date.toISOString()) }) }, async (_ctx, res) => {
-                // The output form is what the schema produces, not what it parses.
-                // @ts-expect-error a string is not the Date the schema takes
-                res.api({ at: 'already a string' });
-                return res.api({ at: new Date(0) });
-            });
+            .addApi('iso', iso, async (_ctx) => ({ at: new Date(0) }))
+            // The output form is what the schema produces, not what it parses.
+            // @ts-expect-error a string is not the Date the schema takes
+            .addApi('isoString', iso, async (_ctx) => ({ at: 'already a string' }));
     });
 
     it('answers a payload the schema rejects as a crash, naming the paths and never the values', async () => {
@@ -480,20 +450,10 @@ describe('Output parsing at runtime: what a success payload reaches the wire as'
         vi.restoreAllMocks();
     });
 
-    it('strips a refusal\'s payload the same way, and passes null as it is', async () => {
-        const visitor = lambderTestApp(app()).visitor();
-        const refused = await visitor.apiOutcome('refused', {});
-        assertApiFailure(refused, 'errorMessage');
-        expect(refused.response.payload).toEqual({ id: 'u1', name: 'Ada' });
-        const refusedNull = await visitor.apiOutcome('refusedNull', {});
-        assertApiFailure(refusedNull, 'errorMessage');
-        expect(refusedNull.response.payload).toBeNull();
-    });
-
     it('sends what a hook or the input validation handler answers as given, in shapes of their own', async () => {
         const cached = { id: 'u1', name: 'Ada', at: new Date(0).toISOString() };
         const answering = initLambder().create({ apiPath: '/api' })
-            .addApi('user.get', { input: z.object({ id: z.string() }), output: z.object({ id: z.string(), name: z.string(), at: z.date() }) }, async (_ctx, res) => res.api({ ...userRow, at: new Date(0) }))
+            .addApi('user.get', { input: z.object({ id: z.string() }), output: z.object({ id: z.string(), name: z.string(), at: z.date() }) }, async (_ctx) => ({ ...userRow, at: new Date(0) }))
             .setApiInputValidationErrorHandler((_ctx, res) => res.api({ field: 'id' } as never, { errorMessage: 'Invalid input.' }))
             // A cached answer, replayed in the wire form it was stored in.
             .addHook('beforeRender', async (ctx, res) => ctx.apiName === 'user.get' && ctx.apiPayload?.id === 'cached' ? res.api(cached) : ctx);
@@ -516,7 +476,7 @@ describe('Async refinements in input schemas and preflight slices', () => {
                 notReserved: { apiInput: z.object({ name: z.string().refine(async (name) => name !== 'root', 'Reserved.') }), handler: async () => {} },
             },
         }).addApi('claim', { input: z.object({ name: available }), output: z.object({ name: z.string() }), guards: 'notReserved' },
-            async (ctx, res) => res.api({ name: ctx.apiPayload.name })));
+            async (ctx) => ({ name: ctx.apiPayload.name })));
         const visitor = app.visitor();
 
         expect(await visitor.api('claim', { name: 'grace' })).toEqual({ name: 'grace' });

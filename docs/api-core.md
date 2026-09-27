@@ -158,8 +158,10 @@ answer is the shape the idempotency store persists and replays;
 | `invalidPayloadAnswer(apiVersion, message)` | A compressed payload that could not be restored (400) |
 | `crashAnswer(apiVersion, revealed?)` | The last-resort 500, still an envelope; `revealed` (the crash in full, with the call's logList) only for a caller `crashes.reveal` trusts |
 
-The server's `res.api()` builds through `buildApiEnvelope`, and the mock wraps
-a handler's return with it, so the two sides cannot drift on a byte.
+The server wraps an API handler's returned output with `buildApiEnvelope` (as
+does `res.api()`, for an envelope a hook or an error handler writes by hand),
+and the mock wraps a mock handler's return with it, so the two sides cannot
+drift on a byte.
 
 ## The pipeline
 
@@ -202,13 +204,15 @@ unmetered or undeduplicated request is worse than a refused one.
 
 `definition` is a `LambderApiDefinition`: `{ name, mode, guards?, rateLimit?,
 idempotency?, input?, output? }`. The schemas are optional because the mock has
-none. On the server, `output` is what every payload a handler answers is
-parsed through before it is sent (the parse belongs to the server's resolver,
-so the mock, which has no schemas, sends payloads as given), and it is part of
-the endpoint's signature digest.
-`exec(ctx)` is the adapter's step: on the server it calls the app handler and
-converts its `LambderResponse` to an answer; in the mock it calls the mock
-handler and wraps the return in the envelope.
+none. On the server, `output` is what every output a handler returns is parsed
+through before it is sent (the parse is the server adapter's, so the mock,
+which has no schemas, sends outputs as given), and it is part of the
+endpoint's signature digest.
+`exec(ctx)` is the adapter's step: on the server it calls the app handler,
+parses the output it returned and wraps it in the envelope; in the mock it
+calls the mock handler and wraps its return in the envelope. Either way the
+handler answers by returning and refuses by throwing, so an `exec` hands the
+pipeline an answer or throws.
 
 The steps, in the order `run` executes them:
 
@@ -277,9 +281,12 @@ type LambderApiCallContext<S> = {
 
 The server's `LambderRenderContext` extends it (with `ctx.api`, the parsed
 request, beside the HTTP fields), and so does the mock's handler context.
-`LambderAnswerHeaders` records header operations in call order, so `set`
-replaces what the answer itself carries and `add` appends to it, exactly as
-the two would if called on the answer directly.
+Both carry the response tools (`LambderResponseTools`: `setResponseHeader`,
+`addResponseHeader`, `setCookie`, `clearCookie`), which write into
+`responseHeaders`, so a handler writes its headers and cookies the same way on
+either side. `LambderAnswerHeaders` records header operations in call order,
+so `set` replaces what the answer itself carries and `add` appends to it,
+exactly as the two would if called on the answer directly.
 
 ## Stores are interfaces
 
@@ -328,8 +335,9 @@ the mock runtime stand in for a callee there.
 `Lambder.ts` keeps routes, actions, hooks, files, index serving, CORS,
 templating, finalization and the global error handler. For an API call it
 parses the event into `ctx.api`, runs the pipeline with an `exec` that calls
-the handler and converts its response (`answerFromResponse`,
-`responseFromAnswer`), and hands the answer to hooks, CORS and finalization
-as a `LambderResponse`. The signature gate and the payload restore also run
-before routing, so hooks see a plain payload and a stale client is answered
-before any of them, whether or not the name it asked for exists.
+the handler, parses what it returned through the API's `output` and builds the
+envelope answer, and hands the pipeline's answer to hooks, CORS and
+finalization as a `LambderResponse` (`responseFromAnswer`), with the API's
+declared `compress` option on it. The signature gate and the payload restore
+also run before routing, so hooks see a plain payload and a stale client is
+answered before any of them, whether or not the name it asked for exists.

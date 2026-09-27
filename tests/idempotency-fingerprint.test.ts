@@ -5,13 +5,11 @@
  * handed the first request's answer. And a key scope passed as the call's key
  * moves on by itself once an answer settles the operation, and only then.
  *
- * The two scenarios the rule exists for:
- * - a stale refusal: qty 10 is refused ("only 5 in stock"), the person fixes
- *   it to qty 2 and resubmits, and would be handed the stored refusal for a
- *   day;
- * - a lost edit: qty 3 times out after it was processed, the person edits to
- *   qty 4 and resubmits under the same key, and would be handed qty 3's
- *   success while only qty 3 was ever placed.
+ * The scenario the rule exists for is a lost edit: qty 3 times out after it
+ * was processed, the person edits to qty 4 and resubmits under the same key,
+ * and would be handed qty 3's success while only qty 3 was ever placed. A
+ * refusal is never stored (it is thrown, and the handler decides afresh on a
+ * retry), so a corrected request after one goes through under the same key.
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -35,13 +33,13 @@ const createShop = () => {
         idempotency: { store: new LambderMemoryIdempotencyStore() },
         guards: { coupon: { guardInput: z.object({ code: z.string() }), handler: async () => {} } },
     }).addApi('order.place', { input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true },
-        async (ctx, res) => {
-            if(ctx.apiPayload.qty > 5) return res.api(null, { errorMessage: 'Only 5 in stock.' });
+        async (ctx) => {
+            if(ctx.apiPayload.qty > 5) refuse('Only 5 in stock.', { code: 'app/out-of-stock' });
             placed.push(ctx.apiPayload.qty);
-            return res.api({ placed: ctx.apiPayload.qty });
+            return { placed: ctx.apiPayload.qty };
         })
         .addApi('order.withCoupon', { input: z.object({ qty: z.number(), note: z.string() }), output: z.object({ placed: z.number() }), idempotency: true, guards: 'coupon' },
-            async (ctx, res) => res.api({ placed: ctx.apiPayload.qty })));
+            async (ctx) => ({ placed: ctx.apiPayload.qty })));
     return { app, placed };
 };
 
@@ -61,14 +59,13 @@ describe('A key belongs to the request it was first used for', () => {
         expect(placed).toEqual([3]);
     });
 
-    it('does not hand a corrected request the refusal stored for the first', async () => {
+    it('stores nothing for a refusal, so a corrected request under the same key goes through', async () => {
         const { app, placed } = createShop();
         const visitor = app.visitor();
 
-        assertApiFailure(await visitor.apiOutcome('order.place', { qty: 10 }, { idempotencyKey: KEY }), 'errorMessage');
-        const corrected = await visitor.apiOutcome('order.place', { qty: 2 }, { idempotencyKey: KEY });
-        assertApiFailure(corrected, 'errorMessage', { code: LAMBDER_REFUSAL_CODES.idempotencyKeyReused });
-        expect(placed).toEqual([]);
+        assertApiFailure(await visitor.apiOutcome('order.place', { qty: 10 }, { idempotencyKey: KEY }), 'errorMessage', { code: 'app/out-of-stock' });
+        expect(await visitor.api('order.place', { qty: 2 }, { idempotencyKey: KEY })).toEqual({ placed: 2 });
+        expect(placed).toEqual([2]);
     });
 
     it('reads the payload alone, whatever the guard inputs beside it and the order its keys were written in', async () => {
@@ -215,7 +212,7 @@ describe('A store with no room for a claim', () => {
         const orderGate = new Promise<void>((resolve) => { releaseOrder = resolve; });
         const app = lambderTestApp(initLambder().create({ apiPath: '/api', idempotency: { store } })
             .addApi('order.place', { input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true },
-                async (ctx, res) => { await orderGate; return res.api({ placed: ctx.apiPayload.qty }); }), { idempotency: { store } });
+                async (ctx) => { await orderGate; return { placed: ctx.apiPayload.qty }; }), { idempotency: { store } });
         try {
             // The one record the store has room for: an order still running.
             const running = app.visitor().apiOutcome('order.place', { qty: 1 }, { idempotencyKey: createIdempotencyKeyScope() });
@@ -258,16 +255,16 @@ describe('A retry after a timeout runs the operation once', () => {
                 }),
             },
         }).addApi('order.place', { input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true, guards: 'captcha' },
-            async (ctx, res) => {
+            async (ctx) => {
                 await new Promise((resolve) => setTimeout(resolve, 60));
                 placed.push(ctx.apiPayload.qty);
-                return res.api({ placed: placed.length });
+                return { placed: placed.length };
             })
             .addApi('order.limited', { input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true, rateLimit: 'onePerIp' },
-                async (ctx, res) => {
+                async (ctx) => {
                     await new Promise((resolve) => setTimeout(resolve, 60));
                     placed.push(ctx.apiPayload.qty);
-                    return res.api({ placed: placed.length });
+                    return { placed: placed.length };
                 });
         const caller = new LambderInvokeCaller<typeof lambder.ApiContract>({ functionName: 'shop', transport: LambderInvokeCaller.localTransport(lambder.getHandler()) });
         return { caller, placed };
@@ -330,7 +327,7 @@ describe('A call that could not be built', () => {
     it('leaves the invoke caller\'s key untried, as the browser caller does, so the next refusal moves it', async () => {
         const lambder = initLambder().create({ apiPath: '/api', idempotency: { store: new LambderMemoryIdempotencyStore() } })
             .addApi('order.place', { input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true },
-                async (ctx, res) => res.api({ placed: ctx.apiPayload.qty }));
+                async (ctx) => ({ placed: ctx.apiPayload.qty }));
         const caller = new LambderInvokeCaller<typeof lambder.ApiContract>({ functionName: 'shop', transport: LambderInvokeCaller.localTransport(lambder.getHandler()) });
         const scope = createIdempotencyKeyScope();
         const key = scope.current;
@@ -355,11 +352,11 @@ describe('An answer that breaks its output schema', () => {
             idempotency: { store: new LambderMemoryIdempotencyStore() },
             crashes: { report: (error) => { crashes.push(error); } },
         }).addApi('card.charge', { input: z.object({ cents: z.number() }), output: z.object({ receipt: z.string() }), idempotency: true },
-            async (ctx, res) => {
+            async (ctx) => {
                 charged.push(ctx.apiPayload.cents);
                 // A row whose column came back a number: the charge has
                 // happened, and the answer breaks the schema after it.
-                return res.api({ receipt: 42 } as unknown as { receipt: string });
+                return { receipt: 42 } as unknown as { receipt: string };
             });
         const caller = new LambderInvokeCaller<typeof lambder.ApiContract>({ functionName: 'shop', transport: LambderInvokeCaller.localTransport(lambder.getHandler()) });
 
@@ -386,9 +383,9 @@ describe('An answer that breaks its output schema', () => {
             idempotency: { store: new LambderMemoryIdempotencyStore() },
             crashes: { report: (error) => { crashes.push(error); } },
         }).addApi('card.charge', { input: z.object({ cents: z.number() }), output, idempotency: true },
-            async (ctx, res) => {
+            async (ctx) => {
                 charged.push(ctx.apiPayload.cents);
-                return res.api({ receipt: 'r-1' });
+                return { receipt: 'r-1' };
             });
         const caller = new LambderInvokeCaller<typeof lambder.ApiContract>({ functionName: 'shop', transport: LambderInvokeCaller.localTransport(lambder.getHandler()) });
         for(let attempt = 0; attempt < 3; attempt++){

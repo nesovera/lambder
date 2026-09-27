@@ -1,5 +1,6 @@
 import type { LambderSessionRecord } from "../shared/contracts/LambderSessionStore.js";
 import { LambderAnswerHeaders } from "../shared/wire/LambderAnswerHeaders.js";
+import { serializeCookie, serializeClearCookie, type LambderCookieOptions, type LambderClearCookieOptions } from "../shared/wire/LambderCookie.js";
 
 /**
  * The context the API core needs from whoever runs it. The server's render
@@ -13,7 +14,7 @@ import { LambderAnswerHeaders } from "../shared/wire/LambderAnswerHeaders.js";
  * - `responseHeaders` collects headers written during the call, applied
  *   onto the answer by the pipeline.
  * - `logList` collects entries for the envelope's logList channel
- *   (`res.logToApiResponse` on the server).
+ *   (`ctx.logList.push(entry)` from a handler).
  */
 export type LambderApiCallContext<TSessionData = any> = {
     session: LambderSessionRecord<TSessionData> | null;
@@ -32,6 +33,40 @@ export const createApiCallContext = <TSessionData = any>(): LambderApiCallContex
     guardData: Object.create(null) as Record<string, unknown>,
     responseHeaders: new LambderAnswerHeaders(),
     logList: [],
+});
+
+/**
+ * What a handler writes onto its answer beside the body: headers and cookies,
+ * collected on `responseHeaders` and applied to whatever answer the request
+ * ends with. On every context a handler receives, the server's and the
+ * mock's alike, since an API handler returns its output and has no response
+ * builder to write them on.
+ */
+export type LambderResponseTools = {
+    /** Replaces a response header. */
+    setResponseHeader(key: string, value: string | string[]): void;
+    /** Appends a response header value (repeatable for one key). */
+    addResponseHeader(key: string, value: string): void;
+    /**
+     * Adds a Set-Cookie header. A function-form `domain` is resolved against
+     * the request host. Defaults: Path=/, SameSite=Lax, Secure, not HttpOnly,
+     * browser-session lifetime.
+     */
+    setCookie(name: string, value: string, options?: LambderCookieOptions): void;
+    /**
+     * Adds a Set-Cookie header that deletes the cookie. Pass the `domain` and
+     * `path` it was set with: a cookie's identity is (name, domain, path), and
+     * a deletion under another scope deletes nothing.
+     */
+    clearCookie(name: string, options?: LambderClearCookieOptions): void;
+};
+
+/** The response tools of one context, writing into its own responseHeaders; `host` resolves a function-form cookie domain. */
+export const responseToolsOf = (ctx: { responseHeaders: LambderAnswerHeaders }, host: string): LambderResponseTools => ({
+    setResponseHeader: (key, value) => { ctx.responseHeaders.set(key, value); },
+    addResponseHeader: (key, value) => { ctx.responseHeaders.add(key, value); },
+    setCookie: (name, value, options) => { ctx.responseHeaders.add("Set-Cookie", serializeCookie(name, value, options, host)); },
+    clearCookie: (name, options) => { ctx.responseHeaders.add("Set-Cookie", serializeClearCookie(name, options, host)); },
 });
 
 /**

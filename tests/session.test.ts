@@ -118,6 +118,7 @@ describe('Session Type Safety', () => {
             event: {} as any, lambdaContext: {} as any, eventFormat: 'v1' as const,
             responseHeaders: new LambderAnswerHeaders(), logList: [],
             sessionController: {} as any, rateLimit: async () => {}, isRateLimited: async () => false as const,
+            setResponseHeader: () => {}, addResponseHeader: () => {}, setCookie: () => {}, clearCookie: () => {},
         } satisfies LambderRenderContext | LambderSessionRenderContext<any, UserSessionData & { permissions: string[] }>;
         expect(sessionCtx.session.data.permissions).toContain('read');
     });
@@ -826,14 +827,14 @@ describe('Session Endpoint Protection', () => {
 
         it('a session API without the session option is refused at registration', () => {
             const bare = new Lambder({ apiPath: '/api' });
-            expect(() => bare.addSessionApi('x', { input: z.any(), output: z.any() }, async (ctx, res) => res.api(null)))
+            expect(() => bare.addSessionApi('x', { input: z.any(), output: z.any() }, async (ctx) => null))
                 .toThrow(/needs the session option at creation/);
         });
     });
 
     describe('addSessionApi', () => {
         const profileApi = () => lambder.addSessionApi('user.profile', { input: z.any(), output: z.any() },
-            async (ctx, resolver) => resolver.api({ userId: ctx.session.data.userId }));
+            async (ctx) => ({ userId: ctx.session.data.userId }));
 
         it('answers the protocol\'s sessionExpired flag when no session exists', async () => {
             profileApi();
@@ -872,7 +873,7 @@ describe('Session Endpoint Protection', () => {
                     }),
                 },
             }).addSessionApi('org.action', { input: z.any(), output: z.any(), guards: { orgPermission: 'ORG.MANAGE' } },
-                async (ctx, resolver) => resolver.api(ctx.guardData.orgPermission));
+                async (ctx) => ctx.guardData.orgPermission);
 
             const response = await guarded.render(createMockEvent('/api', 'POST', token, 'org.action'), createMockContext());
             expect(JSON.parse(decodeBody(response) || '{}').payload).toEqual({ subject: 'user-123', permission: 'ORG.MANAGE' });
@@ -887,7 +888,7 @@ describe('Session Endpoint Protection', () => {
                 guards: { sessionOnly: lambderGuard({ session: true, handler: () => {} }) },
                 requireSessionApiGuards: true,
             }).addSessionApi('me.session', { input: z.any(), output: z.any(), guards: 'sessionOnly' },
-                async (ctx, resolver) => resolver.api({ userId: ctx.session.data.userId }));
+                async (ctx) => ({ userId: ctx.session.data.userId }));
 
             const response = await strict.render(createMockEvent('/api', 'POST', token, 'me.session'), createMockContext());
             expect(JSON.parse(decodeBody(response) || '{}').payload).toEqual({ userId: '123' });
@@ -895,19 +896,19 @@ describe('Session Endpoint Protection', () => {
 
         it('hands the handler typed session data', async () => {
             const { token } = await plantRecord(store, { data: { userId: '123', username: 'testuser', role: 'admin' } });
-            lambder.addSessionApi('user.profile', { input: z.any(), output: z.any() }, async (ctx, resolver) => {
+            lambder.addSessionApi('user.profile', { input: z.any(), output: z.any() }, async (ctx) => {
                 const userId: string = ctx.session.data.userId;
                 const role: 'admin' | 'user' | 'guest' = ctx.session.data.role;
-                return resolver.api({ userId, role });
+                return { userId, role };
             });
             const response = await lambder.render(createMockEvent('/api', 'POST', token, 'user.profile'), createMockContext());
             expect(JSON.parse(decodeBody(response) || '{}').payload).toEqual({ userId: '123', role: 'admin' });
         });
 
         it('a handler creates a session through the controller and the answer carries its cookies', async () => {
-            lambder.addApi('login', { input: z.object({ user: z.string() }), output: z.any() }, async (ctx, res) => {
+            lambder.addApi('login', { input: z.object({ user: z.string() }), output: z.any() }, async (ctx) => {
                 const session = await lambder.getSessionController(ctx).createSession(ctx.apiPayload.user, { userId: '9', username: ctx.apiPayload.user, role: 'user' });
-                return res.api({ key: session.sessionKey });
+                return { key: session.sessionKey };
             });
             const response = await lambder.render(createMockEvent('/api', 'POST', undefined, 'login', { user: 'ada' }), createMockContext());
             expect(JSON.parse(decodeBody(response) || '{}').payload).toEqual({ key: 'ada' });
@@ -920,11 +921,11 @@ describe('Session Endpoint Protection', () => {
 
         it('answers sessionExpired, not a crash, when the session ends while the handler holds it', async () => {
             const { token } = await plantRecord(store);
-            lambder.addSessionApi('user.rename', { input: z.any(), output: z.any() }, async (ctx, resolver) => {
+            lambder.addSessionApi('user.rename', { input: z.any(), output: z.any() }, async (ctx) => {
                 // A logout in another tab lands mid-request.
                 await store.delete(ctx.session.sessionKeyHash, ctx.session.secretHash);
                 await ctx.sessionController.updateSessionData({ ...ctx.session.data, username: 'renamed' });
-                return resolver.api({ renamed: true });
+                return { renamed: true };
             });
             const response = await lambder.render(createMockEvent('/api', 'POST', token, 'user.rename'), createMockContext());
             expect(JSON.parse(decodeBody(response) || '{}').sessionExpired).toBe(true);
@@ -934,10 +935,10 @@ describe('Session Endpoint Protection', () => {
 
         it('a rotation after the session ended mints nothing and sets no cookies', async () => {
             const { token } = await plantRecord(store);
-            lambder.addSessionApi('org.switch', { input: z.any(), output: z.any() }, async (ctx, resolver) => {
+            lambder.addSessionApi('org.switch', { input: z.any(), output: z.any() }, async (ctx) => {
                 await store.delete(ctx.session.sessionKeyHash, ctx.session.secretHash);
                 await ctx.sessionController.regenerateSession();
-                return resolver.api({ switched: true });
+                return { switched: true };
             });
             const response = await lambder.render(createMockEvent('/api', 'POST', token, 'org.switch'), createMockContext());
             expect(JSON.parse(decodeBody(response) || '{}').sessionExpired).toBe(true);
@@ -956,7 +957,7 @@ describe('Session Endpoint Protection', () => {
         it('hands handlers renewed data when the session data is stale', async () => {
             const { token } = await plantRecord(store, { dataExpiresAt: nowSec() - 10 });
             const app = makeRefreshingLambder(async (session) => ({ ...session.data, role: 'admin' as const }))
-                .addSessionApi('user.profile', { input: z.any(), output: z.any() }, async (ctx, resolver) => resolver.api({ role: ctx.session.data.role }));
+                .addSessionApi('user.profile', { input: z.any(), output: z.any() }, async (ctx) => ({ role: ctx.session.data.role }));
             const response = await app.render(createMockEvent('/api', 'POST', token, 'user.profile'), createMockContext());
             expect(JSON.parse(decodeBody(response) || '{}').payload?.role).toBe('admin');
             expect(store.list()[0]!.data.role).toBe('admin');
@@ -965,7 +966,7 @@ describe('Session Endpoint Protection', () => {
         it('answers sessionExpired when the refresh callback ends the session', async () => {
             const { token } = await plantRecord(store, { dataExpiresAt: nowSec() - 10 });
             const app = makeRefreshingLambder(async () => null)
-                .addSessionApi('user.profile', { input: z.any(), output: z.any() }, async (ctx, resolver) => resolver.api({ role: ctx.session.data.role }));
+                .addSessionApi('user.profile', { input: z.any(), output: z.any() }, async (ctx) => ({ role: ctx.session.data.role }));
             const response = await app.render(createMockEvent('/api', 'POST', token, 'user.profile'), createMockContext());
             expect(JSON.parse(decodeBody(response) || '{}').sessionExpired).toBe(true);
             expect(store.size).toBe(0);

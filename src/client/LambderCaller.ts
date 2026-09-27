@@ -56,7 +56,6 @@ type FetchEndEventHandler = (params: {
 
 type ErrorHandler = (err: Error) => void|Promise<void>;
 type ValidationErrorHandler = (zodError: LambderValidationError) => (void|false)|Promise<(void|false)>;
-type MessageHandler = (message: LambderAppRefusalMessage | string) => void|Promise<void>;
 /** Handed the refusal as its message object, a plain-string errorMessage having been read as one (refusalMessageOf). */
 type ErrorMessageHandler = (message: LambderAppRefusalMessage) => void|Promise<void>;
 
@@ -70,7 +69,6 @@ export type LambderLogListHandler = (apiName: string, logList: unknown[]) => voi
 export type LambderCallOptions = LambderSharedCallOptions & {
     versionExpiredHandler?: NotifyHandler;
     sessionExpiredHandler?: NotifyHandler;
-    messageHandler?: MessageHandler;
     errorMessageHandler?: ErrorMessageHandler;
     apiInputValidationErrorHandler?: ValidationErrorHandler;
     notAuthorizedHandler?: NotifyHandler;
@@ -103,7 +101,6 @@ type LambderCallerBaseOptions = {
     timeoutMs?: number,
     versionExpiredHandler?: NotifyHandler,
     sessionExpiredHandler?: NotifyHandler,
-    messageHandler?: MessageHandler,
     errorMessageHandler?: ErrorMessageHandler,
     notAuthorizedHandler?: NotifyHandler,
     errorHandler?: ErrorHandler,
@@ -163,7 +160,6 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
     private versionExpiredHandler?: NotifyHandler;
     private sessionExpiredHandler?: NotifyHandler;
 
-    private messageHandler?: MessageHandler;
     private errorMessageHandler?: ErrorMessageHandler;
     private notAuthorizedHandler?: NotifyHandler;
     private errorHandler?: ErrorHandler;
@@ -188,7 +184,7 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
             isCorsEnabled,
             timeoutMs,
             versionExpiredHandler, sessionExpiredHandler,
-            messageHandler, errorMessageHandler,
+            errorMessageHandler,
             notAuthorizedHandler, errorHandler, logListHandler,
             fetchStartedHandler, fetchEndedHandler,
             apiInputValidationErrorHandler,
@@ -209,7 +205,6 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
         this.versionExpiredHandler = versionExpiredHandler;
         this.sessionExpiredHandler = sessionExpiredHandler;
 
-        this.messageHandler = messageHandler;
         this.errorMessageHandler = errorMessageHandler;
         this.notAuthorizedHandler = notAuthorizedHandler;
         this.errorHandler = errorHandler;
@@ -255,7 +250,6 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
         // Per-call overrides win over the constructor handlers.
         const versionExpiredHandler = options?.versionExpiredHandler ?? this.versionExpiredHandler;
         const sessionExpiredHandler = options?.sessionExpiredHandler ?? this.sessionExpiredHandler;
-        const messageHandler = options?.messageHandler ?? this.messageHandler;
         const errorMessageHandler = options?.errorMessageHandler ?? this.errorMessageHandler;
         const notAuthorizedHandler = options?.notAuthorizedHandler ?? this.notAuthorizedHandler;
         const errorHandler = options?.errorHandler ?? this.errorHandler;
@@ -472,11 +466,6 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
                 if(notAuthorizedHandler){ await notAuthorizedHandler(); }
                 else{ await reportError(new Error("Not Authorized;")); }
                 return outcome;
-            }
-            // Presence, not truthiness: the envelope keeps a message an app
-            // spelled out as the empty string, so the handler runs for it.
-            if(data.message !== undefined && messageHandler){
-                await messageHandler(data.message);
             }
             if(!outcome.ok && outcome.reason === 'errorMessage'){
                 if(errorMessageHandler && outcome.errorMessage !== undefined){ await errorMessageHandler(outcome.errorMessage); }

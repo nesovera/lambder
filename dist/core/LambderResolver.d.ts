@@ -1,10 +1,9 @@
-import type { LambderApiNullAnswerConfig } from "../shared/wire/LambderApiContract.js";
-import LambderResponseBuilder, { type LambderResolverApiMethod, type LambderApiResponseConfig, type LambderResponseOptions } from "./LambderResponseBuilder.js";
+import LambderResponseBuilder from "./LambderResponseBuilder.js";
 import type { LambderResponse } from "./LambderResponse.js";
 type SyncDie<T extends (...args: any[]) => LambderResponse> = (...args: Parameters<T>) => never;
 type AsyncDie<T extends (...args: any[]) => Promise<LambderResponse>> = (...args: Parameters<T>) => Promise<never>;
 /** The `res.die.*` surface: every builder method, throwing what it built. Internal to the resolver, which is the only thing that has one. */
-interface DieResolverMethods<TOutput> {
+interface DieResolverMethods {
     raw: SyncDie<LambderResponseBuilder["raw"]>;
     json: SyncDie<LambderResponseBuilder["json"]>;
     text: SyncDie<LambderResponseBuilder["text"]>;
@@ -15,25 +14,20 @@ interface DieResolverMethods<TOutput> {
     redirect: SyncDie<LambderResponseBuilder["redirect"]>;
     versionExpired: SyncDie<LambderResponseBuilder["versionExpired"]>;
     fileBase64: SyncDie<LambderResponseBuilder["fileBase64"]>;
-    api: LambderResolverApiMethod<TOutput, never>;
-    apiBinary: LambderResolverApiMethod<TOutput, never>;
+    api: SyncDie<LambderResponseBuilder["api"]>;
     file: AsyncDie<LambderResponseBuilder["file"]>;
     templateFile: AsyncDie<LambderResponseBuilder["templateFile"]>;
 }
 /**
- * Response builder passed to route/api handlers and hooks.
+ * Response builder passed to route handlers and hooks.
  *
  * `res.die.*` builds the response and THROWS it, immediately halting the
  * request at any call depth (handlers, hooks, nested service functions).
  * Lambder's render pipeline catches thrown LambderResponse instances and uses
  * them as the response. Plain `throw res.html(...)` works the same way.
  */
-export default class LambderResolver<TOutput = any> extends LambderResponseBuilder<TOutput> {
-    die: DieResolverMethods<TOutput>;
+export default class LambderResolver extends LambderResponseBuilder {
+    die: DieResolverMethods;
     constructor(...args: ConstructorParameters<typeof LambderResponseBuilder>);
-    api(payload: TOutput, config?: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
-    api(payload: null, config: LambderApiNullAnswerConfig, options?: LambderResponseOptions): LambderResponse;
-    apiBinary(payload: TOutput, config?: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
-    apiBinary(payload: null, config: LambderApiNullAnswerConfig, options?: LambderResponseOptions): LambderResponse;
 }
 export {};

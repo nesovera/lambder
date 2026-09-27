@@ -386,13 +386,11 @@ export class LambderApiIdempotencyEngine {
             }
             // A crash or a thrown refusal (LambderApiRefusal, refuse())
             // releases the claim so a retry retries. The rule is deliberate:
-            // ANSWERS are stored and replayed, returned refusal envelopes
-            // included; EXCEPTIONS are not, so a thrown refusal re-executes
-            // on retry and the handler decides afresh. (On the server,
-            // res.die.api() is an answer: the adapter catches it before it
-            // reaches here.) The handler's own error is what gets rethrown,
-            // since a cleanup error in its place would hide why the call
-            // failed.
+            // ANSWERS (the output a handler returned) are stored and
+            // replayed; EXCEPTIONS are not, so a thrown refusal re-executes
+            // on retry and the handler decides afresh. The handler's own
+            // error is what gets rethrown, since a cleanup error in its place
+            // would hide why the call failed.
             try {
                 await store.abandon(scopeKey, ownerToken);
             }

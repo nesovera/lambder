@@ -191,7 +191,7 @@ export const userMocks = mockApp.apiSlice(
         },
     }),
 
-    mockApp.notMocked("admin.runSignedQuery", "operator endpoint, no client calls it"),
+    mockApp.notMocked("admin.exportOrders", "operator endpoint, no client calls it"),
 );
 
 mockApp.register(userMocks, billingMocks, adminMocks);   // exhaustive over the contract, no overlaps
@@ -325,12 +325,12 @@ mockApp.reset();                                      // sessions, cookies, coun
 ```
 
 `restore()` is how an override is put back, and the handle carries nothing
-else. It used to carry a `[Symbol.dispose]` member as well, for `using`, and
-that member is declared only under `lib: ESNext`: a consumer on `lib: ES2022`,
-which is what this package's only consumer is set to, got TS2550 "Property
-'dispose' does not exist on type 'SymbolConstructor'" out of the published
-`.d.ts` from importing the entry at all, whenever `skipLibCheck` was off. A
-try/finally scopes an override in every project, and needs no lib.
+else. In particular it has no `[Symbol.dispose]` member for `using`: that
+member is declared only under `lib: ESNext`, and a project on `lib: ES2022`
+would get TS2550 "Property 'dispose' does not exist on type
+'SymbolConstructor'" out of the published `.d.ts` from importing the entry at
+all, whenever `skipLibCheck` is off. A try/finally scopes an override in every
+project, and needs no lib.
 
 `override()` replaces one endpoint's handler until restored and keeps the
 entry's declarations (mode, guards, rate limit, idempotency) as registered.
@@ -365,9 +365,11 @@ mockApp.publicApi("user.get", {
 });
 ```
 
-A handler returns its payload, so the rest of the envelope goes on the
-context: `ctx.envelope.message` is what a server handler passes to
-`res.api(payload, { message })`, and `ctx.logList` is the usual log channel.
+A handler returns its payload, as a server handler returns its output, and
+writes what goes beside it through the context, with the server's own tools:
+`ctx.setResponseHeader`, `ctx.addResponseHeader`, `ctx.setCookie` and
+`ctx.clearCookie` land on the answer, and `ctx.logList.push(entry)` feeds the
+envelope's `logList`, so a server handler and its mock twin read alike.
 `ctx.sessionController`, `ctx.rateLimit(policy, key?)` and `ctx.isRateLimited(policy,
 key?)` are the server's, bound the same way: a policy charged from code
 counts on the mock's limiter and refuses with the same 429. The policy name is
@@ -400,14 +402,15 @@ survives: the runtime did not create it and does not know what else holds it.
 ```typescript
 mockApp.sessionApi("order.create", {
     guards: { orgPermission: "ORDERS.CREATE" },
-    handler: async ({ apiName, payload, session, sessionController, guardData, guardInputs, idempotencyKey, request, responseHeaders, logList, signal }) => {
+    handler: async ({ apiName, payload, session, sessionController, guardData, guardInputs, idempotencyKey, request, setResponseHeader, setCookie, logList, signal }) => {
         // payload: the contract's input, never optional
         // session: LambderSessionRecord<SessionData> on a session endpoint, null on a public one
         // sessionController: the session controller for this call (create, regenerate, end, endAll, update, refresh)
         // guardData: what the declared guards returned, typed from the mock guard map
         // guardInputs: what the caller sent, typed by the contract
         // request: headers, cookies, ip, host, siteHost, version
-        // responseHeaders: set()/add() land on the answer; logList feeds the envelope's logList
+        // setResponseHeader, addResponseHeader, setCookie, clearCookie: land on the answer, as on the server
+        // logList: push entries for the envelope's logList
         return { orderId: "o_1" };
     },
 });

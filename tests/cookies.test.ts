@@ -1,7 +1,7 @@
 /**
  * Cookies: every copy of a cookie name is kept on ctx.cookieList (a name
- * held at several scopes arrives several times), res.setCookie /
- * res.clearCookie serialize Set-Cookie headers, and the session controller
+ * held at several scopes arrives several times), ctx.setCookie /
+ * ctx.clearCookie serialize Set-Cookie headers, and the session controller
  * tolerates a stale copy of the session cookie shadowing the live one.
  */
 
@@ -128,12 +128,12 @@ describe('serializeCookie', () => {
     });
 });
 
-describe('res.setCookie / res.clearCookie', () => {
+describe('ctx.setCookie / ctx.clearCookie', () => {
     it('emit Set-Cookie headers, resolving a function-form domain against the request host', async () => {
         const lambder = new Lambder({ files: testPublicFiles() })
             .addRoute('/set', (ctx, res) => {
-                res.setCookie('pref', 'dark', { domain: (hostname) => `.${hostname}`, maxAge: 3600 });
-                res.clearCookie('legacy', { httpOnly: true });
+                ctx.setCookie('pref', 'dark', { domain: (hostname) => `.${hostname}`, maxAge: 3600 });
+                ctx.clearCookie('legacy', { httpOnly: true });
                 return res.html('ok');
             });
 
@@ -153,7 +153,7 @@ describe('res.setCookie / res.clearCookie', () => {
         const lambder = new Lambder({ files: testPublicFiles() })
             .addRoute('/x', (ctx, res) => res.html('ok'))
             .addHook('afterRender', async (ctx, res, response) => {
-                res.setCookie('seen', '1', { secure: false });
+                ctx.setCookie('seen', '1', { secure: false });
                 return response;
             });
 
@@ -569,7 +569,7 @@ describe('Session cookies at several scopes', () => {
                 tokenCookieKey: 'sid', csrfCookieKey: 'csid',
                 cookie: { domain: '.example.com' },
             },
-        }).addSessionApi('whoami', { input: z.any(), output: z.any() }, async (ctx, res) => res.api({ key: ctx.session.sessionKey }));
+        }).addSessionApi('whoami', { input: z.any(), output: z.any() }, async (ctx) => ({ key: ctx.session.sessionKey }));
 
         const result = await lambder.render(createMockEvent('/api', {
             httpMethod: 'POST',

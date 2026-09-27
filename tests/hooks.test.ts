@@ -595,9 +595,9 @@ describe('Hooks - Combined Workflow', () => {
         lambder.addApi('testApi', {
             input: z.object({ value: z.string() }),
             output: z.object({ result: z.string() })
-        }, async (ctx, res) => {
+        }, async (ctx) => {
             executionOrder.push('apiHandler');
-            return res.api({ result: ctx.apiPayload.value });
+            return { result: ctx.apiPayload.value };
         });
 
         await lambder.addHook('afterRender', async (ctx, res, response) => {
@@ -631,7 +631,7 @@ describe('Hooks - beforeRender on the fallback chain', () => {
             .addRoute('/route', (ctx, res) => res.text('route'))
             .addHook('beforeRender', async (ctx, res) => {
                 seen.push(ctx.path);
-                res.setHeader('Content-Security-Policy', "default-src 'self'");
+                ctx.setResponseHeader('Content-Security-Policy', "default-src 'self'");
                 return ctx;
             });
         const visitor = browse(lambder);

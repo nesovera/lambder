@@ -42,9 +42,12 @@ import type {
 import type { LambderApiAnswer } from "../api/LambderApiAnswer.js";
 import {
     apiNotFoundAnswer,
+    buildApiEnvelope,
+    envelopeAnswer,
     refusalAnswer,
     sessionExpiredAnswer,
 } from "../api/LambderApiEnvelope.js";
+import { LambderApiOutputValidationError } from "../api/LambderApiOutputValidationError.js";
 import type {
     LambderApiGuard,
     LambderGuardMetaMap,
@@ -68,7 +71,7 @@ import {
     type LambderSessionRenderContext,
 } from "./LambderContext.js";
 import { COMPRESSED_PAYLOAD_GZ_FIELD, COMPRESSED_PAYLOAD_BR_FIELD, COMPRESSED_PAYLOAD_BYTES_FIELD } from "../shared/wire/LambderRequestPayload.js";
-import type { MaybePromise } from "../shared/util/LambderTypeUtilities.js";
+import type { LambderReadonlyDeep, MaybePromise } from "../shared/util/LambderTypeUtilities.js";
 import { coerceToError } from "../shared/wire/LambderCrashDetail.js";
 import { LambderCrashHandling } from "./LambderCrashHandling.js";
 import { policyBuildersFor } from "./LambderPolicyBuilders.js";
@@ -392,6 +395,7 @@ export default class Lambder<
         TName extends string,
         TInput extends z.ZodType,
         TOutput extends z.ZodType,
+        const TAnswer extends LambderReadonlyDeep<z.input<TOutput>>,
         const TRateOpt extends LambderRateLimitOption<_TRateLimitPolicies, z.input<TInput>, false> = never,
         const TGuardsOpt extends LambderGuardsOption<_TGuards, z.input<TInput>, false> = never,
         const TIdempotencyOpt extends LambderApiIdempotencyOption = never,
@@ -402,11 +406,19 @@ export default class Lambder<
             rateLimit?: TRateOpt;
             /** Replay-protect this API per client idempotencyKey. Requires the idempotency option at creation. */
             idempotency?: _TIdempotencyEnabled extends true ? TIdempotencyOpt : never;
+            /**
+             * Whether this API's answers are compressed for a caller that accepts it: "auto" (the default) when the
+             * body is large enough to gain, false never, true always. false suits an answer of base64 bytes: once
+             * compressed it leaves the function base64-encoded again, so it is no smaller under Lambda's response
+             * cap or to a lambda caller, and a browser gets it only about a quarter smaller for the time spent at
+             * both ends. A transport setting of this server's, not part of the API's contract.
+             */
+            compress?: boolean | "auto";
         } & LambderRequirableGuardsField<_TPublicGuardsRequired, TGuardsOpt>,
+        /** Answers the call by returning its output (parsed through `output` before it is sent), or refuses it with refuse(). */
         handler: (
             ctx: LambderRenderContext<z.infer<TInput>, Record<string, string>, LambderGuardDataOf<_TGuards, TGuardsOpt>, TSessionData, _TRateLimitPolicies>,
-            resolver: LambderResolver<z.input<TOutput>>
-        ) => MaybePromise<LambderResponse>
+        ) => MaybePromise<TAnswer>
     ): Lambder<TSessionData, LambderMergeContract<_TContract, TName, LambderContractEntry<
         z.input<TInput>,
         LambderJsonOutputOf<z.output<TOutput>>,
@@ -424,6 +436,7 @@ export default class Lambder<
         TName extends string,
         TInput extends z.ZodType,
         TOutput extends z.ZodType,
+        const TAnswer extends LambderReadonlyDeep<z.input<TOutput>>,
         const TRateOpt extends LambderRateLimitOption<_TRateLimitPolicies, z.input<TInput>, true> = never,
         const TGuardsOpt extends LambderGuardsOption<_TGuards, z.input<TInput>, true> = never,
         const TIdempotencyOpt extends LambderApiIdempotencyOption = never,
@@ -434,11 +447,19 @@ export default class Lambder<
             rateLimit?: TRateOpt;
             /** Replay-protect this API per client idempotencyKey. Requires the idempotency option at creation. */
             idempotency?: _TIdempotencyEnabled extends true ? TIdempotencyOpt : never;
+            /**
+             * Whether this API's answers are compressed for a caller that accepts it: "auto" (the default) when the
+             * body is large enough to gain, false never, true always. false suits an answer of base64 bytes: once
+             * compressed it leaves the function base64-encoded again, so it is no smaller under Lambda's response
+             * cap or to a lambda caller, and a browser gets it only about a quarter smaller for the time spent at
+             * both ends. A transport setting of this server's, not part of the API's contract.
+             */
+            compress?: boolean | "auto";
         } & LambderRequirableGuardsField<_TSessionGuardsRequired, TGuardsOpt> & LambderSessionEnabledInstance<_TSessionsEnabled>,
+        /** Answers the call by returning its output (parsed through `output` before it is sent), or refuses it with refuse(). */
         handler: (
             ctx: LambderSessionRenderContext<z.infer<TInput>, TSessionData, Record<string, string>, LambderGuardDataOf<_TGuards, TGuardsOpt>, _TRateLimitPolicies>,
-            resolver: LambderResolver<z.input<TOutput>>
-        ) => MaybePromise<LambderResponse>
+        ) => MaybePromise<TAnswer>
     ): Lambder<TSessionData, LambderMergeContract<_TContract, TName, LambderContractEntry<
         z.input<TInput>,
         LambderJsonOutputOf<z.output<TOutput>>,
@@ -461,8 +482,8 @@ export default class Lambder<
     private registerApi(
         name: string,
         mode: LambderApiMode,
-        schema: { input: z.ZodType, output: z.ZodType, rateLimit?: LambderRateLimitOptionValue, guards?: LambderGuardsOptionValue, idempotency?: LambderApiIdempotencyOption },
-        handler: (ctx: never, resolver: LambderResolver) => MaybePromise<LambderResponse>,
+        schema: { input: z.ZodType, output: z.ZodType, rateLimit?: LambderRateLimitOptionValue, guards?: LambderGuardsOptionValue, idempotency?: LambderApiIdempotencyOption, compress?: boolean | "auto" },
+        handler: (ctx: never) => MaybePromise<unknown>,
     ): void {
         if(this.apiDefinitions.has(name)){
             throw new Error(`Lambder: duplicate API name "${name}". Dispatch is first-match, so the second registration would be silently dead code.`);
@@ -490,7 +511,7 @@ export default class Lambder<
         this.apiDefinitions.set(name, definition);
         this.actionList.push({
             match: (ctx) => ctx.apiName === name ? {} : false,
-            actionFn: (ctx) => this.runApi(ctx, definition, handler),
+            actionFn: (ctx) => this.runApi(ctx, definition, schema.output, schema.compress ?? "auto", handler),
         });
     }
 
@@ -944,8 +965,8 @@ export default class Lambder<
                 response = (await this.answerThrown(err, ctx, resolver)).copy();
             }
 
-            // Only what the hooks themselves wrote (res.setHeader inside a
-            // hook) is left to apply, which leaves their overrides standing.
+            // Only what the hooks themselves wrote (ctx.setResponseHeader
+            // inside a hook) is left to apply, which leaves their overrides standing.
             // A hook that answered with a different response takes the whole
             // set instead: headers belong to the call, not to the response
             // that first carried them, so the call's session cookie must
@@ -1137,47 +1158,55 @@ export default class Lambder<
 
     /**
      * One API call through the core: the pipeline runs the protocol steps and
-     * calls back for the handler, whose LambderResponse (returned, or thrown
-     * via res.die.*) becomes the answer the pipeline stores and hands back.
-     * The context is the pipeline's context, so a session it fetched is on
-     * ctx.session and the validated payload is on ctx.apiPayload when the
-     * handler runs. The handler's resolver knows the API's output schema, so
-     * every success payload is parsed through it before it is sent.
+     * calls back for the handler, whose returned output becomes the answer
+     * the pipeline stores and hands back. The context is the pipeline's
+     * context, so a session it fetched is on ctx.session and the validated
+     * payload is on ctx.apiPayload when the handler runs.
+     *
+     * The output goes out as the API's schema declares it. The type system
+     * accepts a value that carries more than the schema (a row read straight
+     * from a table is assignable to a narrower object type), and without the
+     * parse the extra fields, a password hash included, would reach the
+     * client. zod strips what the schema does not declare, fills its defaults
+     * and applies its transforms, so the wire and the idempotency store only
+     * see the declared shape. The handler returns the schema's input form, so
+     * a transform runs exactly once.
+     *
+     * An output the schema rejects is the handler breaking its contract,
+     * answered as a crash rather than sent (LambderApiOutputValidationError,
+     * which an idempotency key records as its answer, since the handler has
+     * already run). The parse is synchronous, so an output schema cannot be
+     * async: zod throws from a synchronous parse that meets an async
+     * refinement or transform, and a transform may throw of its own accord.
+     * Either throw becomes the same error, carrying what was thrown as its
+     * cause. Left to escape as it is, it would read as the handler crashing
+     * before its answer: the idempotency engine would release the key's claim
+     * and every retry would run the operation again.
      */
     private async runApi(
         ctx: LambderRenderContext,
         definition: LambderApiDefinition,
-        handler: (ctx: never, resolver: LambderResolver) => MaybePromise<LambderResponse>,
+        output: z.ZodType,
+        compress: boolean | "auto",
+        handler: (ctx: never) => MaybePromise<unknown>,
     ): Promise<LambderResponse> {
         const request = ctx.api;
         if(!request) throw new Error(`Lambder: API "${definition.name}" was matched by a request that is not an API call.`);
-        const resolver = new LambderResolver({ files: this.files, apiVersion: this.apiVersion, ctx, apiOutput: definition.output });
-        // What the handler produced, in both forms: the answer went to the
-        // pipeline, and the response is kept so it can carry on unchanged.
-        const handled: { output: { response: LambderResponse; answer: LambderApiAnswer } | null } = { output: null };
         const { answer } = await this.pipeline.run(request, ctx, definition, async () => {
             ctx.apiPayload = request.payload;
-            let response: LambderResponse;
+            const returned = await handler(ctx as never);
+            let parsed: z.ZodSafeParseResult<unknown>;
             try {
-                response = await handler(ctx as never, resolver);
-            } catch(err){
-                // A thrown LambderResponse IS the response (res.die.*): an
-                // answer like a returned one, stored and replayed alike.
-                if(err instanceof LambderResponse) response = err;
-                else throw err;
+                parsed = output.safeParse(returned);
+            }catch(thrown){
+                throw new LambderApiOutputValidationError(definition.name, { thrown });
             }
-            handled.output = { response, answer: answerFromResponse(response) };
-            return handled.output.answer;
+            if(!parsed.success) throw new LambderApiOutputValidationError(definition.name, { zodError: parsed.error });
+            return envelopeAnswer(buildApiEnvelope(this.apiVersion, parsed.data, { logList: ctx.logList }));
         });
-        // When the pipeline answered with the handler's own answer, its
-        // response carries on rather than a rebuild. An answer holds a Buffer
-        // body base64-encoded (the plain shape the idempotency store
-        // persists), and a response rebuilt from it would hand finalization a
-        // base64 string it must pass through uncompressed. Identity decides,
-        // since the pipeline may have answered with a stored replay or a
-        // refusal instead.
-        if(handled.output?.answer === answer) return handled.output.response;
-        return responseFromAnswer(answer);
+        // The API's compress option, on whatever answer the call ended with:
+        // a replayed one comes back from its store without the hint.
+        return responseFromAnswer({ ...answer, compress });
     }
 
     /** A thrown LambderApiRefusal (from a hook, say) as the structured API envelope: the core's one mapping. */

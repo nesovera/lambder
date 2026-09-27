@@ -17,15 +17,17 @@ const lambder = initLambder<SessionData>().create({
 }).addApi("getCompany", {
     input: z.object({ slug: z.string() }),
     output: z.object({ id: z.string(), name: z.string() }),
-}, async ({ apiPayload }, res) => res.api(await loadCompany(apiPayload.slug)));
+}, async ({ apiPayload }) => await loadCompany(apiPayload.slug));
 
 export type ApiContractType = typeof lambder.ApiContract;
 export const handler = lambder.getHandler();
 ```
 
-Registration chains onto the creation call: every `addApi` returns an instance
-carrying the contract so far, so the whole backend is one declaration and
-`lambder.ApiContract` is the accumulated type.
+A handler returns its output, which is parsed through the output schema before
+it is sent, and says no by throwing `refuse()`. Registration chains onto the
+creation call: every `addApi` returns an instance carrying the contract so
+far, so the whole backend is one declaration and `lambder.ApiContract` is the
+accumulated type.
 
 The frontend imports that contract type and gets autocomplete, typed payloads
 and typed results with no hand-written client:
@@ -153,7 +155,7 @@ guide that matches what you are building. The full index lives in
 | [Configuration](./docs/configuration.md) | Every `initLambder().create({...})` option, in one reference |
 | [Routing and actions](./docs/routing.md) | Routes, matchers, hooks, fallbacks, crash reporting, and non-HTTP invocations |
 | [APIs and refusals](./docs/apis.md) | `addApi`/`addSessionApi`, the inferred contract, `refuse()` and `LambderApiRefusal`, the signature file |
-| [Responses](./docs/responses.md) | The render context, resolver methods, cookies, compression, ETag and the size cap |
+| [Responses](./docs/responses.md) | The render context and its response tools (headers, cookies, log entries), the response builder routes and hooks use, compression, ETag and the size cap |
 | [Sessions](./docs/sessions.md) | Sessions over a store, cookie scope, secrets at rest, `dataRefresh`, the controller API |
 | [API policies](./docs/api-policies.md) | Declarative rate limits, guards and idempotency, and mandatory authorization declarations |
 | [Calling another lambda](./docs/invoke.md) | `LambderInvokeCaller`: invoking a Lambder app in another function, its contract, failures and compression |
@@ -185,25 +187,14 @@ framework:
 ## Versioning and changes
 
 Released versions and what each one changed are in
-[CHANGELOG.md](./CHANGELOG.md). The current major is v8, which came out of a
-review of 7.3.1: session writes that cannot undo a logout, API calls that must
-be JSON, output schemas applied at runtime, rate limits that count IPv6 callers
-by their /64 and custom keys after the guards, idempotency keys bound to the
-request they were first sent with, and the same behavior on every gateway and
-in the mock. Every break and what to do about it is in the 8.0.2 entry. The
-compiler finds most of them. Fourteen it cannot are named there: hand-built
-calls without a JSON Content-Type, hand-built answers without `apiVersion`,
-handlers whose payload does not match their output schema, code that decoded
-`ctx.path` itself, string routes that match case-sensitively, compression
-behind a REST API, two more IAM actions (`UpdateItem` on the session table,
-`GetItem` on the rate-limit table), custom-key limits charged after the
-guards, idempotency keys bound to the request they were first sent with,
-`errorMessage` always being an object, `credentials: true` needing named
-origins, template slots and `html` interpolations refused or checked in
-more attribute positions, `refreshSessionData()` throwing where it answered
-null, and `z.ZodType<T>` annotations leaving a field unchecked. Every live
-session is signed out once by the
-upgrade. An app still on v6 goes through the 7.0.0 entry first.
+[CHANGELOG.md](./CHANGELOG.md). The current major is v9, which gives an API
+handler one shape: it takes its context and returns its output, says no with
+`refuse()`, and writes headers, cookies and log entries through the context,
+while the response builder stays with routes, hooks and error handlers. Every
+break and what to do about it is in the 9.0.1 entry, and the compiler finds
+most of them. An app still on v7 goes through the 8.0.2 entry first, which
+names the breaks of v8 the compiler cannot find, and one on v6 through the
+7.0.0 entry before that.
 
 ## Contributing
 

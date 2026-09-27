@@ -45,7 +45,7 @@ export { toHttpAnswer } from "./api/LambderApiAnswer.js";
 export type { LambderApiAnswer } from "./api/LambderApiAnswer.js";
 export { LambderAnswerHeaders, getAnswerHeader, setAnswerHeader, addAnswerHeader } from "./shared/wire/LambderAnswerHeaders.js";
 export { createApiCallContext } from "./api/LambderApiCallContext.js";
-export type { LambderApiCallContext, LambderApiCallTrace } from "./api/LambderApiCallContext.js";
+export type { LambderApiCallContext, LambderApiCallTrace, LambderResponseTools } from "./api/LambderApiCallContext.js";
 export type { LambderApiDefinition } from "./api/LambderApiDefinition.js";
 // Per-endpoint signatures: what a client build ships with, digested from the server's own registrations.
 export { apiSignatureOf } from "./api/LambderApiSignature.js";
@@ -135,7 +135,6 @@ export type { LambderTemplateData, LambderTemplatingEngineOptions } from "./core
 export type {
     LambderResponseOptions,
     LambderRawResponseInit,
-    LambderResolverApiMethod,
 } from "./core/LambderResponseBuilder.js";
 
 // Routing / configuration types
@@ -362,7 +361,6 @@ export type {
     LambderApiMode,
     LambderApiEnvelopeBody,
     LambderApiResponseConfig,
-    LambderApiNullAnswerConfig,
     LambderContractEntry,
     LambderMergeContract,
     LambderGuardNamesIn,
@@ -413,6 +411,6 @@ export type {
     LambderRequestCompressionSettings,
 } from "./shared/wire/LambderRequestPayload.js";
 
-// Cookies (res.setCookie / res.clearCookie build on these; exported for code holding a LambderResponse)
+// Cookies (ctx.setCookie / ctx.clearCookie build on these; exported for code holding a LambderResponse)
 export { serializeCookie, serializeClearCookie, resolveCookieDomain } from "./shared/wire/LambderCookie.js";
 export type { LambderCookieOptions, LambderClearCookieOptions, LambderCookieDomain } from "./shared/wire/LambderCookie.js";

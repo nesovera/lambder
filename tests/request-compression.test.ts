@@ -43,7 +43,7 @@ const echoApi = () => initLambder().create({ apiPath: '/api' })
     .addApi('echo', {
         input: z.object({ notes: z.array(z.string()) }),
         output: z.object({ count: z.number() }),
-    }, (ctx, res) => res.api({ count: ctx.apiPayload.notes.length }));
+    }, (ctx) => ({ count: ctx.apiPayload.notes.length }));
 
 describe('Request compression - the caller side', () => {
     beforeEach(() => { vi.stubGlobal('location', { hostname: 'localhost' }); });
@@ -230,7 +230,7 @@ describe('Request compression - the server side', () => {
         let seenPost: any;
         const lambder = initLambder().create({ apiPath: '/api' })
             .addApi('inspect', { input: z.object({ notes: z.array(z.string()) }), output: z.object({ ok: z.boolean() }) },
-                (ctx, res) => { seenPost = ctx.post; return res.api({ ok: true }); });
+                (ctx) => { seenPost = ctx.post; return { ok: true }; });
 
         await lambder.render(await compressedApiEvent('inspect', bigPayload(10)), createMockContext());
 
@@ -254,7 +254,7 @@ describe('Request compression - the server side', () => {
             input: z.object({ notes: z.array(z.string()) }),
             output: z.object({ ok: z.boolean() }),
             guards: 'inspectPayload',
-        }, (ctx, res) => res.api({ ok: true }));
+        }, (ctx) => ({ ok: true }));
 
         const result = await lambder.render(await compressedApiEvent('guarded', bigPayload(4)), createMockContext());
 
@@ -302,7 +302,7 @@ describe('Request compression - the server side', () => {
     it('refuses a payload declared over the configured ceiling without decompressing it', async () => {
         const lambder = initLambder().create({ apiPath: '/api', maxRequestPayloadBytes: 1000 })
             .addApi('echo', { input: z.object({ notes: z.array(z.string()) }), output: z.object({ count: z.number() }) },
-                (ctx, res) => res.api({ count: ctx.apiPayload.notes.length }));
+                (ctx) => ({ count: ctx.apiPayload.notes.length }));
 
         const result = await lambder.render(await compressedApiEvent('echo', bigPayload()), createMockContext());
 
@@ -408,7 +408,7 @@ describe('Request compression - the deployment shape (HTTP API v2 + CORS)', () =
         .addApi('echo', {
             input: z.object({ notes: z.array(z.string()) }),
             output: z.object({ count: z.number() }),
-        }, (ctx, res) => res.api({ count: ctx.apiPayload.notes.length }));
+        }, (ctx) => ({ count: ctx.apiPayload.notes.length }));
 
     const v2ApiEvent = (body: Record<string, unknown>) => createMockEventV2('/api', {
         headers: { host: 'api.example.com', origin: 'https://example.com', 'content-type': 'application/json' },
@@ -444,7 +444,7 @@ describe('Request compression - round trip through the real pipeline', () => {
             .addApi('import', {
                 input: z.object({ notes: z.array(z.string()) }),
                 output: z.object({ received: z.number() }),
-            }, (ctx, res) => res.api({ received: ctx.apiPayload.notes.length }));
+            }, (ctx) => ({ received: ctx.apiPayload.notes.length }));
 
         // The caller builds the envelope; the server consumes it verbatim.
         vi.stubGlobal('location', { hostname: 'localhost' });
@@ -492,7 +492,7 @@ describe('Request compression - round trip through the real pipeline', () => {
             input: z.object({ tenant: z.string(), notes: z.array(z.string()) }),
             output: z.object({ ok: z.boolean() }),
             rateLimit: 'perTenant',
-        }, (ctx, res) => res.api({ ok: true }));
+        }, (ctx) => ({ ok: true }));
 
         const result = await lambder.render(
             await compressedApiEvent('ingest', { tenant: 'acme', ...bigPayload(50) }),

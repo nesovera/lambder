@@ -253,7 +253,7 @@ Everything below chains off the created instance and returns `this`.
 
 | Method | Purpose |
 | --- | --- |
-| `addApi(name, schemas, handler)` | Public API. See [APIs](./apis.md) |
+| `addApi(name, schemas, handler)` | Public API: the handler returns its output or throws `refuse()`. See [APIs](./apis.md) |
 | `addSessionApi(name, schemas, handler)` | Session-protected API |
 | `addRoute(matcher, handler)` | HTTP route. See [Routing](./routing.md) |
 | `addSessionRoute(matcher, handler)` | Session-protected route |
