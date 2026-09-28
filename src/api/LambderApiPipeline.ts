@@ -16,6 +16,7 @@ import {
 } from "./LambderApiEnvelope.js";
 import { LambderApiValidationRefusal, isLambderApiValidationRefusal } from "./LambderApiValidationRefusal.js";
 import { isLambderApiRefusal } from "../shared/wire/LambderApiRefusal.js";
+import { checkedRefusal } from "./LambderApiRefusals.js";
 import { DEFAULT_MAX_RESTORED_PAYLOAD_BYTES } from "../shared/wire/LambderRequestPayload.js";
 import { assertPositiveInteger } from "../shared/util/LambderOptionChecks.js";
 import { compareDottedVersions, isDottedVersion } from "../shared/wire/LambderVersionOrder.js";
@@ -149,7 +150,8 @@ const usesIdempotency = (definition: LambderApiDefinition): definition is Lambde
  * Steps whose subsystem is not configured are skipped. A LambderApiRefusal
  * thrown by any step, guard or handler is rendered here, in one place: a
  * validation error through onInvalidInput, any other refusal as the refusal
- * envelope, and a session ended while the handler held it
+ * envelope once checked against the endpoint's declared codes
+ * (checkedRefusal), and a session ended while the handler held it
  * (LambderSessionNotFoundError) as sessionExpired. Anything else propagates, because only the adapter knows what a
  * crash means (a global error handler, a mock event).
  *
@@ -357,7 +359,13 @@ export class LambderApiPipeline<TCtx extends LambderApiCallContext<TSessionData>
             if(isLambderApiValidationRefusal(err)){
                 answer = await this.refuseInput(err, ctx, request);
             } else if(isLambderApiRefusal(err)){
-                answer = refusalAnswer(err, this.apiVersion, ctx.logList);
+                // Checked against the endpoint's declared codes, and its data
+                // parsed, before it becomes an answer; a refusal the endpoint
+                // may not send throws from here as a crash. By this point the
+                // idempotency engine has already released the claim, as it
+                // does for every thrown refusal: a retry runs the handler
+                // again and decides afresh.
+                answer = refusalAnswer(checkedRefusal(definition.name, definition.refusals, err), this.apiVersion, ctx.logList);
             } else if(err instanceof LambderSessionNotFoundError){
                 // No usable session: it ended while the handler held it (a
                 // logout or a password change landed mid-request), or a read

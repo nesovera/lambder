@@ -24,7 +24,8 @@ export const handler = lambder.getHandler();
 ```
 
 A handler returns its output, which is parsed through the output schema before
-it is sent, and says no by throwing `refuse()`. Registration chains onto the
+it is sent, and says no by throwing a refusal: `ctx.refuse()`, typed to the
+codes the API declares, or `refuse()` from anywhere. Registration chains onto the
 creation call: every `addApi` returns an instance carrying the contract so
 far, so the whole backend is one declaration and `lambder.ApiContract` is the
 accumulated type.
@@ -46,6 +47,16 @@ const company = await caller.api("getCompany", { slug: "acme" });
   runtime validation and compile-time inference on both sides of the wire.
 - **One inferred contract.** The API contract is derived from the backend code
   and consumed by the frontend as a type-only import.
+- **Exact results.** A success is only ever the handler's parsed output, an
+  object or an array, so a caller's success is typed as exactly the output and
+  is never null or falsy; everything a hook or an error handler answers is a
+  refusal.
+- **Declared refusals.** An app declares its refusal codes once, each with the
+  schema of its data, the status it leaves with and whether it flags
+  `notAuthorized`; every API and guard names the codes it may refuse with, and
+  a guard's or a handler's `ctx.refuse` is typed to them. The contract carries
+  them, a caller narrows `refusal.data` on the code, and a refusal outside its
+  declaration is a crash, never an answer.
 - **Simple route and API declaration.** Paths, regexes, predicates and
   structured matchers, chained fluently.
 - **Sessions.** Over a store of your choosing (DynamoDB, memory, your own),
@@ -188,16 +199,19 @@ framework:
 ## Versioning and changes
 
 Released versions and what each one changed are in
-[CHANGELOG.md](./CHANGELOG.md). The current major is v9, which gives an API
-handler one shape: it takes its context and returns its output, says no with
-`refuse()`, and writes headers, cookies and log entries through the context,
-while the response builder stays with routes, hooks and error handlers. Every
-break and what to do about it is in the 9.0.1 entry, and the compiler finds
-most of them. The one it cannot is a change of behavior: a refusal is no
-longer stored under an idempotency key, so a retry after one runs the handler
-again. An app still on v7 goes through the 8.0.2 entry first, which
-names the breaks of v8 the compiler cannot find, and one on v6 through the
-7.0.0 entry before that.
+[CHANGELOG.md](./CHANGELOG.md). The current major is v10, which makes both
+sides of an answer exact. A success is only ever the handler's parsed output,
+and an output is an object or an array, so `caller.api()` is truthy exactly
+on success and a success's payload is typed as exactly the output; a hook, a
+fallback or an error handler answers an API call with `res.apiRefusal()`,
+never with a payload. A refusal names a code the app declared, which the
+contract carries and a caller narrows on, with its data typed. Every break
+and what to do about it is in the 10.0.1 entry, and the compiler finds most
+of them. The ones it cannot are changes of behavior: a refusal whose code its
+API does not declare is now a crash rather than an answer, and a success
+whose payload is not an object or an array now reads as a server failure. An
+app still on v8 goes through the 9.0.1 entry first, and one on an older
+major through the entries before it.
 
 ## Contributing
 

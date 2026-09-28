@@ -25,13 +25,15 @@ type SessionData = {
 };
 
 type ApiContractType = {
-    "user.get": { input: { userId: string }; output: { id: string; name: string }; mode: "public" };
+    "user.get": { input: { userId: string }; output: { id: string; name: string }; mode: "public"; refusals: { "app/not-found": {} } };
     "login": { input: { email: string }; output: { ok: boolean }; mode: "public"; rateLimit: "authPerIp" };
     "logout": { input: {}; output: { ok: boolean }; mode: "session"; guards: "sessionOnly" };
     "order.create": {
         input: { qty: number };
         output: { orderId: string; organizationId: string; qty: number };
         mode: "session";
+        // The codes the server declares for it, its guard's included.
+        refusals: { "app/not-a-member": {} };
         guards: { orgPermission: Permission };
         guardInputs: { orgPermission: { organizationId: string } };
         idempotency: true;
@@ -80,8 +82,10 @@ const users = [{
 }];
 
 export const userMocks = mockApp.apiSlice(
-    mockApp.publicApi("user.get", async ({ payload }) => {
-        const user = users.find((u) => u.id === payload.userId) ?? refuse("No such user.", { code: "app/not-found" });
+    mockApp.publicApi("user.get", async (ctx) => {
+        const user = users.find((u) => u.id === ctx.payload.userId);
+        // Typed to the endpoint's declared codes; `return` lets the compiler narrow `user` below.
+        if (!user) return ctx.refuse("No such user.", { code: "app/not-found" });
         return { id: user.id, name: user.name };
     }),
     mockApp.publicApi("login", { rateLimit: "authPerIp", handler: async ({ payload, sessionController }) => {

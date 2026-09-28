@@ -25,7 +25,7 @@ export class LambderInvokeError extends Error {
     apiName;
     functionName;
     status;
-    errorMessage;
+    refusal;
     crash;
     functionError;
     logList;
@@ -41,7 +41,7 @@ export class LambderInvokeError extends Error {
         this.apiName = init.apiName;
         this.functionName = init.functionName;
         this.status = init.status;
-        this.errorMessage = init.errorMessage;
+        this.refusal = init.refusal;
         this.crash = init.crash;
         this.functionError = init.functionError;
         this.logList = init.logList;
@@ -100,8 +100,8 @@ export const describeFailure = (init) => {
         return init.crash.message;
     if (init.functionError)
         return `${init.functionError.errorType ?? "FunctionError"}: ${init.functionError.errorMessage ?? "the function failed"}`;
-    if (init.errorMessage !== undefined)
-        return init.errorMessage.content;
+    if (init.refusal !== undefined)
+        return init.refusal.content;
     if (init.reason === 'validation')
         return "the callee rejected the input";
     if (init.reason === 'versionExpired')

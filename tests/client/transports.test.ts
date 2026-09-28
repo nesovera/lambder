@@ -521,7 +521,7 @@ describe('The mock app as a callee', () => {
         assertApiFailure(stranger, 'sessionExpired');
         const unknown = await (caller as LambderInvokeCaller<any>).apiOutcome('nope', {});
         assertApiFailure(unknown);
-        expect(unknown.errorMessage?.code).toBe('lambder/api-not-found');
+        expect(unknown.refusal?.code).toBe('lambder/api-not-found');
     });
 
     it('serves one MSW handler for the whole api path, the session riding in its jar and never in MSW\'s Cookie header', async () => {

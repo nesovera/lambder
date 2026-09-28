@@ -227,7 +227,7 @@ export default class LambderInvokeCaller {
             apiName,
             functionName: this.functionName,
             status: init.status,
-            errorMessage: init.errorMessage,
+            refusal: init.refusal,
             crash: init.crash,
             functionError: init.functionError,
             logList,
@@ -246,7 +246,7 @@ export default class LambderInvokeCaller {
             logList,
             cookies: init.cookies ?? [],
             ...(init.status !== undefined ? { status: init.status } : {}),
-            ...(init.errorMessage !== undefined ? { errorMessage: init.errorMessage } : {}),
+            ...(init.refusal !== undefined ? { refusal: init.refusal } : {}),
             ...(init.retryAfterSeconds !== undefined ? { retryAfterSeconds: init.retryAfterSeconds } : {}),
             ...(init.zodError !== undefined ? { zodError: init.zodError } : {}),
             ...(init.crash !== undefined ? { crash: init.crash } : {}),
@@ -288,6 +288,9 @@ export default class LambderInvokeCaller {
      */
     async dispatch(apiName, payload, options = {}) {
         const idempotentAttempt = beginIdempotentAttempt(options.idempotencyKey);
+        // The reader cannot check a refusal's code against declarations it
+        // does not have; the callee never sends one its endpoint did not
+        // declare, which is what the endpoint's message type stands for.
         const outcome = await this.dispatchAttempt(apiName, payload, options, idempotentAttempt);
         // Only the first settle counts: an attempt that never left settled
         // itself as not sent.
@@ -378,11 +381,10 @@ export default class LambderInvokeCaller {
         // The answer's Set-Cookie values, so a session the callee rotated or
         // cleared is visible to whoever is carrying it.
         const cookies = http.cookies;
-        // The declared output, by the callee's own typing: a handler returns
-        // its output, so a success payload is null only where the output
-        // allows null.
+        // The callee handler's output: only a handler's answer reads as a
+        // success, and an output is always an object or an array.
         if (outcome.ok)
-            return { ok: true, payload: (outcome.payload ?? null), response: outcome.response, logList, cookies };
+            return { ok: true, payload: outcome.payload, response: outcome.response, logList, cookies };
         const shared = { status: outcome.status, retryAfterSeconds: outcome.retryAfterSeconds, logList, cookies };
         // Each failure reason carries different evidence, and the outcome
         // union says which: a rejected input has its issues and no envelope,
@@ -399,7 +401,7 @@ export default class LambderInvokeCaller {
             return await this.failureOutcome(apiName, {
                 ...shared,
                 reason: 'server',
-                errorMessage: outcome.errorMessage,
+                refusal: outcome.refusal,
                 response: outcome.response,
                 crash: outcome.response?.crash,
                 cause: outcome.error,
@@ -408,7 +410,7 @@ export default class LambderInvokeCaller {
         }
         return await this.failureOutcome(apiName, {
             ...shared,
-            ...(outcome.reason === 'errorMessage' ? { reason: outcome.reason, errorMessage: outcome.errorMessage } : { reason: outcome.reason }),
+            ...(outcome.reason === 'refusal' ? { reason: outcome.reason, refusal: outcome.refusal } : { reason: outcome.reason }),
             response: outcome.response,
             crash: outcome.response.crash,
         });
@@ -429,10 +431,9 @@ export default class LambderInvokeCaller {
     /**
      * The declared output, or a thrown LambderInvokeError carrying the
      * outcome. A failed dependency is a failed request: the throw reaches the
-     * app's global error handler with the callee's error as its cause. The
-     * resolver lets a handler answer null only when the output allows it or
-     * beside a reason (LambderApiAnswer), so null arrives only for a
-     * nullable output.
+     * app's global error handler with the callee's error as its cause. Only
+     * the callee handler's own output reads as a success, so what this
+     * returns is always the contract's output.
      */
     async api(apiName, ...rest) {
         const [payload, options] = rest;

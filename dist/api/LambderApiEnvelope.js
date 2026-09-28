@@ -1,35 +1,70 @@
-import { LAMBDER_REFUSAL_CODES, refusalMessageOf } from "../shared/wire/LambderApiRefusal.js";
+import { LAMBDER_REFUSAL_CODES, isLambderRefusalCode, refusalMessageOf } from "../shared/wire/LambderApiRefusal.js";
 import { setAnswerHeader } from "../shared/wire/LambderAnswerHeaders.js";
 /*
  * The one place the API envelope is written, and the one mapping from each
  * kind of protocol outcome onto an answer: a success, a thrown refusal, a
  * rejected input, an unknown name, a missing session, a stale client, a
  * malformed compressed payload, and the last-resort crash. The server's API
- * path and res.api(), the mock runtime and the pipeline all build through these
+ * path and res.apiRefusal(), the mock runtime and the pipeline all build through these
  * functions, so server and mock cannot drift on a single byte of the wire
  * format. Pure: no Node built-ins, no response classes.
  */
 export const API_ANSWER_CONTENT_TYPE = "application/json; charset=utf-8";
 /**
- * The wire envelope for one answer. Flags are only present when set, so a
- * plain success is `{ apiVersion, payload }` and nothing else; an empty
- * logList is omitted.
+ * A handler's answer as the wire envelope: its parsed output and the logList
+ * the call accumulated, nothing else. The only envelope a reader takes for a
+ * success; an empty logList is omitted.
  */
-export const buildApiEnvelope = (apiVersion, payload, { versionExpired, sessionExpired, notAuthorized, errorMessage, logList, crash, } = {}) => ({
+export const successEnvelope = (apiVersion, payload, logList) => ({
     apiVersion: apiVersion ?? null,
     payload,
-    ...(versionExpired ? { versionExpired } : {}),
-    ...(sessionExpired ? { sessionExpired } : {}),
-    ...(notAuthorized ? { notAuthorized } : {}),
+    ...(logList?.length ? { logList } : {}),
+});
+/**
+ * Every other answer as the wire envelope: a null payload beside the
+ * refusal's message and flags. Flags are only present when set, and an
+ * empty logList is omitted.
+ */
+export const refusalEnvelope = (apiVersion, { versionExpired, sessionExpired, notAuthorized, refusal, logList, crash }) => ({
+    apiVersion: apiVersion ?? null,
+    payload: null,
+    ...(versionExpired ? { versionExpired: true } : {}),
+    ...(sessionExpired ? { sessionExpired: true } : {}),
+    ...(notAuthorized ? { notAuthorized: true } : {}),
     // Presence, not truthiness: these channels carry app values, and an app
-    // that refuses with errorMessage: "" (or 0) meant to say something. The
+    // that refuses with refusal: "" (or 0) meant to say something. The
     // flags above are booleans, where false and absent mean the same. An
-    // errorMessage goes out as a message object whatever form it was written
+    // refusal goes out as a message object whatever form it was written
     // in, so every reader meets one shape.
-    ...(errorMessage !== undefined ? { errorMessage: refusalMessageOf(errorMessage) } : {}),
+    ...(refusal !== undefined ? { refusal: refusalMessageOf(refusal) } : {}),
     ...(crash !== undefined ? { crash } : {}),
     ...(logList?.length ? { logList } : {}),
 });
+/**
+ * An API call answered from outside its handler (res.apiRefusal on the
+ * server, onInvalidInput in the mock) as its envelope, once the config is
+ * known to be a refusal: a refusal message or one of the three flags, so a
+ * reader never takes it for the handler's output, and a message with a
+ * framework code or none and no data, since it answers outside any one
+ * endpoint's declared refusals. `writer` names the call in the error, and
+ * the logList is the config's own or the one given.
+ */
+export const plainRefusalEnvelope = (apiVersion, config, writer, logList) => {
+    const { refusal, versionExpired, sessionExpired, notAuthorized } = config;
+    if (refusal === undefined && !versionExpired && !sessionExpired && !notAuthorized) {
+        throw new Error(`Lambder: ${writer} needs a refusal message or one of the versionExpired, sessionExpired and notAuthorized flags. An API call answered from outside its handler is always a refusal.`);
+    }
+    if (refusal !== undefined) {
+        const message = refusalMessageOf(refusal);
+        if (message.code !== undefined && !isLambderRefusalCode(message.code)) {
+            throw new Error(`Lambder: ${writer} was given the code "${message.code}". It answers outside any one API's declared refusals, so its message carries a framework code or none.`);
+        }
+        if (message.data !== undefined) {
+            throw new Error(`Lambder: ${writer} was given a message with data. Only a code an API declares carries data, and this answer is outside any one API's declaration.`);
+        }
+    }
+    return refusalEnvelope(apiVersion, { ...config, logList: config.logList ?? logList });
+};
 /** An envelope as an answer: JSON body, JSON content type, the status and headers given (200 and none by default). */
 export const envelopeAnswer = (envelope, options = {}) => {
     const headers = { "Content-Type": [API_ANSWER_CONTENT_TYPE] };
@@ -41,13 +76,13 @@ export const envelopeAnswer = (envelope, options = {}) => {
     return { statusCode: options.statusCode ?? 200, headers, body: JSON.stringify(envelope) };
 };
 /**
- * A thrown refusal as an answer: its errorMessage and flags on the envelope,
+ * A thrown refusal as an answer: its refusal and flags on the envelope,
  * its status (200 unless it set one) and its extra headers (Retry-After on a
  * rate limit). The logList the call accumulated rides along, as it does on
  * a success.
  */
-export const refusalAnswer = (err, apiVersion, logList) => envelopeAnswer(buildApiEnvelope(apiVersion, null, {
-    ...(err.errorMessage !== undefined ? { errorMessage: err.errorMessage } : {}),
+export const refusalAnswer = (err, apiVersion, logList) => envelopeAnswer(refusalEnvelope(apiVersion, {
+    ...(err.refusal !== undefined ? { refusal: err.refusal } : {}),
     ...(err.notAuthorized ? { notAuthorized: true } : {}),
     ...(err.sessionExpired ? { sessionExpired: true } : {}),
     logList,
@@ -155,17 +190,17 @@ export const validationAnswer = (zodError, logList) => {
     };
 };
 /** No API is registered under the requested name: a refusal, not a 404, so a typed caller reads it. */
-export const apiNotFoundAnswer = (apiVersion, logList) => envelopeAnswer(buildApiEnvelope(apiVersion, null, {
-    errorMessage: { type: "warning", code: LAMBDER_REFUSAL_CODES.apiNotFound, content: "API not found." },
+export const apiNotFoundAnswer = (apiVersion, logList) => envelopeAnswer(refusalEnvelope(apiVersion, {
+    refusal: { type: "warning", code: LAMBDER_REFUSAL_CODES.apiNotFound, content: "API not found." },
     logList,
 }));
 /** A session API called without a live session: the protocol's sessionExpired flag, which the caller clears its cookies on. */
-export const sessionExpiredAnswer = (apiVersion, logList) => envelopeAnswer(buildApiEnvelope(apiVersion, null, { sessionExpired: true, logList }));
+export const sessionExpiredAnswer = (apiVersion, logList) => envelopeAnswer(refusalEnvelope(apiVersion, { sessionExpired: true, logList }));
 /** The caller was built against another shape of the endpoint (the signature gate), or the app judged it stale: the protocol's versionExpired flag, which the caller reloads on. */
-export const versionExpiredAnswer = (apiVersion) => envelopeAnswer(buildApiEnvelope(apiVersion, null, { versionExpired: true }));
+export const versionExpiredAnswer = (apiVersion) => envelopeAnswer(refusalEnvelope(apiVersion, { versionExpired: true }));
 /** A compressed request payload that could not be restored: a 400 with the reason, never a crash. */
-export const invalidPayloadAnswer = (apiVersion, message) => envelopeAnswer(buildApiEnvelope(apiVersion, null, {
-    errorMessage: { type: "error", code: LAMBDER_REFUSAL_CODES.invalidRequestPayload, content: message },
+export const invalidPayloadAnswer = (apiVersion, message) => envelopeAnswer(refusalEnvelope(apiVersion, {
+    refusal: { type: "error", code: LAMBDER_REFUSAL_CODES.invalidRequestPayload, content: message },
 }), { statusCode: 400 });
 /**
  * The last-resort answer when the call crashed and nothing else could
@@ -175,4 +210,4 @@ export const invalidPayloadAnswer = (apiVersion, message) => envelopeAnswer(buil
  * with the call's logList) is passed only for a caller the app's
  * `crashes.reveal` trusts.
  */
-export const crashAnswer = (apiVersion, revealed) => envelopeAnswer(buildApiEnvelope(apiVersion, null, { errorMessage: "Internal server error.", ...revealed }), { statusCode: 500 });
+export const crashAnswer = (apiVersion, revealed) => envelopeAnswer(refusalEnvelope(apiVersion, { refusal: "Internal server error.", ...revealed }), { statusCode: 500 });

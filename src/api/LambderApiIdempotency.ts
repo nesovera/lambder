@@ -129,7 +129,7 @@ const keyReusedRefusal = (apiName: string): LambderApiRefusal => new LambderApiR
     `Idempotency key reused for a different request to "${apiName}".`,
     {
         statusCode: 409,
-        errorMessage: {
+        refusal: {
             type: "error",
             code: LAMBDER_REFUSAL_CODES.idempotencyKeyReused,
             content: "This request key was already used for a different request. Start the operation again.",
@@ -163,7 +163,7 @@ const requestFingerprintOf = async (payload: unknown): Promise<string> => {
         const content = "Invalid request payload: nested too deep to fingerprint.";
         throw new LambderApiRefusal(content, {
             statusCode: 400,
-            errorMessage: { type: "error", code: LAMBDER_REFUSAL_CODES.invalidRequestPayload, content } satisfies LambderRefusalMessage,
+            refusal: { type: "error", code: LAMBDER_REFUSAL_CODES.invalidRequestPayload, content } satisfies LambderRefusalMessage,
         });
     }
     try {
@@ -262,7 +262,7 @@ export class LambderApiIdempotencyEngine {
             const content = `Invalid idempotency key: must be a string of ${IDEMPOTENCY_MIN_KEY_LENGTH}-${IDEMPOTENCY_MAX_KEY_LENGTH} characters.`;
             throw new LambderApiRefusal(content, {
                 statusCode: 400,
-                errorMessage: { type: "error", code: LAMBDER_REFUSAL_CODES.invalidIdempotencyKey, content } satisfies LambderRefusalMessage,
+                refusal: { type: "error", code: LAMBDER_REFUSAL_CODES.invalidIdempotencyKey, content } satisfies LambderRefusalMessage,
             });
         }
         return rawKey;
@@ -379,7 +379,7 @@ export class LambderApiIdempotencyEngine {
         if(begun.state === "pending"){
             throw new LambderApiRefusal(`Duplicate request for "${apiName}": the original is still processing.`, {
                 statusCode: 409,
-                errorMessage: { type: "warning", code: LAMBDER_REFUSAL_CODES.duplicateInFlight, content: "This request is already being processed." } satisfies LambderRefusalMessage,
+                refusal: { type: "warning", code: LAMBDER_REFUSAL_CODES.duplicateInFlight, content: "This request is already being processed." } satisfies LambderRefusalMessage,
             });
         }
         // The other replay path: the original settled between this request's

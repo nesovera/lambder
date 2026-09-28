@@ -28,11 +28,11 @@ import { LambderApiOutputValidationError } from '../../src/api/LambderApiOutputV
 
 const createShop = () => {
     const placed: number[] = [];
-    const app = lambderTestApp(initLambder().create({
+    const app = lambderTestApp(initLambder().declareRefusals({ 'app/out-of-stock': {} }).create({
         apiPath: '/api',
         idempotency: { store: new LambderMemoryIdempotencyStore() },
         guards: { coupon: { guardInput: z.object({ code: z.string() }), handler: async () => {} } },
-    }).addApi('order.place', { input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true },
+    }).addApi('order.place', { input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true, refusals: 'app/out-of-stock' },
         async (ctx) => {
             if(ctx.apiPayload.qty > 5) refuse('Only 5 in stock.', { code: 'app/out-of-stock' });
             placed.push(ctx.apiPayload.qty);
@@ -55,7 +55,7 @@ describe('A key belongs to the request it was first used for', () => {
         expect(await visitor.api('order.place', { qty: 3 }, { idempotencyKey: KEY })).toEqual({ placed: 3 });
         // The edit to qty 4 under the same key: refused, not told qty 3 went through.
         const edited = await visitor.apiOutcome('order.place', { qty: 4 }, { idempotencyKey: KEY });
-        assertApiFailure(edited, 'errorMessage', { code: LAMBDER_REFUSAL_CODES.idempotencyKeyReused, status: 409 });
+        assertApiFailure(edited, 'refusal', { code: LAMBDER_REFUSAL_CODES.idempotencyKeyReused, status: 409 });
         expect(placed).toEqual([3]);
     });
 
@@ -63,7 +63,7 @@ describe('A key belongs to the request it was first used for', () => {
         const { app, placed } = createShop();
         const visitor = app.visitor();
 
-        assertApiFailure(await visitor.apiOutcome('order.place', { qty: 10 }, { idempotencyKey: KEY }), 'errorMessage', { code: 'app/out-of-stock' });
+        assertApiFailure(await visitor.apiOutcome('order.place', { qty: 10 }, { idempotencyKey: KEY }), 'refusal', { code: 'app/out-of-stock' });
         expect(await visitor.api('order.place', { qty: 2 }, { idempotencyKey: KEY })).toEqual({ placed: 2 });
         expect(placed).toEqual([2]);
     });
@@ -75,7 +75,7 @@ describe('A key belongs to the request it was first used for', () => {
         assertApiSuccess(await visitor.apiOutcome('order.withCoupon', { qty: 1, note: 'n' }, { idempotencyKey: KEY, guardInputs: { coupon: { code: 'A' } } }));
         assertApiSuccess(await visitor.apiOutcome('order.withCoupon', { note: 'n', qty: 1 }, { idempotencyKey: KEY, guardInputs: { coupon: { code: 'B' } } }));
         assertApiFailure(await visitor.apiOutcome('order.withCoupon', { qty: 2, note: 'n' }, { idempotencyKey: KEY, guardInputs: { coupon: { code: 'A' } } }),
-            'errorMessage', { code: LAMBDER_REFUSAL_CODES.idempotencyKeyReused });
+            'refusal', { code: LAMBDER_REFUSAL_CODES.idempotencyKeyReused });
     });
 
     it('tells apart payloads that differ only under a "__proto__" key', async () => {
@@ -89,7 +89,7 @@ describe('A key belongs to the request it was first used for', () => {
 
         assertApiSuccess(await visitor.apiOutcome('order.place', first, { idempotencyKey: KEY }));
         assertApiFailure(await visitor.apiOutcome('order.place', second, { idempotencyKey: KEY }),
-            'errorMessage', { code: LAMBDER_REFUSAL_CODES.idempotencyKeyReused });
+            'refusal', { code: LAMBDER_REFUSAL_CODES.idempotencyKeyReused });
         expect(placed).toEqual([1]);
     });
 });
@@ -101,7 +101,7 @@ describe('A key scope as the call\'s key', () => {
         const scope = createIdempotencyKeyScope();
         const first = scope.current;
 
-        assertApiFailure(await visitor.apiOutcome('order.place', { qty: 10 }, { idempotencyKey: scope }), 'errorMessage');
+        assertApiFailure(await visitor.apiOutcome('order.place', { qty: 10 }, { idempotencyKey: scope }), 'refusal');
         expect(scope.current).not.toBe(first);
 
         const second = scope.current;
@@ -122,12 +122,12 @@ describe('A key scope as the call\'s key', () => {
 
     it('settles on a success or a refusal of the request, and not on a failure that says nothing', () => {
         expect(rotatesAfter({ ok: true })).toBe(true);
-        expect(rotatesAfter({ ok: false, reason: 'errorMessage', errorMessage: { code: 'app/out-of-stock' } })).toBe(true);
+        expect(rotatesAfter({ ok: false, reason: 'refusal', refusal: { code: 'app/out-of-stock' } })).toBe(true);
         expect(rotatesAfter({ ok: false, reason: 'validation' })).toBe(true);
         expect(rotatesAfter({ ok: false, reason: 'notAuthorized' })).toBe(true);
-        expect(rotatesAfter({ ok: false, reason: 'errorMessage', errorMessage: { code: LAMBDER_REFUSAL_CODES.duplicateInFlight } })).toBe(false);
-        expect(rotatesAfter({ ok: false, reason: 'errorMessage', status: 429, errorMessage: { code: LAMBDER_REFUSAL_CODES.rateLimited } })).toBe(false);
-        expect(rotatesAfter({ ok: false, reason: 'errorMessage', status: 429, errorMessage: { code: 'app/slow-down' } })).toBe(false);
+        expect(rotatesAfter({ ok: false, reason: 'refusal', refusal: { code: LAMBDER_REFUSAL_CODES.duplicateInFlight } })).toBe(false);
+        expect(rotatesAfter({ ok: false, reason: 'refusal', status: 429, refusal: { code: LAMBDER_REFUSAL_CODES.rateLimited } })).toBe(false);
+        expect(rotatesAfter({ ok: false, reason: 'refusal', status: 429, refusal: { code: 'app/slow-down' } })).toBe(false);
         expect(rotatesAfter({ ok: false, reason: 'server', status: 500 })).toBe(false);
         expect(rotatesAfter(timedOut)).toBe(false);
         expect(rotatesAfter({ ok: false, reason: 'sessionExpired' })).toBe(false);
@@ -137,10 +137,10 @@ describe('A key scope as the call\'s key', () => {
     it('keeps a key an unanswered attempt may have used through a refusal, and lets it go on a success or a key reused', () => {
         const refused = { ok: false, reason: 'notAuthorized' };
         expect(rotatesAfter(refused, timedOut)).toBe(false);
-        expect(rotatesAfter(refused, { ok: false, reason: 'errorMessage', errorMessage: { code: LAMBDER_REFUSAL_CODES.duplicateInFlight } })).toBe(false);
-        expect(rotatesAfter(refused, { ok: false, reason: 'errorMessage', status: 429 })).toBe(true);
+        expect(rotatesAfter(refused, { ok: false, reason: 'refusal', refusal: { code: LAMBDER_REFUSAL_CODES.duplicateInFlight } })).toBe(false);
+        expect(rotatesAfter(refused, { ok: false, reason: 'refusal', status: 429 })).toBe(true);
         expect(rotatesAfter({ ok: true }, timedOut)).toBe(true);
-        expect(rotatesAfter({ ok: false, reason: 'errorMessage', errorMessage: { code: LAMBDER_REFUSAL_CODES.idempotencyKeyReused } }, timedOut)).toBe(true);
+        expect(rotatesAfter({ ok: false, reason: 'refusal', refusal: { code: LAMBDER_REFUSAL_CODES.idempotencyKeyReused } }, timedOut)).toBe(true);
     });
 
     it('keeps the key through a refusal while another attempt under it is still in flight', () => {
@@ -174,7 +174,7 @@ describe('A key scope as the call\'s key', () => {
             transport: async () => {
                 calls += 1;
                 if(calls === 1) throw new Error('offline');
-                return { status: 200, header: () => null, json: async () => ({ apiVersion: null, errorMessage: 'Verification failed.' }), text: async () => '' };
+                return { status: 200, header: () => null, json: async () => ({ apiVersion: null, refusal: 'Verification failed.' }), text: async () => '' };
             },
         });
         const scope = createIdempotencyKeyScope();
@@ -221,7 +221,7 @@ describe('A store with no room for a claim', () => {
             const scope = createIdempotencyKeyScope();
             const key = scope.current;
             const refused = await app.visitor().apiOutcome('order.place', { qty: 2 }, { idempotencyKey: scope });
-            assertApiFailure(refused, 'errorMessage', { code: LAMBDER_REFUSAL_CODES.duplicateInFlight, status: 409 });
+            assertApiFailure(refused, 'refusal', { code: LAMBDER_REFUSAL_CODES.duplicateInFlight, status: 409 });
             expect(scope.current).toBe(key);
 
             releaseOrder();
@@ -289,7 +289,7 @@ describe('A retry after a timeout runs the operation once', () => {
         // While the original still runs, the page resends the spent token:
         // refused by the guard, before the replay record is claimed.
         const reused = await caller.apiOutcome('order.place', { qty: 1 }, { idempotencyKey: scope, guardInputs: { captcha: { captchaToken: 'c1' } } });
-        expect(reused.ok ? 'ok' : reused.reason).toBe('errorMessage');
+        expect(reused.ok ? 'ok' : reused.reason).toBe('refusal');
         await settle();
         const retry = await caller.apiOutcome('order.place', { qty: 1 }, { idempotencyKey: scope, guardInputs: { captcha: { captchaToken: 'c3' } } });
         expect(retry.ok && retry.payload).toEqual({ placed: 1 });
@@ -302,7 +302,7 @@ describe('A retry after a timeout runs the operation once', () => {
         const firstTap = caller.apiOutcome('order.place', { qty: 1 }, { idempotencyKey: scope, guardInputs: { captcha: { captchaToken: 'c1' } }, timeoutMs: 30 });
         await new Promise((resolve) => setTimeout(resolve, 10));
         const secondTap = await caller.apiOutcome('order.place', { qty: 1 }, { idempotencyKey: scope, guardInputs: { captcha: { captchaToken: 'c1' } } });
-        expect(secondTap.ok ? 'ok' : secondTap.reason).toBe('errorMessage');
+        expect(secondTap.ok ? 'ok' : secondTap.reason).toBe('refusal');
         expect((await firstTap).ok).toBe(false);
         await settle();
         const retry = await caller.apiOutcome('order.place', { qty: 1 }, { idempotencyKey: scope, guardInputs: { captcha: { captchaToken: 'c2' } } });

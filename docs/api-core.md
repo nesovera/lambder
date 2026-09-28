@@ -149,19 +149,22 @@ answer is the shape the idempotency store persists and replays;
 
 | Function | Answers |
 | --- | --- |
-| `buildApiEnvelope(apiVersion, payload, config)` | The envelope object, flags only when set |
+| `successEnvelope(apiVersion, payload, logList?)` | A handler's answer: its output and the logList, nothing else |
+| `refusalEnvelope(apiVersion, channels)` | Every other answer: a null payload beside the flags that are set, the refusal and a crash |
+| `plainRefusalEnvelope(apiVersion, config, writer, logList?)` | `res.apiRefusal()`'s, and the mock's `onInvalidInput`'s: a refusal envelope once the config is known to be one (a refusal message or a flag, a framework code or none, no data) |
 | `envelopeAnswer(envelope, { statusCode?, headers? })` | An envelope as an answer |
-| `refusalAnswer(err, apiVersion, logList?)` | A thrown `LambderApiRefusal`: its errorMessage and flags, status, headers |
+| `refusalAnswer(err, apiVersion, logList?)` | A thrown `LambderApiRefusal`: its refusal and flags, status, headers |
 | `validationAnswer(zodError, logList?)` | The standard 422 body, bounded by bytes |
 | `apiNotFoundAnswer(apiVersion, logList?)` | The `lambder/api-not-found` refusal |
 | `sessionExpiredAnswer(apiVersion, logList?)`, `versionExpiredAnswer(apiVersion)` | The protocol flags |
 | `invalidPayloadAnswer(apiVersion, message)` | A compressed payload that could not be restored (400) |
 | `crashAnswer(apiVersion, revealed?)` | The last-resort 500, still an envelope; `revealed` (the crash in full, with the call's logList) only for a caller `crashes.reveal` trusts |
 
-The server wraps an API handler's returned output with `buildApiEnvelope` (as
-does `res.api()`, for an envelope a hook or an error handler writes by hand),
-and the mock wraps a mock handler's return with it, so the two sides cannot
-drift on a byte.
+The server wraps an API handler's parsed output with `successEnvelope`, and
+the mock wraps a mock handler's return with it, so the two sides cannot drift
+on a byte; it is the only envelope a reader takes for a success. Every other
+answer is a `refusalEnvelope`, `res.apiRefusal()` included (through
+`plainRefusalEnvelope`, which also holds it to a refusal's shape).
 
 ## The pipeline
 
@@ -203,11 +206,17 @@ with `console.error` naming the policy or the API. Set it to false where an
 unmetered or undeduplicated request is worse than a refused one.
 
 `definition` is a `LambderApiDefinition`: `{ name, mode, guards?, rateLimit?,
-idempotency?, input?, output? }`. The schemas are optional because the mock has
-none. On the server, `output` is what every output a handler returns is parsed
-through before it is sent (the parse is the server adapter's, so the mock,
-which has no schemas, sends outputs as given), and it is part of the
-endpoint's signature digest.
+idempotency?, input?, output?, refusals? }`. The schemas are optional because
+the mock has none. On the server, `output` is what every output a handler
+returns is parsed through before it is sent (the parse is the server
+adapter's, so the mock, which has no schemas, sends outputs as given once it
+has checked they are objects or arrays), and it is part of the endpoint's
+signature digest. `refusals` is every code the endpoint may refuse with, its
+own and its guards', resolved against the vocabulary: the pipeline checks a
+thrown refusal against it with `checkedRefusal` before rendering it, parsing
+a declared code's data through its schema. The mock fills it from the
+generated options (codes without schemas, so membership alone is checked),
+and leaves it out without them, which checks nothing.
 `exec(ctx)` is the adapter's step: on the server it calls the app handler,
 parses the output it returned and wraps it in the envelope; in the mock it
 calls the mock handler and wraps its return in the envelope. Either way the

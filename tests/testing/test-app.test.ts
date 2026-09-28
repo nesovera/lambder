@@ -20,7 +20,7 @@ import type { LambderRateLimiter } from '../../src/shared/contracts/LambderRateL
 import type { LambderIdempotencyStore } from '../../src/shared/contracts/LambderIdempotencyStore.js';
 import LambderCaller from '../../src/client/LambderCaller.js';
 import { lambderHandlerTransport } from '../../src/invoke/lambderHandlerTransport.js';
-import { lambderTestApp, assertApiSuccess, assertApiFailure } from '../../src/testing.js';
+import { lambderTestApp, assertApiSuccess, assertApiFailure, assertApiRefusal } from '../../src/testing.js';
 
 type SessionData = { userId: string; role: 'admin' | 'member'; refreshed?: boolean };
 
@@ -44,7 +44,7 @@ let ordersCreated = 0;
 let scheduledRuns: unknown[] = [];
 
 const createApp = () => {
-    const app = initLambder<SessionData>().create({
+    const app = initLambder<SessionData>().declareRefusals({ 'app/wrong-role': { notAuthorized: true } }).create({
         files: new LambderLocalFileSource({ root: './tests/fixtures/public' }),
         apiPath: '/secure',
         apiVersion: '1.0.0',
@@ -60,8 +60,9 @@ const createApp = () => {
         guards: {
             role: lambderGuard({
                 session: true,
+                refusals: ['app/wrong-role'],
                 handler: (ctx, _input, wanted: 'admin' | 'member') => {
-                    if(ctx.session.data.role !== wanted) refuse('Wrong role.', { code: 'app/wrong-role', notAuthorized: true });
+                    if(ctx.session.data.role !== wanted) refuse('Wrong role.', { code: 'app/wrong-role' });
                     return { role: ctx.session.data.role };
                 },
             }),
@@ -193,12 +194,12 @@ describe('lambderTestApp: visitors', () => {
         expect(first.clientIp).not.toBe(second.clientIp);
 
         expect(await first.api('limited', {})).toEqual({ ok: true });
-        assertApiFailure(await first.apiOutcome('limited', {}), 'errorMessage', { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
+        assertApiFailure(await first.apiOutcome('limited', {}), 'refusal', { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
         expect(await second.api('limited', {})).toEqual({ ok: true });
 
         // The same address is the same counter, which is how a shared one is tested.
         const sharing = app.visitor({ clientIp: second.clientIp });
-        assertApiFailure(await sharing.apiOutcome('limited', {}), 'errorMessage', { code: LAMBDER_REFUSAL_CODES.rateLimited });
+        assertApiFailure(await sharing.apiOutcome('limited', {}), 'refusal', { code: LAMBDER_REFUSAL_CODES.rateLimited });
     });
 
     it('shows the handler the visitor\'s host, address and headers', async () => {
@@ -249,7 +250,7 @@ describe('lambderTestApp: sessions from outside a request', () => {
             const visitor = await app.signIn('ada', { userId: 'ada', role: 'member' }, { ttlSeconds: 60 });
             const limited = app.visitor();
             expect(await limited.api('limited', {})).toEqual({ ok: true });
-            assertApiFailure(await limited.apiOutcome('limited', {}), 'errorMessage');
+            assertApiFailure(await limited.apiOutcome('limited', {}), 'refusal');
 
             vi.setSystemTime(Date.now() + 61_000);
 
@@ -268,7 +269,7 @@ describe('lambderTestApp: what the app threw', () => {
 
         // The answer is the app's own, untouched: a 500 that says nothing.
         assertApiFailure(crashed, 'server', { status: 500 });
-        expect(crashed.errorMessage).toEqual({ type: 'error', content: 'Internal server error.' });
+        expect(crashed.refusal).toEqual({ type: 'error', content: 'Internal server error.' });
         // What was thrown travels beside it, stack and all.
         expect(crashed.error.cause).toBeInstanceOf(Error);
         expect((crashed.error.cause as Error).message).toBe('boom');
@@ -310,11 +311,11 @@ describe('lambderTestApp: what the app threw', () => {
     it('leaves what the app\'s own error handler answers alone, and still says what was thrown', async () => {
         const handled = lambderTestApp(initLambder().create({})
             .addApi('crash', { input: z.object({}), output: z.any() }, async () => { throw new Error('boom'); })
-            .setGlobalErrorHandler((_err, _ctx, res) => res.api(null, { errorMessage: 'Something went wrong on our side.' })));
+            .setGlobalErrorHandler((_err, _ctx, res) => res.apiRefusal({ refusal: 'Something went wrong on our side.' })));
 
         const outcome = await handled.visitor().apiOutcome('crash', {});
-        assertApiFailure(outcome, 'errorMessage');
-        expect(outcome.errorMessage).toEqual({ type: 'error', content: 'Something went wrong on our side.' });
+        assertApiFailure(outcome, 'refusal');
+        expect(outcome.refusal).toEqual({ type: 'error', content: 'Something went wrong on our side.' });
         expect(handled.crashes.map((error) => error.message)).toEqual(['boom']);
     });
 
@@ -451,7 +452,7 @@ describe.each(['v2', 'v1'] as const)('lambderTestApp on %s events', (eventFormat
         expect((await visitor.request('GET', '/old')).headers.location).toBe('/hello/moved');
         expect((await visitor.request('GET', '/main.css')).headers['content-type']).toContain('text/css');
         await visitor.api('limited', {});
-        assertApiFailure(await visitor.apiOutcome('limited', {}), 'errorMessage', { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
+        assertApiFailure(await visitor.apiOutcome('limited', {}), 'refusal', { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
     });
 
     it('decodes the path once whatever host the visitor browses, a Function URL\'s included', async () => {
@@ -565,9 +566,13 @@ describe('assertApiSuccess / assertApiFailure', () => {
 
         const refused = await member.apiOutcome('admin.only', {});
         expect(() => assertApiSuccess(refused))
-            .toThrow(/Expected the call to succeed, but it was a failure with reason "notAuthorized", status 200, errorMessage .*"code":"app\/wrong-role"/);
+            .toThrow(/Expected the call to succeed, but it was a failure with reason "notAuthorized", status 200, refusal .*"code":"app\/wrong-role"/);
         expect(() => assertApiFailure(refused, 'sessionExpired')).toThrow(/reason "sessionExpired", but it was a failure with reason "notAuthorized"/);
-        expect(() => assertApiFailure(refused, 'notAuthorized', { code: 'app/other' })).toThrow(/code "app\/other"/);
+        expect(() => assertApiFailure(refused, 'notAuthorized', { code: LAMBDER_REFUSAL_CODES.rateLimited })).toThrow(/code "lambder\/rate-limited"/);
+        expect(() => assertApiRefusal(refused, LAMBDER_REFUSAL_CODES.rateLimited)).toThrow(/refused with code "lambder\/rate-limited", but it was a failure with reason "notAuthorized"/);
+        assertApiRefusal(refused, 'app/wrong-role');
+        // @ts-expect-error a code admin.only cannot refuse with
+        expect(() => assertApiRefusal(refused, 'app/other')).toThrow(/code "app\/other"/);
         expect(() => assertApiFailure(refused, 'notAuthorized', { status: 403 })).toThrow(/status 403/);
 
         const crashed = await visitor.apiOutcome('crash', {});

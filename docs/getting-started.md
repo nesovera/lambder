@@ -104,7 +104,7 @@ statement discards the instance the contract accumulated onto and leaves
         guards: { open: "the password check here IS the control" },
     }, async (ctx) => {
         const user = await authenticateUser(ctx.apiPayload.email, ctx.apiPayload.password);
-        // A refusal, not an output: the caller's errorMessageHandler shows it.
+        // A refusal, not an output: the caller's refusalHandler shows it.
         if (!user) refuse("Wrong email or password.");
 
         // ctx.sessionController is this request's session controller, typed SessionData.
@@ -149,7 +149,7 @@ import type { ApiContractType } from "./backend/handler"; // type-only import
 
 const caller = new LambderCaller<ApiContractType>({
     apiPath: "/api",
-    errorMessageHandler: (message) => showToast(message),
+    refusalHandler: (message) => showToast(message),
     sessionExpiredHandler: () => redirectToLogin(),
 });
 

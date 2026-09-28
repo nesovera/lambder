@@ -9,7 +9,8 @@ export type LambderIdempotentAttemptOutcome = {
     ok: boolean;
     reason?: string;
     status?: number;
-    errorMessage?: { code?: string };
+    /** The refusal's message, when the answer carried one: only its code is read. */
+    refusal?: { code?: string };
 };
 
 /** One call's key, and what tells its scope how the call ended. */
@@ -27,7 +28,7 @@ export const IDEMPOTENT_ATTEMPT_NOT_SENT: LambderIdempotentAttemptOutcome = { ok
  * Refusals that answer this request itself, so the same request would get
  * the same answer again and what the person sends next is a new operation.
  */
-const REFUSAL_REASONS = new Set(["validation", "notAuthorized", "errorMessage"]);
+const REFUSAL_REASONS = new Set(["validation", "notAuthorized", "refusal"]);
 
 /** Answers that never reached the operation: the same request may pass later. */
 const UNTRIED_REASONS = new Set(["sessionExpired", "versionExpired", "payloadTooLarge", "notSent"]);
@@ -69,7 +70,7 @@ let beginAttemptOf: (scope: LambderIdempotencyKeyScope) => LambderIdempotentAtte
  * - A success settles it, and so does a key refused as reused for another
  *   request, since that key can never carry this one.
  * - A refusal of this request (a rejected input, not authorized, an
- *   errorMessage) settles it, unless another attempt under the same key is
+ *   refusal) settles it, unless another attempt under the same key is
  *   still in flight or went unanswered. That attempt may run or have run the
  *   operation, and guards, validation and rate limits refuse before the
  *   replay record is claimed, so the refusal of a retry or a double-tap says
@@ -124,10 +125,10 @@ export class LambderIdempotencyKeyScope {
             settled = true;
             if(key !== this.#key) return;
             this.#inFlight -= 1;
-            const code = outcome.errorMessage?.code;
+            const code = outcome.refusal?.code;
             if(outcome.ok || code === LAMBDER_REFUSAL_CODES.idempotencyKeyReused){ this.rotate(); return; }
-            // A rate limit refuses before the claim, whatever code a policy's
-            // own message carries, so its status is what names it.
+            // A rate limit refuses before the claim, and its status names it
+            // as surely as its code.
             if(UNTRIED_REASONS.has(outcome.reason ?? "") || outcome.status === 429 || code === LAMBDER_REFUSAL_CODES.rateLimited) return;
             if(REFUSAL_REASONS.has(outcome.reason ?? "") && code !== LAMBDER_REFUSAL_CODES.duplicateInFlight){
                 if(!this.#possiblyUsed && this.#inFlight === 0) this.rotate();

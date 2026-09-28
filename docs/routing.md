@@ -106,7 +106,7 @@ lambder
 lambder
     // Unmatched API names
     .setApiFallbackHandler((ctx, res) => {
-        return res.api(null, { errorMessage: "API not found" });
+        return res.apiRefusal({ refusal: "API not found" });
     })
     // A Zod input rejection, from an API's own schema or from a guard or
     // rate-limit key slice. One failure, one shape, whichever schema rejected it.
@@ -115,7 +115,7 @@ lambder
         // guard runs, and one strictObject issue carries every key the
         // client posted, so the answer would be larger than the request.
         const where = zodError.issues[0]?.path.join(".") || "the payload";
-        return res.api(null, { errorMessage: { type: "warning", content: `Invalid input at ${where}.` } });
+        return res.apiRefusal({ refusal: { type: "warning", content: `Invalid input at ${where}.` } });
     })
     // Anything that throws and is not a response or a LambderApiRefusal
     .setGlobalErrorHandler((err, ctx, res) => {
@@ -123,9 +123,13 @@ lambder
     });
 ```
 
+A handler here answers an API call with `res.apiRefusal`, which is always a
+refusal: only an API handler's own output reads as a success to a caller
+(see [Responses](./responses.md#api-answers-outside-a-handler)).
+
 When an API call crashes with no `setGlobalErrorHandler` (or the handler itself
 fails), the last-resort 500 is the API envelope,
-`{ apiVersion, payload: null, errorMessage: { type: "error", content: "Internal server error." } }`,
+`{ apiVersion, payload: null, refusal: { type: "error", content: "Internal server error." } }`,
 with `crash` and `logList` beside it only for a caller `crashes.reveal` trusts
 (see [Crashes](#crashes)); routes get a plain-text 500.
 

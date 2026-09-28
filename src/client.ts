@@ -48,21 +48,37 @@ export type { LambderIdempotencyKeyScope } from "./shared/wire/LambderIdempotenc
 
 // Typed API refusals (isomorphic: shared code may throw them from anywhere;
 // in the browser they are plain Errors).
-export { LambderApiRefusal, isLambderApiRefusal, refuse, refusalMessageOf, LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";
-export type { LambderApiRefusalOptions, LambderRefusalMessage, LambderAppRefusalMessage, LambderRefusalCode, LambderRefuseOptions } from "./shared/wire/LambderApiRefusal.js";
+export { LambderApiRefusal, isLambderApiRefusal, isLambderRefusalCode, refuse, refusalMessageOf, LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";
+export type {
+    LambderApiRefusalOptions,
+    LambderRefusalMessage,
+    LambderPlainRefusalMessage,
+    LambderUncheckedRefusalMessage,
+    LambderRefusalCode,
+    LambderRefuseOptions,
+    LambderDeclaredRefuseOptions,
+    LambderDeclaredRefuse,
+} from "./shared/wire/LambderApiRefusal.js";
+export { isObjectPayload } from "./shared/wire/LambderObjectPayload.js";
 
 // The API contract and wire envelope both sides speak, and the helpers that read a contract type.
 export type {
     LambderApiContractShape,
     LambderApiMode,
     LambderApiEnvelopeBody,
-    LambderApiResponseConfig,
+    LambderApiSuccessEnvelope,
+    LambderApiRefusalEnvelope,
+    LambderRefusalEnvelopeFields,
+    LambderApiRefusalConfig,
     LambderGuardNamesIn,
     LambderContractMode,
     LambderContractKeysWithMode,
     LambderContractKeysWithGuard,
     LambderJsonOf,
-    LambderJsonOutputOf,
+    LambderContractRefusalsOf,
+    LambderContractRefusalMessage,
+    LambderContractRefusals,
+    LambderContractAnyRefusalMessage,
     LambderContractGuardsOf,
     LambderContractGuardNames,
     LambderContractGuardInputsOf,
@@ -128,7 +144,7 @@ export type {
     LambderI18nTranslatorFor,
 } from "./shared/LambderI18n.js";
 // The status union every refusal option names; browser and mock code declares statuses too.
-export type { LambderHttpStatusCode } from "./shared/wire/LambderHttpStatus.js";
+export type { LambderHttpStatusCode, LambderRefusalStatusCode } from "./shared/wire/LambderHttpStatus.js";
 
 // Waiting longer after each failure, once: for a reconnecting client or a
 // screen that has to come back by itself.

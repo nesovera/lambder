@@ -22,7 +22,8 @@ export { compareDottedVersions, isDottedVersion } from "./shared/wire/LambderVer
 export { createIdempotencyKey, createIdempotencyKeyScope } from "./shared/wire/LambderIdempotencyKeyScope.js";
 // Typed API refusals (isomorphic: shared code may throw them from anywhere;
 // in the browser they are plain Errors).
-export { LambderApiRefusal, isLambderApiRefusal, refuse, refusalMessageOf, LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";
+export { LambderApiRefusal, isLambderApiRefusal, isLambderRefusalCode, refuse, refusalMessageOf, LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";
+export { isObjectPayload } from "./shared/wire/LambderObjectPayload.js";
 // The server's declared options as plain data (the generated options module's
 // entry types) and the readers a client derives its own facts from.
 export { apiGuardParam } from "./shared/wire/LambderApiOptionEntries.js";

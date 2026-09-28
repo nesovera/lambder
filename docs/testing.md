@@ -120,7 +120,7 @@ expect(page.text()).toContain("kettle");
 
 | Member | |
 | --- | --- |
-| `api(name, payload, options?)` | The payload on success, `undefined` on a failure. `LambderCaller.api`, typed by your contract |
+| `api(name, payload, options?)` | The endpoint's output on success, `undefined` on every failure. `LambderCaller.api`, typed by your contract |
 | `apiOutcome(name, payload, options?)` | The full outcome, never throwing. Pair it with the [assertions](#asserting-on-outcomes) |
 | `request(method, path, init?)` | One HTTP request that is not an API call: a route, a session route, a public file, the index page, a fallback. `init` is `{ query, headers, body }`. The answer comes back decoded (decompressed, header names lowercased) as `{ statusCode, headers, cookies, body, text(), json() }`. Redirects are not followed |
 | `signIn(sessionKey, data, options?)` | Signs this visitor in; returns the created session and its raw tokens, as `LambderMockApp.signIn` does |
@@ -158,22 +158,27 @@ it. An app serving several hosts gives individual visitors their own:
 ## Asserting on outcomes
 
 An outcome is a discriminated union, so a test expecting a refusal has to
-narrow before it can read what the refusal carries. `assertApiSuccess` and
-`assertApiFailure` do the narrowing through an `asserts` signature, and when
-the outcome is not what the test expected they say what it was:
+narrow before it can read what the refusal carries. `assertApiSuccess`,
+`assertApiFailure` and `assertApiRefusal` do the narrowing through an
+`asserts` signature, and when the outcome is not what the test expected they
+say what it was:
 
 ```typescript
-import { assertApiSuccess, assertApiFailure, LAMBDER_REFUSAL_CODES } from "lambder/testing";
+import { assertApiSuccess, assertApiFailure, assertApiRefusal, LAMBDER_REFUSAL_CODES } from "lambder/testing";
 
 const outcome = await visitor.apiOutcome("order.create", { sku: "kettle" });
 assertApiSuccess(outcome);
-expect(outcome.payload?.orderNumber).toBe(1);           // narrowed to the success arm
+expect(outcome.payload.orderNumber).toBe(1);            // narrowed to the success arm: the output, exactly
 
 const invalid = await visitor.apiOutcome("order.create", { sku: "" });
 assertApiFailure(invalid, "validation");
 expect(invalid.zodError.issues[0]?.path).toEqual(["sku"]);   // narrowed to the arm that carries zodError
 
-assertApiFailure(await visitor.apiOutcome("signup", form), "errorMessage", { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
+const short = await visitor.apiOutcome("order.pay", { orderId, amount: 250 });
+assertApiRefusal(short, "wallet-short");                // one of the endpoint's declared codes
+expect(short.refusal.data.available).toBe(100);    // that code's data, typed
+
+assertApiFailure(await visitor.apiOutcome("signup", form), "refusal", { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
 ```
 
 ```
@@ -182,11 +187,22 @@ Error: Expected the call to fail with reason "notAuthorized", but it was a succe
 
 `assertApiFailure(outcome, reason?, { code?, status? })`: the reason is typed
 against the union it was handed, so a misspelled one is a compile error;
-`code` is the refusal's `errorMessage.code`; with no reason, any failure
-passes. Both throw a plain `Error` and import no test runner, so they serve
-vitest, jest and `node:test` alike. They are typed structurally over `ok` and
-`reason`, so a `LambderInvokeOutcome` narrows through the same two functions,
-and `lambder/mock` exports them too, for frontend tests over the mock app.
+`code` is the refusal's `refusal.code`, one of the endpoint's declared
+codes or the framework's; with no reason, any failure passes.
+`assertApiRefusal(outcome, code)` matches the code whichever reason the
+refusal arrived under (a refusal flagged `notAuthorized` keeps its code), and
+narrows `refusal` to that code's own arm, so a test asserts on the code
+and its data rather than on the wording, and a code the endpoint does not
+declare is a compile error. All three throw a plain `Error` and import no
+test runner, so they serve vitest, jest and `node:test` alike. They are typed
+structurally over `ok` and `reason`, so a `LambderInvokeOutcome` narrows
+through the same functions, and `lambder/mock` exports them too, for
+frontend tests over the mock app.
+
+A refusal whose code the endpoint does not declare, or whose data its code's
+schema rejects, is a crash rather than an answer (see
+[Declared refusals](./apis.md#declared-refusals)), so a test over the real
+server finds one on the first call that raises it, in `app.crashes`.
 
 ## When the app crashes
 
@@ -205,7 +221,7 @@ the instance throws, without changing what it answers:
 
   ```
   Error: Expected the call to succeed, but it was a failure with reason "server", status 500,
-  errorMessage "Internal server error.", error "Request failed: 500 - " (cause: relation "org" does not exist).
+  refusal "Internal server error.", error "Request failed: 500 - " (cause: relation "org" does not exist).
   ```
 
 - **On the test app.** `app.crashes` holds every error thrown while answering

@@ -73,7 +73,7 @@ when the registry loads.
 | `rateLimits` | off | Required when an endpoint references a policy. `{ policies, limiter?, failOpen? }`: the same policies the server declares, over `LambderMemoryRateLimiter` unless a limiter is given, checked against the contract (below). `failOpen: false` refuses a call whose limiter threw instead of letting it through |
 | `idempotency` | off | Required when an endpoint declares idempotency. `true`, or `{ defaultTtlSeconds?, defaultPendingTtlSeconds?, failOpen?, store?, callerIdentity? }`: the server's own options, `callerIdentity` bound to the mock call context without its session, since it runs on public endpoints alone |
 | `guards` | none | The mock guard map; required whenever the contract declares a guard name, and checked against the contract (below) |
-| `guardDeclarations` | none | The generated `guardDeclarations` table: each mock guard of a name it has is held to the server guard's input mode and session requirement ([below](#declarations-policies-and-guards-from-the-generated-options)) |
+| `guardDeclarations` | none | The generated `guardDeclarations` table: each mock guard of a name it has is held to the server guard's input mode and session requirement, and its refusal codes join the entries declaring it ([below](#declarations-policies-and-guards-from-the-generated-options)) |
 | `apiOptions` | none | The generated `apiOptions` table: every entry's guards, rate limit and idempotency are read off it rather than restated, and a rest answer runs under the mode it gives the name ([below](#declarations-policies-and-guards-from-the-generated-options)) |
 | `cookieHost` | the page's host, else `localhost` | The host this runtime's cookies belong to: what `signIn` plants them under, what the transport's jar sends them to, and what a call naming no `siteHost` is read as arriving at |
 | `maxRequestPayloadBytes` | `20_000_000` | Ceiling on what a compressed request payload may restore to |
@@ -81,7 +81,7 @@ when the registry loads.
 | `callLogSize` | `200` | How many completed calls `mockApp.calls` keeps |
 | `revealHandlerErrors` | `true` | Answer a thrown handler with the message it threw rather than the server's "Internal server error." |
 | `onReset` | none | Called at the end of `reset()`, so the app rewinds its own data |
-| `onInvalidInput` | none | `(zodError, ctx) => ({ payload?, config?, statusCode? }) \| null`: the answer to an input that fails its schema, for a server app that sets `setApiInputValidationErrorHandler`. The same answer as data, `res.api(payload, config)` with its status (200 unless named); `null` answers the standard 422 |
+| `onInvalidInput` | none | `(zodError, ctx) => ({ config, statusCode? }) \| null`: the answer to an input that fails its schema, for a server app that sets `setApiInputValidationErrorHandler`. The same answer as data, `res.apiRefusal(config)` with its status (200 unless named), held to the same rule: a refusal message or a flag, a framework code or none; `null` answers the standard 422 |
 
 A misspelled option is a compile error, nested ones included: `idempotency:
 { failOpn: false }` and `rateLimits: { policies: { p: { budgt: "perApi" } } }`
@@ -120,8 +120,9 @@ and the table cannot hold one:
 ```typescript
 import { lambderMockPoliciesFrom } from "lambder/mock";
 import { apiOptions, guardDeclarations, rateLimitPolicies } from "./generated/apiOptions.generated";
+import { refusalVocabulary } from "../shared/refusals";   // the object the server's init declares too
 
-export const mockApp = mock.create({
+export const mockApp = mock.declareRefusals(refusalVocabulary, { requireCodes: true }).create({
     sessions: true,
     rateLimits: {
         policies: lambderMockPoliciesFrom(rateLimitPolicies, {
@@ -163,6 +164,29 @@ never disagrees with the server about a limit it did not mean to change, and a
 policy added on the server reaches the mock on the next generation. The result
 keeps each policy's `per` and `budget` as literals, so the checks above
 against the contract still apply to it.
+
+`apiOptions` also holds each entry's own refusal codes and `guardDeclarations`
+the codes each guard adds. What each code is comes from the vocabulary, which
+the mock declares exactly as the server does:
+`initLambderMock<Contract, SessionData>().declareRefusals(vocabulary, { requireCodes? })`,
+with the same object and the same option the server's `initLambder()` is
+given, imported from shared code (codes, zod schemas, statuses and flags hold
+nothing secret; zod is in the mock's bundle already). A mock that declared it
+checks and sends every refusal an entry answers with as the server would: the
+code among the codes the tables give the entry, its data parsed through the
+code's schema from the input form (defaults filled, transforms run once,
+strays stripped), and the declaration's status and flag, so a mock raise
+site names the code alone. Anything else is a crash with the server's
+`LambderApiRefusalValidationError`, whether a handler, a mock guard or an
+injected failure raised it; with `requireCodes`, an uncoded refusal is one
+too. A handler's `ctx.refuse` and the mock init's own `refuse` are typed to
+the vocabulary, data in its input form; `failNext` and `setFailure` take an
+injected refusal the same way. An entry that can refuse with a declared code
+therefore needs the vocabulary declared, and one whose table declares guards
+needs `guardDeclarations` too; registering the entry without them throws, as
+does a table naming a code the vocabulary does not hold, since the two
+describe one server. A mock given no tables checks nothing, and its
+`ctx.refuse` takes a code's data in the contract's wire form.
 
 `guardDeclarations`, the table of the server's guards, holds each mock guard
 of a name the table has to the server guard's input mode (`apiInput`,
@@ -365,8 +389,12 @@ mockApp.publicApi("user.get", {
 });
 ```
 
-A handler returns its payload, as a server handler returns its output, and
-writes what goes beside it through the context, with the server's own tools:
+A handler returns its payload, as a server handler returns its output: an
+object or an array, typed as the contract's output. One that answers anything
+else (a cast, an `any`) crashes the call with the server's
+`LambderApiOutputValidationError`, so a mock never hands a caller the falsy
+success a server cannot send. It writes what goes beside the payload through
+the context, with the server's own tools:
 `ctx.setResponseHeader`, `ctx.addResponseHeader`, `ctx.setCookie` and
 `ctx.clearCookie` land on the answer, and `ctx.logList.push(entry)` feeds the
 envelope's `logList`, so a server handler and its mock twin read alike.
@@ -416,9 +444,19 @@ mockApp.sessionApi("order.create", {
 });
 ```
 
-Handlers say no with `refuse()` or a thrown `LambderApiRefusal`, exactly as
-server handlers do; the pipeline renders the refusal, status and headers
-included. A handler that throws anything else crashes the call: the caller
+Handlers say no with `ctx.refuse()`, `refuse()` or a thrown
+`LambderApiRefusal`, exactly as server handlers do; the pipeline renders the
+refusal, status and headers included. `ctx.refuse` is typed to the codes the
+contract entry declares, with each code's data in the form it arrives in
+(the mock has no schema to parse it through, so a server's `z.date()` is a
+string here):
+
+```typescript
+mockApp.publicApi("order.pay", async (ctx) => {
+    if (ctx.payload.amount > 100) return ctx.refuse("The wallet holds less than the total.", { code: "wallet-short", data: { available: 100, currency: "USD" } });
+    return { paid: true };
+});
+``` A handler that throws anything else crashes the call: the caller
 receives a 500 envelope carrying the thrown message (the server sends
 "Internal server error." instead, and `revealHandlerErrors: false` asks for
 that shape), and the error rides on the call's event. The headers written
@@ -624,7 +662,16 @@ that was arranged for it.
 
 A `LambderMockFailure` is one of `network`, `timeout`, `server`, `refusal`
 (with an optional message and status), `notAuthorized`, `sessionExpired`,
-`versionExpired` and `rateLimited` (with an optional `Retry-After`). Each is
+`versionExpired` and `rateLimited` (with an optional `Retry-After` and
+message words; its code is always `lambder/rate-limited`). A refusal's and a
+`notAuthorized` failure's message is typed to the endpoint, one of its
+declared codes with that code's data, and checked against the tables where
+the mock has them, so a test cannot inject a refusal the server could never
+send:
+
+```typescript
+mockApp.failNext("order.pay", { reason: "refusal", message: { type: "warning", code: "wallet-short", content: "Short.", data: { available: 10, currency: "USD" } } });
+``` Each is
 rendered by the same function the pipeline uses for the real thing, so an
 injected 429 carries the `Retry-After` a real one does. `network` rejects the
 transport, which the caller reports as `network`; `timeout` waits for the
@@ -671,8 +718,11 @@ exactly as the server does (or what `onInvalidInput` states, for a server app
 with its own validation handler); one without takes whatever arrives, and a
 handler
 returning the wrong shape is a compile error rather than a runtime one.
-Output is never validated: the contract is type-only, so the mock has no
-output schema to strip a handler's extra fields with, where the server does.
+Output is not parsed: the contract is type-only, so the mock has no output
+schema to strip a handler's extra fields with, where the server does. It is
+held to being an object or an array, the rule every answer keeps. A
+refusal's data is not parsed either, for the same reason; the tables let the
+mock check its code.
 Guard inputs and rate-limit key slices, whose schemas the mock guard map
 declares, are validated as on the server. The MSW adapter and the invoke
 transport take a POST as an API call only with `Content-Type:

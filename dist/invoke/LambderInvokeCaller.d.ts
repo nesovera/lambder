@@ -24,7 +24,7 @@ import type { APIGatewayProxyEventV2, Context } from "aws-lambda";
 import { type LambderInvokeFailure, type LambderInvokeOutcome } from "./LambderInvokeOutcome.js";
 import { type LambderApiSignatureMap } from "../shared/wire/LambderApiSignatureMap.js";
 import type { LambdaClient, LambdaClientConfig } from "@aws-sdk/client-lambda";
-import type { LambderApiContractShape } from "../shared/wire/LambderApiContract.js";
+import type { LambderApiContractShape, LambderContractRefusalMessage } from "../shared/wire/LambderApiContract.js";
 import { type LambderCallArgs, type LambderContractOutputOf, type LambderGuardInputsProviderOption, type LambderSharedCallOptions } from "../shared/wire/LambderCallOptions.js";
 import { type LambderCompressionOption } from "../shared/wire/LambderCompressionOption.js";
 import { type LambderInvokeSession, type LambderLambdaHttpResult } from "./LambderLambdaEvent.js";
@@ -214,14 +214,13 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
      * comes from the contract rather than a type parameter, so a call site
      * cannot replace it by annotating what it assigns to.
      */
-    apiOutcome<TApiName extends keyof TContract & string = string>(apiName: TApiName, ...rest: LambderCallArgs<TContract, TApiName, TProvidedGuards, LambderInvokeCallOptions>): Promise<LambderInvokeOutcome<LambderContractOutputOf<TContract, TApiName>>>;
+    apiOutcome<TApiName extends keyof TContract & string = string>(apiName: TApiName, ...rest: LambderCallArgs<TContract, TApiName, TProvidedGuards, LambderInvokeCallOptions>): Promise<LambderInvokeOutcome<LambderContractOutputOf<TContract, TApiName>, LambderContractRefusalMessage<TContract, TApiName>>>;
     /**
      * The declared output, or a thrown LambderInvokeError carrying the
      * outcome. A failed dependency is a failed request: the throw reaches the
-     * app's global error handler with the callee's error as its cause. The
-     * resolver lets a handler answer null only when the output allows it or
-     * beside a reason (LambderApiAnswer), so null arrives only for a
-     * nullable output.
+     * app's global error handler with the callee's error as its cause. Only
+     * the callee handler's own output reads as a success, so what this
+     * returns is always the contract's output.
      */
     api<TApiName extends keyof TContract & string = string>(apiName: TApiName, ...rest: LambderCallArgs<TContract, TApiName, TProvidedGuards, LambderInvokeCallOptions>): Promise<LambderContractOutputOf<TContract, TApiName>>;
     /**

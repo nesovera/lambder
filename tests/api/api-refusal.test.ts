@@ -3,7 +3,7 @@
  *
  * - Thrown anywhere in an API call's stack (handler, hooks, nested helpers
  *   that hold nothing of the request), it becomes the refusal envelope
- *   ({ errorMessage, notAuthorized, sessionExpired }) and never reaches the
+ *   ({ refusal, notAuthorized, sessionExpired }) and never reaches the
  *   global error handler.
  * - Thrown outside an API call it stays a normal error.
  * - Detection is brand-based (isLambderApiRefusal) so refusals survive duplicate
@@ -13,9 +13,9 @@
 
 import { describe, it, expect } from 'vitest';
 import { z } from 'zod';
-import Lambder from '../../src/core/Lambder.js';
+import Lambder, { initLambder } from '../../src/core/Lambder.js';
 import { LambderApiRefusal, isLambderApiRefusal, refuse, refusalMessageOf, LAMBDER_REFUSAL_CODES } from '../../src/shared/wire/LambderApiRefusal.js';
-import type { LambderAppRefusalMessage, LambderRefusalMessage } from '../../src/shared/wire/LambderApiRefusal.js';
+import type { LambderUncheckedRefusalMessage, LambderRefusalMessage } from '../../src/shared/wire/LambderApiRefusal.js';
 import { decodeBody, createApiEvent as createEnvelopeEvent, createMockContext, testPublicFiles } from '../helpers.js';
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
@@ -52,7 +52,7 @@ describe('LambderApiRefusal - envelope mapping on API calls', () => {
         expect(result.statusCode).toBe(200);
         const body = JSON.parse(decodeBody(result));
         expect(body.payload).toBe(null);
-        expect(body.errorMessage).toEqual({ type: 'error', content: 'You are not a member of an organization.' });
+        expect(body.refusal).toEqual({ type: 'error', content: 'You are not a member of an organization.' });
     });
 
     it('works from nested helpers that hold nothing of the request', async () => {
@@ -70,20 +70,20 @@ describe('LambderApiRefusal - envelope mapping on API calls', () => {
         expect(result.statusCode).toBe(200);
         const body = JSON.parse(decodeBody(result));
         expect(body.notAuthorized).toBe(true);
-        expect(body.errorMessage).toEqual({ type: 'error', content: 'Permission denied.' });
+        expect(body.refusal).toEqual({ type: 'error', content: 'Permission denied.' });
     });
 
-    it('carries structured errorMessage objects verbatim', async () => {
+    it('carries structured refusal objects verbatim', async () => {
         const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
             .addApi('refuse', testSchema, async () => {
                 throw new LambderApiRefusal('Quota exceeded', {
-                    errorMessage: { type: 'warning', content: 'Daily quota exceeded.' },
+                    refusal: { type: 'warning', content: 'Daily quota exceeded.' },
                 });
             });
 
         const result = await lambder.render(createApiEvent('refuse', { value: 'x' }), createMockContext());
         const body = JSON.parse(decodeBody(result));
-        expect(body.errorMessage).toEqual({ type: 'warning', content: 'Daily quota exceeded.' });
+        expect(body.refusal).toEqual({ type: 'warning', content: 'Daily quota exceeded.' });
     });
 
     it('sets the sessionExpired flag when requested', async () => {
@@ -106,7 +106,7 @@ describe('LambderApiRefusal - envelope mapping on API calls', () => {
         const result = await lambder.render(createApiEvent('refuse', { value: 'x' }), createMockContext());
         expect(result.statusCode).toBe(403);
         const body = JSON.parse(decodeBody(result));
-        expect(body.errorMessage).toEqual({ type: 'error', content: 'Forbidden' });
+        expect(body.refusal).toEqual({ type: 'error', content: 'Forbidden' });
     });
 
     it('maps refusals thrown from beforeRender hooks on API calls', async () => {
@@ -125,7 +125,7 @@ describe('LambderApiRefusal - envelope mapping on API calls', () => {
 
         expect(handlerRan).toBe(false);
         expect(result.statusCode).toBe(200);
-        expect(JSON.parse(decodeBody(result)).errorMessage).toEqual({ type: 'error', content: 'Blocked by hook' });
+        expect(JSON.parse(decodeBody(result)).refusal).toEqual({ type: 'error', content: 'Blocked by hook' });
     });
 
     it('maps refusals thrown from afterRender hooks on API calls', async () => {
@@ -136,14 +136,14 @@ describe('LambderApiRefusal - envelope mapping on API calls', () => {
         });
 
         const result = await lambder.render(createApiEvent('ok', { value: 'x' }), createMockContext());
-        expect(JSON.parse(decodeBody(result)).errorMessage).toEqual({ type: 'error', content: 'Rejected after render' });
+        expect(JSON.parse(decodeBody(result)).refusal).toEqual({ type: 'error', content: 'Rejected after render' });
     });
 
     it('recognizes the brand across duplicate installs (no instanceof)', async () => {
         // Simulate an error constructed by a second copy of the package.
         const foreign = Object.assign(new Error('Foreign refusal'), {
             isLambderApiRefusal: true,
-            errorMessage: 'Foreign refusal',
+            refusal: 'Foreign refusal',
             notAuthorized: true,
         });
         const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
@@ -161,15 +161,15 @@ describe('refuse() - the standard refusal shape', () => {
     it('is the shape of the framework\'s own refusals too (unknown API)', async () => {
         const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' });
         const result = await lambder.render(createApiEvent('missing', {}), createMockContext());
-        expect(JSON.parse(decodeBody(result)).errorMessage).toEqual({ type: 'warning', code: LAMBDER_REFUSAL_CODES.apiNotFound, content: 'API not found.' });
+        expect(JSON.parse(decodeBody(result)).refusal).toEqual({ type: 'warning', code: LAMBDER_REFUSAL_CODES.apiNotFound, content: 'API not found.' });
     });
 
     it('carries a machine-readable code for clients to branch and translate on', async () => {
-        const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
-            .addApi('dup', testSchema, async () => refuse('Already reported.', { code: 'ALREADY_REPORTED' }));
+        const lambder = initLambder().declareRefusals({ ALREADY_REPORTED: {} }).create({ files: testPublicFiles(), apiPath: '/api' })
+            .addApi('dup', { ...testSchema, refusals: 'ALREADY_REPORTED' }, async () => refuse('Already reported.', { code: 'ALREADY_REPORTED' }));
 
         const result = await lambder.render(createApiEvent('dup', { value: 'x' }), createMockContext());
-        expect(JSON.parse(decodeBody(result)).errorMessage).toEqual({ type: 'warning', code: 'ALREADY_REPORTED', content: 'Already reported.' });
+        expect(JSON.parse(decodeBody(result)).refusal).toEqual({ type: 'warning', code: 'ALREADY_REPORTED', content: 'Already reported.' });
     });
 
     it('carries extra headers onto the refusal response', async () => {
@@ -203,7 +203,7 @@ describe('refuse() - the standard refusal shape', () => {
         expect(result.statusCode).toBe(200);
         const body = JSON.parse(decodeBody(result));
         expect(body.payload).toBe(null);
-        expect(body.errorMessage).toEqual({ type: 'warning', content: 'Record not found.' });
+        expect(body.refusal).toEqual({ type: 'warning', content: 'Record not found.' });
     });
 
     it('carries type, title, flags and statusCode through its options', async () => {
@@ -216,7 +216,7 @@ describe('refuse() - the standard refusal shape', () => {
         expect(result.statusCode).toBe(403);
         const body = JSON.parse(decodeBody(result));
         expect(body.notAuthorized).toBe(true);
-        expect(body.errorMessage).toEqual({ type: 'error', title: 'Not Allowed', content: 'Admins only.' });
+        expect(body.refusal).toEqual({ type: 'error', title: 'Not Allowed', content: 'Admins only.' });
     });
 
     it('works from nested helpers and skips the global error handler', async () => {
@@ -234,7 +234,7 @@ describe('refuse() - the standard refusal shape', () => {
 
         const result = await lambder.render(createApiEvent('guarded', { value: 'x' }), createMockContext());
         expect(globalHandlerCalled).toBe(false);
-        expect(JSON.parse(decodeBody(result)).errorMessage.content).toBe('Value must be positive.');
+        expect(JSON.parse(decodeBody(result)).refusal.content).toBe('Value must be positive.');
     });
 });
 
@@ -269,7 +269,7 @@ describe('Last-resort 500 shape', () => {
         expect(result.multiValueHeaders?.['Content-Type']).toEqual(['application/json; charset=utf-8']);
         const body = JSON.parse(result.body || '{}');
         expect(body.payload).toBe(null);
-        expect(body.errorMessage).toEqual({ type: 'error', content: 'Internal server error.' });
+        expect(body.refusal).toEqual({ type: 'error', content: 'Internal server error.' });
         expect(body.apiVersion).toBe('1.2.3');
     });
 
@@ -313,27 +313,30 @@ describe('LambderRefusalMessage - branching on the code', () => {
         expect(describeRefusal({ type: 'error', content: 'plain' })).toBe('plain');
     });
 
-    it('takes an app\'s own vocabulary as a type argument, and keeps the switch exhaustive over it', () => {
-        type AppCode = 'app/not-verified' | 'app/quota-exhausted';
-        const describeAppRefusal = (message: LambderRefusalMessage<AppCode>): string => {
+    it('takes an endpoint\'s declared codes as a type argument, narrows data on the code, and keeps the switch exhaustive over them', () => {
+        type Declared = { 'app/not-verified': {}; 'app/quota-exhausted': { data: { remaining: number } } };
+        const describeAppRefusal = (message: LambderRefusalMessage<Declared>): string => {
             switch(message.code){
                 case 'app/not-verified': return 'verify your address';
-                case 'app/quota-exhausted': return 'buy more';
+                case 'app/quota-exhausted': return `buy more (${message.data.remaining} left)`;
                 default: return message.content;
             }
         };
 
         expect(describeAppRefusal({ type: 'warning', code: 'app/not-verified', content: 'x' })).toBe('verify your address');
-        // A code outside the declared vocabulary is a compile error, which is
-        // the point: the client's own list is the one being checked.
-        // @ts-expect-error "app/typo" is not one of this app's codes
+        expect(describeAppRefusal({ type: 'warning', code: 'app/quota-exhausted', content: 'x', data: { remaining: 0 } })).toBe('buy more (0 left)');
+        // A code outside the declared codes is a compile error, which is the
+        // point: the endpoint's own list is the one being checked.
+        // @ts-expect-error "app/typo" is not one of the declared codes
         expect(describeAppRefusal({ type: 'warning', code: 'app/typo', content: 'fallback' })).toBe('fallback');
+        // @ts-expect-error a code that declares data carries it
+        const _withoutData: LambderRefusalMessage<Declared> = { type: 'warning', code: 'app/quota-exhausted', content: 'x' };
     });
 
-    it('lets an app WRITE any code through LambderAppRefusalMessage', () => {
+    it('lets an app WRITE any code through LambderUncheckedRefusalMessage', () => {
         // Refusals an app authors are the other direction: a rate-limit
         // policy's message carries whatever code the app uses.
-        const message: LambderAppRefusalMessage = { type: 'warning', code: 'app/anything', content: 'x' };
+        const message: LambderUncheckedRefusalMessage = { type: 'warning', code: 'app/anything', content: 'x' };
         expect(message.code).toBe('app/anything');
     });
 });
@@ -345,7 +348,7 @@ describe('refusalMessageOf', () => {
     });
 
     it('hands a message object back as it is', () => {
-        const message: LambderAppRefusalMessage = { type: 'warning', code: 'app/no', title: 'Heads up', content: 'No.' };
+        const message: LambderUncheckedRefusalMessage = { type: 'warning', code: 'app/no', title: 'Heads up', content: 'No.' };
         expect(refusalMessageOf(message)).toBe(message);
     });
 

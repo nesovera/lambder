@@ -22,26 +22,27 @@ import { LambderPlainSessionCrypto } from '../../src/session/LambderSessionCrypt
 import { LambderMemorySessionStore } from '../../src/stores/LambderMemorySessionStore.js';
 import type { LambderSessionStore } from '../../src/shared/contracts/LambderSessionStore.js';
 import type { LambderApiTransport } from '../../src/shared/transport/LambderApiTransport.js';
-import { assertApiSuccess, assertApiFailure } from '../../src/shared/wire/LambderOutcomeAssertions.js';
-import type { LambderApiOptionEntry } from '../../src/shared/wire/LambderApiOptionEntries.js';
+import { assertApiSuccess, assertApiFailure, assertApiRefusal } from '../../src/shared/wire/LambderOutcomeAssertions.js';
+import type { LambderApiOptionEntry, LambderGuardDeclarationEntry } from '../../src/shared/wire/LambderApiOptionEntries.js';
 
 type SessionData = { userId: string; tenants: { tenantId: string; role: 'reader' | 'writer' }[] };
 
 /** The contract as a consuming app imports it: a type, nothing else. */
 type Contract = {
-    'user.get': { input: { userId: string }; output: { id: string; name: string }; mode: 'public' };
+    'user.get': { input: { userId: string }; output: { id: string; name: string }; mode: 'public'; refusals: { 'app/user-archived': { data: { since: string; by: string; days: number } } } };
     'login': { input: { user: string }; output: { ok: boolean }; mode: 'public' };
     'logout': { input: {}; output: { ok: boolean }; mode: 'session' };
     'me': { input: {}; output: { userId: string }; mode: 'session' };
     'order.create': {
         input: { qty: number }; output: { orderId: string; qty: number }; mode: 'session';
+        refusals: { 'app/not-a-member': {}; 'app/read-only': {} };
         guards: { tenant: 'writer' }; guardInputs: { tenant: { tenantId: string } }; idempotency: true;
     };
     'limited': { input: {}; output: { n: number }; mode: 'public'; rateLimit: 'tight' };
     'ticket.buy': { input: { seat: string }; output: { ticketId: string }; mode: 'public'; idempotency: true };
     'echo': { input: { notes: string[] }; output: { count: number }; mode: 'public' };
-    'admin.run': { input: {}; output: null; mode: 'public' };
-    'admin.audit': { input: {}; output: null; mode: 'session' };
+    'admin.run': { input: {}; output: {}; mode: 'public' };
+    'admin.audit': { input: {}; output: {}; mode: 'session' };
 };
 
 const mock = initLambderMock<Contract, SessionData>();
@@ -148,8 +149,8 @@ describe('LambderMockApp - answers', () => {
         const outcome = await (callerFor(mockApp) as LambderCaller<any>).apiOutcome('nope', {});
         expect(outcome.ok).toBe(false);
         if(outcome.ok) return;
-        expect(outcome.reason).toBe('errorMessage');
-        expect(outcome.errorMessage).toMatchObject({ code: LAMBDER_REFUSAL_CODES.apiNotFound });
+        expect(outcome.reason).toBe('refusal');
+        expect(outcome.refusal).toMatchObject({ code: LAMBDER_REFUSAL_CODES.apiNotFound });
         expect(mockApp.calls.at(-1)?.outcome).toBe('unknownApi');
     });
 
@@ -158,7 +159,7 @@ describe('LambderMockApp - answers', () => {
         const outcome = await callerFor(mockApp).apiOutcome('admin.run', {});
         expect(outcome.ok).toBe(false);
         if(outcome.ok) return;
-        expect(outcome.errorMessage).toMatchObject({ code: LAMBDER_REFUSAL_CODES.notMocked, content: expect.stringContaining('operator endpoint') });
+        expect(outcome.refusal).toMatchObject({ code: LAMBDER_REFUSAL_CODES.notMocked, content: expect.stringContaining('operator endpoint') });
         expect(mockApp.calls.at(-1)?.outcome).toBe('notMocked');
     });
 
@@ -206,7 +207,7 @@ describe('LambderMockApp - answers', () => {
 
         const current = await callerFor(mockApp, { apiSignatures: mockSignatures }).apiOutcome('admin.run', {});
         assertApiFailure(current);
-        expect(current.errorMessage).toMatchObject({ code: LAMBDER_REFUSAL_CODES.notMocked });
+        expect(current.refusal).toMatchObject({ code: LAMBDER_REFUSAL_CODES.notMocked });
 
         const compressing = new LambderCaller<Contract>({
             apiPath: '/api', isCorsEnabled: false, apiVersion: '2', requestCompression: true, transport: mockApp.transport(),
@@ -235,16 +236,20 @@ describe('LambderMockApp - answers', () => {
         const answer = await mockApp.handle({ apiPath: '/api', apiName: 'user.get', token: '', siteHost: '', payload: { userId: '1' } });
         expect(answer.statusCode).toBe(410);
         expect(answer.headers['X-Reason']).toEqual(['deleted']);
-        expect(JSON.parse(answer.body).errorMessage).toEqual({ type: 'warning', code: 'app/gone', content: 'Gone.' });
+        expect(JSON.parse(answer.body).refusal).toEqual({ type: 'warning', code: 'app/gone', content: 'Gone.' });
         expect(mockApp.calls.at(-1)?.outcome).toBe('refusal');
     });
 
-    it('a handler returning undefined answers a null payload', async () => {
+    it('a handler answering anything but an object or an array crashes, as on the server', async () => {
         const { mockApp } = createMockApp();
-        mockApp.override('user.get', async () => undefined as never);
-        const outcome = await callerFor(mockApp).apiOutcome('user.get', { userId: '1' });
-        expect(outcome.ok).toBe(true);
-        if(outcome.ok) expect(outcome.payload).toBeNull();
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        for(const answered of [undefined, null, 'Ada']){
+            mockApp.override('user.get', async () => answered as never);
+            const outcome = await callerFor(mockApp).apiOutcome('user.get', { userId: '1' });
+            expect(outcome).toMatchObject({ ok: false, reason: 'server', status: 500 });
+            expect(mockApp.calls.at(-1)).toMatchObject({ outcome: 'crash', error: { name: 'LambderApiOutputValidationError' } });
+        }
+        vi.restoreAllMocks();
     });
 
     it('a compressed request payload is restored before the handler sees it', async () => {
@@ -411,7 +416,7 @@ describe('LambderMockApp - guards, rate limits, idempotency, version', () => {
         await bob.api('login', { user: 'bob' });
         const readOnly = await bob.apiOutcome('order.create', { qty: 1 }, { guardInputs: { tenant: { tenantId: 't1' } }, idempotencyKey: 'k-order-four-abcdefabcdef' });
         assertApiFailure(readOnly);
-        expect(readOnly.errorMessage).toMatchObject({ code: 'app/read-only' });
+        expect(readOnly.refusal).toMatchObject({ code: 'app/read-only' });
         expect(orderRuns()).toBe(1);
     });
 
@@ -425,7 +430,7 @@ describe('LambderMockApp - guards, rate limits, idempotency, version', () => {
         ));
         const caller = callerFor(mockApp);
         expect(await caller.api('user.get', { userId: 'u1' })).toEqual({ id: 'u1', name: 'Ada' });
-        assertApiFailure(await caller.apiOutcome('user.get', { userId: 'u1' }), 'errorMessage', { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
+        assertApiFailure(await caller.apiOutcome('user.get', { userId: 'u1' }), 'refusal', { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
         expect(await caller.api('user.get', { userId: 'u2' })).toEqual({ id: 'u2', name: 'Ada' });
     });
 
@@ -438,7 +443,7 @@ describe('LambderMockApp - guards, rate limits, idempotency, version', () => {
         expect(third.ok).toBe(false);
         if(third.ok) return;
         expect(third.status).toBe(429);
-        expect(third.errorMessage).toMatchObject({ code: LAMBDER_REFUSAL_CODES.rateLimited });
+        expect(third.refusal).toMatchObject({ code: LAMBDER_REFUSAL_CODES.rateLimited });
         expect(third.retryAfterSeconds).toBeGreaterThanOrEqual(1);
         expect(mockApp.calls.at(-1)?.outcome).toBe('rateLimited');
         expect(mockApp.rateLimiter?.countOf('api|limited|tight|ip:127.0.0.1', 'perMin')).toBe(2);
@@ -475,7 +480,7 @@ describe('LambderMockApp - guards, rate limits, idempotency, version', () => {
         // The same key for a different seat is another request, refused
         // rather than handed the first seat's ticket.
         const other = await caller.apiOutcome('ticket.buy', { seat: 'A2' }, { idempotencyKey: key });
-        assertApiFailure(other, 'errorMessage', { code: LAMBDER_REFUSAL_CODES.idempotencyKeyReused, status: 409 });
+        assertApiFailure(other, 'refusal', { code: LAMBDER_REFUSAL_CODES.idempotencyKeyReused, status: 409 });
     });
 
     it('carries rateLimits.failOpen to the engine, so a limiter that throws can refuse the call', async () => {
@@ -533,10 +538,10 @@ describe('LambderMockApp - failure injection and latency', () => {
         for(let i = 0; i < 8; i += 1){
             const outcome = await caller.apiOutcome('user.get', { userId: '1' });
             reasons.push(outcome.ok ? 'ok' : outcome.reason);
-            if(!outcome.ok && outcome.reason === 'errorMessage' && i === 3) expect(outcome.errorMessage).toEqual({ type: 'warning', content: 'No.' });
+            if(!outcome.ok && outcome.reason === 'refusal' && i === 3) expect(outcome.refusal).toEqual({ type: 'warning', content: 'No.' });
             if(!outcome.ok && i === 7) expect(outcome.retryAfterSeconds).toBe(7);
         }
-        expect(reasons).toEqual(['network', 'timeout', 'server', 'errorMessage', 'notAuthorized', 'sessionExpired', 'versionExpired', 'errorMessage']);
+        expect(reasons).toEqual(['network', 'timeout', 'server', 'refusal', 'notAuthorized', 'sessionExpired', 'versionExpired', 'refusal']);
         expect((await caller.apiOutcome('user.get', { userId: '1' })).ok).toBe(true);
         expect(mockApp.calls.filter((call) => call.outcome === 'injected').length).toBe(8);
     });
@@ -580,7 +585,7 @@ describe('LambderMockApp - failure injection and latency', () => {
 
         const refused = await caller.apiOutcome('user.get', { userId: '1' });
         assertApiFailure(refused);
-        expect(refused.errorMessage).toEqual({ type: 'warning', content: 'Queued.' });
+        expect(refused.refusal).toEqual({ type: 'warning', content: 'Queued.' });
         expect((await caller.apiOutcome('user.get', { userId: '1' })).ok).toBe(true);
     });
 
@@ -744,19 +749,19 @@ describe('LambderMockApp - overrides, reset, observation', () => {
 
     it('answers a bad input as the server app\'s own validation handler does, once the mock states it', async () => {
         // A server app with setApiInputValidationErrorHandler answers 200 with
-        // an errorMessage; a mock that always answered 422 would test the
+        // a refusal; a mock that always answered 422 would test the
         // form's error path against an answer production never gives.
         const mockApp = mock.create({
             ...requiredOptions,
-            onInvalidInput: (zodError) => ({ payload: null, config: { errorMessage: `Check ${zodError.issues[0]?.path.join('.')}.` } }),
+            onInvalidInput: (zodError) => ({ payload: null, config: { refusal: `Check ${zodError.issues[0]?.path.join('.')}.` } }),
         });
         mockApp.registerPartial(mockApp.apiSlice(
             mockApp.publicApi('user.get', { input: z.object({ userId: z.string() }), handler: async ({ payload }) => ({ id: payload.userId, name: 'Ada' }) }),
         ));
         const outcome = await callerFor(mockApp).apiOutcome('user.get', { userId: 42 } as never);
 
-        assertApiFailure(outcome, 'errorMessage');
-        expect(outcome.errorMessage?.content).toBe('Check userId.');
+        assertApiFailure(outcome, 'refusal');
+        expect(outcome.refusal?.content).toBe('Check userId.');
         expect(outcome.status).toBe(200);
 
         // null asks for the standard answer.
@@ -819,11 +824,11 @@ describe('LambderMockApp - overrides, reset, observation', () => {
 
         const revealed = await build().apiOutcome('echo', { notes: [] });
         assertApiFailure(revealed);
-        expect(revealed.errorMessage?.content).toBe('Translations not found for "checkout"');
+        expect(revealed.refusal?.content).toBe('Translations not found for "checkout"');
 
         const hidden = await build(false).apiOutcome('echo', { notes: [] });
         assertApiFailure(hidden);
-        expect(hidden.errorMessage?.content).toBe('Internal server error.');
+        expect(hidden.refusal?.content).toBe('Internal server error.');
     });
 
     it('reset also puts back the configured latency and restarts the call numbering', async () => {
@@ -1237,7 +1242,7 @@ describe('LambderMockApp - the rest entry', () => {
 
         expect(outcome.ok).toBe(false);
         if(outcome.ok) return;
-        expect(outcome.errorMessage).toMatchObject({
+        expect(outcome.refusal).toMatchObject({
             code: LAMBDER_REFUSAL_CODES.notMocked,
             content: expect.stringContaining('"limited" is not mocked: not mocked yet'),
         });
@@ -1279,13 +1284,13 @@ describe('LambderMockApp - the rest entry', () => {
 
         const signedIn = await callerFor(app, { jar }).apiOutcome('me', {});
         assertApiFailure(signedIn);
-        expect(signedIn.errorMessage).toMatchObject({ code: LAMBDER_REFUSAL_CODES.notMocked });
+        expect(signedIn.refusal).toMatchObject({ code: LAMBDER_REFUSAL_CODES.notMocked });
         expect(recording.reads()).toBe(0);
 
         // And with no session at all it is still "not mocked" rather than the
         // sessionExpired the server answers.
         const signedOut = await callerFor(app).apiOutcome('me', {});
-        assertApiFailure(signedOut, 'errorMessage');
+        assertApiFailure(signedOut, 'refusal');
         expect(app.calls.at(-1)?.outcome).toBe('notMocked');
         expect(recording.reads()).toBe(0);
     });
@@ -1299,7 +1304,7 @@ describe('LambderMockApp - the rest entry', () => {
 
         const current = await callerFor(app, { apiSignatures: mockSignatures }).apiOutcome('limited', {});
         assertApiFailure(current);
-        expect(current.errorMessage).toMatchObject({ code: LAMBDER_REFUSAL_CODES.notMocked });
+        expect(current.refusal).toMatchObject({ code: LAMBDER_REFUSAL_CODES.notMocked });
     });
 
     it('a second rest entry is refused the way a duplicate name is, and leaves the registry as it was', () => {
@@ -1333,7 +1338,7 @@ describe('LambderMockApp - the rest entry', () => {
 
         const answer = await post({ apiName: 'limited', payload: {}, token: '', siteHost: 'localhost' });
         expect(answer).toBeDefined();
-        expect(await (answer as Response).json()).toMatchObject({ errorMessage: { code: LAMBDER_REFUSAL_CODES.notMocked } });
+        expect(await (answer as Response).json()).toMatchObject({ refusal: { code: LAMBDER_REFUSAL_CODES.notMocked } });
         expect(app.calls.at(-1)).toMatchObject({ apiName: 'limited', outcome: 'notMocked' });
     });
 });
@@ -1482,7 +1487,7 @@ describe('LambderMockApp - idempotency carries the server\'s own options', () =>
 describe('LambderMockApp - declarations read off the apiOptions table', () => {
     /** The table writeApiOptions would write for this file's contract: `as const`, as the generated module is. */
     const contractOptions = {
-        'user.get': { mode: 'public' },
+        'user.get': { mode: 'public', refusals: 'app/user-archived' },
         'login': { mode: 'public' },
         'logout': { mode: 'session' },
         'me': { mode: 'session' },
@@ -1494,8 +1499,39 @@ describe('LambderMockApp - declarations read off the apiOptions table', () => {
         'admin.audit': { mode: 'session' },
     } as const satisfies Record<string, LambderApiOptionEntry>;
 
+    /** The guard declarations writeApiOptions would write beside the table: the tenant guard, and the codes it refuses with. */
+    const contractGuardDeclarations = {
+        tenant: { input: 'guardInput', session: true, runAt: 'beforeInputValidation', refusals: ['app/not-a-member', 'app/read-only'] },
+    } as const satisfies Record<string, LambderGuardDeclarationEntry>;
+
+    /** The server's vocabulary, the same object its init declares, which the mock imports from shared code. */
+    const contractVocabulary = {
+        'app/not-a-member': { notAuthorized: true, status: 403 },
+        'app/read-only': {},
+        'app/user-archived': { data: z.object({ since: z.string(), by: z.string().default('system'), days: z.number().transform((days) => days * 24) }) },
+    } as const;
+    const declaredMock = mock.declareRefusals(contractVocabulary);
+
+    /**
+     * The guard map for a mock given the tables: a declared code's flag is
+     * its declaration's, so the raise site names the code alone. mockGuards,
+     * for a mock given no tables, has to set the flag itself.
+     */
+    const declaredGuards = {
+        tenant: mock.guard({
+            guardInput: z.object({ tenantId: z.string() }),
+            session: true,
+            handler: (ctx, { tenantId }, role: 'reader' | 'writer') => {
+                const membership = ctx.session.data.tenants.find((tenant) => tenant.tenantId === tenantId);
+                if(!membership) refuse('Not a member.', { code: 'app/not-a-member' });
+                if(role === 'writer' && membership.role !== 'writer') refuse('Read-only member.', { code: 'app/read-only' });
+                return membership;
+            },
+        }),
+    };
+
     const createDerivedApp = () => {
-        const app = mock.create({ ...requiredOptions, apiOptions: contractOptions });
+        const app = declaredMock.create({ ...requiredOptions, guards: declaredGuards, apiOptions: contractOptions, guardDeclarations: contractGuardDeclarations });
         let ticketRuns = 0;
         app.register(
             app.apiSlice(
@@ -1523,7 +1559,7 @@ describe('LambderMockApp - declarations read off the apiOptions table', () => {
         // The rate limit: tight allows two a minute.
         expect((await callerOf(app).apiOutcome('limited', {})).ok).toBe(true);
         expect((await callerOf(app).apiOutcome('limited', {})).ok).toBe(true);
-        assertApiFailure(await callerOf(app).apiOutcome('limited', {}), 'errorMessage', { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
+        assertApiFailure(await callerOf(app).apiOutcome('limited', {}), 'refusal', { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
 
         // The idempotency: a retry with the same key replays the first answer.
         const key = createIdempotencyKey();
@@ -1536,11 +1572,85 @@ describe('LambderMockApp - declarations read off the apiOptions table', () => {
         await app.signIn('lin', { userId: 'lin', tenants: [{ tenantId: 't1', role: 'reader' }] }, { jar });
         const reader = await callerOf(app, jar).apiOutcome('order.create', { qty: 1 }, { guardInputs: { tenant: { tenantId: 't1' } }, idempotencyKey: createIdempotencyKey() });
         assertApiFailure(reader);
-        expect(reader.errorMessage).toMatchObject({ code: 'app/read-only' });
+        expect(reader.refusal).toMatchObject({ code: 'app/read-only' });
         const writerJar = new LambderCookieJar();
         await app.signIn('ada', { userId: 'ada', tenants: [{ tenantId: 't1', role: 'writer' }] }, { jar: writerJar });
         expect(await callerOf(app, writerJar).api('order.create', { qty: 2 }, { guardInputs: { tenant: { tenantId: 't1' } }, idempotencyKey: createIdempotencyKey() })).toEqual({ orderId: 'o-t1', qty: 2 });
         expect(app.calls.at(-1)?.guardsRun).toEqual(['tenant']);
+    });
+
+    it('holds a refusal to the codes the tables declare for the entry, its guards\' included', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        const app = createDerivedApp();
+        const jar = new LambderCookieJar();
+        await app.signIn('sam', { userId: 'sam', tenants: [] }, { jar });
+        // The guard's own code goes out, with the flag and status its declaration gives it.
+        const stranger = await callerOf(app, jar).apiOutcome('order.create', { qty: 1 }, { guardInputs: { tenant: { tenantId: 't1' } }, idempotencyKey: createIdempotencyKey() });
+        assertApiFailure(stranger, 'notAuthorized', { code: 'app/not-a-member', status: 403 });
+        // A code no table declares for the entry does not.
+        app.override('user.get', async () => refuse('Gone.', { code: 'app/gone' }));
+        assertApiFailure(await callerOf(app).apiOutcome('user.get', { userId: '1' }), 'server', { status: 500 });
+        expect(app.calls.at(-1)).toMatchObject({ outcome: 'crash', error: { name: 'LambderApiRefusalValidationError' } });
+        // Nor an injected one.
+        app.failNext('user.get', { reason: 'refusal', message: { type: 'warning', code: 'app/gone' as never, content: 'Gone.' } });
+        assertApiFailure(await callerOf(app).apiOutcome('user.get', { userId: '1' }), 'server', { status: 500 });
+        vi.restoreAllMocks();
+    });
+
+    it('parses a declared code\'s data as the server does: from the input form, defaults filled and transforms run once, and nothing else is sent', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        const app = createDerivedApp();
+        // ctx.refuse takes the input form: `by` defaults and `days` transforms on the way out, exactly once.
+        app.override('user.get', async ({ refuse }) => refuse('Archived.', { code: 'app/user-archived', data: { since: '2024-01-01', days: 2 } }));
+        const archived = await callerOf(app).apiOutcome('user.get', { userId: '1' });
+        assertApiRefusal(archived, 'app/user-archived');
+        expect(archived.refusal.data).toEqual({ since: '2024-01-01', by: 'system', days: 48 });
+        // Without its data, or with data its schema rejects, the code is not sent.
+        app.override('user.get', async () => refuse('Archived.', { code: 'app/user-archived' }));
+        assertApiFailure(await callerOf(app).apiOutcome('user.get', { userId: '1' }), 'server', { status: 500 });
+        expect(app.calls.at(-1)?.error).toMatchObject({ name: 'LambderApiRefusalValidationError', message: expect.stringContaining('which carries data, and no data') });
+        app.override('user.get', async () => refuse('Archived.', { code: 'app/user-archived', data: { since: 'yesterday' } }));
+        assertApiFailure(await callerOf(app).apiOutcome('user.get', { userId: '1' }), 'server', { status: 500 });
+        expect(app.calls.at(-1)?.error).toMatchObject({ message: expect.stringContaining('data its schema does not accept') });
+        // Nor is data on a code that carries none.
+        const jar = new LambderCookieJar();
+        await app.signIn('ada', { userId: 'ada', tenants: [{ tenantId: 't1', role: 'writer' }] }, { jar });
+        app.override('order.create', async () => refuse('No.', { code: 'app/read-only', data: { why: 'frozen' } }));
+        assertApiFailure(await callerOf(app, jar).apiOutcome('order.create', { qty: 1 }, { guardInputs: { tenant: { tenantId: 't1' } }, idempotencyKey: createIdempotencyKey() }), 'server', { status: 500 });
+        expect(app.calls.at(-1)?.error).toMatchObject({ message: expect.stringContaining('and data it does not declare') });
+        vi.restoreAllMocks();
+    });
+
+    it('needs the vocabulary declared on the init when the tables name a code, and refuses a table naming one the vocabulary does not hold', () => {
+        const undeclared = mock.create({ ...requiredOptions, apiOptions: contractOptions, guardDeclarations: contractGuardDeclarations });
+        expect(() => undeclared.publicApi('user.get', async () => ({ id: '1', name: 'Ada' })))
+            .toThrow(/"user\.get" can refuse with declared codes by the apiOptions table, and the mock init declared no refusal vocabulary/);
+        const missingOne = mock.declareRefusals({ 'app/not-a-member': {} }).create({ ...requiredOptions, apiOptions: contractOptions, guardDeclarations: contractGuardDeclarations });
+        expect(() => missingOne.sessionApi('order.create', async () => ({ orderId: 'o', qty: 1 })))
+            .toThrow(/"order\.create" can refuse with "app\/read-only" by the apiOptions and guardDeclarations tables, which the vocabulary declared on the mock init does not hold/);
+    });
+
+    it('requires a code on every refusal when the vocabulary says so, as the server does', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        const strict = mock.declareRefusals(contractVocabulary, { requireCodes: true })
+            .create({ ...requiredOptions, guards: declaredGuards, apiOptions: contractOptions, guardDeclarations: contractGuardDeclarations });
+        strict.register(strict.apiSlice(strict.publicApi('user.get', async (ctx) => {
+            // @ts-expect-error a refusal names a code here
+            if(Math.random() > 2) ctx.refuse('Plain.');
+            // The free refuse() still compiles; the render check is what catches it.
+            return refuse('Plain.');
+        })), strict.restNotMocked('not mocked'));
+        assertApiFailure(await callerOf(strict).apiOutcome('user.get', { userId: '1' }), 'server', { status: 500 });
+        expect(strict.calls.at(-1)?.error).toMatchObject({ name: 'LambderApiRefusalValidationError', message: expect.stringContaining('refused without a code') });
+        // The switch needs the table that says which codes an entry may send.
+        expect(() => mock.declareRefusals(contractVocabulary, { requireCodes: true }).create({ ...requiredOptions })).toThrow(/requireCodes needs the apiOptions table/);
+        vi.restoreAllMocks();
+    });
+
+    it('needs the guard declarations beside a table whose entries declare guards, since they hold the guards\' codes', () => {
+        const app = mock.create({ ...requiredOptions, apiOptions: contractOptions });
+        expect(() => app.sessionApi('order.create', async () => ({ orderId: 'o', qty: 1 })))
+            .toThrow(/"order\.create" declares guards in the apiOptions table, and create\(\) was not given the guardDeclarations table/);
     });
 
     it('refuses an entry that restates an option the table declares, at compile time and at runtime', () => {
@@ -1579,11 +1689,11 @@ describe('LambderMockApp - declarations read off the apiOptions table', () => {
         await app.signIn('ada', { userId: 'ada', tenants: [] }, { jar });
         const signedIn = await callerOf(app, jar).apiOutcome('admin.audit', {});
         assertApiFailure(signedIn);
-        expect(signedIn.errorMessage).toMatchObject({ code: LAMBDER_REFUSAL_CODES.notMocked });
+        expect(signedIn.refusal).toMatchObject({ code: LAMBDER_REFUSAL_CODES.notMocked });
 
         const publicOne = await callerOf(app).apiOutcome('admin.run', {});
         assertApiFailure(publicOne);
-        expect(publicOne.errorMessage).toMatchObject({ code: LAMBDER_REFUSAL_CODES.notMocked });
+        expect(publicOne.refusal).toMatchObject({ code: LAMBDER_REFUSAL_CODES.notMocked });
         expect(app.calls.at(-1)).toMatchObject({ outcome: 'notMocked', mode: 'public' });
     });
 });

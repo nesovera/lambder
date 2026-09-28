@@ -9,6 +9,182 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [10.0.1] - 2026-09-28
+
+A major that makes both sides of an API answer exact. A success is only ever
+the handler's parsed output, an object or an array, so a caller's success is
+typed as exactly the endpoint's output and is never null or falsy. A refusal
+names a code the app declared once, with the schema of its data and the
+status and flag it leaves with: the contract carries every code an endpoint
+can refuse with, a caller narrows `refusal.data` on the code, and a refusal
+outside its declaration is a crash rather than an answer, which is what keeps
+the caller's type honest. The envelope field that carries it is now called
+what it is, `refusal`.
+
+### Changed (breaking)
+
+- **The envelope's `errorMessage` is `refusal`,** on every surface: the wire
+  field, an outcome's `refusal` and its reason `'refusal'` (not
+  `'errorMessage'`), the callers' `refusalHandler`, `res.apiRefusal({
+  refusal })`, a `LambderApiRefusal`'s `refusal` and the option that sets it,
+  a rate-limit policy's and an override's `refusal`, the generated policy
+  table's `refusal`, and `LambderIdempotentAttemptOutcome.refusal`. The field
+  carries a typed refusal with a code and data, and it may be an "info" or a
+  "warning", so "error message" named neither its role nor its type. Lambda's
+  own `errorMessage` on a function error is Lambda's and keeps its name.
+- **An API's output is an object or an array.** An output schema whose JSON
+  form is anything else (`z.void()`, `z.boolean()`, `z.number()`, a nullable
+  or an optional object, `z.date()`) is a compile error on the `output`
+  option, and a handler that answers one anyway is a crash
+  (`LambderApiOutputValidationError`, which gains that kind). `caller.api()`
+  is then truthy exactly on success.
+  - To move: an API with nothing to answer declares `output: z.object({})`
+    and returns `{}`; one that answered a primitive wraps it
+    (`{ count }`); one whose output was nullable answers `{ order: null }`.
+- **A success outcome's payload is exactly the output.**
+  `LambderApiSuccessOutcome<T>` is `payload: T`, not `T | null | undefined`,
+  and `LambderCaller.api()` returns `T | undefined`, `undefined` on every
+  failure, a refusal included (it no longer hands back the refusal
+  envelope's payload). `LambderInvokeCaller` no longer turns an absent
+  payload into `null`.
+- **A reader takes a success only when its payload is an object or an
+  array.** A 2xx envelope with no flag and no refusal whose payload is
+  null, a primitive or missing reads as reason `server`: no handler wrote it.
+- **`res.api(payload, config, options)` is `res.apiRefusal(config,
+  options)`.** An API call answered from outside its handler (a hook, a
+  fallback, the input validation handler, the global error handler) is
+  always a refusal: the config carries a `refusal` or one of the
+  `versionExpired`, `sessionExpired` and `notAuthorized` flags (a compile
+  error and a thrown error otherwise), the payload is null, and its message
+  carries a framework code or none, never an app code or data.
+  `res.die.api` is `res.die.apiRefusal`, and `LambderApiResponseConfig` is
+  `LambderApiRefusalConfig`.
+  - To move: `res.api(null, config, options)` becomes `res.apiRefusal(config,
+    options)`. A hook that answered an API call with a cached success moves
+    the cache into the handler, which answers from it.
+- **The mock's `onInvalidInput` answers `{ config, statusCode? }`,** a
+  refusal held to the same rule, with no payload. A mock handler that
+  answers anything but an object or an array crashes the call, as the
+  server does, instead of answering a null payload.
+- **The envelope is two shapes.** `LambderApiEnvelopeBody<T>` is a
+  `LambderApiSuccessEnvelope<T>` (the payload) or a
+  `LambderApiRefusalEnvelope` (a null payload beside the flags, the
+  refusal and a crash). A failure outcome's `response` is the refusal
+  envelope. `buildApiEnvelope` is replaced by `successEnvelope`,
+  `refusalEnvelope` and `plainRefusalEnvelope`, and
+  `LambderApiEnvelopeConfig` by `LambderRefusalEnvelopeFields`.
+  `LambderJsonOutputOf` is removed: an output is `LambderJsonOf` of the
+  schema's output.
+- **A coded refusal must be declared, and leaves as declared.** A refusal
+  whose code is neither a framework code nor one its endpoint declares, data
+  on a refusal whose code declares none, no data on one whose code carries
+  data, data its code's schema rejects, or a declared code raised with a
+  status or `notAuthorized` flag of its own (its declaration owns them) is
+  now a crash (`LambderApiRefusalValidationError`) rather than an answer. The
+  same check runs on a refusal a hook throws for an API call, and in the
+  mock where it has the generated options.
+  - To move: declare every code with `initLambder().declareRefusals()`
+    (below), name each in the `refusals` option of the APIs and guards that
+    raise it, and move a code's status and `notAuthorized` from its raise
+    sites into its declaration.
+- **`create()` takes no `refusals`.** The vocabulary is declared on the init,
+  `initLambder<SessionData>().declareRefusals(vocabulary)`, before any guard
+  is built, so guards and shared helpers can be typed to it; `create()` on
+  that init hands it to the instance. `LambderCreateOptions.refusals` stays
+  for the class constructed directly.
+- **`LambderRefusalMessage` is generic over an endpoint's declared codes.**
+  Its argument is the contract's map of code to `{ data }` or `{}`
+  (`LambderContractRefusalsOf`), not a union of code strings, and the
+  message is one arm per code, so `data` narrows on `code`. The message
+  shape gains `data`. `LambderAppRefusalMessage` is
+  `LambderUncheckedRefusalMessage`: the message before any check, what a
+  thrown refusal carries and what a reader gets off a body no server
+  vouched for; an app's own message is a declared one.
+- **A rate-limit message carries no code.** A policy's and an override's
+  `refusal` is a `LambderRateLimitMessage` (type, title, content); every
+  rate-limit refusal is `lambder/rate-limited`. A code or data there is a
+  compile error on a policy and a creation or registration error on both.
+- **An endpoint's signature covers its declared refusals,** codes, data
+  schemas, statuses and flags, so every endpoint's signature changes once
+  with this version, and adding a code to an endpoint or a guard, or
+  changing how a code leaves, reloads its callers.
+- **The instance has a ninth and a tenth type parameter,** the refusal
+  vocabulary and whether every refusal names a code. Code that names
+  `Lambder<...>` with every parameter written out adds two.
+- **An entry of the mock whose `apiOptions` entry declares guards needs
+  `guardDeclarations` beside the table,** which holds the codes those guards
+  add, and one that can refuse with a declared code needs the vocabulary
+  declared on the mock init (`initLambderMock().declareRefusals()`, the same
+  object the server's init declares); registering one without them throws,
+  as does a table naming a code the vocabulary does not hold.
+- **`LambderContractRefusalsFor` is `LambderWireRefusalsOf`** (it pairs with
+  `LambderHandlerRefusalsOf`: the same codes in the handler's form and in
+  wire form), and **`handWrittenRefusalEnvelope` is `plainRefusalEnvelope`**
+  (what it enforces is a plain refusal message: a framework code or none,
+  and no data).
+
+### Added
+
+- **Declared refusals.** `initLambder().declareRefusals(vocabulary)` is the
+  app's vocabulary: each code once, `{}` or `{ data: schema }` (an object or
+  an array, as an output), with the `status` every refusal with it leaves
+  with (200 by default, never 422 or a 5xx) and whether it sets
+  `notAuthorized`. The init it returns is bound to it: its `guard()` types a
+  guard's `ctx.refuse` to the guard's `refusals` and refuses a guard naming a
+  code outside the vocabulary as it is built, its `refuse` is typed to the
+  whole vocabulary for shared helpers and hooks, and its `create()` hands the
+  vocabulary to the instance. `addApi` and `addSessionApi` take `refusals`,
+  one code or a non-empty list, and a guard takes `refusals` too; a guard's
+  codes join every API that declares it. The handler's context carries
+  `ctx.refuse`, typed to those codes with `data` required where a code
+  declares it and no status or flag of its own; the free `refuse()` and
+  `LambderApiRefusal` take `code` and `data` from a shared helper. A declared
+  code's data is parsed through its schema before it is sent, and the
+  refusal leaves with its declaration's status and flag. The contract entry
+  carries `refusals`, every code the endpoint can refuse with;
+  `LambderContractRefusalsOf`, `LambderContractRefusalMessage`,
+  `LambderContractRefusals` and `LambderContractAnyRefusalMessage` read it;
+  an outcome's `refusal` (on the browser caller, the invoke caller, the test
+  visitor and the mock) and a per-call `refusalHandler` are typed per
+  endpoint, and the constructor's `refusalHandler` across the contract. The
+  generated options record each API's `refusals` and each guard declaration's;
+  the vocabulary itself is not written, since it is shared code the mock
+  declares as the server does.
+- **`declareRefusals(vocabulary, { requireCodes: true })`** makes every
+  refusal an API answers with name a declared or framework code: an uncoded
+  `refuse("...")` from a handler, a guard or a helper is then a crash rather
+  than an answer, and `ctx.refuse` and the init's `refuse` require a code.
+  The mock's `declareRefusals` takes the same option.
+- **`assertApiRefusal(outcome, code)`** in `lambder/testing` and
+  `lambder/mock`: asserts a refusal's code on any failure arm and narrows its
+  `refusal` to that code, data typed. `LambderExpectedFailure.code` is
+  typed to the outcome's codes.
+- **The mock declares the vocabulary and refuses as the server does.**
+  `initLambderMock().declareRefusals(vocabulary, { requireCodes? })` takes
+  the same object and option the server's init does, from shared code. A
+  mock handler's `ctx.refuse` and the mock init's `refuse` are then typed to
+  the codes the contract gives the endpoint with each code's data in the
+  schema's input form, and the mock checks and sends a refusal exactly as the
+  server would: the code among the codes the generated tables give the entry,
+  the data parsed through the code's schema (defaults filled, transforms run
+  once), and the declaration's status and flag. `failNext` and `setFailure`
+  take an injected refusal the same way. A mock that declared no vocabulary
+  types `ctx.refuse` from the contract's wire form and checks nothing.
+  `LambderMockRefusalsOf` is the map behind both.
+- `checkedRefusal`, `LambderApiRefusalValidationError`,
+  `LambderRefusalDeclaration`, `LambderRefusalVocabulary`,
+  `LambderRefusalStatusCode`,
+  `LambderApiAllowedRefusal`, `LambderApiAllowedRefusals`,
+  `LambderEndpointRefusals`, `LambderRefusalsOption`,
+  `LambderRefusalNamesIn`, `LambderRefusalsOptionValue`,
+  `LambderHandlerRefusalsOf`, `LambderWireRefusalsOf`,
+  `LambderGuardRefusals`, `LambderGuardRefusalNamesOf`,
+  `LambderPlainRefusalMessage`, `LambderUncheckedRefusalMessage`,
+  `LambderDeclaredRefuse`, `LambderDeclaredRefuseOptions`,
+  `LambderRateLimitMessage`, `LambderRefusalEnvelopeFields`,
+  `isLambderRefusalCode`, `isObjectPayload`, `successEnvelope`,
+  `refusalEnvelope` and `plainRefusalEnvelope`.
+
 ## [9.0.3] - 2026-09-27
 
 An upload bucket can now sign a ticket that sends the file with a PUT instead

@@ -33,7 +33,10 @@ export default class LambderCaller {
     get isLoading() { return this.fetchTrackerList.length > 0; }
     versionExpiredHandler;
     sessionExpiredHandler;
-    errorMessageHandler;
+    // Hears every endpoint's refusals, so held at the widest message: the
+    // constructor option types it to the contract's codes, and dispatch,
+    // generic over one endpoint's message, hands it one of those.
+    refusalHandler;
     notAuthorizedHandler;
     errorHandler;
     apiInputValidationErrorHandler;
@@ -49,7 +52,7 @@ export default class LambderCaller {
     constructor(options) {
         // The conditional provider option is resolved per instantiation;
         // inside the class it is read through the plain shape.
-        const { apiPath, apiVersion, apiSignatures, isCorsEnabled, timeoutMs, versionExpiredHandler, sessionExpiredHandler, errorMessageHandler, notAuthorizedHandler, errorHandler, logListHandler, fetchStartedHandler, fetchEndedHandler, apiInputValidationErrorHandler, sessionCookieDomain, requestCompression, guardInputsProvider, transport, } = options;
+        const { apiPath, apiVersion, apiSignatures, isCorsEnabled, timeoutMs, versionExpiredHandler, sessionExpiredHandler, refusalHandler, notAuthorizedHandler, errorHandler, logListHandler, fetchStartedHandler, fetchEndedHandler, apiInputValidationErrorHandler, sessionCookieDomain, requestCompression, guardInputsProvider, transport, } = options;
         this.apiPath = apiPath;
         this.apiVersion = apiVersion;
         this.apiSignatures = apiSignatures;
@@ -60,7 +63,7 @@ export default class LambderCaller {
         this.transport = transport ?? lambderFetchTransport({ cors: isCorsEnabled });
         this.versionExpiredHandler = versionExpiredHandler;
         this.sessionExpiredHandler = sessionExpiredHandler;
-        this.errorMessageHandler = errorMessageHandler;
+        this.refusalHandler = refusalHandler;
         this.notAuthorizedHandler = notAuthorizedHandler;
         this.errorHandler = errorHandler;
         this.apiInputValidationErrorHandler = apiInputValidationErrorHandler;
@@ -98,7 +101,7 @@ export default class LambderCaller {
         // Per-call overrides win over the constructor handlers.
         const versionExpiredHandler = options?.versionExpiredHandler ?? this.versionExpiredHandler;
         const sessionExpiredHandler = options?.sessionExpiredHandler ?? this.sessionExpiredHandler;
-        const errorMessageHandler = options?.errorMessageHandler ?? this.errorMessageHandler;
+        const refusalHandler = options?.refusalHandler ?? this.refusalHandler;
         const notAuthorizedHandler = options?.notAuthorizedHandler ?? this.notAuthorizedHandler;
         const errorHandler = options?.errorHandler ?? this.errorHandler;
         const apiInputValidationErrorHandler = options?.apiInputValidationErrorHandler ?? this.apiInputValidationErrorHandler;
@@ -325,9 +328,9 @@ export default class LambderCaller {
                 }
                 return outcome;
             }
-            if (!outcome.ok && outcome.reason === 'errorMessage') {
-                if (errorMessageHandler && outcome.errorMessage !== undefined) {
-                    await errorMessageHandler(outcome.errorMessage);
+            if (!outcome.ok && outcome.reason === 'refusal') {
+                if (refusalHandler && outcome.refusal !== undefined) {
+                    await refusalHandler(outcome.refusal);
                 }
                 return outcome;
             }
@@ -356,7 +359,9 @@ export default class LambderCaller {
     ;
     /**
      * Full-fidelity call: resolves to a discriminated LambderApiOutcome
-     * instead of collapsing every failure to undefined. Never throws.
+     * instead of collapsing every failure to undefined. Never throws. A
+     * success's payload is the endpoint's output, and a refusal's
+     * refusal narrows on the codes the endpoint declares.
      *
      * The output is computed from the contract in the return type rather than
      * taken as a type parameter, so a call site cannot replace it by
@@ -371,16 +376,15 @@ export default class LambderCaller {
     }
     ;
     /**
-     * The payload on success, `undefined` on every failure except a
-     * structured refusal, which hands back whatever payload the envelope
-     * carried (usually null). Neither is distinguishable from a legitimately
-     * null or undefined payload: use apiOutcome() when that matters.
+     * The endpoint's output on success, `undefined` on every failure. An
+     * output is always an object or an array, so the result is truthy exactly
+     * when the call succeeded; the handlers configured on the caller have
+     * already been told why it did not. Use apiOutcome() to branch on the
+     * reason at the call site.
      */
     async api(apiName, ...rest) {
         const [payload, options] = rest;
         const outcome = await this.dispatch(apiName, payload, options);
-        if (outcome.ok)
-            return outcome.payload;
-        return outcome.reason === 'errorMessage' ? outcome.response.payload : undefined;
+        return outcome.ok ? outcome.payload : undefined;
     }
 }

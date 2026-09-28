@@ -10,10 +10,10 @@
  * should not have to read the whole class to find it. None of these functions
  * touch the caller's state.
  */
-import type { LambderApiEnvelopeBody } from "../shared/wire/LambderApiContract.js";
+import type { LambderApiRefusalEnvelope, LambderApiSuccessEnvelope } from "../shared/wire/LambderApiContract.js";
 import type { LambderApiFailureReason, LambderValidationError } from "../shared/wire/LambderApiOutcome.js";
 import type { LambderCrashDetail } from "../shared/wire/LambderCrashDetail.js";
-import type { LambderAppRefusalMessage } from "../shared/wire/LambderApiRefusal.js";
+import type { LambderUncheckedRefusalMessage } from "../shared/wire/LambderApiRefusal.js";
 export type LambderInvokeFailureReason = LambderApiFailureReason | 'crash' | 'protocol' | 'payloadTooLarge';
 /** Lambda's own error payload for a FunctionError invocation. */
 export type LambderInvokeFunctionError = {
@@ -21,13 +21,17 @@ export type LambderInvokeFunctionError = {
     errorMessage?: string;
     trace?: string[];
 };
-/** What every invoke failure carries, whatever went wrong. */
-type LambderInvokeFailureFields = {
+/**
+ * What every invoke failure carries, whatever went wrong. TMessage is the
+ * refusal message the endpoint can answer with (LambderContractRefusalMessage),
+ * on every arm, as on the browser caller's outcome.
+ */
+type LambderInvokeFailureFields<TMessage extends LambderUncheckedRefusalMessage> = {
     ok: false;
     /** HTTP status, when the callee answered. */
     status?: number;
-    /** Envelope errorMessage, when the callee provided one: always the message object, a plain string having been read as one (refusalMessageOf). */
-    errorMessage?: LambderAppRefusalMessage;
+    /** The envelope's refusal, when the callee provided one: always the message object, a plain string having been read as one (refusalMessageOf). */
+    refusal?: TMessage;
     /** Seconds to wait before retrying, from the answer's Retry-After header. */
     retryAfterSeconds?: number;
     /** Always present: the error api() throws for this failure, with the callee's error as its cause when one is known. */
@@ -38,31 +42,31 @@ type LambderInvokeFailureFields = {
     cookies: string[];
 };
 /** HTTP 422: the callee rejected the input against the API's schema. Always carries the issues. */
-export type LambderInvokeValidationFailure = LambderInvokeFailureFields & {
+export type LambderInvokeValidationFailure<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = LambderInvokeFailureFields<TMessage> & {
     reason: 'validation';
     zodError: LambderValidationError;
 };
 /** Lambda reported a FunctionError: the callee failed outside the framework (an init failure, a timeout, out of memory). Always carries the runtime's error payload. */
-export type LambderInvokeCrashFailure = LambderInvokeFailureFields & {
+export type LambderInvokeCrashFailure<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = LambderInvokeFailureFields<TMessage> & {
     reason: 'crash';
     functionError: LambderInvokeFunctionError;
 };
 /** Refused before sending: the serialized event is over the invoke cap. Always carries its size. */
-export type LambderInvokePayloadTooLargeFailure = LambderInvokeFailureFields & {
+export type LambderInvokePayloadTooLargeFailure<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = LambderInvokeFailureFields<TMessage> & {
     reason: 'payloadTooLarge';
     /** The event's byte size, so a caller can say by how much it is over. */
     bytes: number;
 };
-/** The callee answered, and the envelope itself says the call is refused. Always carries that envelope, and an `errorMessage` refusal always carries its message. */
-export type LambderInvokeEnvelopeFailure = LambderInvokeFailureFields & {
-    response: LambderApiEnvelopeBody<any>;
+/** The callee answered, and the envelope itself says the call is refused. Always carries that envelope, and a `refusal` failure always carries the refusal. */
+export type LambderInvokeEnvelopeFailure<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = LambderInvokeFailureFields<TMessage> & {
+    response: LambderApiRefusalEnvelope;
     /** The callee's crash detail, when its global error handler sent one (the envelope's `crash` field). */
     crash?: LambderCrashDetail;
 } & ({
     reason: 'versionExpired' | 'sessionExpired' | 'notAuthorized';
 } | {
-    reason: 'errorMessage';
-    errorMessage: LambderAppRefusalMessage;
+    reason: 'refusal';
+    refusal: TMessage;
 });
 /**
  * Nothing usable came back: the invoke never arrived or was given up on, the
@@ -71,9 +75,9 @@ export type LambderInvokeEnvelopeFailure = LambderInvokeFailureFields & {
  * answered with Lambder's own envelope, which is how a crash detail and a
  * logList arrive with it.
  */
-export type LambderInvokeDeliveryFailure = LambderInvokeFailureFields & {
+export type LambderInvokeDeliveryFailure<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = LambderInvokeFailureFields<TMessage> & {
     reason: 'network' | 'timeout' | 'server' | 'protocol' | 'unknown';
-    response?: LambderApiEnvelopeBody<any>;
+    response?: LambderApiRefusalEnvelope;
     /** The callee's crash detail, when its global error handler sent one (the envelope's `crash` field). */
     crash?: LambderCrashDetail;
 };
@@ -85,14 +89,19 @@ export type LambderInvokeDeliveryFailure = LambderInvokeFailureFields & {
  * caller's LambderApiOutcome is discriminated the same way.
  *
  * `error`, `logList` and `cookies` are on every arm, and `status`,
- * `errorMessage` and `retryAfterSeconds` are there whenever an answer came
+ * `refusal` and `retryAfterSeconds` are there whenever an answer came
  * back to read them from.
  */
-export type LambderInvokeFailure = LambderInvokeValidationFailure | LambderInvokeCrashFailure | LambderInvokePayloadTooLargeFailure | LambderInvokeEnvelopeFailure | LambderInvokeDeliveryFailure;
-export type LambderInvokeOutcome<T> = {
+export type LambderInvokeFailure<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = LambderInvokeValidationFailure<TMessage> | LambderInvokeCrashFailure<TMessage> | LambderInvokePayloadTooLargeFailure<TMessage> | LambderInvokeEnvelopeFailure<TMessage> | LambderInvokeDeliveryFailure<TMessage>;
+/**
+ * An invoke's result: the callee handler's output on success (never null,
+ * an output being an object or an array), or a failure whose refusal
+ * narrows on the codes the endpoint declares.
+ */
+export type LambderInvokeOutcome<T, TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = {
     ok: true;
     payload: T;
-    response: LambderApiEnvelopeBody<T>;
+    response: LambderApiSuccessEnvelope<T>;
     logList: unknown[];
     /**
      * The answer's Set-Cookie values. A caller carrying a user's session
@@ -102,14 +111,14 @@ export type LambderInvokeOutcome<T> = {
      * tokens themselves.
      */
     cookies: string[];
-} | LambderInvokeFailure;
+} | LambderInvokeFailure<TMessage>;
 export type LambderInvokeErrorInit = {
     message: string;
     reason: LambderInvokeFailureReason;
     apiName: string;
     functionName: string;
     status?: number;
-    errorMessage?: LambderAppRefusalMessage;
+    refusal?: LambderUncheckedRefusalMessage;
     crash?: LambderCrashDetail;
     functionError?: LambderInvokeFunctionError;
     logList: unknown[];
@@ -132,7 +141,7 @@ export declare class LambderInvokeError extends Error {
     readonly apiName: string;
     readonly functionName: string;
     readonly status?: number;
-    readonly errorMessage?: LambderAppRefusalMessage;
+    readonly refusal?: LambderUncheckedRefusalMessage;
     readonly crash?: LambderCrashDetail;
     readonly functionError?: LambderInvokeFunctionError;
     readonly logList: unknown[];

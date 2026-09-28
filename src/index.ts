@@ -55,12 +55,13 @@ export type { LambderApiSignatureMap } from "./shared/wire/LambderApiSignatureMa
 export { RELOAD_LOOP_WINDOW_MS } from "./client/LambderReloadLoopBreaker.js";
 export { compareDottedVersions, isDottedVersion } from "./shared/wire/LambderVersionOrder.js";
 export {
-    buildApiEnvelope, envelopeAnswer, refusalAnswer, validationAnswer, apiNotFoundAnswer,
+    successEnvelope, refusalEnvelope, plainRefusalEnvelope, envelopeAnswer, refusalAnswer, validationAnswer, apiNotFoundAnswer,
     sessionExpiredAnswer, versionExpiredAnswer, invalidPayloadAnswer, crashAnswer, API_ANSWER_CONTENT_TYPE,
 } from "./api/LambderApiEnvelope.js";
-export type { LambderApiEnvelopeConfig, LambderValidationAnswerBody } from "./api/LambderApiEnvelope.js";
+export type { LambderValidationAnswerBody } from "./api/LambderApiEnvelope.js";
 export { LambderApiValidationRefusal, isLambderApiValidationRefusal } from "./api/LambderApiValidationRefusal.js";
 export { LambderApiOutputValidationError } from "./api/LambderApiOutputValidationError.js";
+export { checkedRefusal } from "./api/LambderApiRefusals.js";
 
 // Calling a Lambder app from another lambda (server-only: the Lambda SDK, zlib)
 export { LambderInvokeError, isLambderInvokeError } from "./invoke/LambderInvokeOutcome.js";
@@ -95,8 +96,18 @@ export { describeCrash, errorFromCrashDetail } from "./shared/wire/LambderCrashD
 export type { LambderCrashDetail, LambderCrashCause } from "./shared/wire/LambderCrashDetail.js";
 
 // Typed API refusals (isomorphic: shared code may throw them from anywhere)
-export { LambderApiRefusal, isLambderApiRefusal, refuse, refusalMessageOf, LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";
-export type { LambderApiRefusalOptions, LambderRefusalMessage, LambderAppRefusalMessage, LambderRefusalCode, LambderRefuseOptions } from "./shared/wire/LambderApiRefusal.js";
+export { LambderApiRefusal, isLambderApiRefusal, isLambderRefusalCode, refuse, refusalMessageOf, LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";
+export type {
+    LambderApiRefusalOptions,
+    LambderRefusalMessage,
+    LambderPlainRefusalMessage,
+    LambderUncheckedRefusalMessage,
+    LambderRefusalCode,
+    LambderRefuseOptions,
+    LambderDeclaredRefuseOptions,
+    LambderDeclaredRefuse,
+} from "./shared/wire/LambderApiRefusal.js";
+export { isObjectPayload } from "./shared/wire/LambderObjectPayload.js";
 export { default as LambderResponseBuilder } from "./core/LambderResponseBuilder.js";
 export { default as LambderResolver } from "./core/LambderResolver.js";
 export { default as LambderSessionManager } from "./session/LambderSessionManager.js";
@@ -124,7 +135,7 @@ export {
     type LambderResponseCompressionOption,
 } from "./core/LambderResponse.js";
 // The status union every refusal option names, from the module that declares it.
-export type { LambderHttpStatusCode } from "./shared/wire/LambderHttpStatus.js";
+export type { LambderHttpStatusCode, LambderRefusalStatusCode } from "./shared/wire/LambderHttpStatus.js";
 
 // Type-safe templating (tagged templates with auto-escaping)
 export { html, xml, raw, jsonScript, escapeHtml, renderHtmlValue, LambderSafeHtml, type LambderHtmlValue } from "./shared/LambderHtml.js";
@@ -295,7 +306,23 @@ export type {
     LambderGuardsOption,
     LambderGuardDataOf,
     LambderGuardInputsOf,
+    LambderGuardRefusals,
+    LambderGuardRefusalNamesOf,
 } from "./api/LambderApiGuards.js";
+
+// Declarative per-API policies: declared refusals
+export { LambderApiRefusalValidationError } from "./api/LambderApiRefusals.js";
+export type {
+    LambderRefusalDeclaration,
+    LambderRefusalVocabulary,
+    LambderApiAllowedRefusal,
+    LambderApiAllowedRefusals,
+    LambderEndpointRefusals,
+    LambderRefusalsOption,
+    LambderRefusalNamesIn,
+    LambderHandlerRefusalsOf,
+    LambderWireRefusalsOf,
+} from "./api/LambderApiRefusals.js";
 
 // Declarative per-API policies: rate limits
 export { lambderRateLimitKeyBuilder, rateLimitRefusal, DEFAULT_RATE_LIMIT_REFUSAL } from "./api/LambderApiRateLimits.js";
@@ -319,12 +346,14 @@ export type {
 // Declarative per-API policies: idempotency
 export type { LambderApiIdempotencyConfig } from "./api/LambderApiIdempotency.js";
 
-// The runtime shapes of the three policy options, declared below both the
+// The runtime shapes of the declarative options, declared below both the
 // contract that records them and the engines that read them.
 export type {
     LambderGuardsOptionValue,
+    LambderRateLimitMessage,
     LambderRateLimitOverride,
     LambderRateLimitOptionValue,
+    LambderRefusalsOptionValue,
     LambderApiIdempotencyOption,
 } from "./shared/wire/LambderApiOptionValues.js";
 
@@ -361,7 +390,10 @@ export type {
     LambderApiContractShape,
     LambderApiMode,
     LambderApiEnvelopeBody,
-    LambderApiResponseConfig,
+    LambderApiSuccessEnvelope,
+    LambderApiRefusalEnvelope,
+    LambderRefusalEnvelopeFields,
+    LambderApiRefusalConfig,
     LambderContractEntry,
     LambderMergeContract,
     LambderGuardNamesIn,
@@ -369,7 +401,10 @@ export type {
     LambderContractKeysWithMode,
     LambderContractKeysWithGuard,
     LambderJsonOf,
-    LambderJsonOutputOf,
+    LambderContractRefusalsOf,
+    LambderContractRefusalMessage,
+    LambderContractRefusals,
+    LambderContractAnyRefusalMessage,
     LambderContractGuardsOf,
     LambderContractGuardNames,
     LambderContractGuardInputsOf,

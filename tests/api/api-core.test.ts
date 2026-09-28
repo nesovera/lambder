@@ -11,7 +11,7 @@ import zlib from 'zlib';
 import { toHttpAnswer } from '../../src/api/LambderApiAnswer.js';
 import { LambderAnswerHeaders, getAnswerHeader, setAnswerHeader, addAnswerHeader } from '../../src/shared/wire/LambderAnswerHeaders.js';
 import {
-    buildApiEnvelope, envelopeAnswer, refusalAnswer, validationAnswer, apiNotFoundAnswer,
+    successEnvelope, refusalEnvelope, plainRefusalEnvelope, envelopeAnswer, refusalAnswer, validationAnswer, apiNotFoundAnswer,
     sessionExpiredAnswer, versionExpiredAnswer, invalidPayloadAnswer, crashAnswer,
 } from '../../src/api/LambderApiEnvelope.js';
 import { readApiEnvelope, restoreCompressedPayload, type LambderApiRequest } from '../../src/api/LambderApiRequest.js';
@@ -89,36 +89,47 @@ describe('LambderAnswerHeaders', () => {
 });
 
 describe('The envelope', () => {
-    it('buildApiEnvelope carries only the flags that are set and drops an empty logList', () => {
-        expect(buildApiEnvelope('1', { a: 1 })).toEqual({ apiVersion: '1', payload: { a: 1 } });
-        expect(buildApiEnvelope(undefined, null, { sessionExpired: true, logList: [] })).toEqual({ apiVersion: null, payload: null, sessionExpired: true });
-        expect(buildApiEnvelope(null, null, { errorMessage: 'no', logList: ['x'] })).toEqual({ apiVersion: null, payload: null, errorMessage: { type: 'error', content: 'no' }, logList: ['x'] });
+    it('a success envelope carries the payload and the logList, and a refusal envelope only the flags that are set, both dropping an empty logList', () => {
+        expect(successEnvelope('1', { a: 1 })).toEqual({ apiVersion: '1', payload: { a: 1 } });
+        expect(successEnvelope('1', { a: 1 }, [])).toEqual({ apiVersion: '1', payload: { a: 1 } });
+        expect(refusalEnvelope(undefined, { sessionExpired: true, logList: [] })).toEqual({ apiVersion: null, payload: null, sessionExpired: true });
+        expect(refusalEnvelope(null, { refusal: 'no', logList: ['x'] })).toEqual({ apiVersion: null, payload: null, refusal: { type: 'error', content: 'no' }, logList: ['x'] });
+    });
+
+    it('a hand-written refusal envelope says no, with a framework code or none and no data', () => {
+        expect(plainRefusalEnvelope('1', { refusal: 'Busy.' }, 'test', ['kept'])).toEqual({ apiVersion: '1', payload: null, refusal: { type: 'error', content: 'Busy.' }, logList: ['kept'] });
+        expect(plainRefusalEnvelope('1', { versionExpired: true }, 'test')).toEqual({ apiVersion: '1', payload: null, versionExpired: true });
+        expect(plainRefusalEnvelope('1', { refusal: { type: 'warning', code: 'lambder/api-not-found', content: 'Gone.' } }, 'test').refusal).toMatchObject({ code: 'lambder/api-not-found' });
+        expect(() => plainRefusalEnvelope('1', {} as never, 'res.apiRefusal()')).toThrow(/res\.apiRefusal\(\) needs a refusal message or one of/);
+        expect(() => plainRefusalEnvelope('1', { notAuthorized: false } as never, 'test')).toThrow(/always a refusal/);
+        expect(() => plainRefusalEnvelope('1', { refusal: { type: 'error', content: 'No.', code: 'app/closed' as never } }, 'test')).toThrow(/was given the code "app\/closed"/);
+        expect(() => plainRefusalEnvelope('1', { refusal: { type: 'error', content: 'No.', data: { a: 1 } as never } }, 'test')).toThrow(/a message with data/);
     });
 
     it('each answer function renders its outcome with the right status, headers and body', () => {
-        const ok = envelopeAnswer(buildApiEnvelope('1', { a: 1 }));
+        const ok = envelopeAnswer(successEnvelope('1', { a: 1 }));
         expect(ok.statusCode).toBe(200);
         expect(ok.headers).toEqual({ 'Content-Type': ['application/json; charset=utf-8'] });
         expect(JSON.parse(ok.body)).toEqual({ apiVersion: '1', payload: { a: 1 } });
 
-        const refusal = refusalAnswer(new LambderApiRefusal('Slow down', { errorMessage: { type: 'warning', content: 'Slow down' }, statusCode: 429, headers: { 'Retry-After': '9' }, notAuthorized: true }), '1', ['log']);
+        const refusal = refusalAnswer(new LambderApiRefusal('Slow down', { refusal: { type: 'warning', content: 'Slow down' }, statusCode: 429, headers: { 'Retry-After': '9' }, notAuthorized: true }), '1', ['log']);
         expect(refusal.statusCode).toBe(429);
         expect(refusal.headers['Retry-After']).toEqual(['9']);
-        expect(JSON.parse(refusal.body)).toEqual({ apiVersion: '1', payload: null, notAuthorized: true, errorMessage: { type: 'warning', content: 'Slow down' }, logList: ['log'] });
+        expect(JSON.parse(refusal.body)).toEqual({ apiVersion: '1', payload: null, notAuthorized: true, refusal: { type: 'warning', content: 'Slow down' }, logList: ['log'] });
 
         const validation = validationAnswer(z.object({ v: z.string() }).safeParse({}).error!);
         expect(validation.statusCode).toBe(422);
         expect(JSON.parse(validation.body).zodError.issues[0].path).toEqual(['v']);
         expect(JSON.parse(validation.body).issueCount).toBeUndefined();
 
-        expect(JSON.parse(apiNotFoundAnswer('1').body).errorMessage.code).toBe(LAMBDER_REFUSAL_CODES.apiNotFound);
+        expect(JSON.parse(apiNotFoundAnswer('1').body).refusal.code).toBe(LAMBDER_REFUSAL_CODES.apiNotFound);
         expect(JSON.parse(sessionExpiredAnswer('1').body).sessionExpired).toBe(true);
         expect(JSON.parse(versionExpiredAnswer('1').body).versionExpired).toBe(true);
         expect(invalidPayloadAnswer('1', 'bad').statusCode).toBe(400);
-        expect(JSON.parse(invalidPayloadAnswer('1', 'bad').body).errorMessage.code).toBe(LAMBDER_REFUSAL_CODES.invalidRequestPayload);
+        expect(JSON.parse(invalidPayloadAnswer('1', 'bad').body).refusal.code).toBe(LAMBDER_REFUSAL_CODES.invalidRequestPayload);
         const crash = crashAnswer('1');
         expect(crash.statusCode).toBe(500);
-        expect(JSON.parse(crash.body)).toEqual({ apiVersion: '1', payload: null, errorMessage: { type: 'error', content: 'Internal server error.' } });
+        expect(JSON.parse(crash.body)).toEqual({ apiVersion: '1', payload: null, refusal: { type: 'error', content: 'Internal server error.' } });
     });
 
 
@@ -171,13 +182,13 @@ describe('The envelope', () => {
         expect(JSON.parse(validationAnswer(zodError, []).body).logList).toBeUndefined();
     });
 
-    it('renders an errorMessage the app set to an empty value, since presence is the statement', () => {
+    it('renders a refusal the app set to an empty value, since presence is the statement', () => {
         // A truthiness check would drop exactly the refusals an app spells
-        // out as empty: errorMessage: "" would reach the caller as no
-        // errorMessage at all, and its errorMessageHandler would never run.
-        const refusal = refusalAnswer(new LambderApiRefusal('Denied.', { errorMessage: '' }), '1');
-        expect(JSON.parse(refusal.body).errorMessage).toEqual({ type: 'error', content: '' });
-        expect(JSON.parse(refusalAnswer(new LambderApiRefusal('Denied.'), '1').body).errorMessage).toEqual({ type: 'error', content: 'Denied.' });
+        // out as empty: refusal: "" would reach the caller as no
+        // refusal at all, and its refusalHandler would never run.
+        const refusal = refusalAnswer(new LambderApiRefusal('Denied.', { refusal: '' }), '1');
+        expect(JSON.parse(refusal.body).refusal).toEqual({ type: 'error', content: '' });
+        expect(JSON.parse(refusalAnswer(new LambderApiRefusal('Denied.'), '1').body).refusal).toEqual({ type: 'error', content: 'Denied.' });
     });
 
     it('toHttpAnswer gives the accessor view resolveApiOutcome reads, Set-Cookie values apart', async () => {
@@ -232,7 +243,7 @@ describe('Reading and restoring a request', () => {
 });
 
 describe('LambderApiPipeline', () => {
-    const okExec = async () => envelopeAnswer(buildApiEnvelope('1', { ran: true }));
+    const okExec = async () => envelopeAnswer(successEnvelope('1', { ran: true }));
 
     it('runs a bare definition: no configured step, just the handler', async () => {
         const pipeline = new LambderApiPipeline({ apiVersion: '1' });
@@ -291,7 +302,7 @@ describe('LambderApiPipeline', () => {
         expect(JSON.parse((await pipeline.prepare(request({ apiName: 'nope', signature: 'anything' })))!.body).versionExpired).toBe(true);
         // Without a map every signature passes.
         expect(await new LambderApiPipeline().prepare(request({ signature: 'anything' }))).toBeNull();
-        expect(JSON.parse(pipeline.answerUnknownApi().body).errorMessage.code).toBe(LAMBDER_REFUSAL_CODES.apiNotFound);
+        expect(JSON.parse(pipeline.answerUnknownApi().body).refusal.code).toBe(LAMBDER_REFUSAL_CODES.apiNotFound);
         // Both adapters run prepare() with the definition the name resolved
         // to, or null, so a signed stale client has already been answered by
         // the time an unknown name is reported: the refusal carries the call's
@@ -310,10 +321,10 @@ describe('LambderApiPipeline', () => {
         expect(standard.answer.statusCode).toBe(422);
         expect(JSON.parse(standard.answer.body).zodError.issues[0].path).toEqual(['value']);
 
-        const custom = new LambderApiPipeline({ onInvalidInput: async (zodError) => envelopeAnswer(buildApiEnvelope(null, null, { errorMessage: `bad ${zodError.issues[0]?.path.join('.')}` }), { statusCode: 400 }) });
+        const custom = new LambderApiPipeline({ onInvalidInput: async (zodError) => envelopeAnswer(refusalEnvelope(null, { refusal: `bad ${zodError.issues[0]?.path.join('.')}` }), { statusCode: 400 }) });
         const answered = await custom.run(request({ payload: {} }), createApiCallContext(), definition, okExec);
         expect(answered.answer.statusCode).toBe(400);
-        expect(JSON.parse(answered.answer.body).errorMessage).toEqual({ type: 'error', content: 'bad value' });
+        expect(JSON.parse(answered.answer.body).refusal).toEqual({ type: 'error', content: 'bad value' });
 
         // The handler sees the PARSED payload: the schema's output, unknown
         // keys stripped and coercions applied, not what the client posted.
@@ -340,7 +351,7 @@ describe('LambderApiPipeline', () => {
 
         const result = await pipeline.run(request(), createApiCallContext(), definition, okExec);
 
-        expect(JSON.parse(result.answer.body).errorMessage.code).toBe('app/no');
+        expect(JSON.parse(result.answer.body).refusal.code).toBe('app/no');
         expect(result.guardsRun).toEqual(['first', 'second']);
     });
 
@@ -374,7 +385,7 @@ describe('LambderApiPipeline', () => {
         const ctx = createApiCallContext();
         ctx.responseHeaders.set('X-Before', 'yes');
         const refused = await pipeline.run(request(), ctx, { name: 'thing.do', mode: 'public' }, async () => refuse('No.', { code: 'app/no' }));
-        expect(JSON.parse(refused.answer.body).errorMessage).toEqual({ type: 'warning', code: 'app/no', content: 'No.' });
+        expect(JSON.parse(refused.answer.body).refusal).toEqual({ type: 'warning', code: 'app/no', content: 'No.' });
         expect(refused.answer.headers['X-Before']).toEqual(['yes']);
         // The call keeps its headers rather than forgetting them: the server
         // adapter applies them again onto whatever response its afterRender

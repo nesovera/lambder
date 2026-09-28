@@ -13,17 +13,23 @@ import { LambderFiles } from "./LambderFiles.js";
 import { isLambderApiRefusal } from "../shared/wire/LambderApiRefusal.js";
 import { LambderApiPipeline } from "../api/LambderApiPipeline.js";
 import { LAMBDER_BACKEND_SWAP, LAMBDER_CRASH_WATCH } from "../shared/util/LambderTestingDoors.js";
+import { checkedRefusal, readRefusalVocabulary, resolveAllowedRefusals, toRefusalCodes, } from "../api/LambderApiRefusals.js";
+import { refuse } from "../shared/wire/LambderApiRefusal.js";
 import { apiSignatureOf } from "../api/LambderApiSignature.js";
 import { apiNameKeyOf } from "../shared/wire/LambderApiSignatureMap.js";
 import { assertPlainData } from "../shared/util/assertPlainData.js";
-import { apiNotFoundAnswer, buildApiEnvelope, envelopeAnswer, refusalAnswer, sessionExpiredAnswer, } from "../api/LambderApiEnvelope.js";
+import { apiNotFoundAnswer, envelopeAnswer, refusalAnswer, sessionExpiredAnswer, successEnvelope, } from "../api/LambderApiEnvelope.js";
+import { describePayloadKind, isObjectPayload } from "../shared/wire/LambderObjectPayload.js";
 import { LambderApiOutputValidationError } from "../api/LambderApiOutputValidationError.js";
+import { toGuardEntries } from "../api/LambderApiGuards.js";
 import { bindContextTools, createContext, isV2HttpEvent, } from "./LambderContext.js";
 import { COMPRESSED_PAYLOAD_GZ_FIELD, COMPRESSED_PAYLOAD_BR_FIELD, COMPRESSED_PAYLOAD_BYTES_FIELD } from "../shared/wire/LambderRequestPayload.js";
 import { coerceToError } from "../shared/wire/LambderCrashDetail.js";
 import { LambderCrashHandling } from "./LambderCrashHandling.js";
 import { policyBuildersFor } from "./LambderPolicyBuilders.js";
 import { assertCreateOptions, } from "./LambderCreateOptions.js";
+/** The refusals of a name no API is registered under: no code, and none required. */
+const NO_DECLARED_REFUSALS = { codes: new Map(), codeRequired: false };
 /**
  * Main Lambder class for building type-safe serverless APIs. Create
  * instances with initLambder<SessionData>().create({...}) (see below): the
@@ -38,6 +44,8 @@ import { assertCreateOptions, } from "./LambderCreateOptions.js";
  * @typeParam _TSessionGuardsRequired - @internal True when create() received requireSessionApiGuards (do not pass manually)
  * @typeParam _TPublicGuardsRequired - @internal True when create() received requirePublicApiGuards (do not pass manually)
  * @typeParam _TSessionsEnabled - @internal True when create() received the session option (do not pass manually). Defaults to true, unlike its siblings, so a plugin annotating its parameter as the bare Lambder<SessionData> can still register session APIs. create() knows the option and supplies the false; `new Lambder(...)` relies on the registration-time throw alone.
+ * @typeParam _TRefusals - @internal The refusal vocabulary declareRefusals() gave the init (do not pass manually)
+ * @typeParam _TRefusalCodesRequired - @internal True when declareRefusals() received requireCodes (do not pass manually)
  *
  * @example
  * ```typescript
@@ -84,6 +92,10 @@ export default class Lambder {
     guards;
     /** The rate-limit policies given at creation, kept for apiOptionEntries(), which records each one less its key handler. */
     rateLimitPolicies;
+    /** The refusal vocabulary given at creation: what each API's and each guard's refusal codes resolve against. Null without the option. */
+    refusalVocabulary;
+    /** Every API's refusals option as written, for apiOptionEntries(); its definition holds the resolved set. */
+    refusalOptions = new Map();
     hookList = { "beforeRender": [], "afterRender": [], "fallback": [] };
     createdHooks = [];
     initPromise = null;
@@ -98,6 +110,8 @@ export default class Lambder {
     corsConfig = null;
     finalizeOptions;
     requireSessionApiGuards;
+    /** Whether every refusal an API answers with has to name a code (declareRefusals's requireCodes). */
+    requireRefusalCodes;
     /** Told what a request threw, beside whatever answers it; null outside a test. See LAMBDER_CRASH_WATCH. */
     crashWatcher = null;
     /** The crashes option applied: reporting, and the framework's own 500. */
@@ -127,6 +141,7 @@ export default class Lambder {
         const session = options.session;
         this.guards = options.guards;
         this.rateLimitPolicies = options.rateLimits?.policies;
+        this.refusalVocabulary = readRefusalVocabulary(options.refusals);
         this.pipeline = new LambderApiPipeline({
             apiVersion: this.apiVersion,
             minApiVersion: options.minApiVersion,
@@ -157,12 +172,13 @@ export default class Lambder {
         this.trustedClientIpHeaders = options.trustedClientIpHeaders ?? [];
         this.trustedHostHeaders = options.trustedHostHeaders ?? [];
         this.requireSessionApiGuards = options.requireSessionApiGuards ?? false;
+        this.requireRefusalCodes = options.requireRefusalCodes ?? false;
         this.requirePublicApiGuards = options.requirePublicApiGuards ?? false;
         this.crashHandling = new LambderCrashHandling(options.crashes ?? {}, this.apiVersion);
         this.contextTools = {
             sessionControllerFor: (ctx) => this.getSessionController(ctx),
             chargeRateLimit: async (ctx, policy, key, refuse) => {
-                const { checkResult, refusal } = await this.pipeline.chargeRateLimit(policy, {
+                const { checkResult, refusal: refusalToThrow } = await this.pipeline.chargeRateLimit(policy, {
                     // A per-API budget counts per registered API. The posted
                     // name of a call no API matched (a hook or the fallback
                     // charging it) is the caller's choice, and a fresh name
@@ -172,13 +188,13 @@ export default class Lambder {
                     session: ctx.session,
                     key,
                 });
-                if (refuse && refusal) {
+                if (refuse && refusalToThrow) {
                     if (ctx.api)
-                        throw refusal;
+                        throw refusalToThrow;
                     // A route has no envelope to carry a refusal, so it
                     // answers the same 429 as text, with the same Retry-After
                     // and the policy's own words.
-                    throw this.getResolver(ctx).text(refusal.errorMessage.content, { statusCode: 429, headers: refusal.headers });
+                    throw this.getResolver(ctx).text(refusalToThrow.refusal.content, { statusCode: 429, headers: refusalToThrow.headers });
                 }
                 return checkResult;
             },
@@ -265,14 +281,14 @@ export default class Lambder {
     }
     // Typed API with Zod
     addApi(name, schema, 
-    /** Answers the call by returning its output (parsed through `output` before it is sent), or refuses it with refuse(). */
+    /** Answers the call by returning its output (parsed through `output` before it is sent), or refuses it with ctx.refuse() or refuse(). */
     handler) {
         this.registerApi(name, "public", schema, handler);
         return this;
     }
     // Typed Session API with Zod
     addSessionApi(name, schema, 
-    /** Answers the call by returning its output (parsed through `output` before it is sent), or refuses it with refuse(). */
+    /** Answers the call by returning its output (parsed through `output` before it is sent), or refuses it with ctx.refuse() or refuse(). */
     handler) {
         this.registerApi(name, "session", schema, handler);
         return this;
@@ -303,9 +319,22 @@ export default class Lambder {
             throw new Error(`Lambder: ${mode} API "${name}" declares no guards, and require${mode === "session" ? "Session" : "Public"}ApiGuards is on. ` +
                 `Declare the guard that authorizes it, or ${optOut}.`);
         }
-        const definition = { name, mode, guards: schema.guards, rateLimit: schema.rateLimit, idempotency: schema.idempotency, input: schema.input, output: schema.output };
+        // The option, like guards and rateLimit, is a declaration or absent:
+        // an empty list would read as declaring codes while declaring none.
+        const ownRefusals = toRefusalCodes(schema.refusals);
+        if (schema.refusals !== undefined && ownRefusals.length === 0) {
+            throw new Error(`Lambder: API "${name}" declares an empty refusals option, which declares no code. Name the codes it refuses with, or omit the option entirely.`);
+        }
+        const allowedCodes = resolveAllowedRefusals(name, this.refusalVocabulary, ownRefusals, toGuardEntries(schema.guards).map(({ name: guard }) => ({
+            guard,
+            codes: (this.guards && Object.prototype.hasOwnProperty.call(this.guards, guard) ? this.guards[guard]?.refusals : undefined) ?? [],
+        })));
+        const refusals = { codes: allowedCodes, codeRequired: this.requireRefusalCodes };
+        const definition = { name, mode, guards: schema.guards, rateLimit: schema.rateLimit, idempotency: schema.idempotency, input: schema.input, output: schema.output, refusals };
         this.pipeline.assertRegistration(definition);
         this.apiDefinitions.set(name, definition);
+        if (schema.refusals !== undefined)
+            this.refusalOptions.set(name, schema.refusals);
         this.actionList.push({
             match: (ctx) => ctx.apiName === name ? {} : false,
             actionFn: (ctx) => this.runApi(ctx, definition, schema.output, schema.compress ?? "auto", handler),
@@ -436,13 +465,16 @@ export default class Lambder {
      * and guard name. A policy's key handler is never written: its `per`
      * says "custom" and no more. A guard's input schema is never written
      * either; its declaration says only which of the three input modes it
-     * has. Every table is sorted by name, so the module diffs by endpoint
-     * and never moves when registrations are reordered.
+     * has. The refusal vocabulary is not written at all: it is shared code
+     * (codes, zod schemas, statuses and flags), and the mock declares the
+     * same object. Every table is sorted by name, so the module diffs by
+     * endpoint and never moves when registrations are reordered.
      */
     apiOptionEntries() {
         const apis = {};
         for (const name of [...this.apiDefinitions.keys()].sort()) {
             const { mode, guards, rateLimit, idempotency } = this.apiDefinitions.get(name);
+            const refusals = this.refusalOptions.get(name);
             const entry = { mode };
             if (guards !== undefined) {
                 assertPlainData(guards, `the guards option of API "${name}"`);
@@ -454,11 +486,13 @@ export default class Lambder {
             }
             if (idempotency !== undefined)
                 entry.idempotency = idempotency;
+            if (refusals !== undefined)
+                entry.refusals = refusals;
             apis[name] = entry;
         }
         const rateLimitPolicies = {};
         for (const name of Object.keys(this.rateLimitPolicies ?? {}).sort()) {
-            const { per, budget, chargeAt, errorMessage, ...windows } = this.rateLimitPolicies[name];
+            const { per, budget, chargeAt, refusal, ...windows } = this.rateLimitPolicies[name];
             const entry = {};
             for (const [window, limit] of Object.entries(windows)) {
                 if (limit !== undefined)
@@ -470,9 +504,9 @@ export default class Lambder {
                 entry.budget = budget;
             if (chargeAt !== undefined)
                 entry.chargeAt = chargeAt;
-            if (errorMessage !== undefined) {
-                assertPlainData(errorMessage, `the errorMessage of rate-limit policy "${name}"`);
-                entry.errorMessage = errorMessage;
+            if (refusal !== undefined) {
+                assertPlainData(refusal, `the refusal of rate-limit policy "${name}"`);
+                entry.refusal = refusal;
             }
             rateLimitPolicies[name] = entry;
         }
@@ -483,6 +517,7 @@ export default class Lambder {
                 input: guard.apiInput ? "apiInput" : guard.guardInput ? "guardInput" : "none",
                 session: guard.session === true,
                 runAt: guard.runAt ?? "beforeInputValidation",
+                ...(guard.refusals?.length ? { refusals: guard.refusals } : {}),
             };
         }
         return { apis, rateLimitPolicies, guards };
@@ -902,7 +937,9 @@ export default class Lambder {
      * see the declared shape. The handler returns the schema's input form, so
      * a transform runs exactly once.
      *
-     * An output the schema rejects is the handler breaking its contract,
+     * An output the schema rejects, or one that is not an object or an array
+     * (isObjectPayload: what makes a caller's success never falsy), is the
+     * handler breaking its contract,
      * answered as a crash rather than sent (LambderApiOutputValidationError,
      * which an idempotency key records as its answer, since the handler has
      * already run). The parse is synchronous, so an output schema cannot be
@@ -929,52 +966,69 @@ export default class Lambder {
             }
             if (!parsed.success)
                 throw new LambderApiOutputValidationError(definition.name, { zodError: parsed.error });
-            return envelopeAnswer(buildApiEnvelope(this.apiVersion, parsed.data, { logList: ctx.logList }));
+            if (!isObjectPayload(parsed.data))
+                throw new LambderApiOutputValidationError(definition.name, { notObject: describePayloadKind(parsed.data) });
+            return envelopeAnswer(successEnvelope(this.apiVersion, parsed.data, ctx.logList));
         });
         // The API's compress option, on whatever answer the call ended with:
         // a replayed one comes back from its store without the hint.
         return responseFromAnswer({ ...answer, compress });
     }
-    /** A thrown LambderApiRefusal (from a hook, say) as the structured API envelope: the core's one mapping. */
+    /**
+     * A thrown LambderApiRefusal (from a hook, say) as the structured API
+     * envelope: the core's one mapping, after the same check the pipeline
+     * applies, against the endpoint the call names. A name no API is
+     * registered under declares no code, so only an uncoded or a framework
+     * refusal goes out for it.
+     */
     apiErrorResponse(err, ctx) {
-        return responseFromAnswer(refusalAnswer(err, this.apiVersion, ctx.logList));
+        const apiName = ctx.apiName ?? "";
+        const refusal = checkedRefusal(apiName, this.apiDefinitions.get(apiName)?.refusals ?? NO_DECLARED_REFUSALS, err);
+        return responseFromAnswer(refusalAnswer(refusal, this.apiVersion, ctx.logList));
     }
 }
+/** The init bound to one vocabulary (or none): the policy builders, refuse and create() that share it. */
+const lambderInitOf = (declared) => ({
+    ...policyBuildersFor(declared?.vocabulary ?? null),
+    /**
+     * refuse() typed to the app's whole vocabulary, for a shared helper or a
+     * hook that raises a declared code with no endpoint in hand: `code` is
+     * one of the vocabulary's and `data` follows it. Which endpoint may send
+     * the code is checked where the refusal is rendered, as for the free
+     * refuse(). Inside an API handler ctx.refuse is narrower, that
+     * endpoint's codes alone.
+     */
+    refuse: refuse,
+    create(options) {
+        const withRefusals = { ...options, refusals: declared?.refusals, requireRefusalCodes: declared?.requireCodes ?? false };
+        return new Lambder(withRefusals);
+    },
+});
 /**
- * The canonical way to create an instance: fix the session data type first,
- * then create with the full configuration in one declaration. The policy,
- * guard and idempotency types are inferred from the options, so the instance
- * is born fully typed and `typeof lambderApp` is the annotation type for api
- * modules. There are no ordering rules, and nothing can be half-configured.
- *
- * ```typescript
- * // app.ts (imports no api modules, so modules can import the type back)
- * export const lambderApp = initLambder<SessionData>().create({
- *     apiPath: "/api",
- *     session: { store: new LambderDdbSessionStore({ tableName: "app-session", region: "us-east-1" }), sessionSalt: "..." },
- *     rateLimits: { limiter, policies },
- *     guards,
- *     idempotency: { store },
- * });
- * export type AppLambder = typeof lambderApp;
- *
- * // orders.ts
- * export const orderApi = (lambder: AppLambder) => lambder.addSessionApi(...);
- *
- * // index.ts: registration only
- * const lambder = lambderApp.addHook(...).use(orderApi)...;
- * export const handler = lambder.getHandler();
- * ```
- *
- * Curried because TypeScript type arguments are all-or-nothing per call:
- * passing the session data type to `new Lambder<S>(...)` would silently
- * widen the inferred policy and guard types to their {} defaults. Fixing the
- * session type in the first call lets the second infer everything else.
- * `new Lambder(options)` serves untyped or session-data-free instances.
+ * The entry point of an app: binds the session data type, and hands out the
+ * builders and create() that share it. `declareRefusals()` binds the app's
+ * refusal vocabulary too, so a guard's ctx.refuse and the init's own refuse
+ * are typed to it before any instance exists, and create() gives it to the
+ * instance for every API's refusals option to name codes from.
  */
 export const initLambder = () => ({
-    ...policyBuildersFor(),
-    create(options) {
-        return new Lambder(options);
+    ...lambderInitOf(null),
+    /**
+     * Declares the app's refusal vocabulary: every code once, with the schema
+     * of its data (`{ data: schema }`) or none (`{}`), the status every
+     * refusal with it leaves with (`status`, 200 by default) and whether it
+     * sets the notAuthorized flag (`notAuthorized: true`). Returns the init
+     * bound to it: its guard() types ctx.refuse to a guard's refusals and
+     * refuses a guard naming a code outside the vocabulary, its refuse is
+     * typed to the whole vocabulary, and its create() hands the vocabulary to
+     * the instance. With `requireCodes`, an uncoded refusal from an API
+     * handler, a guard or a helper is a crash rather than an answer, so every
+     * "no" a client reads names a code.
+     */
+    declareRefusals(refusals, options = {}) {
+        const vocabulary = readRefusalVocabulary(refusals);
+        if (!vocabulary)
+            throw new Error("Lambder: declareRefusals() takes the vocabulary, an object of codes.");
+        return lambderInitOf({ refusals, vocabulary, requireCodes: (options.requireCodes ?? false) });
     },
 });

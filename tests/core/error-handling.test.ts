@@ -71,7 +71,7 @@ describe('Error Handling - Global Error Handler', () => {
         })
             .setGlobalErrorHandler((err, ctx, res) => {
                 if (ctx?.api) {
-                    return res.api({ error: err.message });
+                    return res.apiRefusal({ refusal: err.message });
                 }
                 return res.raw({ statusCode: 500, body: err.message });
             })
@@ -88,7 +88,7 @@ describe('Error Handling - Global Error Handler', () => {
 
         expect(result.statusCode).toBe(200);
         const body = JSON.parse(result.body || '{}');
-        expect(body.payload.error).toBe('API handler error');
+        expect(body).toMatchObject({ payload: null, refusal: { type: 'error', content: 'API handler error' } });
     });
 
     it('should catch async errors', async () => {
@@ -169,16 +169,13 @@ describe('Error Handling - Custom Error Responses', () => {
         })
             .setGlobalErrorHandler((err, ctx, res) => {
                 if (ctx?.api) {
-                    return res.api(
-                        { success: false, error: err.message },
-                        { errorMessage: err.message }
-                    );
+                    return res.apiRefusal({ refusal: { type: 'error', title: 'Failed', content: err.message } }, { statusCode: 500 });
                 }
                 return res.raw({ statusCode: 500, body: err.message });
             })
             .addApi('testApi', {
                 input: z.void(),
-                output: z.object({ success: z.boolean(), error: z.string().optional() })
+                output: z.object({ success: z.boolean() })
             }, async (ctx) => {
                 throw new Error('Custom error message');
             });
@@ -187,10 +184,10 @@ describe('Error Handling - Custom Error Responses', () => {
         const event = createApiEvent({ apiName: 'testApi' });
         const result = await handler(event, createMockContext());
 
+        expect(result.statusCode).toBe(500);
         const body = JSON.parse(result.body || '{}');
-        expect(body.payload.success).toBe(false);
-        expect(body.payload.error).toBe('Custom error message');
-        expect(body.errorMessage).toEqual({ type: 'error', content: 'Custom error message' });
+        expect(body.payload).toBe(null);
+        expect(body.refusal).toEqual({ type: 'error', title: 'Failed', content: 'Custom error message' });
     });
 
     it('should return HTML error for routes', async () => {
@@ -547,7 +544,7 @@ describe('Error Handling - Complex Error Scenarios', () => {
             .setGlobalErrorHandler((err, ctx, res) => {
                 if (ctx?.api) {
                     errorTypes.push('api');
-                    return res.api({ error: err.message });
+                    return res.apiRefusal({ refusal: err.message });
                 } else {
                     errorTypes.push('route');
                     return res.html(`<h1>${err.message}</h1>`);

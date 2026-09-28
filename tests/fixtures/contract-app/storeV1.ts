@@ -12,6 +12,7 @@ export const lambder = storeApp()
         input: z.object({ orderId: z.string() }),
         output: z.object({ cancelled: z.boolean() }),
         guards: { storePermission: "orders.manage" },
+        refusals: "order-closed",
     }, async (_ctx) => ({ cancelled: true }))
     .addApi("store.hours", {
         input: z.void(),

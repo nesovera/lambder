@@ -18,6 +18,7 @@ export type {
     LambderMockCallContext,
     LambderMockSessionCallContext,
     LambderMockContext,
+    LambderMockRefusalsOf,
     LambderMockGuards,
     LambderMockHandler,
     LambderMockEntry,
@@ -76,10 +77,11 @@ export { LambderMemoryIdempotencyStore } from "./stores/LambderMemoryIdempotency
 export { LambderWebCrypto, LambderPlainSessionCrypto } from "./session/LambderSessionCrypto.js";
 export type { LambderSessionCrypto } from "./session/LambderSessionCrypto.js";
 export { LambderApiRefusal, refuse, LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";
-export type { LambderRefusalMessage } from "./shared/wire/LambderApiRefusal.js";
-// The outcome assertions a test over the mock app narrows with; the same two
-// `lambder/testing` exports for a test over the real server.
-export { assertApiSuccess, assertApiFailure } from "./shared/wire/LambderOutcomeAssertions.js";
+export type { LambderRefusalMessage, LambderDeclaredRefuse, LambderDeclaredRefuseOptions } from "./shared/wire/LambderApiRefusal.js";
+export { LambderApiRefusalValidationError } from "./api/LambderApiRefusals.js";
+// The outcome assertions a test over the mock app narrows with; the same
+// ones `lambder/testing` exports for a test over the real server.
+export { assertApiSuccess, assertApiFailure, assertApiRefusal } from "./shared/wire/LambderOutcomeAssertions.js";
 export type { LambderExpectedFailure } from "./shared/wire/LambderOutcomeAssertions.js";
 export type { LambderApiRequest } from "./api/LambderApiRequest.js";
 export type { LambderApiAnswer } from "./api/LambderApiAnswer.js";

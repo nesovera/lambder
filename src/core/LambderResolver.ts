@@ -16,7 +16,7 @@ interface DieResolverMethods {
     redirect: SyncDie<LambderResponseBuilder["redirect"]>;
     versionExpired: SyncDie<LambderResponseBuilder["versionExpired"]>;
     fileBase64: SyncDie<LambderResponseBuilder["fileBase64"]>;
-    api: SyncDie<LambderResponseBuilder["api"]>;
+    apiRefusal: SyncDie<LambderResponseBuilder["apiRefusal"]>;
     file: AsyncDie<LambderResponseBuilder["file"]>;
     templateFile: AsyncDie<LambderResponseBuilder["templateFile"]>;
 }
@@ -46,7 +46,7 @@ export default class LambderResolver extends LambderResponseBuilder {
             redirect: (...a) => { throw this.redirect(...a); },
             versionExpired: (...a) => { throw this.versionExpired(...a); },
             fileBase64: (...a) => { throw this.fileBase64(...a); },
-            api: (...a) => { throw this.api(...a); },
+            apiRefusal: (...a) => { throw this.apiRefusal(...a); },
             file: async (...a) => { throw await this.file(...a); },
             templateFile: async (...a) => { throw await this.templateFile(...a); },
         };

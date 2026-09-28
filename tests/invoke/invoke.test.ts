@@ -44,9 +44,9 @@ import { LAMBDER_INVOKE_API_ID, LAMBDER_LOCAL_API_ID } from '../../src/shared/wi
 import LambderCaller from '../../src/client/LambderCaller.js';
 import { describeCrash, errorFromCrashDetail } from '../../src/shared/wire/LambderCrashDetail.js';
 import type { LambderValidationError } from '../../src/shared/wire/LambderApiOutcome.js';
-import type { LambderApiEnvelopeBody } from '../../src/shared/wire/LambderApiContract.js';
+import type { LambderApiRefusalEnvelope } from '../../src/shared/wire/LambderApiContract.js';
 import { lambderGuard } from '../../src/core/LambderPolicyBuilders.js';
-import { refuse, LAMBDER_REFUSAL_CODES, type LambderAppRefusalMessage } from '../../src/shared/wire/LambderApiRefusal.js';
+import { refuse, LAMBDER_REFUSAL_CODES, type LambderUncheckedRefusalMessage, type LambderRefusalCode } from '../../src/shared/wire/LambderApiRefusal.js';
 import { compressPayloadBrotli, compressPayloadGzip } from '../../src/shared/wire/LambderRequestPayload.js';
 import { LambderTransportFailure } from '../../src/shared/transport/LambderApiTransport.js';
 import { assertApiFailure } from '../../src/shared/wire/LambderOutcomeAssertions.js';
@@ -59,7 +59,7 @@ const bigPayload = (size = 400) => ({ notes: Array.from({ length: size }, (_, i)
  * The callee: an ordinary app with the shapes the caller has to handle. The
  * invokeOnly guard is an app's own convention: a marker check, not security.
  */
-const createCallee = () => initLambder().create({
+const createCallee = () => initLambder().declareRefusals({ 'app/no': { status: 403 } }).create({
     apiPath: '/api',
     guards: {
         invokeOnly: lambderGuard({ handler: async (ctx) => {
@@ -85,25 +85,25 @@ const createCallee = () => initLambder().create({
         output: z.object({ count: z.number(), filler: z.string() }),
         compress: false,
     }, (ctx) => ({ count: ctx.apiPayload.notes.length, filler: 'x'.repeat(2000) }))
-    .addApi('refuse', { input: z.object({}), output: z.null() }, () => refuse('No.', { code: 'app/no', statusCode: 403 }))
+    .addApi('refuse', { input: z.object({}), output: z.object({}), refusals: 'app/no' }, () => refuse('No.', { code: 'app/no' }))
     .addApi('logs', { input: z.object({}), output: z.object({ ok: z.boolean() }) }, (_ctx) => {
         _ctx.logList.push({ step: 1 });
         _ctx.logList.push({ step: 2 });
         return { ok: true };
     })
-    .addApi('crash', { input: z.object({}), output: z.null() }, (_ctx) => {
+    .addApi('crash', { input: z.object({}), output: z.object({}) }, (_ctx) => {
         _ctx.logList.push({ before: 'the throw' });
         throw new Error('boom', { cause: new Error('root cause') });
     })
     .addApi('captchaed', { input: z.object({}), output: z.object({ ok: z.boolean() }), guards: 'captcha' }, (_ctx) => ({ ok: true }))
-    .addApi('nullAnswer', { input: z.object({}), output: z.object({ n: z.number() }).nullable() }, (_ctx) => null)
+    .addApi('nullAnswer', { input: z.object({}), output: z.object({ n: z.number().nullable() }) }, (_ctx) => ({ n: null }))
     .addApi('whoami', {
         input: z.object({}),
         output: z.object({ cookie: z.record(z.string(), z.string()), token: z.string() }),
     }, (ctx) => ({ cookie: ctx.cookie, token: String(ctx.post.token ?? '') }))
     .addRoute('/hello', (ctx, res) => res.text(`hi ${ctx.get.name ?? 'nobody'}`, { headers: { 'X-Seen-Cookie': ctx.cookie.session ?? '' } }))
     .setGlobalErrorHandler((err, ctx, res) =>
-        res.api(null, { errorMessage: 'Internal server error.', crash: describeCrash(err, ctx), logList: ctx?.logList }, { statusCode: 500 }));
+        res.apiRefusal({ refusal: 'Internal server error.', crash: describeCrash(err, ctx), logList: ctx?.logList }, { statusCode: 500 }));
 
 type Callee = ReturnType<typeof createCallee>;
 type Contract = Callee['ApiContract'];
@@ -407,27 +407,29 @@ describe('LambderInvokeCaller - round trips through a real Lambder app', () => {
         }
     });
 
-    it('a refusal is reason errorMessage: apiOutcome() returns it, api() throws it', async () => {
+    it('a refusal is reason refusal: apiOutcome() returns it, api() throws it', async () => {
         const callee = createCallee();
         const caller = callerFor(callee);
 
         const outcome = await caller.apiOutcome('refuse', {});
         expect(outcome.ok).toBe(false);
         if(outcome.ok) throw new Error('unreachable');
-        expect(outcome.reason).toBe('errorMessage');
+        expect(outcome.reason).toBe('refusal');
         expect(outcome.status).toBe(403);
-        expect(outcome.errorMessage).toEqual({ type: 'warning', code: 'app/no', content: 'No.' });
+        expect(outcome.refusal).toEqual({ type: 'warning', code: 'app/no', content: 'No.' });
+        // Typed from the callee's contract: the code it declares, or the framework's.
+        expectTypeOf(outcome.refusal?.code).toEqualTypeOf<'app/no' | LambderRefusalCode | undefined>();
         expect(outcome.error).toBeInstanceOf(LambderInvokeError);
         expect(outcome.error.outcome).toBe(outcome);
 
         const thrown = await caller.api('refuse', {}).then(() => null, (err: unknown) => err);
         expect(isLambderInvokeError(thrown)).toBe(true);
         if(!isLambderInvokeError(thrown)) throw new Error('unreachable');
-        expect(thrown.message).toBe('callee-fn refuse failed (errorMessage): No.');
-        expect(thrown.reason).toBe('errorMessage');
+        expect(thrown.message).toBe('callee-fn refuse failed (refusal): No.');
+        expect(thrown.reason).toBe('refusal');
         expect(thrown.apiName).toBe('refuse');
         expect(thrown.functionName).toBe('callee-fn');
-        expect(thrown.errorMessage?.code).toBe('app/no');
+        expect(thrown.refusal?.code).toBe('app/no');
     });
 
     it('a rejected input is reason validation with the zod issues', async () => {
@@ -447,7 +449,7 @@ describe('LambderInvokeCaller - round trips through a real Lambder app', () => {
         expect(outcome.ok).toBe(false);
         if(outcome.ok || outcome.reason !== 'server') throw new Error('unreachable');
         expect(outcome.status).toBe(500);
-        expect(outcome.errorMessage).toEqual({ type: 'error', content: 'Internal server error.' });
+        expect(outcome.refusal).toEqual({ type: 'error', content: 'Internal server error.' });
         // The detail the callee's global error handler described.
         expect(outcome.crash?.name).toBe('Error');
         expect(outcome.crash?.message).toBe('boom');
@@ -466,13 +468,13 @@ describe('LambderInvokeCaller - round trips through a real Lambder app', () => {
         expect((cause.cause as Error).message).toBe('root cause');
     });
 
-    it('a null answer is a success with a null payload, typed by the nullable output', async () => {
+    it('a success is the handler\'s output exactly: a nullable member arrives as null, typed as declared', async () => {
         const caller = callerFor(createCallee());
         const answer = await caller.api('nullAnswer', {});
-        expectTypeOf(answer).toEqualTypeOf<{ n: number } | null>();
-        expect(answer).toBe(null);
+        expectTypeOf(answer).toEqualTypeOf<{ n: number | null }>();
+        expect(answer).toEqual({ n: null });
         const outcome = await caller.apiOutcome('nullAnswer', {});
-        expect(outcome).toMatchObject({ ok: true, payload: null, logList: [] });
+        expect(outcome).toMatchObject({ ok: true, payload: { n: null }, logList: [] });
     });
 
     it('a session rides as the token cookie and the CSRF token', async () => {
@@ -484,8 +486,8 @@ describe('LambderInvokeCaller - round trips through a real Lambder app', () => {
         const outcome = await (callerFor(createCallee()) as LambderInvokeCaller).apiOutcome('nope', {});
         expect(outcome.ok).toBe(false);
         if(outcome.ok) throw new Error('unreachable');
-        expect(outcome.reason).toBe('errorMessage');
-        expect(outcome.errorMessage?.code).toBe(LAMBDER_REFUSAL_CODES.apiNotFound);
+        expect(outcome.reason).toBe('refusal');
+        expect(outcome.refusal?.code).toBe(LAMBDER_REFUSAL_CODES.apiNotFound);
     });
 
     it('an apiPath mismatch names the likely cause', async () => {
@@ -506,7 +508,7 @@ describe('LambderInvokeCaller - the logs of an answer that failed', () => {
     });
 
     it.each([
-        ['a 500 envelope', 500, { apiVersion: null, payload: null, errorMessage: 'Internal server error.', logList: [{ step: 'before the crash' }] }],
+        ['a 500 envelope', 500, { apiVersion: null, payload: null, refusal: 'Internal server error.', logList: [{ step: 'before the crash' }] }],
         ['a 422 validation body', 422, { error: 'Input validation failed', zodError: { name: 'ZodError', message: '', issues: [] }, logList: [{ step: 'before the crash' }] }],
     ] as const)('%s carries its logList to onLogList, like every other answer', async (_label, statusCode, body) => {
         const seen: unknown[][] = [];
@@ -645,7 +647,7 @@ describe('LambderInvokeCaller - onFailure is the single reporting point', () => 
         await caller.api('crash', {}).catch(() => order.push('thrown'));
 
         expect(onFailure).toHaveBeenCalledTimes(2);
-        expect(order).toEqual(['reported callee-fn:refuse:errorMessage', 'reported callee-fn:crash:server', 'thrown']);
+        expect(order).toEqual(['reported callee-fn:refuse:refusal', 'reported callee-fn:crash:server', 'thrown']);
         const [failure] = onFailure.mock.calls[1]!;
         expect(failure.reason === 'server' && failure.crash?.message).toBe('boom');
         expect(failure.error).toBeInstanceOf(LambderInvokeError);
@@ -937,7 +939,7 @@ describe('LambderCaller and LambderInvokeCaller read the same envelope the same 
         }else if(!fromBrowser.ok && !fromServer.ok){
             expect(fromServer.reason).toBe(fromBrowser.reason);
             expect(fromServer.status).toBe(fromBrowser.status);
-            expect(fromServer.errorMessage).toEqual(fromBrowser.errorMessage);
+            expect(fromServer.refusal).toEqual(fromBrowser.refusal);
             // Both sides answered a 5xx here, which is the arm that keeps the
             // envelope beside its Error.
             if(fromBrowser.reason === 'server' && fromServer.reason === 'server'){
@@ -955,11 +957,11 @@ describe('LambderInvokeCaller - hooks cannot break the call', () => {
             const caller = callerFor(createCallee(), { onFailure: async () => { throw new Error('reporter down'); } });
 
             const outcome = await caller.apiOutcome('refuse', {});
-            assertApiFailure(outcome, 'errorMessage');
+            assertApiFailure(outcome, 'refusal');
 
             const thrown = await caller.api('refuse', {}).then(() => null, (err: unknown) => err);
             expect(isLambderInvokeError(thrown)).toBe(true);
-            if(isLambderInvokeError(thrown)) expect(thrown.reason).toBe('errorMessage');
+            if(isLambderInvokeError(thrown)) expect(thrown.reason).toBe('refusal');
             expect(consoleError).toHaveBeenCalledTimes(2);
             expect(String(consoleError.mock.calls[0]![0])).toContain('onFailure threw for callee-fn refuse');
         } finally {
@@ -1257,7 +1259,7 @@ describe('LambderInvokeCaller - the answer\'s cookies', () => {
                 async (ctx) => { await callee.getSessionController(ctx).createSession(ctx.apiPayload.user, { userId: ctx.apiPayload.user }); return { ok: true }; })
             .addSessionApi('me', { input: z.object({}), output: z.object({ userId: z.string() }) },
                 async (ctx) => ({ userId: ctx.session.data.userId }))
-            .addSessionApi('signOut', { input: z.object({}), output: z.null() }, async (ctx) => {
+            .addSessionApi('signOut', { input: z.object({}), output: z.object({}) }, async (ctx) => {
                 await callee.getSessionController(ctx).endSession();
                 refuse('Signed out.', { type: 'info' });
             });
@@ -1289,7 +1291,7 @@ describe('LambderInvokeCaller - the answer\'s cookies', () => {
         const signedOut = await caller.apiOutcome('signOut', {}, { session });
         expect(signedOut.ok).toBe(false);
         if(signedOut.ok) throw new Error('unreachable');
-        expect(signedOut.reason).toBe('errorMessage');
+        expect(signedOut.reason).toBe('refusal');
         expect(signedOut.cookies.map((cookie) => cookie.split('=')[0]).sort()).toEqual(['LMDRSESSIONCSTK', 'LMDRSESSIONTKID']);
 
         // And a failure with no answer at all reports an empty list rather
@@ -1313,17 +1315,17 @@ describe('LambderInvokeCaller - a failure narrows to what its reason carries', (
             expectTypeOf(failure.functionError).toEqualTypeOf<LambderInvokeFunctionError>();
         }else if(failure.reason === 'payloadTooLarge'){
             expectTypeOf(failure.bytes).toEqualTypeOf<number>();
-        }else if(failure.reason === 'errorMessage'){
+        }else if(failure.reason === 'refusal'){
             // An envelope refusal always comes with the envelope, and this
             // one with the message it is about.
-            expectTypeOf(failure.response).toEqualTypeOf<LambderApiEnvelopeBody<any>>();
-            expectTypeOf(failure.errorMessage).toEqualTypeOf<LambderAppRefusalMessage>();
+            expectTypeOf(failure.response).toEqualTypeOf<LambderApiRefusalEnvelope>();
+            expectTypeOf(failure.refusal).toEqualTypeOf<LambderUncheckedRefusalMessage>();
         }else if(failure.reason === 'notAuthorized'){
-            expectTypeOf(failure.response).toEqualTypeOf<LambderApiEnvelopeBody<any>>();
-            expectTypeOf(failure.errorMessage).toEqualTypeOf<LambderAppRefusalMessage | undefined>();
+            expectTypeOf(failure.response).toEqualTypeOf<LambderApiRefusalEnvelope>();
+            expectTypeOf(failure.refusal).toEqualTypeOf<LambderUncheckedRefusalMessage | undefined>();
         }else{
             // A delivery failure may or may not have got an answer at all.
-            expectTypeOf(failure.response).toEqualTypeOf<LambderApiEnvelopeBody<any> | undefined>();
+            expectTypeOf(failure.response).toEqualTypeOf<LambderApiRefusalEnvelope | undefined>();
         }
         // And what one reason has, another does not.
         expectTypeOf(failure.error).toEqualTypeOf<LambderInvokeError>();

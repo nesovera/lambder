@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import type { LambderEndpointRefusals } from "./LambderApiRefusals.js";
 import type { LambderApiMode } from "../shared/wire/LambderApiContract.js";
 import type { LambderApiIdempotencyOption, LambderGuardsOptionValue, LambderRateLimitOptionValue } from "../shared/wire/LambderApiOptionValues.js";
 /**
@@ -10,6 +11,13 @@ import type { LambderApiIdempotencyOption, LambderGuardsOptionValue, LambderRate
  * signature (apiSignatureOf), which is what a client's build is checked
  * against; the server also parses every output a handler returns through it
  * before it is sent.
+ *
+ * `refusals` is every code the endpoint may refuse with (its own option and
+ * its guards'), resolved against the vocabulary, and whether every refusal
+ * has to name one: what every refusal it answers with is checked against
+ * (checkedRefusal); the codes are part of its signature. Undefined where the
+ * codes are not known (a mock without generated options), which checks
+ * nothing.
  */
 export type LambderApiDefinition = {
     name: string;
@@ -19,4 +27,5 @@ export type LambderApiDefinition = {
     idempotency?: LambderApiIdempotencyOption;
     input?: z.ZodType;
     output?: z.ZodType;
+    refusals?: LambderEndpointRefusals;
 };

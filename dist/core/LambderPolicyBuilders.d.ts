@@ -9,21 +9,24 @@
  */
 import type { LambderRenderContext, LambderSessionRenderContext } from "./LambderContext.js";
 import { type LambderGuardBuilder } from "../api/LambderApiGuards.js";
+import type { LambderRefusalDeclaration, LambderRefusalVocabulary } from "../api/LambderApiRefusals.js";
 import { type LambderRateLimitKeyBuilder } from "../api/LambderApiRateLimits.js";
 /** Builder for the server's guards: the handler sees the render context (session-typed when `session: true`). */
 export declare const lambderGuard: LambderGuardBuilder<LambderRenderContext, LambderSessionRenderContext<any, any>>;
 /** Builder for the server's rate-limit keys: the handler sees the render context. */
 export declare const lambderRateLimitKey: LambderRateLimitKeyBuilder<LambderRenderContext>;
 /**
- * The same two builders bound to one app's session data, which is what
- * initLambder<SessionData>() hands out beside create(): a guard's
- * `ctx.session.data` and `ctx.sessionController` are SessionData where the standalone
- * lambderGuard() leaves them `any`. The server's counterpart of the mock's
- * `guard` and `rateLimitKey`.
+ * The same two builders bound to one app's session data and refusal
+ * vocabulary, which is what initLambder<SessionData>() hands out beside
+ * create(): a guard's `ctx.session.data` and `ctx.sessionController` are
+ * SessionData where the standalone lambderGuard() leaves them `any`, and its
+ * `ctx.refuse` is typed to the guard's refusals from the vocabulary
+ * declareRefusals() gave (null: none declared, so a guard names no code).
+ * The server's counterpart of the mock's `guard` and `rateLimitKey`.
  */
-export declare const policyBuildersFor: <TSessionData>() => {
-    /** Builds a guard whose handler sees this app's session type. */
-    guard: LambderGuardBuilder<LambderRenderContext<any, Record<string, string>, {}, TSessionData>, LambderSessionRenderContext<any, TSessionData>>;
+export declare const policyBuildersFor: <TSessionData, TRefusals extends LambderRefusalVocabulary = {}, TCodesRequired extends boolean = false>(vocabulary: ReadonlyMap<string, LambderRefusalDeclaration> | null) => {
+    /** Builds a guard whose handler sees this app's session type and, on ctx.refuse, the guard's own refusal codes. */
+    guard: LambderGuardBuilder<LambderRenderContext<any, Record<string, string>, {}, TSessionData>, LambderSessionRenderContext<any, TSessionData>, TRefusals, TCodesRequired>;
     /** Builds a rate-limit key whose handler sees this app's session type; the counterpart of `guard`. */
     rateLimitKey: LambderRateLimitKeyBuilder<LambderRenderContext<any, Record<string, string>, {}, TSessionData>>;
 };

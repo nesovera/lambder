@@ -17,7 +17,7 @@
 export { lambderTestApp } from "./testing/LambderTestApp.js";
 export type { LambderTestApp, LambderTestAppOptions, LambderTestedInstance } from "./testing/LambderTestApp.js";
 export type { LambderTestVisitor, LambderTestVisitorOptions, LambderTestRequestInit } from "./testing/LambderTestVisitor.js";
-export { assertApiSuccess, assertApiFailure } from "./shared/wire/LambderOutcomeAssertions.js";
+export { assertApiSuccess, assertApiFailure, assertApiRefusal } from "./shared/wire/LambderOutcomeAssertions.js";
 export type { LambderExpectedFailure } from "./shared/wire/LambderOutcomeAssertions.js";
 export { lambderSessionStoreConformance } from "./testing/lambderSessionStoreConformance.js";
 export type { LambderSessionStoreConformanceOptions } from "./testing/lambderSessionStoreConformance.js";

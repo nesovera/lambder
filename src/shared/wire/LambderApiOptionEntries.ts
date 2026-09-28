@@ -17,8 +17,8 @@
  */
 
 import type { LambderApiMode, LambderGuardNamesIn } from "./LambderApiContract.js";
-import type { LambderApiIdempotencyOption, LambderGuardsOptionValue, LambderRateLimitOptionValue } from "./LambderApiOptionValues.js";
-import type { LambderAppRefusalMessage } from "./LambderApiRefusal.js";
+import type { LambderApiIdempotencyOption, LambderGuardsOptionValue, LambderRateLimitMessage, LambderRateLimitOptionValue, LambderRefusalsOptionValue } from "./LambderApiOptionValues.js";
+
 import type { LambderRateLimitPolicy } from "../contracts/LambderRateLimiter.js";
 
 /**
@@ -69,17 +69,19 @@ export type LambderRateLimitBudget = "perApi" | "perPolicy";
 export type LambderRateLimitChargeAt = "beforeGuards" | "afterGuards";
 
 /**
- * One API as the generated module records it: its mode and its three
- * declarative options exactly as written at registration. A guard's
- * parameter is written as the JSON it is (a permission string, a list of
- * them, a reason), which is what makes the module plain data: a parameter
- * that is code or a class instance fails the write and names the API.
+ * One API as the generated module records it: its mode and its declarative
+ * options exactly as written at registration. A guard's parameter is written
+ * as the JSON it is (a permission string, a list of them, a reason), which is
+ * what makes the module plain data: a parameter that is code or a class
+ * instance fails the write and names the API. `refusals` is the API's own
+ * option; the codes its guards add are on their declarations.
  */
 export type LambderApiOptionEntry = {
     mode: LambderApiMode;
     guards?: LambderGuardsOptionValue;
     rateLimit?: LambderRateLimitOptionValue;
     idempotency?: LambderApiIdempotencyOption;
+    refusals?: LambderRefusalsOptionValue;
 };
 
 /**
@@ -93,23 +95,29 @@ export type LambderRateLimitPolicyEntry = LambderRateLimitPolicy & {
     per?: "ip" | "session" | "custom";
     budget?: LambderRateLimitBudget;
     chargeAt?: LambderRateLimitChargeAt;
-    errorMessage?: LambderAppRefusalMessage;
+    refusal?: LambderRateLimitMessage;
 };
 
 /**
  * One guard as the generated module records it: how it is fed (a slice of
  * the API's own payload, a value the client sends separately, or nothing),
- * whether it needs a session, and when it runs. The schema behind an input
- * mode is never written; the mode alone is what a mock guard standing in for
- * it has to match.
+ * whether it needs a session, when it runs, and the refusal codes it
+ * declares, which join those of every API declaring it. The schema behind an
+ * input mode is never written; the mode alone is what a mock guard standing
+ * in for it has to match.
  */
 export type LambderGuardDeclarationEntry = {
     input: "apiInput" | "guardInput" | "none";
     session: boolean;
     runAt: LambderGuardRunAt;
+    refusals?: readonly string[];
 };
 
-/** Everything `lambder.apiOptionEntries()` reports, and the three tables the generated module exports. */
+/**
+ * Everything `lambder.apiOptionEntries()` reports, and the three tables the
+ * generated module exports. The refusal vocabulary is not among them: it is
+ * shared code, which the mock declares as the server does.
+ */
 export type LambderApiOptionEntries = {
     apis: Record<string, LambderApiOptionEntry>;
     rateLimitPolicies: Record<string, LambderRateLimitPolicyEntry>;

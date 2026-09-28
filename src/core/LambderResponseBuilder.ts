@@ -6,10 +6,10 @@ import { LambderSafeHtml } from "../shared/LambderHtml.js";
 import type { LambderTemplateData } from "./LambderTemplatingEngine.js";
 // The API envelope types live with the contract (shared/, browser-safe) so
 // the caller and MSW never have to import this server-side module for them.
-import type { LambderApiResponseConfig } from "../shared/wire/LambderApiContract.js";
-import { buildApiEnvelope } from "../api/LambderApiEnvelope.js";
+import type { LambderApiRefusalConfig } from "../shared/wire/LambderApiContract.js";
+import { plainRefusalEnvelope } from "../api/LambderApiEnvelope.js";
 
-export type { LambderApiEnvelopeBody, LambderApiResponseConfig } from "../shared/wire/LambderApiContract.js";
+export type { LambderApiEnvelopeBody, LambderApiRefusalConfig } from "../shared/wire/LambderApiContract.js";
 
 export type LambderResponseOptions = {
     statusCode?: LambderHttpStatusCode;
@@ -139,7 +139,7 @@ export default class LambderResponseBuilder {
     };
 
     versionExpired(options?: LambderResponseOptions): LambderResponse {
-        return this.api(null, { versionExpired: true }, options);
+        return this.apiRefusal({ versionExpired: true }, options);
     };
 
     fileBase64(fileBase64: string, mimeType: string, options?: LambderResponseOptions): LambderResponse {
@@ -183,16 +183,17 @@ export default class LambderResponseBuilder {
     };
 
     /**
-     * An API envelope written by hand: what a hook, an input validation
-     * handler or a global error handler answers an API call with (a refusal
-     * flag, an errorMessage, a crash). The payload goes out as given; an API
-     * handler's own output is parsed through its schema by the instance
-     * instead. The logList channel is what the request accumulated unless the
-     * config names its own.
+     * An API call answered from outside its handler: what a hook, a fallback,
+     * the input validation handler or the global error handler answers with.
+     * It is always a refusal (a refusal message, or one of the versionExpired,
+     * sessionExpired and notAuthorized flags) with a null payload, so a
+     * caller's success is only ever the handler's parsed output. Its message
+     * carries a framework code or none, and no data, since it answers outside
+     * any one endpoint's declared refusals. The logList channel is what the
+     * request accumulated unless the config names its own.
      */
-    api(payload: unknown, config: LambderApiResponseConfig = {}, options?: LambderResponseOptions): LambderResponse {
-        const envelope = buildApiEnvelope(this.apiVersion, payload, { ...config, logList: config.logList || this.ctx?.logList });
-        return this.json(envelope as Record<string, any>, options);
+    apiRefusal(config: LambderApiRefusalConfig, options?: LambderResponseOptions): LambderResponse {
+        return this.json(plainRefusalEnvelope(this.apiVersion, config, "res.apiRefusal()", this.ctx?.logList) as Record<string, any>, options);
     };
 
 };

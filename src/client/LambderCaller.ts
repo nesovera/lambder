@@ -1,4 +1,4 @@
-import type { LambderAppRefusalMessage } from '../shared/wire/LambderApiRefusal.js';
+import type { LambderUncheckedRefusalMessage } from '../shared/wire/LambderApiRefusal.js';
 import Cookies from 'js-cookie';
 import {
     compressPayloadGzip,
@@ -9,7 +9,7 @@ import {
     type LambderRequestCompressionSettings,
 } from '../shared/wire/LambderRequestPayload.js';
 import { resolveCompressionOption } from '../shared/wire/LambderCompressionOption.js';
-import type { LambderApiContractShape } from '../shared/wire/LambderApiContract.js';
+import type { LambderApiContractShape, LambderContractAnyRefusalMessage, LambderContractRefusalMessage } from '../shared/wire/LambderApiContract.js';
 import { resolveApiOutcome, type LambderApiHttpAnswer, type LambderApiOutcome, type LambderValidationError } from '../shared/wire/LambderApiOutcome.js';
 import {
     mergeGuardInputs,
@@ -56,8 +56,13 @@ type FetchEndEventHandler = (params: {
 
 type ErrorHandler = (err: Error) => void|Promise<void>;
 type ValidationErrorHandler = (zodError: LambderValidationError) => (void|false)|Promise<(void|false)>;
-/** Handed the refusal as its message object, a plain-string errorMessage having been read as one (refusalMessageOf). */
-type ErrorMessageHandler = (message: LambderAppRefusalMessage) => void|Promise<void>;
+/**
+ * Handed the refusal as its message object, a plain-string refusal
+ * having been read as one (refusalMessageOf). TMessage is what the calls it
+ * hears can refuse with: one endpoint's declared codes on a per-call
+ * override, every endpoint's on the constructor's.
+ */
+type RefusalHandler<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = (message: TMessage) => void|Promise<void>;
 
 /** The logListHandler option: an answer's logList, success or failure, when it has entries. The invoke caller's onLogList, for a browser. */
 export type LambderLogListHandler = (apiName: string, logList: unknown[]) => void|Promise<void>;
@@ -65,11 +70,13 @@ export type LambderLogListHandler = (apiName: string, logList: unknown[]) => voi
 /**
  * Per-call options: the request extras both callers share (see
  * LambderSharedCallOptions) plus an override for every constructor handler.
+ * TMessage is the endpoint's refusal message, which the per-call
+ * refusalHandler is handed.
  */
-export type LambderCallOptions = LambderSharedCallOptions & {
+export type LambderCallOptions<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = LambderSharedCallOptions & {
     versionExpiredHandler?: NotifyHandler;
     sessionExpiredHandler?: NotifyHandler;
-    errorMessageHandler?: ErrorMessageHandler;
+    refusalHandler?: RefusalHandler<TMessage>;
     apiInputValidationErrorHandler?: ValidationErrorHandler;
     notAuthorizedHandler?: NotifyHandler;
     errorHandler?: ErrorHandler;
@@ -78,7 +85,7 @@ export type LambderCallOptions = LambderSharedCallOptions & {
     fetchEndedHandler?: FetchEndEventHandler;
 };
 
-type LambderCallerBaseOptions = {
+type LambderCallerBaseOptions<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = {
     apiPath: string,
     /** Sent with every call as `version`, informational: the server stamps its own on every answer. */
     apiVersion?: string,
@@ -101,7 +108,8 @@ type LambderCallerBaseOptions = {
     timeoutMs?: number,
     versionExpiredHandler?: NotifyHandler,
     sessionExpiredHandler?: NotifyHandler,
-    errorMessageHandler?: ErrorMessageHandler,
+    /** Handed every refusal a call of this caller comes back with, typed with every code the contract declares. */
+    refusalHandler?: RefusalHandler<TMessage>,
     notAuthorizedHandler?: NotifyHandler,
     errorHandler?: ErrorHandler,
     /** Receives each answer's logList, with the API name. Default: console.log with a `[lambder]` prefix, one line per entry. */
@@ -140,7 +148,7 @@ const pageReloadLoopBreaker = new LambderReloadLoopBreaker();
 
 /** Constructor options: the base options plus guardInputsProvider, mandatory once TProvided names guards. */
 export type LambderCallerOptions<TContract, TProvided extends string = never> =
-    LambderCallerBaseOptions & LambderGuardInputsProviderOption<TContract, TProvided>;
+    LambderCallerBaseOptions<LambderContractAnyRefusalMessage<TContract>> & LambderGuardInputsProviderOption<TContract, TProvided>;
 
 /**
  * @typeParam TContract - The API contract, for typed names, payloads and guard inputs.
@@ -160,7 +168,10 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
     private versionExpiredHandler?: NotifyHandler;
     private sessionExpiredHandler?: NotifyHandler;
 
-    private errorMessageHandler?: ErrorMessageHandler;
+    // Hears every endpoint's refusals, so held at the widest message: the
+    // constructor option types it to the contract's codes, and dispatch,
+    // generic over one endpoint's message, hands it one of those.
+    private refusalHandler?: RefusalHandler<LambderUncheckedRefusalMessage>;
     private notAuthorizedHandler?: NotifyHandler;
     private errorHandler?: ErrorHandler;
     private apiInputValidationErrorHandler?: ValidationErrorHandler;
@@ -184,7 +195,7 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
             isCorsEnabled,
             timeoutMs,
             versionExpiredHandler, sessionExpiredHandler,
-            errorMessageHandler,
+            refusalHandler,
             notAuthorizedHandler, errorHandler, logListHandler,
             fetchStartedHandler, fetchEndedHandler,
             apiInputValidationErrorHandler,
@@ -192,7 +203,7 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
             requestCompression,
             guardInputsProvider,
             transport,
-        } = options as LambderCallerBaseOptions & { guardInputsProvider?: (apiName: string) => unknown };
+        } = options as LambderCallerBaseOptions<LambderUncheckedRefusalMessage> & { guardInputsProvider?: (apiName: string) => unknown };
         this.apiPath = apiPath;
         this.apiVersion = apiVersion;
         this.apiSignatures = apiSignatures;
@@ -205,7 +216,7 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
         this.versionExpiredHandler = versionExpiredHandler;
         this.sessionExpiredHandler = sessionExpiredHandler;
 
-        this.errorMessageHandler = errorMessageHandler;
+        this.refusalHandler = refusalHandler;
         this.notAuthorizedHandler = notAuthorizedHandler;
         this.errorHandler = errorHandler;
         this.apiInputValidationErrorHandler = apiInputValidationErrorHandler;
@@ -242,15 +253,15 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
     }
 
     /** One call, one outcome. Never throws; every failure path resolves to { ok: false }. */
-    private async dispatch<TOutput>(
+    private async dispatch<TOutput, TMessage extends LambderUncheckedRefusalMessage>(
         apiName: string,
         payload?: any,
-        options?: LambderCallOptions,
-    ): Promise<LambderApiOutcome<TOutput>>{
+        options?: LambderCallOptions<TMessage>,
+    ): Promise<LambderApiOutcome<TOutput, TMessage>>{
         // Per-call overrides win over the constructor handlers.
         const versionExpiredHandler = options?.versionExpiredHandler ?? this.versionExpiredHandler;
         const sessionExpiredHandler = options?.sessionExpiredHandler ?? this.sessionExpiredHandler;
-        const errorMessageHandler = options?.errorMessageHandler ?? this.errorMessageHandler;
+        const refusalHandler = options?.refusalHandler ?? this.refusalHandler;
         const notAuthorizedHandler = options?.notAuthorizedHandler ?? this.notAuthorizedHandler;
         const errorHandler = options?.errorHandler ?? this.errorHandler;
         const apiInputValidationErrorHandler = options?.apiInputValidationErrorHandler ?? this.apiInputValidationErrorHandler;
@@ -308,7 +319,7 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
             idempotentAttempt.settle(stage === "beforeSending" ? IDEMPOTENT_ATTEMPT_NOT_SENT : { ok: false, reason: failure.reason });
             await fetchEnded(failure.error);
             await reportError(failure.error);
-            const outcome: LambderApiOutcome<TOutput> = { ok: false, reason: failure.reason, error: failure.error };
+            const outcome: LambderApiOutcome<TOutput, TMessage> = { ok: false, reason: failure.reason, error: failure.error };
             return outcome;
         };
 
@@ -391,7 +402,7 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
 
             // The reading of the answer is shared with LambderInvokeCaller;
             // only what to do about each outcome is this caller's.
-            const outcome = await resolveApiOutcome<TOutput>(answer);
+            const outcome = await resolveApiOutcome<TOutput, TMessage>(answer);
             idempotentAttempt.settle(outcome);
 
             // Every answer's logs, surfaced once and before any branch that
@@ -467,8 +478,8 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
                 else{ await reportError(new Error("Not Authorized;")); }
                 return outcome;
             }
-            if(!outcome.ok && outcome.reason === 'errorMessage'){
-                if(errorMessageHandler && outcome.errorMessage !== undefined){ await errorMessageHandler(outcome.errorMessage); }
+            if(!outcome.ok && outcome.reason === 'refusal'){
+                if(refusalHandler && outcome.refusal !== undefined){ await refusalHandler(outcome.refusal); }
                 return outcome;
             }
             return outcome;
@@ -493,7 +504,9 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
 
     /**
      * Full-fidelity call: resolves to a discriminated LambderApiOutcome
-     * instead of collapsing every failure to undefined. Never throws.
+     * instead of collapsing every failure to undefined. Never throws. A
+     * success's payload is the endpoint's output, and a refusal's
+     * refusal narrows on the codes the endpoint declares.
      *
      * The output is computed from the contract in the return type rather than
      * taken as a type parameter, so a call site cannot replace it by
@@ -501,29 +514,29 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
      */
     async apiOutcome<TApiName extends keyof TContract & string = string>(
         apiName: TApiName,
-        ...rest: LambderCallArgs<TContract, TApiName, TProvidedGuards, LambderCallOptions>
-    ): Promise<LambderApiOutcome<LambderContractOutputOf<TContract, TApiName>>>{
+        ...rest: LambderCallArgs<TContract, TApiName, TProvidedGuards, LambderCallOptions<LambderContractRefusalMessage<TContract, TApiName>>>
+    ): Promise<LambderApiOutcome<LambderContractOutputOf<TContract, TApiName>, LambderContractRefusalMessage<TContract, TApiName>>>{
         // The tuple is a conditional type on an unresolved TApiName, so its
         // elements read as unknown from inside; the contract shaped them on
         // the way in, which is where the guarantee belongs.
-        const [payload, options] = rest as [unknown, LambderCallOptions | undefined];
-        return await this.dispatch<LambderContractOutputOf<TContract, TApiName>>(apiName, payload, options);
+        const [payload, options] = rest as [unknown, LambderCallOptions<LambderContractRefusalMessage<TContract, TApiName>> | undefined];
+        return await this.dispatch(apiName, payload, options);
     };
 
     /**
-     * The payload on success, `undefined` on every failure except a
-     * structured refusal, which hands back whatever payload the envelope
-     * carried (usually null). Neither is distinguishable from a legitimately
-     * null or undefined payload: use apiOutcome() when that matters.
+     * The endpoint's output on success, `undefined` on every failure. An
+     * output is always an object or an array, so the result is truthy exactly
+     * when the call succeeded; the handlers configured on the caller have
+     * already been told why it did not. Use apiOutcome() to branch on the
+     * reason at the call site.
      */
     async api<TApiName extends keyof TContract & string = string>(
         apiName: TApiName,
-        ...rest: LambderCallArgs<TContract, TApiName, TProvidedGuards, LambderCallOptions>
-    ): Promise<LambderContractOutputOf<TContract, TApiName>|null|undefined> {
-        const [payload, options] = rest as [unknown, LambderCallOptions | undefined];
-        const outcome = await this.dispatch<LambderContractOutputOf<TContract, TApiName>>(apiName, payload, options);
-        if(outcome.ok) return outcome.payload;
-        return outcome.reason === 'errorMessage' ? outcome.response.payload : undefined;
+        ...rest: LambderCallArgs<TContract, TApiName, TProvidedGuards, LambderCallOptions<LambderContractRefusalMessage<TContract, TApiName>>>
+    ): Promise<LambderContractOutputOf<TContract, TApiName> | undefined> {
+        const [payload, options] = rest as [unknown, LambderCallOptions<LambderContractRefusalMessage<TContract, TApiName>> | undefined];
+        const outcome = await this.dispatch<LambderContractOutputOf<TContract, TApiName>, LambderContractRefusalMessage<TContract, TApiName>>(apiName, payload, options);
+        return outcome.ok ? outcome.payload : undefined;
     }
 
 }

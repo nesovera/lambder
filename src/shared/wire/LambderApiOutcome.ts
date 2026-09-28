@@ -11,8 +11,9 @@
  */
 
 import type { z } from "zod";
-import type { LambderApiEnvelopeBody } from "./LambderApiContract.js";
-import { refusalMessageOf, type LambderAppRefusalMessage } from "./LambderApiRefusal.js";
+import type { LambderApiRefusalEnvelope, LambderApiSuccessEnvelope } from "./LambderApiContract.js";
+import { refusalMessageOf, type LambderUncheckedRefusalMessage } from "./LambderApiRefusal.js";
+import { isObjectPayload } from "./LambderObjectPayload.js";
 
 /**
  * The 422 body's `zodError` as it survives JSON: a ZodError's name and
@@ -29,25 +30,36 @@ export type LambderApiFailureReason =
     | 'versionExpired'   // envelope flag: the client was built against another shape of the endpoint (its signature did not match)
     | 'sessionExpired'   // envelope flag: session gone (cookies cleared)
     | 'notAuthorized'    // envelope flag: authenticated but not allowed
-    | 'errorMessage'     // structured refusal on the envelope's errorMessage field
+    | 'refusal'     // structured refusal on the envelope's refusal field
     | 'unknown';         // unexpected internal failure (e.g. an app handler threw)
 
-/** A call that produced an answer the server means as a result. */
+/**
+ * The endpoint's handler answered: `payload` is its output, parsed through
+ * the API's output schema on the server, exactly the contract's type. Only a
+ * handler's answer reads as a success: everything else the server writes
+ * into an API call is a refusal (see LambderApiRefusalConfig), and a reader
+ * refuses a success whose payload is not an object (see isObjectPayload).
+ */
 export type LambderApiSuccessOutcome<T> = {
     ok: true;
-    payload: T | null | undefined;
-    response: LambderApiEnvelopeBody<T>;
+    payload: T;
+    response: LambderApiSuccessEnvelope<T>;
     /** The answer's logList, when it carried one. See LambderApiFailureFields.logList: the field is on every arm so a caller surfaces logs once. */
     logList?: unknown[];
 };
 
-/** What every failure carries, whatever went wrong. */
-type LambderApiFailureFields = {
+/**
+ * What every failure carries, whatever went wrong. TMessage is the refusal
+ * message the endpoint can answer with (LambderContractRefusalMessage), on
+ * every arm: a refusal flagged notAuthorized arrives as that reason and still
+ * carries its message.
+ */
+type LambderApiFailureFields<TMessage extends LambderUncheckedRefusalMessage> = {
     ok: false;
     /** HTTP status, when a response was received. */
     status?: number;
-    /** Envelope errorMessage, when the server provided one: always the message object, a plain string having been read as one (refusalMessageOf). */
-    errorMessage?: LambderAppRefusalMessage;
+    /** The envelope's refusal, when the server provided one: always the message object, a plain string having been read as one (refusalMessageOf). */
+    refusal?: TMessage;
     /** Seconds to wait before retrying, from the response's Retry-After header (rate-limit refusals send it, and so may a 503). */
     retryAfterSeconds?: number;
     /**
@@ -68,41 +80,42 @@ type LambderApiFailureFields = {
  * A 5xx also carries `response` when the server answered with Lambder's own
  * envelope, which is how a crash detail and a logList arrive with it.
  */
-export type LambderApiCallFailure<T> = LambderApiFailureFields & {
+export type LambderApiCallFailure<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = LambderApiFailureFields<TMessage> & {
     reason: 'network' | 'timeout' | 'server' | 'unknown';
     error: Error;
-    response?: LambderApiEnvelopeBody<T>;
+    response?: LambderApiRefusalEnvelope;
 };
 
 /** HTTP 422: the server rejected the input against the API's schema. Always carries the issues. */
-export type LambderApiValidationFailure = LambderApiFailureFields & {
+export type LambderApiValidationFailure<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = LambderApiFailureFields<TMessage> & {
     reason: 'validation';
     zodError: LambderValidationError;
 };
 
-/** The server answered, and the envelope itself says the call is refused. Always carries that envelope, and an `errorMessage` refusal always carries its message. */
-export type LambderApiEnvelopeFailure<T> = LambderApiFailureFields & {
-    response: LambderApiEnvelopeBody<T>;
+/** The server answered, and the envelope itself says the call is refused. Always carries that envelope, and a `refusal` failure always carries the refusal. */
+export type LambderApiEnvelopeFailure<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = LambderApiFailureFields<TMessage> & {
+    response: LambderApiRefusalEnvelope;
 } & (
     | { reason: 'versionExpired' | 'sessionExpired' | 'notAuthorized' }
-    | { reason: 'errorMessage'; errorMessage: LambderAppRefusalMessage }
+    | { reason: 'refusal'; refusal: TMessage }
 );
 
 /**
- * Discriminated result of an API call: `ok: true` carries the payload, every
- * failure carries a machine-readable reason, so "the server returned null"
- * and "the request failed" are never conflated.
+ * Discriminated result of an API call: `ok: true` carries the handler's
+ * output, every failure carries a machine-readable reason, so "the server
+ * answered" and "the request failed" are never conflated.
  *
  * The failure side is discriminated by `reason`, so narrowing to a reason
  * narrows to what it carries: `zodError` after `reason === 'validation'`,
  * `response` after an envelope reason, `error` after the rest, with no
- * non-null assertion needed.
+ * non-null assertion needed. TMessage is the endpoint's refusal message
+ * (LambderContractRefusalMessage), which `refusal.code` narrows.
  */
-export type LambderApiOutcome<T> =
+export type LambderApiOutcome<T, TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> =
     | LambderApiSuccessOutcome<T>
-    | LambderApiCallFailure<T>
-    | LambderApiValidationFailure
-    | LambderApiEnvelopeFailure<T>;
+    | LambderApiCallFailure<TMessage>
+    | LambderApiValidationFailure<TMessage>
+    | LambderApiEnvelopeFailure<TMessage>;
 
 /**
  * What reading one HTTP answer can produce: LambderApiOutcome minus the
@@ -111,11 +124,11 @@ export type LambderApiOutcome<T> =
  * has handled `server` and `validation` holds a success or an envelope
  * refusal, both of which carry the envelope.
  */
-export type LambderApiAnswerOutcome<T> =
+export type LambderApiAnswerOutcome<T, TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> =
     | LambderApiSuccessOutcome<T>
-    | (LambderApiCallFailure<T> & { reason: 'server' })
-    | LambderApiValidationFailure
-    | LambderApiEnvelopeFailure<T>;
+    | (LambderApiCallFailure<TMessage> & { reason: 'server' })
+    | LambderApiValidationFailure<TMessage>
+    | LambderApiEnvelopeFailure<TMessage>;
 
 /**
  * What the mapping needs from an HTTP answer, whichever transport produced it.
@@ -146,28 +159,53 @@ export type LambderApiHttpAnswer = {
 };
 
 /**
+ * An envelope as it is read, before it is told apart: every field either
+ * kind may carry, each as it came off the wire.
+ */
+type LambderApiEnvelopeRead = {
+    apiVersion: string | null;
+    payload?: unknown;
+    versionExpired?: unknown;
+    sessionExpired?: unknown;
+    notAuthorized?: unknown;
+    refusal?: unknown;
+    logList?: unknown[];
+    crash?: unknown;
+};
+
+/**
  * Whether a parsed body is Lambder's envelope, which always carries
  * apiVersion (null when the server set none). An object without it is
  * somebody else's answer: API Gateway's own errors ({"message": ...} on a
  * 413, a throttle, a WAF or missing-route 403, an authorizer 401, a 502 from
  * a crashed function), a proxy's, a load balancer's.
  */
-const isApiEnvelope = (value: unknown): value is LambderApiEnvelopeBody<unknown> =>
+const isApiEnvelope = (value: unknown): value is LambderApiEnvelopeRead =>
     value !== null && typeof value === "object" && Object.prototype.hasOwnProperty.call(value, "apiVersion");
 
 /**
  * Reads one HTTP answer into an outcome. A 5xx is a server failure that keeps
  * the envelope when the server sent one (Lambder's own 500 body carries
- * errorMessage, and a global error handler may add crash and logList); a
+ * refusal, and a global error handler may add crash and logList); a
  * 422 is a validation failure only with Lambder's validation body; anything
  * else must be a JSON envelope, whose flags are honoured in a fixed order.
  * A failure read off any answer but a 422 carries the answer's Retry-After
  * as retryAfterSeconds.
+ *
+ * A success is a 2xx envelope with no flag and no refusal whose payload
+ * is an object or an array: what only a handler's parsed output is. Anything
+ * else that says nothing is wrong (a null or primitive payload a hand-built
+ * body, a proxy or an old stored answer carries) is a server failure, so a
+ * success's payload is always the contract's output and never falsy.
+ *
+ * TMessage is the endpoint's refusal message type: the reader cannot check
+ * a code against declarations it does not have, and relies on the server,
+ * which never sends a code the endpoint did not declare.
  */
-export const resolveApiOutcome = async <T>(answer: LambderApiHttpAnswer): Promise<LambderApiAnswerOutcome<T>> => {
+export const resolveApiOutcome = async <T, TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage>(answer: LambderApiHttpAnswer): Promise<LambderApiAnswerOutcome<T, TMessage>> => {
     const status = answer.status;
-    const errorMessageOf = (envelope: LambderApiEnvelopeBody<T> | undefined): { errorMessage?: LambderAppRefusalMessage } =>
-        envelope?.errorMessage !== undefined ? { errorMessage: refusalMessageOf(envelope.errorMessage) } : {};
+    const refusalOf = (envelope: LambderApiEnvelopeRead | undefined): { refusal?: TMessage } =>
+        envelope?.refusal !== undefined ? { refusal: refusalMessageOf(envelope.refusal) as TMessage } : {};
     // Retry-After (delta-seconds) rides every refusal that knows its reset
     // time, e.g. a rate limit, and a 503 that says when to come back; absent
     // or unreadable is undefined.
@@ -179,19 +217,19 @@ export const resolveApiOutcome = async <T>(answer: LambderApiHttpAnswer): Promis
         // handlers may answer text or HTML, and a gateway in front answers
         // JSON of its own: parse defensively, and keep only the envelope, so
         // a foreign body's fields never read as the app's message or crash.
-        let envelope: LambderApiEnvelopeBody<T> | undefined;
+        let envelope: LambderApiEnvelopeRead | undefined;
         try {
             const bodyText = await answer.text();
             try {
                 const parsed: unknown = JSON.parse(bodyText);
-                if(isApiEnvelope(parsed)) envelope = parsed as LambderApiEnvelopeBody<T>;
+                if(isApiEnvelope(parsed)) envelope = parsed;
             } catch { /* not JSON */ }
         } catch { /* body unavailable */ }
         return {
             ok: false, reason: 'server', status,
-            ...errorMessageOf(envelope),
+            ...refusalOf(envelope),
             logList: envelope?.logList,
-            ...(envelope ? { response: envelope } : {}),
+            ...(envelope ? { response: envelope as LambderApiRefusalEnvelope } : {}),
             error: new Error("Request failed: " + status + " - " + (answer.statusText ?? "")),
             ...retryAfter,
         };
@@ -211,9 +249,9 @@ export const resolveApiOutcome = async <T>(answer: LambderApiHttpAnswer): Promis
         return { ok: false, reason: 'validation', status, zodError, logList: body?.logList };
     }
 
-    let data: LambderApiEnvelopeBody<T>;
+    let data: unknown;
     try {
-        data = await answer.json() as LambderApiEnvelopeBody<T>;
+        data = await answer.json();
         if(data === null || typeof data !== "object") throw new Error("Response is not an object");
     }catch(err){
         // A non-envelope body (e.g. an HTML error page) is a server failure.
@@ -227,17 +265,23 @@ export const resolveApiOutcome = async <T>(answer: LambderApiHttpAnswer): Promis
         return { ok: false, reason: 'server', status, error: new Error(`Request failed: ${status} - the answer is not a Lambder envelope${gatewayMessage}`), ...retryAfter };
     }
 
-    if(data.versionExpired) return { ok: false, reason: 'versionExpired', status, ...errorMessageOf(data), response: data, logList: data.logList, ...retryAfter };
-    if(data.sessionExpired) return { ok: false, reason: 'sessionExpired', status, ...errorMessageOf(data), response: data, logList: data.logList, ...retryAfter };
-    if(data.notAuthorized) return { ok: false, reason: 'notAuthorized', status, ...errorMessageOf(data), response: data, logList: data.logList, ...retryAfter };
-    // Presence, not truthiness: the writer keeps an errorMessage an app set
+    const asRefusal = data as LambderApiRefusalEnvelope;
+    if(data.versionExpired) return { ok: false, reason: 'versionExpired', status, ...refusalOf(data), response: asRefusal, logList: data.logList, ...retryAfter };
+    if(data.sessionExpired) return { ok: false, reason: 'sessionExpired', status, ...refusalOf(data), response: asRefusal, logList: data.logList, ...retryAfter };
+    if(data.notAuthorized) return { ok: false, reason: 'notAuthorized', status, ...refusalOf(data), response: asRefusal, logList: data.logList, ...retryAfter };
+    // Presence, not truthiness: the writer keeps a refusal an app set
     // to the empty string, and a refusal that says nothing is still a
     // refusal, not a success.
-    if(data.errorMessage !== undefined) return { ok: false, reason: 'errorMessage', status, errorMessage: refusalMessageOf(data.errorMessage), response: data, logList: data.logList, ...retryAfter };
+    if(data.refusal !== undefined) return { ok: false, reason: 'refusal', status, refusal: refusalMessageOf(data.refusal) as TMessage, response: asRefusal, logList: data.logList, ...retryAfter };
     // An envelope that says nothing is wrong is still not a success when the
-    // status says otherwise.
+    // status says otherwise, nor when its payload is not what a handler
+    // answers. Neither is a refusal either, so neither carries the body as
+    // one: the error says what it was.
     if(status < 200 || status >= 300){
-        return { ok: false, reason: 'server', status, response: data, logList: data.logList, error: new Error(`Request failed: ${status} - ${answer.statusText ?? ""}`), ...retryAfter };
+        return { ok: false, reason: 'server', status, logList: data.logList, error: new Error(`Request failed: ${status} - ${answer.statusText ?? ""}`), ...retryAfter };
     }
-    return { ok: true, payload: data.payload, response: data, logList: data.logList };
+    if(!isObjectPayload(data.payload)){
+        return { ok: false, reason: 'server', status, logList: data.logList, error: new Error("Request failed: the answer's payload is not an object or an array, so no handler of this API wrote it") };
+    }
+    return { ok: true, payload: data.payload as T, response: data as LambderApiSuccessEnvelope<T>, logList: data.logList };
 };

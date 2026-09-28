@@ -1,11 +1,11 @@
 import type { LambderApiMode } from "../shared/wire/LambderApiContract.js";
-import type { LambderRateLimitOptionValue, LambderRateLimitOverride } from "../shared/wire/LambderApiOptionValues.js";
+import type { LambderRateLimitMessage, LambderRateLimitOptionValue, LambderRateLimitOverride } from "../shared/wire/LambderApiOptionValues.js";
 import type { z } from "zod";
 import type { LambderApiRequest } from "./LambderApiRequest.js";
 import type { LambderApiCallContext } from "./LambderApiCallContext.js";
 import { type LambderRateLimiter, type LambderRateLimitExceeded, type LambderRateLimitPolicy } from "../shared/contracts/LambderRateLimiter.js";
 import type { LambderSessionRecord } from "../shared/contracts/LambderSessionStore.js";
-import { LambderApiRefusal, type LambderAppRefusalMessage } from "../shared/wire/LambderApiRefusal.js";
+import { LambderApiRefusal } from "../shared/wire/LambderApiRefusal.js";
 import type { LambderNonEmptyOptionMap } from "../shared/util/LambderTypeUtilities.js";
 import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
 /** Refusal a rate-limited request answers unless the policy or the API's override names its own. */
@@ -16,12 +16,16 @@ export declare const DEFAULT_RATE_LIMIT_REFUSAL: {
 };
 /**
  * The refusal a rate-limited call answers with: a 429 envelope carrying the
- * framework code (a policy's own message inherits it unless it sets a more
- * specific one) and a Retry-After header. The engine throws it; the mock
- * runtime's failure injection throws the same one, so an injected rate
- * limit is indistinguishable from a real one.
+ * framework code, whatever message a policy or an API wrote, and a
+ * Retry-After header. The engine throws it; the mock runtime's failure
+ * injection throws the same one, so an injected rate limit is
+ * indistinguishable from a real one.
+ *
+ * The code goes on after the message, so a message that carries one anyway
+ * (a plain-JS caller, a cast) cannot replace it: a rate limit is never a code
+ * an endpoint declares, and the pipeline would refuse to send one it did not.
  */
-export declare const rateLimitRefusal: (detail: string, retryAfterSeconds: number, message?: LambderAppRefusalMessage) => LambderApiRefusal;
+export declare const rateLimitRefusal: (detail: string, retryAfterSeconds: number, message?: LambderRateLimitMessage) => LambderApiRefusal;
 /**
  * A custom rate-limit key. `apiInput` names the fields of the API's OWN
  * payload the key derives from: that slice is validated against the raw
@@ -106,8 +110,8 @@ export type LambderApiRateLimitPolicyConfig<TCtx = any> = LambderRateLimitPolicy
      * takes it: `per: "ip"` and `per: "session"` have one place each.
      */
     chargeAt?: LambderRateLimitChargeAt;
-    /** Envelope errorMessage for refused requests; inherits code "lambder/rate-limited" unless it sets its own. Default: a warning saying too many requests. */
-    errorMessage?: LambderAppRefusalMessage;
+    /** The refusal's message for refused requests: its type, title and content, under the code "lambder/rate-limited". Default: a warning saying too many requests. */
+    refusal?: LambderRateLimitMessage;
 };
 export type LambderApiRateLimitsConfig<TPolicies extends Record<string, LambderApiRateLimitPolicyConfig<any>>> = {
     /** Your limiter instance (LambderDdbRateLimiter, LambderMemoryRateLimiter, or your own); its table and keyPrefix apply as configured on it. */
@@ -188,7 +192,7 @@ export type LambderRateLimitCheckResult = false | (LambderRateLimitExceeded & {
 /**
  * `ctx.rateLimit(policy, key?)`: counts one attempt against a named policy
  * and, when it is over, refuses the request the way a declared limit does (a
- * 429 with Retry-After and the policy's errorMessage). For a limit whose key
+ * 429 with Retry-After and the policy's refusal). For a limit whose key
  * only the handler knows, or one to charge only on some paths through it.
  *
  * The key tuple is NoInfer: left inferable, a key passed where none belongs
@@ -216,7 +220,7 @@ export type LambderRateLimitChargeResult = {
 };
 type LambderRateLimitOverrideFor<TPolicy> = TPolicy extends {
     budget: "perPolicy";
-} ? Pick<LambderRateLimitOverride, "errorMessage"> : LambderRateLimitOverride;
+} ? Pick<LambderRateLimitOverride, "refusal"> : LambderRateLimitOverride;
 /** The map form's full shape: every referable policy name, each carrying its own override. */
 type LambderRateLimitMap<TPolicies, TPayload, TIncludeSession extends boolean> = {
     readonly [K in LambderAllowedPolicyNames<TPolicies, TPayload, TIncludeSession> & keyof TPolicies]?: true | LambderRateLimitOverrideFor<TPolicies[K]>;

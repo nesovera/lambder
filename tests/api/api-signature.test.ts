@@ -16,6 +16,7 @@ import { lambderHandlerTransport } from '../../src/invoke/lambderHandlerTranspor
 import { assertApiFailure } from '../../src/shared/wire/LambderOutcomeAssertions.js';
 import { LambderMemorySessionStore } from '../../src/stores/LambderMemorySessionStore.js';
 import { apiSignatureOf } from '../../src/api/LambderApiSignature.js';
+import type { LambderApiAllowedRefusal } from '../../src/api/LambderApiRefusals.js';
 import { apiNameKeyOf, lookupApiSignature, readApiSignature, extensibleEnum, API_SIGNATURE_HEX_LENGTH, type LambderApiSignatureMap } from '../../src/shared/wire/LambderApiSignatureMap.js';
 import { LambderReloadLoopBreaker, RELOAD_LOOP_WINDOW_MS } from '../../src/client/LambderReloadLoopBreaker.js';
 import { compareDottedVersions, isDottedVersion } from '../../src/shared/wire/LambderVersionOrder.js';
@@ -72,6 +73,24 @@ describe('The signature digest', () => {
         expect(await apiSignatureOf(definition({ idempotency: false }), guards)).toBe(base);
         // The guard schema is what counts, not the parameter beside its name.
         expect(await apiSignatureOf(definition({ guards: { org: 'READ' } }), guards)).toBe(await apiSignatureOf(definition({ guards: { org: 'WRITE' } }), guards));
+    });
+
+    it('changes when an endpoint can refuse with another code, or a code\'s data changes shape, and not with the order they are declared in', async () => {
+        const closed: LambderApiAllowedRefusal = { data: false };
+        const short: LambderApiAllowedRefusal = { data: true, schema: z.object({ available: z.number() }) };
+        const refusals = (...entries: [string, LambderApiAllowedRefusal][]) => definition({ refusals: { codes: new Map(entries), codeRequired: false } });
+        const base = await apiSignatureOf(definition(), guards);
+        const one = await apiSignatureOf(refusals(['order-closed', closed]), guards);
+        const two = await apiSignatureOf(refusals(['order-closed', closed], ['wallet-short', short]), guards);
+        const reshaped = await apiSignatureOf(refusals(['order-closed', closed], ['wallet-short', { data: true, schema: z.object({ available: z.string() }) }]), guards);
+        expect(new Set([base, one, two, reshaped]).size).toBe(4);
+        expect(await apiSignatureOf(refusals(['wallet-short', short], ['order-closed', closed]), guards)).toBe(two);
+        // The status and the flag a code leaves with count: a caller reads the one and routes on the other.
+        expect(await apiSignatureOf(refusals(['order-closed', { data: false, status: 409 }]), guards)).not.toBe(one);
+        expect(await apiSignatureOf(refusals(['order-closed', { data: false, notAuthorized: true }]), guards)).not.toBe(one);
+        // A code's data is received, so an extensibleEnum in it loses its values as an output's does.
+        const status = (values: [string, ...string[]]) => refusals(['order-held', { data: true, schema: z.object({ status: extensibleEnum(z.enum(values)) }) }]);
+        expect(await apiSignatureOf(status(['held', 'released']), guards)).toBe(await apiSignatureOf(status(['held', 'released', 'expired']), guards));
     });
 
     it('hashes shape, not values: a default\'s value and the order of fields change nothing, and a function default is stable', async () => {
@@ -214,7 +233,7 @@ describe('The server and its map', () => {
         // With no minApiVersion set, the version the caller names decides nothing.
         expect(await bodyOf({ apiName: 'user.get', payload: { id: '1' }, version: '1', signature })).toMatchObject({ payload: { id: '1', name: 'Ada' } });
         expect(await bodyOf({ apiName: 'gone', payload: {}, signature: 'from-another-contract' })).toEqual({ apiVersion: '7', payload: null, versionExpired: true });
-        expect((await bodyOf({ apiName: 'gone', payload: {} })).errorMessage.code).toBe('lambder/api-not-found');
+        expect((await bodyOf({ apiName: 'gone', payload: {} })).refusal.code).toBe('lambder/api-not-found');
         // Ahead of the session read: a stale signed-out client hears "reload", not "log in".
         expect(await bodyOf({ apiName: 'me', signature: 'an-older-shape' })).toEqual({ apiVersion: '7', payload: null, versionExpired: true });
     });
@@ -415,11 +434,11 @@ describe('LambderInvokeCaller with a signature map', () => {
             functionName: 'callee', apiSignatures: map,
             transport: async (event) => {
                 bodies.push(JSON.parse(event.body ?? '{}'));
-                return { functionError: null, result: { statusCode: 200, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ apiVersion: '1', payload: 'ok' }), isBase64Encoded: false } };
+                return { functionError: null, result: { statusCode: 200, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ apiVersion: '1', payload: { ok: true } }), isBase64Encoded: false } };
             },
         });
 
-        expect(await caller.api('user.get', { id: '1' })).toBe('ok');
+        expect(await caller.api('user.get', { id: '1' })).toEqual({ ok: true });
         expect(bodies[0]).toMatchObject({ apiName: 'user.get', signature: 'callee-shape' });
 
         const missing = await caller.apiOutcome('user.list', {});

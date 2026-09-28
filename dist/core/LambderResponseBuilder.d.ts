@@ -4,8 +4,8 @@ import { LambderResponse, type LambderHeadersInput } from "./LambderResponse.js"
 import type { LambderHttpStatusCode } from "../shared/wire/LambderHttpStatus.js";
 import { LambderSafeHtml } from "../shared/LambderHtml.js";
 import type { LambderTemplateData } from "./LambderTemplatingEngine.js";
-import type { LambderApiResponseConfig } from "../shared/wire/LambderApiContract.js";
-export type { LambderApiEnvelopeBody, LambderApiResponseConfig } from "../shared/wire/LambderApiContract.js";
+import type { LambderApiRefusalConfig } from "../shared/wire/LambderApiContract.js";
+export type { LambderApiEnvelopeBody, LambderApiRefusalConfig } from "../shared/wire/LambderApiContract.js";
 export type LambderResponseOptions = {
     statusCode?: LambderHttpStatusCode;
     headers?: LambderHeadersInput;
@@ -79,12 +79,14 @@ export default class LambderResponseBuilder {
         htmlVirtualSlots?: boolean;
     }): Promise<LambderResponse>;
     /**
-     * An API envelope written by hand: what a hook, an input validation
-     * handler or a global error handler answers an API call with (a refusal
-     * flag, an errorMessage, a crash). The payload goes out as given; an API
-     * handler's own output is parsed through its schema by the instance
-     * instead. The logList channel is what the request accumulated unless the
-     * config names its own.
+     * An API call answered from outside its handler: what a hook, a fallback,
+     * the input validation handler or the global error handler answers with.
+     * It is always a refusal (a refusal message, or one of the versionExpired,
+     * sessionExpired and notAuthorized flags) with a null payload, so a
+     * caller's success is only ever the handler's parsed output. Its message
+     * carries a framework code or none, and no data, since it answers outside
+     * any one endpoint's declared refusals. The logList channel is what the
+     * request accumulated unless the config names its own.
      */
-    api(payload: unknown, config?: LambderApiResponseConfig, options?: LambderResponseOptions): LambderResponse;
+    apiRefusal(config: LambderApiRefusalConfig, options?: LambderResponseOptions): LambderResponse;
 }

@@ -1,5 +1,5 @@
 import { LambderResponse } from "./LambderResponse.js";
-import { buildApiEnvelope } from "../api/LambderApiEnvelope.js";
+import { plainRefusalEnvelope } from "../api/LambderApiEnvelope.js";
 /**
  * Builds the responses of routes, hooks and error handlers. An API handler
  * never holds one: it returns its output or refuses, and writes headers and
@@ -92,7 +92,7 @@ export default class LambderResponseBuilder {
     }
     ;
     versionExpired(options) {
-        return this.api(null, { versionExpired: true }, options);
+        return this.apiRefusal({ versionExpired: true }, options);
     }
     ;
     fileBase64(fileBase64, mimeType, options) {
@@ -135,16 +135,17 @@ export default class LambderResponseBuilder {
     }
     ;
     /**
-     * An API envelope written by hand: what a hook, an input validation
-     * handler or a global error handler answers an API call with (a refusal
-     * flag, an errorMessage, a crash). The payload goes out as given; an API
-     * handler's own output is parsed through its schema by the instance
-     * instead. The logList channel is what the request accumulated unless the
-     * config names its own.
+     * An API call answered from outside its handler: what a hook, a fallback,
+     * the input validation handler or the global error handler answers with.
+     * It is always a refusal (a refusal message, or one of the versionExpired,
+     * sessionExpired and notAuthorized flags) with a null payload, so a
+     * caller's success is only ever the handler's parsed output. Its message
+     * carries a framework code or none, and no data, since it answers outside
+     * any one endpoint's declared refusals. The logList channel is what the
+     * request accumulated unless the config names its own.
      */
-    api(payload, config = {}, options) {
-        const envelope = buildApiEnvelope(this.apiVersion, payload, { ...config, logList: config.logList || this.ctx?.logList });
-        return this.json(envelope, options);
+    apiRefusal(config, options) {
+        return this.json(plainRefusalEnvelope(this.apiVersion, config, "res.apiRefusal()", this.ctx?.logList), options);
     }
     ;
 }

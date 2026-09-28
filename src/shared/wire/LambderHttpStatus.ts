@@ -14,3 +14,10 @@ export type LambderHttpStatusCode =
     | 300 | 301 | 302 | 303 | 304 | 307 | 308
     | 400 | 401 | 402 | 403 | 404 | 405 | 406 | 408 | 409 | 410 | 412 | 413 | 415 | 416 | 418 | 422 | 428 | 429 | 431 | 451
     | 500 | 501 | 502 | 503 | 504;
+
+/**
+ * The status a refusal with a declared code may leave with: not a 5xx, which a
+ * reader files as a server failure, not 422, which is input validation's, and
+ * not a 1xx.
+ */
+export type LambderRefusalStatusCode = Exclude<LambderHttpStatusCode, 100 | 101 | 422 | 500 | 501 | 502 | 503 | 504>;

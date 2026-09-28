@@ -14,6 +14,10 @@ import type { LambderSessionCrypto } from "../session/LambderSessionCrypto.js";
 import type { LambderApiGuard } from "../api/LambderApiGuards.js";
 import type { LambderApiRateLimitPolicyConfig, LambderApiRateLimitsConfig } from "../api/LambderApiRateLimits.js";
 import type { LambderApiIdempotencyConfig } from "../api/LambderApiIdempotency.js";
+import { type LambderRefusalVocabulary } from "../api/LambderApiRefusals.js";
+import type { LambderNoExtraKeys } from "../shared/util/LambderTypeUtilities.js";
+import type { LambderJsonOf } from "../shared/wire/LambderApiContract.js";
+import type { LambderRateLimitMessage } from "../shared/wire/LambderApiOptionValues.js";
 import type { MaybePromise } from "../shared/util/LambderTypeUtilities.js";
 export type LambderRouteHandler = (ctx: LambderRenderContext, resolver: LambderResolver) => MaybePromise<LambderResponse>;
 export type LambderSessionRouteHandler<SessionData = any> = (ctx: LambderSessionRenderContext<any, SessionData>, resolver: LambderResolver) => MaybePromise<LambderResponse>;
@@ -251,6 +255,29 @@ export type LambderCreateOptions<TSessionData = any> = {
      */
     guards?: Record<string, LambderApiGuard<any, any, any, LambderRenderContext<any, Record<string, string>, {}, TSessionData>, LambderSessionRenderContext<any, TSessionData>>>;
     /**
+     * The app's refusal vocabulary: every code an API or a guard may refuse
+     * with, each declared once with the schema of its data (`{ data: schema }`
+     * or none), the status every refusal with it leaves with and whether it
+     * sets the notAuthorized flag. An API names the codes it may refuse with
+     * in its own `refusals` option, a guard in its own, and a refusal
+     * carrying any other code is a crash rather than an answer
+     * (LambderApiRefusalValidationError). The codes are what goes on the
+     * wire, so they may not start with the framework's `lambder/`; a code's
+     * data is an object or an array, as an output is.
+     *
+     * An app declares it with `initLambder().declareRefusals()`, which hands
+     * it here and types the init's guard() and refuse to it; it is written
+     * here only when the class is constructed directly.
+     */
+    refusals?: LambderRefusalVocabulary;
+    /**
+     * Whether every refusal an API answers with has to name a declared code
+     * (or a framework code): an uncoded refuse() is then a crash rather than
+     * an answer, and ctx.refuse requires a code. Set through
+     * declareRefusals()'s `requireCodes`, as `refusals` is. Default false.
+     */
+    requireRefusalCodes?: boolean;
+    /**
      * Make an authorization declaration part of registering a session API:
      * every addSessionApi must declare `guards`, at the type level (a missing
      * `guards` is a compile error) and at registration (a plain-JS caller
@@ -306,6 +333,19 @@ type LambderSessionOptionRequired = {
  */
 export type LambderSessionEnabledInstance<TSessionsEnabled extends boolean> = TSessionsEnabled extends true ? unknown : LambderSessionOptionRequired;
 /**
+ * An API answers with an object or an array (see isObjectPayload), so a
+ * caller's success is never null, false, 0 or "". Intersected onto an API's
+ * options: an output schema whose wire form is anything else (z.void(),
+ * z.boolean(), a nullable or an optional object, a Date) is refused where it
+ * is written, and the property name is the message.
+ */
+export type LambderObjectOutputCheck<TOutput extends z.ZodType> = 0 extends 1 & z.output<TOutput> ? unknown : undefined extends z.output<TOutput> ? LambderObjectOutputRefusal : [LambderJsonOf<z.output<TOutput>>] extends [never] ? LambderObjectOutputRefusal : [LambderJsonOf<z.output<TOutput>>] extends [object] ? unknown : LambderObjectOutputRefusal;
+type LambderObjectOutputRefusal = {
+    output: {
+        readonly "lambder: an API answers with an object or an array. One with nothing to answer declares output: z.object({}) and returns {}.": never;
+    };
+};
+/**
  * The `guards` field of an API's options: optional by default, required once
  * create() received the require*ApiGuards flag for that kind of API, so that
  * an authorization declaration cannot be forgotten at the type level.
@@ -320,17 +360,7 @@ export type LambderRequirableGuardsField<TRequired extends boolean, TGuardsOpt> 
     /** Named guards, run in declared order before input validation (after it for a guard declared runAt: "afterInputValidation"): a name, a non-empty list of names, or a non-empty { name: param } map for parameterized guards. Their input requirements merge into this API's contract input; their return values land typed on ctx.guardData. */
     guards?: TGuardsOpt;
 };
-/**
- * Rejects a key the options type does not have, which `const TOptions` would
- * otherwise wave through: inferring a generic from an object literal switches
- * excess-property checking off for the whole literal, so
- * `requireSessionApiGuard` (no trailing "s") or `maxResponseByte` would
- * compile, be dropped in silence, and leave the app on the default. That is
- * worst for the two require*ApiGuards flags, which exist to make a missing
- * authorization declaration a compile error. Mapping every surplus key to
- * `never` puts the error back on the key itself.
- */
-export type LambderNoExtraKeys<TOptions, TShape> = TOptions & Record<Exclude<keyof TOptions, keyof TShape>, never>;
+export type { LambderNoExtraKeys };
 /**
  * What create() was actually given for one option, or undefined when the
  * literal does not carry the key at all.
@@ -347,6 +377,16 @@ export type LambderGivenOption<TOptions, TKey extends PropertyKey> = TKey extend
  */
 type LambderOptionShape<TSessionData, TKey extends keyof LambderCreateOptions<TSessionData>> = NonNullable<LambderCreateOptions<TSessionData>[TKey]>;
 /**
+ * A guard's `refusals` against the vocabulary given beside it: the guard is
+ * built before the instance, so a code it names that the vocabulary does not
+ * hold is caught here, on the guard's entry in the guards option.
+ */
+type LambderGuardRefusalsKnown<TGuard, TRefusals> = TGuard extends {
+    refusals?: infer TNamed;
+} ? NonNullable<TNamed> extends readonly (infer TCode extends string)[] ? string extends TCode ? unknown : [Exclude<TCode, keyof NonNullable<TRefusals> & string>] extends [never] ? unknown : {
+    refusals: readonly (keyof NonNullable<TRefusals> & string)[];
+} : unknown : unknown;
+/**
  * The surplus-key rule one level down, over the option objects a typo is
  * worst on. Excess-property checking is off for the WHOLE literal under
  * `const TOptions`, nested objects included, and the top-level rule does not
@@ -358,7 +398,7 @@ type LambderOptionShape<TSessionData, TKey extends keyof LambderCreateOptions<TS
  * checked against its own option's shape, so the error lands on the
  * misspelled key.
  */
-export type LambderNestedOptionChecks<TSessionData, TOptions extends LambderCreateOptions<TSessionData>> = {
+export type LambderNestedOptionChecks<TSessionData, TOptions extends LambderCreateOptions<TSessionData>, TRefusals = TOptions["refusals"]> = {
     session?: LambderNoExtraKeys<NonNullable<TOptions["session"]>, LambderOptionShape<TSessionData, "session">> & {
         cookie?: LambderNoExtraKeys<NonNullable<NonNullable<TOptions["session"]>["cookie"]>, LambderSessionCookieOptions>;
     };
@@ -366,11 +406,15 @@ export type LambderNestedOptionChecks<TSessionData, TOptions extends LambderCrea
     crashes?: LambderNoExtraKeys<NonNullable<TOptions["crashes"]>, LambderOptionShape<TSessionData, "crashes">>;
     rateLimits?: LambderNoExtraKeys<NonNullable<TOptions["rateLimits"]>, LambderOptionShape<TSessionData, "rateLimits">> & {
         policies?: {
-            [TPolicy in keyof NonNullable<TOptions["rateLimits"]>["policies"]]: LambderNoExtraKeys<NonNullable<TOptions["rateLimits"]>["policies"][TPolicy], LambderApiRateLimitPolicyConfig<LambderRenderContext>>;
+            [TPolicy in keyof NonNullable<TOptions["rateLimits"]>["policies"]]: LambderNoExtraKeys<NonNullable<TOptions["rateLimits"]>["policies"][TPolicy], LambderApiRateLimitPolicyConfig<LambderRenderContext>> & (NonNullable<TOptions["rateLimits"]>["policies"][TPolicy] extends {
+                refusal: infer TMessage;
+            } ? {
+                refusal?: LambderNoExtraKeys<TMessage, LambderRateLimitMessage>;
+            } : unknown);
         };
     };
     guards?: {
-        [TGuard in keyof NonNullable<TOptions["guards"]>]: LambderNoExtraKeys<NonNullable<TOptions["guards"]>[TGuard], LambderOptionShape<TSessionData, "guards">[string]>;
+        [TGuard in keyof NonNullable<TOptions["guards"]>]: LambderNoExtraKeys<NonNullable<TOptions["guards"]>[TGuard], LambderOptionShape<TSessionData, "guards">[string]> & LambderGuardRefusalsKnown<NonNullable<TOptions["guards"]>[TGuard], TRefusals>;
     };
     files?: TOptions["files"] extends {
         source: unknown;
@@ -387,4 +431,3 @@ export type LambderNestedOptionChecks<TSessionData, TOptions extends LambderCrea
  * response (maxResponseBytes: 0) that an app discovers in production.
  */
 export declare const assertCreateOptions: (options: LambderCreateOptions<any>) => void;
-export {};

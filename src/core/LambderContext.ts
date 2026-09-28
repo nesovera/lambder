@@ -8,6 +8,7 @@ import { DEFAULT_API_PATH } from "../shared/wire/LambderDefaultApiPath.js";
 import { LAMBDER_INVOKE_API_ID, LAMBDER_LOCAL_API_ID } from "../shared/wire/LambderInvokeApiId.js";
 import { bindCallTools, responseToolsOf, type LambderResponseTools } from "../api/LambderApiCallContext.js";
 import { decodeRequestPath } from "./LambderRequestPath.js";
+import { refuse } from "../shared/wire/LambderApiRefusal.js";
 import type LambderSessionController from "../session/LambderSessionController.js";
 import type {
     LambderApiRateLimitPolicyConfig,
@@ -143,7 +144,7 @@ export type LambderRenderContext<
     /**
      * Counts one attempt against a named rate-limit policy and refuses the
      * request when it is over: a 429 envelope on an API call, a plain 429 on
-     * a route, with Retry-After and the policy's errorMessage either way. A
+     * a route, with Retry-After and the policy's refusal either way. A
      * policy without `per` takes the key as the second argument; a `per:
      * "ip"` or `per: "session"` one reads it off the request. The instance's
      * limiter, failOpen and key bounding apply, as for a declared limit.
@@ -187,6 +188,10 @@ export const bindContextTools = (
         methods: {
             rateLimit: async (policy: string, key?: string): Promise<void> => { await tools.chargeRateLimit(bound, policy, key, true); },
             isRateLimited: (policy: string, key?: string): Promise<LambderRateLimitCheckResult> => tools.chargeRateLimit(bound, policy, key, false),
+            // refuse() itself: what an API handler's context types as the
+            // endpoint's declared codes (LambderDeclaredRefuse). The check
+            // against the declaration happens where the refusal is rendered.
+            refuse,
             ...responseToolsOf(bound, bound.host),
         },
     });

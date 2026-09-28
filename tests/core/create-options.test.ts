@@ -15,8 +15,7 @@
 import { testPublicFiles } from '../helpers.js';
 import { describe, it, expect, vi } from 'vitest';
 import { z } from 'zod';
-import Lambder, { initLambder } from '../../src/core/Lambder.js';
-import type { LambderCreateOptions } from '../../src/core/LambderCreateOptions.js';
+import Lambder, { initLambder, type LambderInitCreateOptions } from '../../src/core/Lambder.js';
 import { LambderMemorySessionStore } from '../../src/stores/LambderMemorySessionStore.js';
 import { LambderMemoryRateLimiter } from '../../src/stores/LambderMemoryRateLimiter.js';
 import { LambderMemoryIdempotencyStore } from '../../src/stores/LambderMemoryIdempotencyStore.js';
@@ -147,7 +146,8 @@ describe('create(): surplus keys one level down', () => {
 
 describe('create(): the require*ApiGuards flags outside a fresh literal', () => {
     it('keeps the compile-time half when the options are spread from a typed object', () => {
-        const baseOptions: LambderCreateOptions = {
+        // create()'s options: the constructor's less the vocabulary, which declareRefusals() supplies.
+        const baseOptions: LambderInitCreateOptions<any> = {
             apiPath: '/api',
             guards: { g: { handler: () => true } },
             requirePublicApiGuards: true,

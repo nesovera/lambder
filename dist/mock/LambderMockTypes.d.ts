@@ -14,7 +14,10 @@ import type { LambderApiRequest } from "../api/LambderApiRequest.js";
 import type { LambderHttpStatusCode } from "../shared/wire/LambderHttpStatus.js";
 import type { LambderApiDefinition } from "../api/LambderApiDefinition.js";
 import type { LambderApiEnvelopeBody } from "../shared/wire/LambderApiContract.js";
-import type { LambderAppRefusalMessage } from "../shared/wire/LambderApiRefusal.js";
+import type { LambderUncheckedRefusalMessage, LambderDeclaredRefuse } from "../shared/wire/LambderApiRefusal.js";
+import type { LambderRateLimitMessage } from "../shared/wire/LambderApiOptionValues.js";
+import type { LambderContractRefusalsOf } from "../shared/wire/LambderApiContract.js";
+import type { LambderHandlerRefusalsOf } from "../api/LambderApiRefusals.js";
 import type { LambderSessionRecord } from "../shared/contracts/LambderSessionStore.js";
 import type LambderSessionController from "../session/LambderSessionController.js";
 export type LambderMockInputOf<C, K extends keyof C> = C[K] extends {
@@ -67,7 +70,16 @@ export type LambderMockSessionCallContext<S = any> = Omit<LambderMockCallContext
     session: LambderSessionRecord<S>;
 };
 /** What a mock handler for endpoint K receives. */
-export type LambderMockContext<C, K extends keyof C, S, G> = Omit<LambderMockCallContext<S>, "apiName" | "session" | "guardData"> & {
+/**
+ * The codes endpoint K may refuse with, as a mock handler raises them. Where
+ * the mock init declared the vocabulary (declareRefusals), each code's data is
+ * its schema's input form and the mock parses it as the server does; where it
+ * declared none, the contract's wire form, sent as given.
+ */
+export type LambderMockRefusalsOf<C, K extends keyof C, TVocabulary> = [
+    TVocabulary
+] extends [never] ? LambderContractRefusalsOf<C, K> : LambderHandlerRefusalsOf<TVocabulary, keyof LambderContractRefusalsOf<C, K> & string>;
+export type LambderMockContext<C, K extends keyof C, S, G, TVocabulary = never, TCodesRequired extends boolean = false> = Omit<LambderMockCallContext<S>, "apiName" | "session" | "guardData"> & {
     apiName: K;
     /** The payload as posted; never optional, the way a validated payload reaches a server handler. */
     payload: LambderMockInputOf<C, K>;
@@ -79,6 +91,14 @@ export type LambderMockContext<C, K extends keyof C, S, G> = Omit<LambderMockCal
     guardInputs: [LambderContractGuardInputsOf<C, K>] extends [never] ? undefined : LambderContractGuardInputsOf<C, K>;
     /** The key the caller sent, when it sent a string; anything else is not a key and reaches a handler as undefined, having already been refused wherever it mattered. */
     idempotencyKey: string | undefined;
+    /**
+     * Refuses the call, as a server handler's ctx.refuse does: `code` is one
+     * of the endpoint's declared codes, and `data` is the code's data as a
+     * handler hands it over (see LambderMockRefusalsOf). Where the mock
+     * declared the vocabulary with requireCodes, a code is required. Write
+     * `return ctx.refuse(...)` where the code after it relies on it.
+     */
+    refuse: LambderDeclaredRefuse<LambderMockRefusalsOf<C, K, TVocabulary>, TCodesRequired>;
 };
 /**
  * The guard map a mock app must declare: one guard per name any endpoint of
@@ -99,7 +119,7 @@ export type LambderMockGuards<C, S = any> = {
         session?: false;
     };
 };
-export type LambderMockHandler<C, K extends keyof C, S, G> = (ctx: LambderMockContext<C, K, S, G>) => LambderMockOutputOf<C, K> | Promise<LambderMockOutputOf<C, K>>;
+export type LambderMockHandler<C, K extends keyof C, S, G, TVocabulary = never, TCodesRequired extends boolean = false> = (ctx: LambderMockContext<C, K, S, G, TVocabulary, TCodesRequired>) => LambderMockOutputOf<C, K> | Promise<LambderMockOutputOf<C, K>>;
 /**
  * The guards field of an entry: required whenever the contract declares any
  * guard for the endpoint, and type-equal to the server's own declaration.
@@ -196,7 +216,7 @@ type LambderMockDerivedFields = {
  * pinned to the contract, or, with `TDerived` (a mock created with the
  * generated `apiOptions` table), the handler alone.
  */
-export type LambderMockEntryOptions<C, K extends keyof C, S, G, TInputSchema extends z.ZodType = z.ZodType, TDerived extends boolean = false> = (TDerived extends true ? LambderMockDerivedFields : LambderMockGuardsField<C, K> & LambderMockRateLimitField<C, K> & LambderMockIdempotencyField<C, K>) & {
+export type LambderMockEntryOptions<C, K extends keyof C, S, G, TInputSchema extends z.ZodType = z.ZodType, TDerived extends boolean = false, TVocabulary = never, TCodesRequired extends boolean = false> = (TDerived extends true ? LambderMockDerivedFields : LambderMockGuardsField<C, K> & LambderMockRateLimitField<C, K> & LambderMockIdempotencyField<C, K>) & {
     /**
      * A schema to validate the posted payload against, so the mock answers
      * 422 exactly as the server would. Optional, and the mock's own: the
@@ -207,7 +227,7 @@ export type LambderMockEntryOptions<C, K extends keyof C, S, G, TInputSchema ext
      * LambderMockInputPin).
      */
     input?: TInputSchema & LambderMockInputPin<C, K, TInputSchema>;
-    handler: LambderMockHandler<C, K, S, G>;
+    handler: LambderMockHandler<C, K, S, G, TVocabulary, TCodesRequired>;
 };
 /**
  * What publicApi/sessionApi accept. On a mock created with the generated
@@ -219,7 +239,7 @@ export type LambderMockEntryOptions<C, K extends keyof C, S, G, TInputSchema ext
  * guardless endpoint could drop its rate limit and idempotency through the
  * bare form.
  */
-export type LambderMockEntryInput<C, K extends keyof C, S, G, TInputSchema extends z.ZodType = z.ZodType, TDerived extends boolean = false> = TDerived extends true ? LambderMockHandler<C, K, S, G> | LambderMockEntryOptions<C, K, S, G, TInputSchema, true> : [LambderContractGuardsOf<C, K> | LambderContractRateLimitOf<C, K> | LambderContractIdempotencyOf<C, K>] extends [never] ? LambderMockHandler<C, K, S, G> | LambderMockEntryOptions<C, K, S, G, TInputSchema> : LambderMockEntryOptions<C, K, S, G, TInputSchema>;
+export type LambderMockEntryInput<C, K extends keyof C, S, G, TInputSchema extends z.ZodType = z.ZodType, TDerived extends boolean = false, TVocabulary = never, TCodesRequired extends boolean = false> = TDerived extends true ? LambderMockHandler<C, K, S, G, TVocabulary, TCodesRequired> | LambderMockEntryOptions<C, K, S, G, TInputSchema, true, TVocabulary, TCodesRequired> : [LambderContractGuardsOf<C, K> | LambderContractRateLimitOf<C, K> | LambderContractIdempotencyOf<C, K>] extends [never] ? LambderMockHandler<C, K, S, G, TVocabulary, TCodesRequired> | LambderMockEntryOptions<C, K, S, G, TInputSchema, false, TVocabulary, TCodesRequired> : LambderMockEntryOptions<C, K, S, G, TInputSchema, false, TVocabulary, TCodesRequired>;
 /** One registry entry: the endpoint's definition as the pipeline runs it, and its handler (null when registered as not mocked). */
 export type LambderMockEntry<C, K extends keyof C & string> = {
     readonly name: K;
@@ -317,9 +337,12 @@ export type LambderMockLatency = number | {
  * uses for the real thing, so an injected 429 carries the Retry-After a
  * real one does. `network` rejects the transport; `timeout` waits for the
  * caller's own abort (a call with no timeout configured waits for its
- * external signal, or for ever, which is what a timeout is).
+ * external signal, or for ever, which is what a timeout is). TMessage is the
+ * endpoint's refusal message, so an injected refusal names one of its
+ * declared codes with that code's data, and is checked against the
+ * declaration as a real one is.
  */
-export type LambderMockFailure = {
+export type LambderMockFailure<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = {
     reason: "network";
 } | {
     reason: "timeout";
@@ -327,11 +350,11 @@ export type LambderMockFailure = {
     reason: "server";
 } | {
     reason: "refusal";
-    message?: LambderAppRefusalMessage | string;
+    message?: TMessage | string;
     statusCode?: LambderHttpStatusCode;
 } | {
     reason: "notAuthorized";
-    message?: LambderAppRefusalMessage | string;
+    message?: TMessage | string;
 } | {
     reason: "sessionExpired";
 } | {
@@ -339,7 +362,7 @@ export type LambderMockFailure = {
 } | {
     reason: "rateLimited";
     retryAfterSeconds?: number;
-    message?: LambderAppRefusalMessage;
+    message?: LambderRateLimitMessage;
 };
 /** Every sibling in the package spells this `reason`: an outcome's, a transport failure's, an invoke failure's. */
 export type LambderMockFailureReason = LambderMockFailure["reason"];

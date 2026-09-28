@@ -48,3 +48,14 @@ export type LambderReadonlyDeep<T, TDepth extends unknown[] = []> = TDepth["leng
 export type LambderNonEmptyOptionMap<TMap> = {
     [K in keyof TMap]-?: Required<Pick<TMap, K>> & Omit<TMap, K>;
 }[keyof TMap];
+/**
+ * Rejects a key the options type does not have, which `const TOptions` would
+ * otherwise wave through: inferring a generic from an object literal switches
+ * excess-property checking off for the whole literal, so
+ * `requireSessionApiGuard` (no trailing "s") or `maxResponseByte` would
+ * compile, be dropped in silence, and leave the app on the default. That is
+ * worst for the two require*ApiGuards flags, which exist to make a missing
+ * authorization declaration a compile error. Mapping every surplus key to
+ * `never` puts the error back on the key itself.
+ */
+export type LambderNoExtraKeys<TOptions, TShape> = TOptions & Record<Exclude<keyof TOptions, keyof TShape>, never>;

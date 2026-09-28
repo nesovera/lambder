@@ -50,18 +50,17 @@ const createMockContext = (): Context => ({
 // ============================================================================
 
 describe('Output Type Enforcement - Runtime', () => {
-    it('should return correct primitive types', async () => {
+    it('should return a primitive inside its object', async () => {
         const lambder = new Lambder({
             files: testPublicFiles(),
             apiPath: '/api',
         })
         .addApi('add', {
             input: z.object({ a: z.number(), b: z.number() }),
-            output: z.number()
+            output: z.object({ sum: z.number() })
         }, async (ctx) => {
             const { a, b } = ctx.apiPayload;
-            const sum = a + b;
-            return sum;
+            return { sum: a + b };
         });
 
         const event = createMockEvent('add', { a: 5, b: 3 });
@@ -70,7 +69,7 @@ describe('Output Type Enforcement - Runtime', () => {
 
         expect(response.statusCode).toBe(200);
         const body = JSON.parse(response.body || '{}');
-        expect(body.payload).toBe(8);
+        expect(body.payload).toEqual({ sum: 8 });
     });
 
     it('should return correct object types', async () => {
@@ -131,20 +130,20 @@ describe('Output Type Enforcement - Runtime', () => {
         ]);
     });
 
-    it('should handle null returns correctly', async () => {
+    it('should handle a nullable member correctly', async () => {
         const lambder = new Lambder({
             files: testPublicFiles(),
             apiPath: '/api',
         })
         .addApi('findUser', {
             input: z.object({ email: z.string() }),
-            output: z.object({ id: z.string(), name: z.string() }).nullable()
+            output: z.object({ user: z.object({ id: z.string(), name: z.string() }).nullable() })
         }, async (ctx) => {
             const email = ctx.apiPayload.email;
             if (email === 'notfound@example.com') {
-                return null;
+                return { user: null };
             }
-            return { id: '1', name: 'Found User' };
+            return { user: { id: '1', name: 'Found User' } };
         });
 
         // Test null case
@@ -154,7 +153,7 @@ describe('Output Type Enforcement - Runtime', () => {
 
         expect(response1.statusCode).toBe(200);
         const body1 = JSON.parse(response1.body || '{}');
-        expect(body1.payload).toBeNull();
+        expect(body1.payload).toEqual({ user: null });
 
         // Test found case
         const event2 = createMockEvent('findUser', { email: 'found@example.com' });
@@ -163,7 +162,7 @@ describe('Output Type Enforcement - Runtime', () => {
 
         expect(response2.statusCode).toBe(200);
         const body2 = JSON.parse(response2.body || '{}');
-        expect(body2.payload).toEqual({ id: '1', name: 'Found User' });
+        expect(body2.payload).toEqual({ user: { id: '1', name: 'Found User' } });
     });
 
     it('should return boolean types correctly', async () => {
@@ -173,12 +172,11 @@ describe('Output Type Enforcement - Runtime', () => {
         })
         .addApi('deleteUser', {
             input: z.object({ userId: z.string() }),
-            output: z.boolean()
+            output: z.object({ deleted: z.boolean() })
         }, async (ctx) => {
             const userId = ctx.apiPayload.userId;
             // Mock deletion
-            const success = userId !== '';
-            return success;
+            return { deleted: userId !== '' };
         });
 
         const event = createMockEvent('deleteUser', { userId: '123' });
@@ -187,7 +185,7 @@ describe('Output Type Enforcement - Runtime', () => {
 
         expect(response.statusCode).toBe(200);
         const body = JSON.parse(response.body || '{}');
-        expect(body.payload).toBe(true);
+        expect(body.payload).toEqual({ deleted: true });
     });
 
     it('refuses a session API at registration when no session store is configured', () => {
@@ -256,12 +254,12 @@ describe('Input Type Enforcement - Runtime', () => {
         })
         .addApi('add', {
             input: z.object({ a: z.number(), b: z.number() }),
-            output: z.number()
+            output: z.object({ sum: z.number() })
         }, async (ctx) => {
             const { a, b } = ctx.apiPayload;
             expect(typeof a).toBe('number');
             expect(typeof b).toBe('number');
-            return a + b;
+            return { sum: a + b };
         });
 
         const event = createMockEvent('add', { a: 10, b: 20 });
@@ -269,7 +267,7 @@ describe('Input Type Enforcement - Runtime', () => {
         const response = await lambder.render(event, context);
 
         const body = JSON.parse(response.body || '{}');
-        expect(body.payload).toBe(30);
+        expect(body.payload).toEqual({ sum: 30 });
     });
 });
 
@@ -306,9 +304,9 @@ describe('Edge Cases', () => {
         })
         .addApi('add', {
             input: z.object({ a: z.number(), b: z.number() }),
-            output: z.number()
+            output: z.object({ sum: z.number() })
         }, async (ctx) => {
-            return 0;
+            return { sum: 0 };
         });
 
         const event = createMockEvent('add', { a: 0, b: 0 });
@@ -317,7 +315,7 @@ describe('Edge Cases', () => {
 
         expect(response.statusCode).toBe(200);
         const body = JSON.parse(response.body || '{}');
-        expect(body.payload).toBe(0);
+        expect(body.payload).toEqual({ sum: 0 });
     });
 
     it('should handle empty strings in objects', async () => {
@@ -368,26 +366,55 @@ describe('Output Type Enforcement - a handler answers with its output or refuses
             return { id: '1' };
         })
         // @ts-expect-error a bare null is not an answer of this output
-        .addApi('never', { input: z.object({}), output: z.object({ id: z.string() }) }, async (_ctx) => null)
-        .addApi('maybe', {
-            input: z.object({}),
-            output: z.object({ id: z.string() }).nullable(),
-        }, async (_ctx) => null);
+        .addApi('never', { input: z.object({}), output: z.object({ id: z.string() }) }, async (_ctx) => null);
 
         const context = createMockContext();
         const strictOk = JSON.parse((await lambder.render(createMockEvent('strict', { mode: 'ok' }), context)).body || '{}');
         expect(strictOk.payload).toEqual({ id: '1' });
         const refused = JSON.parse((await lambder.render(createMockEvent('strict', { mode: 'refuse' }), context)).body || '{}');
-        expect(refused).toMatchObject({ payload: null, errorMessage: { type: 'warning', content: 'Not now.' } });
-        const maybe = JSON.parse((await lambder.render(createMockEvent('maybe', {}), context)).body || '{}');
-        expect(maybe.payload).toBe(null);
+        expect(refused).toMatchObject({ payload: null, refusal: { type: 'warning', content: 'Not now.' } });
     });
 
-    it('a route writing an API envelope by hand sends it as given', async () => {
+    it('refuses an output that is not an object or an array where it is written, and crashes a handler that answers one', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        const tested = lambderTestApp(initLambder().create({ apiPath: '/api' })
+            // @ts-expect-error an output that may be null is not an object
+            .addApi('maybe', { input: z.object({}), output: z.object({ id: z.string() }).nullable() }, async (_ctx) => null)
+            // @ts-expect-error nor is one that may be undefined, which JSON would drop
+            .addApi('perhaps', { input: z.object({}), output: z.object({ id: z.string() }).optional() }, async (_ctx) => undefined)
+            // @ts-expect-error nor is a boolean
+            .addApi('flag', { input: z.object({}), output: z.boolean() }, async (_ctx) => false)
+            // @ts-expect-error nor a Date, which JSON writes as a string
+            .addApi('clock', { input: z.object({}), output: z.date() }, async (_ctx) => new Date(0))
+            // @ts-expect-error nor nothing at all
+            .addApi('silent', { input: z.object({}), output: z.void() }, async (_ctx) => undefined)
+            .addApi('loose', { input: z.object({}), output: z.any() }, async (_ctx) => 0));
+        for(const name of ['maybe', 'perhaps', 'flag', 'clock', 'silent', 'loose'] as const){
+            const outcome = await tested.visitor().apiOutcome(name, {});
+            assertApiFailure(outcome, 'server', { status: 500 });
+        }
+        expect(tested.crashes.map((crash) => crash.message)).toEqual([
+            expect.stringContaining('API "maybe" answered null, and an API answers with an object or an array'),
+            expect.stringContaining('API "perhaps" answered nothing'),
+            expect.stringContaining('API "flag" answered a boolean'),
+            expect.stringContaining('API "clock" answered an object that JSON writes as something else'),
+            expect.stringContaining('API "silent" answered nothing'),
+            expect.stringContaining('API "loose" answered a number'),
+        ]);
+        vi.restoreAllMocks();
+    });
+
+    it('a route writing an API envelope by hand writes a refusal, and one that says nothing is refused', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => {});
         const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
-            .addRoute('/api-shaped', (_ctx, res) => res.api(null));
-        const response = await lambder.render({ ...createMockEvent('unused', {}), path: '/api-shaped', httpMethod: 'GET', body: null }, createMockContext());
-        expect(JSON.parse(response.body || '{}').payload).toBe(null);
+            .addRoute('/api-shaped', (_ctx, res) => res.apiRefusal({ notAuthorized: true }))
+            .addRoute('/api-empty', (_ctx, res) => res.apiRefusal({} as never))
+            .addRoute('/api-coded', (_ctx, res) => res.apiRefusal({ refusal: { type: 'error', content: 'No.', code: 'app/no' as never } }));
+        const render = async (path: string) => await lambder.render({ ...createMockEvent('unused', {}), path, httpMethod: 'GET', body: null }, createMockContext());
+        expect(JSON.parse((await render('/api-shaped')).body || '{}')).toEqual({ apiVersion: null, payload: null, notAuthorized: true });
+        expect((await render('/api-empty')).statusCode).toBe(500);
+        expect((await render('/api-coded')).statusCode).toBe(500);
+        vi.restoreAllMocks();
     });
 });
 
@@ -450,19 +477,27 @@ describe('Output parsing at runtime: what a success payload reaches the wire as'
         vi.restoreAllMocks();
     });
 
-    it('sends what a hook or the input validation handler answers as given, in shapes of their own', async () => {
-        const cached = { id: 'u1', name: 'Ada', at: new Date(0).toISOString() };
+    it('reads what a hook or the input validation handler answers as a refusal, never as a success', async () => {
         const answering = initLambder().create({ apiPath: '/api' })
-            .addApi('user.get', { input: z.object({ id: z.string() }), output: z.object({ id: z.string(), name: z.string(), at: z.date() }) }, async (_ctx) => ({ ...userRow, at: new Date(0) }))
-            .setApiInputValidationErrorHandler((_ctx, res) => res.api({ field: 'id' } as never, { errorMessage: 'Invalid input.' }))
-            // A cached answer, replayed in the wire form it was stored in.
-            .addHook('beforeRender', async (ctx, res) => ctx.apiName === 'user.get' && ctx.apiPayload?.id === 'cached' ? res.api(cached) : ctx);
+            .addApi('user.get', { input: z.object({ id: z.string() }), output: z.object({ id: z.string(), name: z.string() }) }, async (_ctx) => userRow)
+            .setApiInputValidationErrorHandler((_ctx, res) => res.apiRefusal({ refusal: 'Invalid input.' }))
+            .addHook('beforeRender', async (ctx, res) => {
+                if(ctx.apiName !== 'user.get') return ctx;
+                if(ctx.apiPayload?.id === 'blocked') return res.apiRefusal({ notAuthorized: true });
+                // An envelope shaped like a success, written by hand: no
+                // handler wrote it, and its payload is not an object.
+                if(ctx.apiPayload?.id === 'forged') return res.json({ apiVersion: null, payload: null });
+                return ctx;
+            });
         const visitor = lambderTestApp(answering).visitor();
 
-        expect(await visitor.api('user.get', { id: 'cached' })).toEqual(cached);
         const invalid = await visitor.apiOutcome('user.get', {} as never);
-        assertApiFailure(invalid, 'errorMessage');
-        expect(invalid.response.payload).toEqual({ field: 'id' });
+        assertApiFailure(invalid, 'refusal');
+        expect(invalid.response.payload).toBe(null);
+        assertApiFailure(await visitor.apiOutcome('user.get', { id: 'blocked' }), 'notAuthorized');
+        assertApiFailure(await visitor.apiOutcome('user.get', { id: 'forged' }), 'server');
+        expect(await visitor.api('user.get', { id: 'forged' })).toBeUndefined();
+        expect(await visitor.api('user.get', { id: 'u1' })).toEqual({ id: 'u1', name: 'Ada' });
     });
 });
 

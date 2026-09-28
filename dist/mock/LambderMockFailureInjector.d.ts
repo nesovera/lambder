@@ -1,3 +1,4 @@
+import { type LambderEndpointRefusals } from "../api/LambderApiRefusals.js";
 import type { LambderApiAnswer } from "../api/LambderApiAnswer.js";
 import type { LambderApiRequest } from "../api/LambderApiRequest.js";
 import type { LambderMockFailure, LambderMockFailureReason, LambderMockLatency } from "./LambderMockTypes.js";
@@ -50,8 +51,14 @@ export declare class LambderMockFailureInjector {
     wait(ms: number, signal: AbortSignal | undefined): Promise<void>;
     /** Waits for the caller's own abort, which is what a timeout is; a call with no signal waits for ever. */
     waitForAbort(signal: AbortSignal | undefined): Promise<never>;
-    /** The answer an injected failure produces, or a throw for the ones that never reach the caller as answers. */
-    answerFor(failure: LambderMockFailure, request: LambderApiRequest): Promise<LambderApiAnswer>;
+    /**
+     * The answer an injected failure produces, or a throw for the ones that
+     * never reach the caller as answers. An injected refusal is checked
+     * against the endpoint's declared codes (`endpoint`), as the pipeline
+     * checks a real one, so a test cannot inject what the server could never
+     * send.
+     */
+    answerFor(failure: LambderMockFailure, request: LambderApiRequest, endpoint: LambderEndpointRefusals | undefined): Promise<LambderApiAnswer>;
     /** Clears every injected failure and puts the configured latency back. */
     reset(): void;
 }

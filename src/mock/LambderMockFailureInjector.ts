@@ -1,12 +1,13 @@
-import { LambderApiRefusal, type LambderAppRefusalMessage } from "../shared/wire/LambderApiRefusal.js";
+import { LambderApiRefusal, type LambderUncheckedRefusalMessage } from "../shared/wire/LambderApiRefusal.js";
 import { crashAnswer, refusalAnswer, sessionExpiredAnswer, versionExpiredAnswer } from "../api/LambderApiEnvelope.js";
 import { rateLimitRefusal } from "../api/LambderApiRateLimits.js";
+import { checkedRefusal, type LambderEndpointRefusals } from "../api/LambderApiRefusals.js";
 import type { LambderApiAnswer } from "../api/LambderApiAnswer.js";
 import type { LambderApiRequest } from "../api/LambderApiRequest.js";
 import type { LambderMockFailure, LambderMockFailureReason, LambderMockLatency } from "./LambderMockTypes.js";
 
 /** An injected refusal's message, from a string, a full message, or the reason's own wording. */
-const toRefusalMessage = (message: LambderAppRefusalMessage | string | undefined, fallback: string): LambderAppRefusalMessage =>
+const toRefusalMessage = (message: LambderUncheckedRefusalMessage | string | undefined, fallback: string): LambderUncheckedRefusalMessage =>
     typeof message === "string" ? { type: "warning", content: message }
     : message ?? { type: "warning", content: fallback };
 
@@ -110,19 +111,32 @@ export class LambderMockFailureInjector {
         });
     }
 
-    /** The answer an injected failure produces, or a throw for the ones that never reach the caller as answers. */
-    async answerFor(failure: LambderMockFailure, request: LambderApiRequest): Promise<LambderApiAnswer> {
+    /**
+     * The answer an injected failure produces, or a throw for the ones that
+     * never reach the caller as answers. An injected refusal is checked
+     * against the endpoint's declared codes (`endpoint`), as the pipeline
+     * checks a real one, so a test cannot inject what the server could never
+     * send.
+     */
+    async answerFor(failure: LambderMockFailure, request: LambderApiRequest, endpoint: LambderEndpointRefusals | undefined): Promise<LambderApiAnswer> {
         switch(failure.reason){
             case "network": throw new LambderMockTransportError("network");
             case "timeout": return await this.waitForAbort(request.signal);
             case "server": return crashAnswer(this.apiVersion);
             case "refusal": {
                 const message = toRefusalMessage(failure.message, "Injected refusal.");
-                return refusalAnswer(new LambderApiRefusal(message.content, { errorMessage: message, statusCode: failure.statusCode }), this.apiVersion);
+                return refusalAnswer(checkedRefusal(request.apiName, endpoint, new LambderApiRefusal(message.content, { refusal: message, statusCode: failure.statusCode })), this.apiVersion);
             }
             case "notAuthorized": {
                 const message = toRefusalMessage(failure.message, "Injected authorization refusal.");
-                return refusalAnswer(new LambderApiRefusal(message.content, { errorMessage: message, notAuthorized: true }), this.apiVersion);
+                // A declared code's flag is its declaration's: the refusal is
+                // built without one and the declaration has to supply it.
+                const declared = message.code !== undefined && endpoint?.codes.has(message.code) === true;
+                const checked = checkedRefusal(request.apiName, endpoint, new LambderApiRefusal(message.content, { refusal: message, ...(declared ? {} : { notAuthorized: true }) }));
+                if(!checked.notAuthorized){
+                    throw new Error(`LambderMockApp: the injected notAuthorized failure names the code "${String(message.code)}", which is not declared notAuthorized. Inject it as a refusal, or declare the flag on the code.`);
+                }
+                return refusalAnswer(checked, this.apiVersion);
             }
             case "sessionExpired": return sessionExpiredAnswer(this.apiVersion);
             case "versionExpired": return versionExpiredAnswer(this.apiVersion);

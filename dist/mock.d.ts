@@ -9,7 +9,7 @@
 export { LambderMockApp, initLambderMock } from "./mock/LambderMockApp.js";
 export { LambderMockTransportError } from "./mock/LambderMockFailureInjector.js";
 export type { LambderMockAppOptions, LambderMockSessionsOptions, LambderMockIdempotencyOptions, LambderMockInvalidInputAnswer, LambderMockTransport, LambderMockTransportOptions } from "./mock/LambderMockCreateOptions.js";
-export type { LambderMockCallContext, LambderMockSessionCallContext, LambderMockContext, LambderMockGuards, LambderMockHandler, LambderMockEntry, LambderMockEntryOptions, LambderMockEntryInput, LambderMockSlice, LambderMockRestEntry, LambderMockRegistryCheck, LambderMockMissingNames, LambderMockStrayNames, LambderMockDuplicateNames, LambderMockPublicNames, LambderMockSessionNames, LambderMockLatency, LambderMockFailure, LambderMockFailureReason, LambderMockOutcome, LambderMockCallEvent, LambderMockRequestEvent, LambderMockResponseEvent, LambderMockCallRecord, LambderMockListener, LambderMockRateLimitPolicies, LambderMockInputOf, LambderMockOutputOf, LambderMockOverride, } from "./mock/LambderMockTypes.js";
+export type { LambderMockCallContext, LambderMockSessionCallContext, LambderMockContext, LambderMockRefusalsOf, LambderMockGuards, LambderMockHandler, LambderMockEntry, LambderMockEntryOptions, LambderMockEntryInput, LambderMockSlice, LambderMockRestEntry, LambderMockRegistryCheck, LambderMockMissingNames, LambderMockStrayNames, LambderMockDuplicateNames, LambderMockPublicNames, LambderMockSessionNames, LambderMockLatency, LambderMockFailure, LambderMockFailureReason, LambderMockOutcome, LambderMockCallEvent, LambderMockRequestEvent, LambderMockResponseEvent, LambderMockCallRecord, LambderMockListener, LambderMockRateLimitPolicies, LambderMockInputOf, LambderMockOutputOf, LambderMockOverride, } from "./mock/LambderMockTypes.js";
 export { lambderMockPoliciesFrom } from "./mock/lambderMockPoliciesFrom.js";
 export type { LambderCustomKeyedPolicyNames, LambderMockPolicyKeys } from "./mock/lambderMockPoliciesFrom.js";
 export type { LambderMockGuardShapeOf } from "./mock/LambderMockCreateOptions.js";
@@ -31,8 +31,9 @@ export { LambderMemoryIdempotencyStore } from "./stores/LambderMemoryIdempotency
 export { LambderWebCrypto, LambderPlainSessionCrypto } from "./session/LambderSessionCrypto.js";
 export type { LambderSessionCrypto } from "./session/LambderSessionCrypto.js";
 export { LambderApiRefusal, refuse, LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";
-export type { LambderRefusalMessage } from "./shared/wire/LambderApiRefusal.js";
-export { assertApiSuccess, assertApiFailure } from "./shared/wire/LambderOutcomeAssertions.js";
+export type { LambderRefusalMessage, LambderDeclaredRefuse, LambderDeclaredRefuseOptions } from "./shared/wire/LambderApiRefusal.js";
+export { LambderApiRefusalValidationError } from "./api/LambderApiRefusals.js";
+export { assertApiSuccess, assertApiFailure, assertApiRefusal } from "./shared/wire/LambderOutcomeAssertions.js";
 export type { LambderExpectedFailure } from "./shared/wire/LambderOutcomeAssertions.js";
 export type { LambderApiRequest } from "./api/LambderApiRequest.js";
 export type { LambderApiAnswer } from "./api/LambderApiAnswer.js";

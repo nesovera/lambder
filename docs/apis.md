@@ -23,13 +23,23 @@ lambder
 ```
 
 A handler takes the context and nothing else. It answers the call by
-returning its output, and says no by throwing a refusal with
-[`refuse()`](#refusals), from the handler or from anything it calls. Those are
-the only two answers a handler gives: it returns exactly what the API
-declared, `null` only where the output schema allows null, and every "no" goes
-through `refuse()`. Headers, cookies and debugging entries go beside the
-answer, through the context (`ctx.setResponseHeader`, `ctx.setCookie`,
-`ctx.logList.push`; see [Responses](./responses.md#headers-and-cookies)).
+returning its output, and says no by throwing a refusal with `ctx.refuse()`
+or [`refuse()`](#refusals), from the handler or from anything it calls. Those
+are the only two answers a handler gives: it returns exactly what the API
+declared, and every "no" is a refusal. Headers, cookies and debugging entries
+go beside the answer, through the context (`ctx.setResponseHeader`,
+`ctx.setCookie`, `ctx.logList.push`; see
+[Responses](./responses.md#headers-and-cookies)).
+
+**An output is an object or an array.** Never `null`, a primitive or nothing,
+so a caller's success is never falsy: `caller.api()` returns the output on
+success and `undefined` on every failure, and the two cannot be confused. An
+output schema whose JSON form is anything else (`z.void()`, `z.boolean()`, a
+nullable or an optional object, a `z.date()`, which JSON writes as a string) is a compile
+error on the `output` option, and a handler that answers one anyway (an
+`any` schema) is a crash. An API with nothing to answer declares
+`output: z.object({})` and returns `{}`; a lookup that may find nothing
+answers `{ order: null }` rather than `null`.
 
 **The output schema is applied, not only typed.** What the handler returns is
 parsed through `output` before the envelope is built, so what reaches the
@@ -40,12 +50,21 @@ read straight from a table, with a password hash beside the declared fields,
 is assignable to a narrower output type, and without the parse it would go to
 the client whole. The handler returns the schema's input form (`z.input`),
 what the transforms take, so each transform runs once. A refusal carries no
-output, so there is nothing of it to parse. A hook, the input validation
-handler and the global error handler answer in shapes of their own through
-`res.api()` (a cached answer is already in its wire form), and what they
-answer is sent as given.
+output (a declared code's data is parsed the same way; see
+[Declared refusals](#declared-refusals)).
 
-An output the schema rejects is the handler breaking its own contract and is
+**A success is only ever the handler's output.** A hook, a fallback, the
+input validation handler and the global error handler answer an API call
+through `res.apiRefusal()`, which writes a refusal: a `refusal` message or one
+of the `versionExpired`, `sessionExpired` and `notAuthorized` flags, beside a
+null payload (see [Responses](./responses.md#api-answers-outside-a-handler)).
+A reader takes a 2xx envelope with no flag and no refusal for a success
+only when its payload is an object or an array, so a body shaped like one by
+hand, a proxy's, or an old stored answer reads as a server failure instead.
+The success a caller reads is therefore exactly the contract's output type.
+
+An output the schema rejects, or one that is not an object or an array, is
+the handler breaking its own contract and is
 answered as a crash (`LambderApiOutputValidationError`, named, with the
 failing paths but never the values), not sent. The handler has run by then,
 whatever it wrote or charged included, so under an idempotency key the crash
@@ -63,10 +82,11 @@ The options object beside the schemas is where an API declares its policies:
 | Field | Purpose |
 | --- | --- |
 | `input` | Zod schema for the payload. `z.void()` for none |
-| `output` | Zod schema for the result. Type-checked against what the handler returns, and every output is parsed through it before it is sent |
+| `output` | Zod schema for the result, whose JSON form is an object or an array. Type-checked against what the handler returns, and every output is parsed through it before it is sent |
 | `guards` | Named guards to run before the handler. See [API policies](./api-policies.md#guards) |
 | `rateLimit` | Named rate-limit policies. See [API policies](./api-policies.md#rate-limits) |
 | `idempotency` | `true` or `{ ttlSeconds }`. See [API policies](./api-policies.md#idempotency) |
+| `refusals` | The codes this API may refuse with, from the vocabulary given at creation: one code or a non-empty list. See [Declared refusals](#declared-refusals) |
 | `compress` | Whether this API's answers are compressed for a caller that accepts it: `"auto"` (the default) when the body is large enough to gain, `false` never, `true` always. See [Responses](./responses.md#compression) |
 
 `compress` is a transport setting of this server, not part of the API: it is
@@ -117,9 +137,13 @@ an app writes the contract out as a generated file instead and has its clients
 import that; see [the contract as a generated file](#the-contract-as-a-generated-file).
 
 Each contract entry carries the API's `input` and `output`, its `guardInputs`
-when a guardInput-mode guard applies, and its `guards` option exactly as
-declared: `ApiContractType["getUser"]["guards"]` is the literal
-`{ readonly orgPermission: "USERS.MANAGE" }`.
+when a guardInput-mode guard applies, its `guards` option exactly as
+declared (`ApiContractType["getUser"]["guards"]` is the literal
+`{ readonly orgPermission: "USERS.MANAGE" }`), and its `refusals`: every code
+it can refuse with, its own and its guards', each mapped to `{ data }` (the
+data as it arrives) or `{}`. `refusals` is the one member that is not the
+option as written, since a reader needs the guards' codes too; see
+[Declared refusals](#declared-refusals).
 
 `input` and `output` are the client's side of each schema. `input` is the
 schema's input form (`z.input`): a field with a default is optional to send,
@@ -296,23 +320,25 @@ export const apiOptions = {
 
 export const rateLimitPolicies = {
     "authPerIp": { "perMin": 10, "perHour": 60, "per": "ip" },
-    "codePerEmail": { "perMin": 4, "perDay": 30, "budget": "perPolicy", "per": "custom", "errorMessage": { ... } },
+    "codePerEmail": { "perMin": 4, "perDay": 30, "budget": "perPolicy", "per": "custom", "refusal": { ... } },
     ...
 } as const satisfies Record<string, LambderRateLimitPolicyEntry>;
 
 export const guardDeclarations = {
     "captcha": { "input": "guardInput", "session": false, "runAt": "afterInputValidation" },
-    "store": { "input": "guardInput", "session": true, "runAt": "beforeInputValidation" },
+    "store": { "input": "guardInput", "session": true, "runAt": "beforeInputValidation", "refusals": ["not-staff"] },
     ...
 } as const satisfies Record<string, LambderGuardDeclarationEntry>;
 ```
 
 The tables come from `lambder.apiOptionEntries()`, which the generator calls
-on the instance the module exports: every API's mode and its three options
-exactly as written, every rate-limit policy less its key handler, and every
-guard's input mode, session requirement and place in the call, each table
-sorted by name so the file diffs by endpoint and never moves when
-registrations are reordered.
+on the instance the module exports: every API's mode and its declarative
+options exactly as written, every rate-limit policy less its key handler, and
+every guard's input mode, session requirement, place in the call and refusal
+codes, each table sorted by name so the file diffs by endpoint and never
+moves when registrations are reordered. The refusal vocabulary itself is not
+written: it is shared code, and the mock declares the same object (see
+[the mock runtime](./mock.md#declarations-policies-and-guards-from-the-generated-options)).
 
 Nothing in the file is code, by construction. A guard's parameter is written
 as the JSON it is, so it has to be plain data (a permission string, a list of
@@ -463,9 +489,18 @@ Every endpoint has a signature: a short digest of its client-facing shape,
 computed from the registration itself. It covers the name and mode, the
 `input` and `output` schemas as JSON Schema, every guard the endpoint
 declares with the schema that guard validates (a `guardInput` the client
-sends, or an `apiInput` slice of the payload), and whether the endpoint takes
-an idempotency key. Rate limits, guard parameters and the handler are not
-part of it, because changing them changes nothing for a client. The schemas
+sends, or an `apiInput` slice of the payload), whether the endpoint takes
+an idempotency key, and every refusal code it can send with its data's
+schema. Rate limits, guard parameters and the handler are not
+part of it, because changing them changes nothing for a client.
+
+The refusal codes count in full, a guard's included: a client's refusal type
+lists exactly the codes the endpoint declares, so a client built before a code
+existed would be handed one its types say cannot arrive. Adding a code, or
+changing a code's data, reloads that endpoint's clients on the next deploy; a
+code added to a guard reloads every endpoint declaring the guard. A code's
+data is received, so it is digested in the output position, where an
+extensibleEnum's values leave the digest. The schemas
 are digested as zod emits them, descriptions included, with two edits: the
 `default` keyword is dropped, because a default's value is server behaviour
 rather than shape and a function default would write a fresh clock reading or
@@ -611,12 +646,12 @@ generate the file as part of the build so it can never be stale.
 ## Refusals
 
 A refusal ("you are not allowed", "quota exceeded") is not a crash, and it is
-not an output either. An API handler refuses by throwing, with `refuse()` or a
-`LambderApiRefusal`, and the throw may come from anywhere in the call's stack:
-the handler, a guard, a hook, or a shared helper (a permission check, a
-validator) that knows nothing about the request it runs in. It is rendered as
-the refusal envelope by the core's one mapping, the same on the server and in
-the mock runtime.
+not an output either. An API handler refuses by throwing, with `ctx.refuse()`,
+`refuse()` or a `LambderApiRefusal`, and the throw may come from anywhere in
+the call's stack: the handler, a guard, a hook, or a shared helper (a
+permission check, a validator) that knows nothing about the request it runs
+in. It is rendered as the refusal envelope by the core's one mapping, the same
+on the server and in the mock runtime.
 
 A refusal is never stored as an idempotent answer: a retry under the same key
 runs the handler again, which decides afresh (see
@@ -625,9 +660,9 @@ runs the handler again, which decides afresh (see
 ### `refuse()`
 
 The one-liner for the common case. Callable from anywhere in an API call's
-stack, it throws a typed refusal carrying the standard `LambderRefusalMessage`
-shape (`{ type, code?, title?, content }`) that the pipeline maps onto the
-envelope's `errorMessage`, so refusals never pollute crash logging and clients
+stack, it throws a refusal carrying the standard message shape
+(`{ type, code?, title?, content, data? }`) that the pipeline maps onto the
+envelope's `refusal`, so refusals never pollute crash logging and clients
 get a parseable response:
 
 ```typescript
@@ -636,27 +671,141 @@ import { refuse } from "lambder";
 if (!row) refuse("Record not found.");                                  // { type: "warning", content }
 if (!isAdmin) refuse("Admins only.", { notAuthorized: true });          // + envelope flag
 refuse("Too many attempts.", { type: "error", statusCode: 429 });       // custom rendering intent + status
-if (exists) refuse("Already reported.", { code: "ALREADY_REPORTED" });  // + machine-readable identity
+if (exists) refuse("Already reported.", { code: "already-reported" });  // + a declared code (below)
 // TypeScript applies never-return narrowing: after `if (!row) refuse(...)`, row is defined.
 ```
 
 `refuse(content, options?)` takes `type` (`"warning"` by default, or
-`"error"` or `"info"`), `code`, `title`, the envelope flags `notAuthorized`
-and `sessionExpired`, `statusCode` (200 by default: the envelope is the
-channel, so avoid 5xx, which a caller reads as a crash, and 422, which is
-input validation's), `headers` for the refusal's answer (a `Retry-After`, say)
-and `cause`, kept on the thrown error.
+`"error"` or `"info"`), `code` and `data` (a declared code and its data; see
+below), `title`, the envelope flags `notAuthorized` and `sessionExpired`,
+`statusCode` (200 by default: the envelope is the channel, so avoid 5xx,
+which a caller reads as a crash, and 422, which is input validation's),
+`headers` for the refusal's answer (a `Retry-After`, say) and `cause`, kept
+on the thrown error.
 
-### Refusal codes
+### Declared refusals
 
 `code` is the refusal's identity for machines: clients branch and translate on
 it (a translated client never displays `content`, it looks the code up), and
-`content` stays the human-readable fallback for codes a client does not know
-yet. Keep your app's codes as one typed vocabulary in shared code.
+`content` stays the human-readable fallback. An app declares its codes once,
+as a vocabulary on the init, each with the schema of the data it carries or
+none, the status every refusal with it leaves with and whether it sets the
+`notAuthorized` flag; every API names the codes it may refuse with, and so
+does every guard:
+
+```typescript
+const lambderInit = initLambder<SessionData>().declareRefusals({
+    "order-closed": { status: 409 },
+    "wallet-short": { data: z.object({ available: z.number(), currency: z.string().default("USD") }) },
+    "not-a-manager": { notAuthorized: true, status: 403 },
+});
+
+const managerOnly = lambderInit.guard({
+    session: true,
+    refusals: ["not-a-manager"],
+    handler: (ctx) => {
+        if (ctx.session.data.role !== "manager") ctx.refuse("Managers only.", { code: "not-a-manager" });
+    },
+});
+
+export const lambderApp = lambderInit.create({ apiPath: "/api", session, guards: { managerOnly } });
+
+lambderApp.addApi("order.pay", {
+    input: z.object({ orderId: z.string(), amount: z.number() }),
+    output: z.object({ paid: z.literal(true) }),
+    refusals: ["order-closed", "wallet-short"],
+}, async (ctx) => {
+    const order = await loadOrder(ctx.apiPayload.orderId);
+    if (order.closed) return ctx.refuse("This order is closed.", { code: "order-closed" });
+    if (order.wallet < ctx.apiPayload.amount) {
+        return ctx.refuse("The wallet holds less than the total.", { code: "wallet-short", data: { available: order.wallet } });
+    }
+    return { paid: true };
+});
+```
+
+- **The vocabulary** (`declareRefusals` on the init) holds every code once, so
+  a code means one thing wherever it is raised: one data shape, one status
+  (200 unless the declaration says otherwise, never 422 or a 5xx, which a
+  reader files as something else) and one answer to whether it sets
+  `notAuthorized`. A code is the string that goes on the wire, anything
+  outside the framework's `lambder/` prefix; its data, when it declares any,
+  is an object or an array, as an output is. A misspelled declaration key, a
+  `lambder/` code, a 422 or 5xx status and a `notAuthorized` other than
+  `true` are compile errors and errors at the call.
+- **An API's `refusals` option** names one code or a non-empty list. A code
+  the vocabulary does not hold is a compile error and a registration error.
+  `create()` itself takes no vocabulary: the init carries it.
+- **A guard's `refusals` option** names the codes the guard raises; they join
+  the codes of every API that declares the guard. A guard built with the
+  init's `guard()` has `ctx.refuse` typed to those codes and is refused as it
+  is built when it names a code the vocabulary does not hold; one built with
+  the standalone `lambderGuard()` meets the vocabulary at `create()`.
+- **`ctx.refuse(content, options?)`** on an API handler's context takes
+  `refuse()`'s arguments typed to the endpoint: `code` is one of its codes,
+  `data` is required where that code declares data and refused where it does
+  not, and a declared code takes no `statusCode` or flag of its own, since
+  its declaration owns them. TypeScript narrows the code after a
+  never-returning call only when every name in the call is explicitly
+  annotated, which a handler's `ctx` is not, so write `return ctx.refuse(...)`
+  where the lines after it rely on it. A shared helper or a hook, with no
+  endpoint in hand, raises a code with the init's `refuse`, typed to the
+  whole vocabulary, or with the free `refuse()`; which endpoint may send the
+  code is checked where the refusal is rendered either way.
+- **`declareRefusals(vocabulary, { requireCodes: true })`** makes every
+  refusal an API answers with name a code: an uncoded `refuse("...")` from a
+  handler, a guard or a helper is then a crash rather than an answer,
+  `ctx.refuse` and the init's `refuse` require a code, and a translating
+  client never meets a refusal it cannot look up. Framework codes still pass,
+  and a hook's or an error handler's `res.apiRefusal()` may still answer
+  without one.
+
+**The declaration is enforced where a refusal is rendered.** The pipeline
+checks every thrown refusal against its endpoint: an uncoded refusal and a
+framework code go out as they are; a declared code leaves with its
+declaration's status and flag and has its data parsed through the code's
+schema (synchronously, as an output is: undeclared fields stripped, defaults
+filled, transforms run), and the parsed data is what is sent. Anything else
+is a crash rather than an answer (`LambderApiRefusalValidationError`, naming
+the code and the failing paths but never the values, with the refusal as
+thrown as its `cause`): a code the endpoint does not declare, data on a
+refusal whose code declares none, no data on one whose code carries data,
+data its code's schema rejects, a declared code raised with a status or flag
+of its own, or an uncoded refusal where the app requires codes. A refusal a
+hook throws for an API call is checked against the endpoint the call names,
+and one for a name no API is registered under may carry a framework code or
+none. A test run over `lambder/testing` surfaces the crash at once, which is
+where an undeclared code is found.
+
+**What a caller reads is exact.** The contract entry records every code the
+endpoint can refuse with, and the caller's outcome types `refusal` as one
+arm per code plus one for the framework's codes and the uncoded refusal, so a
+`switch (message.code)` narrows `data` in each case and a `default: never`
+holds:
+
+```typescript
+const outcome = await caller.apiOutcome("order.pay", { orderId, amount });
+if (!outcome.ok && outcome.refusal?.code === "wallet-short") {
+    showTopUp(outcome.refusal.data.available);   // typed { available: number; currency: string }
+}
+```
+
+`LambderContractRefusalMessage<Contract, "order.pay">` is that message type
+for code that holds one outside an outcome, and
+`LambderContractAnyRefusalMessage<Contract>` the same across every endpoint,
+what a caller's constructor `refusalHandler` is handed. A test asserts on
+the code rather than the wording, with `assertApiRefusal(outcome,
+"wallet-short")`, which narrows `outcome.refusal.data` to the code's type
+(see [Testing](./testing.md#asserting-on-outcomes)). The declared codes are
+part of the endpoint's signature (see
+[Signatures](#signatures-when-a-client-must-update)).
+
+### Framework codes
 
 The framework stamps the refusals it authors itself with
 `LAMBDER_REFUSAL_CODES` (exported from `lambder` and `lambder/client`) under
-the reserved `lambder/` prefix, so app codes never collide:
+the reserved `lambder/` prefix, so app codes never collide. They carry no
+data, and no API declares them: every endpoint may send them.
 
 | Constant | Code | Raised when |
 | --- | --- | --- |
@@ -671,41 +820,22 @@ the reserved `lambder/` prefix, so app codes never collide:
 | `uploadTypeRejected` | `lambder/upload-type-rejected` | An upload bucket was asked to sign a ticket for a content type the rule does not accept |
 | `uploadTooLarge` | `lambder/upload-too-large` | An upload bucket was asked to sign a ticket for a file larger than the rule accepts |
 
-A rate-limit policy's own `errorMessage` inherits `lambder/rate-limited` unless
-it sets a code, so an `errorMessageHandler` can treat every rate limit alike and
-still special-case the ones you name.
+A rate-limit refusal is always `lambder/rate-limited`: a policy's
+`refusal` sets its type, title and content, and a code or data there is
+refused at creation, so an `refusalHandler` treats every rate limit
+alike.
 
-On the client, name your own vocabulary as the type argument of
-`LambderRefusalMessage` and the switch is checked: every framework code plus
-yours, and nothing else.
-
-```typescript
-import { LAMBDER_REFUSAL_CODES, type LambderRefusalMessage } from "lambder/client";
-
-type AppCode = "app/not-verified" | "app/quota-exhausted";
-
-const describe = (message: LambderRefusalMessage<AppCode>): string => {
-    switch (message.code) {
-        case "app/not-verified": return t("verifyYourAddress");
-        case "app/quota-exhausted": return t("buyMore");
-        case LAMBDER_REFUSAL_CODES.rateLimited: return t("slowDown");
-        // ... the other lambder/ codes ...
-        default: return message.content;   // a code this client does not know yet
-    }
-};
-```
-
-Leave the argument off (`LambderRefusalMessage`) and the codes are the
-framework's alone, so a `default: never` assertion holds and adding a code to
-the framework breaks the switch rather than falling through it. Messages your
-app WRITES take `LambderAppRefusalMessage`, where any code is welcome: that is
-what a rate-limit policy's `errorMessage` and the mock's failure injection
-accept.
+`LambderRefusalMessage` with no argument is the framework's codes and the
+uncoded refusal alone, so a `default: never` assertion holds over it and a
+framework code added in a later version breaks the switch rather than
+falling through it. Messages an app WRITES outside a handler take
+`LambderUncheckedRefusalMessage`, where any code is welcome: that is what
+`LambderApiRefusal` carries before its endpoint checks it.
 
 ### `LambderApiRefusal`
 
-For full control of the `errorMessage` payload (apps with their own message
-vocabulary), throw `LambderApiRefusal` directly; `refuse()` is sugar over it:
+For full control of the `refusal` payload, throw `LambderApiRefusal`
+directly; `refuse()` is sugar over it:
 
 ```typescript
 import { LambderApiRefusal } from "lambder";
@@ -714,7 +844,7 @@ import { LambderApiRefusal } from "lambder";
 export const requirePermission = (granted: boolean) => {
     if (!granted) throw new LambderApiRefusal("Permission denied.", {
         notAuthorized: true,                                         // envelope flag -> caller's notAuthorizedHandler
-        errorMessage: { type: "warning", content: "Not allowed." },  // any shape your errorMessageHandler expects
+        refusal: { type: "warning", content: "Not allowed." },  // a declared code goes in `code`, its data in `data`
         // sessionExpired: true,                                     // optional envelope flag
         // statusCode: 403,                                          // optional; default 200 (avoid 5xx and 422)
         // headers: { "Retry-After": "30" },                         // optional response headers
@@ -722,7 +852,7 @@ export const requirePermission = (granted: boolean) => {
 };
 ```
 
-`errorMessage` defaults to `{ type: "error", content }` with the error's
+`refusal` defaults to `{ type: "error", content }` with the error's
 message as the content, so `throw new LambderApiRefusal("Nope.")` alone is
 already visible to the client.
 Thrown outside an API call (in a route handler, say) it behaves like a normal

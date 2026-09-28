@@ -2,6 +2,8 @@ import type { z } from "zod";
 import type { LambderApiContractShape } from "../shared/wire/LambderApiContract.js";
 import { type LambderApiRequest } from "../api/LambderApiRequest.js";
 import { type LambderApiAnswer } from "../api/LambderApiAnswer.js";
+import { type LambderDeclaredRefuse, type LambderRefusalMessage } from "../shared/wire/LambderApiRefusal.js";
+import { type LambderDeclaredVocabulary, type LambderHandlerRefusalsOf, type LambderRefusalVocabulary, type LambderRefusalVocabularyChecks } from "../api/LambderApiRefusals.js";
 import { type LambderApiTransport, type LambderApiTransportRequest } from "../shared/transport/LambderApiTransport.js";
 import { LambderCookieJar } from "../shared/transport/LambderCookieJar.js";
 import { type LambderApiGuard, type LambderGuardBuilder } from "../api/LambderApiGuards.js";
@@ -11,7 +13,7 @@ import { LambderMemorySessionStore } from "../stores/LambderMemorySessionStore.j
 import LambderSessionManager, { type LambderCreatedSession } from "../session/LambderSessionManager.js";
 import type { LambderMockAppOptions, LambderMockIdempotencyOptions, LambderMockTransport, LambderMockTransportOptions } from "./LambderMockCreateOptions.js";
 import type { LambderApiOptionEntry, LambderGuardDeclarationEntry } from "../shared/wire/LambderApiOptionEntries.js";
-import type { LambderMockCallContext, LambderMockCallRecord, LambderMockEntry, LambderMockEntryInput, LambderMockFailure, LambderMockFailureReason, LambderMockHandler, LambderMockLatency, LambderMockListener, LambderMockPublicNames, LambderMockRateLimitPolicies, LambderMockRegistryCheck, LambderMockRestEntry, LambderMockSessionCallContext, LambderMockSessionNames, LambderMockSlice, LambderMockOverride } from "./LambderMockTypes.js";
+import type { LambderMockCallContext, LambderMockCallRecord, LambderMockEntry, LambderMockEntryInput, LambderMockFailure, LambderMockFailureReason, LambderMockHandler, LambderMockLatency, LambderMockListener, LambderMockPublicNames, LambderMockRateLimitPolicies, LambderMockRegistryCheck, LambderMockRestEntry, LambderMockSessionCallContext, LambderMockSessionNames, LambderMockSlice, LambderMockOverride, LambderMockRefusalsOf } from "./LambderMockTypes.js";
 /**
  * The mock runtime: the API core (LambderApiPipeline, the same class the
  * Lambda server runs) over memory stores, with typed mock handlers and mock
@@ -26,8 +28,10 @@ import type { LambderMockCallContext, LambderMockCallRecord, LambderMockEntry, L
  * which fixes the contract and session types first so everything else is
  * inferred from the options. `TDerived` is true for a mock created with the
  * generated `apiOptions` table, whose entries are their handlers alone.
+ * `TVocabulary` and `TCodesRequired` are the refusal vocabulary the init
+ * declared (declareRefusals), which types every handler's ctx.refuse.
  */
-export declare class LambderMockApp<C extends LambderApiContractShape, S = any, G extends Record<string, LambderApiGuard<any, any, any>> = {}, TDerived extends boolean = false> {
+export declare class LambderMockApp<C extends LambderApiContractShape, S = any, G extends Record<string, LambderApiGuard<any, any, any>> = {}, TDerived extends boolean = false, TVocabulary extends LambderRefusalVocabulary = never, TCodesRequired extends boolean = false> {
     readonly apiVersion: string | null;
     /** The memory stores, for assertions and reset; null for a subsystem that is off or backed by a store of yours. */
     readonly sessionStore: LambderMemorySessionStore<S> | null;
@@ -65,9 +69,17 @@ export declare class LambderMockApp<C extends LambderApiContractShape, S = any, 
     private readonly registry;
     /** The server's declared options per API, when create() was given the generated table; the entries' declarations come from here. */
     private readonly apiOptions;
+    /** The server's guard declarations, when create() was given the generated table: the refusal codes a declared guard adds to an entry. */
+    private readonly guardDeclarations;
+    /** The server's refusal vocabulary, when create() was given the generated table: whether each code an entry may refuse with carries data. */
+    private readonly refusalVocabulary;
+    /** Whether every refusal an entry answers with has to name a code, as the server's declareRefusals() requireCodes. */
+    private readonly requireRefusalCodes;
     /** The jars the runtime owns and what it planted in document.cookie (see LambderMockBrowserCookies). */
     private readonly browserCookies;
-    constructor(options: LambderMockAppOptions<C, S, G, LambderMockRateLimitPolicies<S>, boolean | LambderMockIdempotencyOptions<S>, {}, Record<string, LambderApiOptionEntry> | undefined>);
+    constructor(options: LambderMockAppOptions<C, S, G, LambderMockRateLimitPolicies<S>, boolean | LambderMockIdempotencyOptions<S>, {}, Record<string, LambderApiOptionEntry> | undefined>, 
+    /** The vocabulary the init declared, or null: what initLambderMock().declareRefusals() passes on. */
+    declared?: LambderDeclaredVocabulary<TVocabulary, TCodesRequired> | null);
     /**
      * The registration-time checks every entry goes through, mocked or not:
      * the ones the server runs on a definition, and the mock's own "a session
@@ -87,13 +99,23 @@ export declare class LambderMockApp<C extends LambderApiContractShape, S = any, 
      * the compiler did not see.
      */
     private declaredOptionsOf;
+    /**
+     * The codes an entry may refuse with, read off the generated tables (its
+     * own from apiOptions, its guards' from guardDeclarations), each resolved
+     * through the vocabulary the init declared, exactly as the server
+     * resolves its own: schema, status and flag. An entry that declares
+     * guards needs the guardDeclarations table, and one with any code needs
+     * the vocabulary; a code the tables name that the vocabulary lacks means
+     * the two describe different servers.
+     */
+    private declaredRefusalsOf;
     /** The mode the apiOptions table gives a name, or null without a table or for a name it does not hold. */
     private declaredModeOf;
     private buildEntry;
     /** A mock for a public endpoint: a handler, or the handler with the endpoint's declarations restated. */
-    publicApi<K extends LambderMockPublicNames<C>, TInputSchema extends z.ZodType = z.ZodType>(name: K, entry: LambderMockEntryInput<C, K, S, G, TInputSchema, TDerived>): LambderMockEntry<C, K>;
+    publicApi<K extends LambderMockPublicNames<C>, TInputSchema extends z.ZodType = z.ZodType>(name: K, entry: LambderMockEntryInput<C, K, S, G, TInputSchema, TDerived, TVocabulary, TCodesRequired>): LambderMockEntry<C, K>;
     /** A mock for a session endpoint: the pipeline fetches the session before the handler runs, and refuses without one. */
-    sessionApi<K extends LambderMockSessionNames<C>, TInputSchema extends z.ZodType = z.ZodType>(name: K, entry: LambderMockEntryInput<C, K, S, G, TInputSchema, TDerived>): LambderMockEntry<C, K>;
+    sessionApi<K extends LambderMockSessionNames<C>, TInputSchema extends z.ZodType = z.ZodType>(name: K, entry: LambderMockEntryInput<C, K, S, G, TInputSchema, TDerived, TVocabulary, TCodesRequired>): LambderMockEntry<C, K>;
     /**
      * A public endpoint deliberately left without a mock; a call answers the
      * notMocked refusal carrying the reason.
@@ -162,7 +184,7 @@ export declare class LambderMockApp<C extends LambderApiContractShape, S = any, 
      * an override one `it` scoped cannot drop the one a describe put in place
      * around it.
      */
-    override<K extends keyof C & string>(name: K, handler: LambderMockHandler<C, K, S, G>): LambderMockOverride;
+    override<K extends keyof C & string>(name: K, handler: LambderMockHandler<C, K, S, G, TVocabulary, TCodesRequired>): LambderMockOverride;
     /** Puts every overridden handler back, however deeply they were stacked. */
     restoreOverrides(): void;
     /** The registered endpoint names. */
@@ -188,10 +210,10 @@ export declare class LambderMockApp<C extends LambderApiContractShape, S = any, 
      * restore, and for a session endpoint the session read).
      */
     private restNotMockedEntry;
-    /** The next call to the endpoint fails this way; several calls queue in order. */
-    failNext(apiName: keyof C & string, failure: LambderMockFailure | LambderMockFailureReason): void;
+    /** The next call to the endpoint fails this way; several calls queue in order. An injected refusal names one of the endpoint's declared codes, its data as a handler raises it (see LambderMockRefusalsOf), and is checked and sent as a real one is. */
+    failNext<K extends keyof C & string>(apiName: K, failure: LambderMockFailure<LambderRefusalMessage<LambderMockRefusalsOf<C, K, TVocabulary>>> | LambderMockFailureReason): void;
     /** Every call to the endpoint fails this way until cleared with null. */
-    setFailure(apiName: keyof C & string, failure: LambderMockFailure | LambderMockFailureReason | null): void;
+    setFailure<K extends keyof C & string>(apiName: K, failure: LambderMockFailure<LambderRefusalMessage<LambderMockRefusalsOf<C, K, TVocabulary>>> | LambderMockFailureReason | null): void;
     /** Every call rejects at the transport, as with no network at all. */
     setOffline(offline: boolean): void;
     setLatency(latency: LambderMockLatency): void;
@@ -313,22 +335,55 @@ export declare class LambderMockApp<C extends LambderApiContractShape, S = any, 
     }, options?: LambderMockTransportOptions): LambderMockTransport;
 }
 /**
- * Fixes the contract and session data types, then hands out the guard
- * builder bound to the mock's contexts and the create() that infers
- * everything else (the guard map, the rate-limit policies) from its options.
- * Curried for the same reason initLambder is: TypeScript type arguments are
- * all-or-nothing per call.
- *
- * ```ts
- * const mock = initLambderMock<ApiContractType, SessionData>();
- * const mockApp = mock.create({
- *     apiVersion: "1.4.0",
- *     sessions: true,
- *     guards: { tenant: mock.guard({ guardInput: z.object({ tenantId: z.uuid() }), session: true, handler: ... }) },
- * });
- * ```
+ * The mock's entry point: fixes the contract and session types, and hands
+ * out the builders and create() that share them. `declareRefusals()` binds
+ * the server's refusal vocabulary too, the same object the server's init
+ * declares, so a mock handler's ctx.refuse takes a code's data in the
+ * schema's input form and the mock parses it exactly as the server does.
  */
 export declare const initLambderMock: <C extends LambderApiContractShape, S = any>() => {
+    /**
+     * Declares the server's refusal vocabulary on the mock: the same object,
+     * and the same `requireCodes`, the server's init declares, imported from
+     * shared code (codes, zod schemas, statuses and flags hold nothing
+     * secret). Given, every refusal an entry answers with is checked and sent
+     * as the server would send it: the code among the codes the tables give
+     * the entry, its data parsed through the code's schema from the input
+     * form, and the declaration's status and flag. An entry whose tables name
+     * a code needs it.
+     */
+    declareRefusals<const TVocabulary extends LambderRefusalVocabulary, const TRequireCodes extends boolean = false>(refusals: TVocabulary & LambderRefusalVocabularyChecks<TVocabulary>, options?: {
+        requireCodes?: TRequireCodes;
+    }): {
+        /** Builds a mock guard: the server guard's shape, the handler seeing the mock's contexts. */
+        guard: LambderGuardBuilder<LambderMockCallContext<S>, LambderMockSessionCallContext<S>>;
+        /**
+         * Builds a mock rate-limit key, the counterpart of `guard`. Bound to the
+         * mock's own call context, because the server's lambderRateLimitKey() is
+         * bound to the render context and a handler written with it compiles here
+         * while reading fields the mock context does not have.
+         */
+        rateLimitKey: import("../api/LambderApiRateLimits.js").LambderRateLimitKeyBuilder<LambderMockCallContext<S>>;
+        /**
+         * refuse() typed to the vocabulary the mock declared, for a mock guard or
+         * a helper of the mock with no endpoint in hand: `code` is one of its
+         * codes and `data` the schema's input form, parsed as the server parses
+         * it. The free refuse() where the mock declared none.
+         */
+        refuse: [TVocabulary] extends [never] ? (content: string, options?: import("../shared/wire/LambderApiRefusal.js").LambderRefuseOptions) => never : LambderDeclaredRefuse<LambderHandlerRefusalsOf<TVocabulary, keyof TVocabulary & string>, TRequireCodes>;
+        /**
+         * The mock app, with the guard map and the rate-limit policies inferred
+         * from the options.
+         *
+         * `const` on each of them pins a restatement to the contract, at a cost:
+         * inferring a generic from an object literal switches excess-property
+         * checking off for the whole literal, nested objects included, so a typo
+         * inside `rateLimits.policies` or `idempotency` would compile and be
+         * dropped. `I` exists for the same reason `P` does, and
+         * LambderMockSurplusKeys puts the error back on the key.
+         */
+        create<const G extends Record<string, LambderApiGuard<any, any, any, LambderMockCallContext<S>, LambderMockSessionCallContext<S>>> = {}, const P extends LambderMockRateLimitPolicies<S> = {}, I extends boolean | LambderMockIdempotencyOptions<S> = boolean | LambderMockIdempotencyOptions<S>, const D extends Record<string, LambderGuardDeclarationEntry> = {}, const A extends Record<string, LambderApiOptionEntry> | undefined = undefined>(options: LambderMockAppOptions<C, S, G, P, I, D, A>): LambderMockApp<C, S, G, [A] extends [undefined] ? false : true, TVocabulary, TRequireCodes>;
+    };
     /** Builds a mock guard: the server guard's shape, the handler seeing the mock's contexts. */
     guard: LambderGuardBuilder<LambderMockCallContext<S>, LambderMockSessionCallContext<S>>;
     /**
@@ -338,6 +393,13 @@ export declare const initLambderMock: <C extends LambderApiContractShape, S = an
      * while reading fields the mock context does not have.
      */
     rateLimitKey: import("../api/LambderApiRateLimits.js").LambderRateLimitKeyBuilder<LambderMockCallContext<S>>;
+    /**
+     * refuse() typed to the vocabulary the mock declared, for a mock guard or
+     * a helper of the mock with no endpoint in hand: `code` is one of its
+     * codes and `data` the schema's input form, parsed as the server parses
+     * it. The free refuse() where the mock declared none.
+     */
+    refuse: (content: string, options?: import("../shared/wire/LambderApiRefusal.js").LambderRefuseOptions) => never;
     /**
      * The mock app, with the guard map and the rate-limit policies inferred
      * from the options.
@@ -349,5 +411,5 @@ export declare const initLambderMock: <C extends LambderApiContractShape, S = an
      * dropped. `I` exists for the same reason `P` does, and
      * LambderMockSurplusKeys puts the error back on the key.
      */
-    create<const G extends Record<string, LambderApiGuard<any, any, any, LambderMockCallContext<S>, LambderMockSessionCallContext<S>>> = {}, const P extends LambderMockRateLimitPolicies<S> = {}, I extends boolean | LambderMockIdempotencyOptions<S> = boolean | LambderMockIdempotencyOptions<S>, const D extends Record<string, LambderGuardDeclarationEntry> = {}, const A extends Record<string, LambderApiOptionEntry> | undefined = undefined>(options: LambderMockAppOptions<C, S, G, P, I, D, A>): LambderMockApp<C, S, G, [A] extends [undefined] ? false : true>;
+    create<const G extends Record<string, LambderApiGuard<any, any, any, LambderMockCallContext<S>, LambderMockSessionCallContext<S>>> = {}, const P extends LambderMockRateLimitPolicies<S> = {}, I extends boolean | LambderMockIdempotencyOptions<S> = boolean | LambderMockIdempotencyOptions<S>, const D extends Record<string, LambderGuardDeclarationEntry> = {}, const A extends Record<string, LambderApiOptionEntry> | undefined = undefined>(options: LambderMockAppOptions<C, S, G, P, I, D, A>): LambderMockApp<C, S, G, [A] extends [undefined] ? false : true, never, false>;
 };

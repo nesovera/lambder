@@ -47,13 +47,13 @@ type Permission = 'ORDERS.MANAGE' | 'ORDERS.VIEW' | 'STAFF.MANAGE';
 const storeGuards = {
     open: lambderGuard({ handler: (_ctx, _payload, _reason: string) => {} }),
     captcha: lambderGuard({ guardInput: z.object({ token: z.string() }), runAt: 'afterInputValidation', handler: () => {} }),
-    store: lambderGuard({ guardInput: z.object({ storeId: z.uuid() }), session: true, handler: (_ctx, _input, _need: Permission | readonly Permission[]) => ({ storeId: 's' }) }),
+    store: lambderGuard({ guardInput: z.object({ storeId: z.uuid() }), session: true, refusals: ['not-staff'], handler: (_ctx, _input, _need: Permission | readonly Permission[]) => ({ storeId: 's' }) }),
     device: lambderGuard({ apiInput: z.object({ deviceToken: z.string() }), handler: () => {} }),
     owner: lambderGuard({ session: true, handler: () => {} }),
 };
 
 /** A store app with every shape of option: a guard per input mode, a policy per kind of key, overrides, idempotency. */
-const storeApp = (ordersNeed: Permission | readonly Permission[] = 'ORDERS.MANAGE') => initLambder<{ userId: string }>().create({
+const storeApp = (ordersNeed: Permission | readonly Permission[] = 'ORDERS.MANAGE') => initLambder<{ userId: string }>().declareRefusals({ 'not-staff': { notAuthorized: true, status: 403 }, 'order-closed': {}, 'invite-pending': { data: z.object({ sentAt: z.string() }) } }).create({
     apiPath: '/api',
     session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
     idempotency: { store: new LambderMemoryIdempotencyStore() },
@@ -65,18 +65,18 @@ const storeApp = (ordersNeed: Permission | readonly Permission[] = 'ORDERS.MANAG
             codePerEmail: {
                 perMin: 4, perDay: 30, budget: 'perPolicy', chargeAt: 'beforeGuards',
                 per: lambderRateLimitKey({ apiInput: z.object({ email: z.string() }), handler: (_ctx, { email }) => email.toLowerCase() }),
-                errorMessage: { type: 'warning', content: 'Too many codes for this address. Try again later.' },
+                refusal: { type: 'warning', content: 'Too many codes for this address. Try again later.' },
             },
             remindPerSession: { perHour: 20, per: 'session' },
             invitesPerRecipient: { perMonth: 3, budget: 'perPolicy' },
         },
     },
 })
-    .addApi('order.lookup', { input: z.object({ code: z.string() }), output: z.object({ found: z.boolean() }), guards: { open: 'A lookup code is the whole secret.' }, rateLimit: 'authPerIp' }, async (_ctx) => ({ found: true }))
+    .addApi('order.lookup', { input: z.object({ code: z.string() }), output: z.object({ found: z.boolean() }), guards: { open: 'A lookup code is the whole secret.' }, rateLimit: 'authPerIp', refusals: 'order-closed' }, async (_ctx) => ({ found: true }))
     .addApi('code.send', { input: z.object({ email: z.string() }), output: z.object({ sent: z.boolean() }), guards: 'captcha', rateLimit: { authPerIp: { perMin: 3 }, codePerEmail: true } }, async (_ctx) => ({ sent: true }))
     .addApi('device.ping', { input: z.object({ deviceToken: z.string() }), output: z.object({ ok: z.boolean() }), guards: ['device'] }, async (_ctx) => ({ ok: true }))
     .addSessionApi('orders.list', { input: z.object({}), output: z.array(z.string()), guards: { store: ordersNeed } }, async (_ctx) => [])
-    .addSessionApi('staff.invite', { input: z.object({ email: z.string() }), output: z.object({ invited: z.boolean() }), guards: { store: ['STAFF.MANAGE', 'ORDERS.MANAGE'] }, rateLimit: 'remindPerSession', idempotency: { ttlSeconds: 600 } }, async (_ctx) => ({ invited: true }))
+    .addSessionApi('staff.invite', { input: z.object({ email: z.string() }), output: z.object({ invited: z.boolean() }), guards: { store: ['STAFF.MANAGE', 'ORDERS.MANAGE'] }, rateLimit: 'remindPerSession', idempotency: { ttlSeconds: 600 }, refusals: ['invite-pending'] }, async (_ctx) => ({ invited: true }))
     .addSessionApi('me', { input: z.object({}), output: z.object({ userId: z.string() }), guards: 'owner', idempotency: true }, async (ctx) => ({ userId: ctx.session.data.userId }));
 
 describe('Lambder.apiOptionEntries', () => {
@@ -88,9 +88,10 @@ describe('Lambder.apiOptionEntries', () => {
             'code.send': { mode: 'public', guards: 'captcha', rateLimit: { authPerIp: { perMin: 3 }, codePerEmail: true } },
             'device.ping': { mode: 'public', guards: ['device'] },
             me: { mode: 'session', guards: 'owner', idempotency: true },
-            'order.lookup': { mode: 'public', guards: { open: 'A lookup code is the whole secret.' }, rateLimit: 'authPerIp' },
+            'order.lookup': { mode: 'public', guards: { open: 'A lookup code is the whole secret.' }, rateLimit: 'authPerIp', refusals: 'order-closed' },
             'orders.list': { mode: 'session', guards: { store: 'ORDERS.MANAGE' } },
-            'staff.invite': { mode: 'session', guards: { store: ['STAFF.MANAGE', 'ORDERS.MANAGE'] }, rateLimit: 'remindPerSession', idempotency: { ttlSeconds: 600 } },
+            // Its own refusals as written; the code its guard adds is on the guard's declaration.
+            'staff.invite': { mode: 'session', guards: { store: ['STAFF.MANAGE', 'ORDERS.MANAGE'] }, rateLimit: 'remindPerSession', idempotency: { ttlSeconds: 600 }, refusals: ['invite-pending'] },
         });
     });
 
@@ -99,7 +100,7 @@ describe('Lambder.apiOptionEntries', () => {
 
         expect(rateLimitPolicies).toEqual({
             authPerIp: { perMin: 10, perHour: 60, per: 'ip' },
-            codePerEmail: { perMin: 4, perDay: 30, budget: 'perPolicy', chargeAt: 'beforeGuards', per: 'custom', errorMessage: { type: 'warning', content: 'Too many codes for this address. Try again later.' } },
+            codePerEmail: { perMin: 4, perDay: 30, budget: 'perPolicy', chargeAt: 'beforeGuards', per: 'custom', refusal: { type: 'warning', content: 'Too many codes for this address. Try again later.' } },
             invitesPerRecipient: { perMonth: 3, budget: 'perPolicy' },
             remindPerSession: { perHour: 20, per: 'session' },
         });
@@ -109,7 +110,7 @@ describe('Lambder.apiOptionEntries', () => {
             device: { input: 'apiInput', session: false, runAt: 'beforeInputValidation' },
             open: { input: 'none', session: false, runAt: 'beforeInputValidation' },
             owner: { input: 'none', session: true, runAt: 'beforeInputValidation' },
-            store: { input: 'guardInput', session: true, runAt: 'beforeInputValidation' },
+            store: { input: 'guardInput', session: true, runAt: 'beforeInputValidation', refusals: ['not-staff'] },
         });
     });
 
@@ -293,7 +294,7 @@ const apiOptions = {
 } as const satisfies LambderApiOptionEntries['apis'];
 const rateLimitPolicies = {
     authPerIp: { perMin: 10, perHour: 60, per: 'ip' },
-    codePerEmail: { perMin: 4, perDay: 30, budget: 'perPolicy', chargeAt: 'beforeGuards', per: 'custom', errorMessage: { type: 'warning', content: 'Too many codes for this address. Try again later.' } },
+    codePerEmail: { perMin: 4, perDay: 30, budget: 'perPolicy', chargeAt: 'beforeGuards', per: 'custom', refusal: { type: 'warning', content: 'Too many codes for this address. Try again later.' } },
     invitesPerRecipient: { perMonth: 3, budget: 'perPolicy' },
     remindPerSession: { perHour: 20, per: 'session' },
 } as const satisfies LambderApiOptionEntries['rateLimitPolicies'];
@@ -347,7 +348,7 @@ describe('lambderMockPoliciesFrom', () => {
     it('puts the key handler back on a custom-keyed policy and copies every other as declared', () => {
         const policies = lambderMockPoliciesFrom(rateLimitPolicies, { keys: { codePerEmail: emailKey } });
         expect(policies.authPerIp).toEqual({ perMin: 10, perHour: 60, per: 'ip' });
-        expect(policies.codePerEmail).toEqual({ perMin: 4, perDay: 30, budget: 'perPolicy', chargeAt: 'beforeGuards', per: emailKey, errorMessage: { type: 'warning', content: 'Too many codes for this address. Try again later.' } });
+        expect(policies.codePerEmail).toEqual({ perMin: 4, perDay: 30, budget: 'perPolicy', chargeAt: 'beforeGuards', per: emailKey, refusal: { type: 'warning', content: 'Too many codes for this address. Try again later.' } });
         expect(policies.invitesPerRecipient).toEqual({ perMonth: 3, budget: 'perPolicy' });
         expect(policies.remindPerSession).toEqual({ perHour: 20, per: 'session' });
         expectTypeOf(policies.authPerIp.per).toEqualTypeOf<'ip'>();
