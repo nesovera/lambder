@@ -11,6 +11,7 @@ import { describe, it, expect, expectTypeOf, vi, afterEach } from 'vitest';
 import { z } from 'zod';
 import Lambder, { initLambder } from '../../src/core/Lambder.js';
 import { lambderGuard } from '../../src/core/LambderPolicyBuilders.js';
+import type { LambderApiGuard } from '../../src/api/LambderApiGuards.js';
 import type { LambderDeclaredRefuseOptions } from '../../src/shared/wire/LambderApiRefusal.js';
 import { LambderMemorySessionStore } from '../../src/stores/LambderMemorySessionStore.js';
 import { LambderMemoryRateLimiter } from '../../src/stores/LambderMemoryRateLimiter.js';
@@ -345,6 +346,27 @@ describe('Declared refusals: creation', () => {
         // @ts-expect-error a code outside the vocabulary
         expect(() => init.refuse('Nope.', { code: 'order-lost' })).toThrow();
         expect(() => init.refuse('Short.', { code: 'wallet-short', data: { available: 1 } })).toThrow(/Short\./);
+    });
+
+    it('builds guards naming no code inside a map held to LambderApiGuard, where the contextual type would otherwise widen their refusals', () => {
+        const init = initLambder<{ role: string }>().declareRefusals({ 'order-closed': {} });
+        // An app's guards file holds its map to LambderApiGuard, whose `refusals?: readonly string[]`
+        // is not an inference site for a guard's refusals: a guard that names none declares none.
+        const guards = {
+            sessionOnly: init.guard({ session: true, handler: () => {} }),
+            open: init.guard({ handler: (_ctx, _payload, _reason: string) => {} }),
+            checked: init.guard({ guardInput: z.object({ token: z.string() }), handler: (ctx, { token }) => {
+                // @ts-expect-error a guard declaring no refusals raises no code
+                if(token === 'x') ctx.refuse('Closed.', { code: 'order-closed' });
+            } }),
+            manager: init.guard({ session: true, refusals: ['order-closed'], handler: (ctx) => {
+                if(ctx.session.data.role !== 'manager') ctx.refuse('Closed.', { code: 'order-closed' });
+            } }),
+        } satisfies Record<string, LambderApiGuard<any, any, any>>;
+        expectTypeOf(guards.sessionOnly.refusals).toEqualTypeOf<readonly [] | undefined>();
+        expectTypeOf(guards.manager.refusals).toEqualTypeOf<readonly ['order-closed'] | undefined>();
+        expect(guards.open.refusals).toBeUndefined();
+        expect(guards.manager.refusals).toEqual(['order-closed']);
     });
 
     it('requires a code on every refusal an API answers with when the vocabulary says so', async () => {

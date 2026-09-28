@@ -9,6 +9,19 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [10.0.2] - 2026-09-28
+
+### Fixed
+
+- **A guard an init's `guard()` builds inside a map held to `LambderApiGuard`**
+  (`{ ... } satisfies Record<string, LambderApiGuard<any, any, any>>`, the
+  shape an app's guards file takes) did not compile when it named no
+  `refusals`: the map's contextual type widened the guard's refusals to
+  `readonly string[]`, which the vocabulary check read as codes it does not
+  hold, so every such guard was asked for a `refusals` option. The refusals in
+  a built guard's type are no longer an inference site, so a guard that names
+  none declares none wherever it is built.
+
 ## [10.0.1] - 2026-09-28
 
 A major that makes both sides of an API answer exact. A success is only ever
