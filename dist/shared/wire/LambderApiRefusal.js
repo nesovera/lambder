@@ -2,7 +2,7 @@
  * A typed refusal: "this request is denied/invalid" as opposed to "the server
  * crashed". Throw it from anywhere in an API call's call stack (handlers,
  * hooks, guards or nested helpers) and the render pipeline maps it onto the
- * structured API envelope (its errorMessage, notAuthorized and
+ * structured API envelope (its refusal, notAuthorized and
  * sessionExpired) instead of routing it through setGlobalErrorHandler, so refusals never reach crash
  * logging and clients receive a parseable response.
  *
@@ -20,8 +20,8 @@ export class LambderApiRefusal extends Error {
      * across them while this marker does not. The pipeline checks the brand.
      */
     isLambderApiRefusal = true;
-    /** What the envelope's errorMessage carries: always a message object, a plain string given to the options made into one. */
-    errorMessage;
+    /** What the envelope's refusal carries: always a message object, a plain string given to the options made into one. */
+    refusal;
     notAuthorized;
     sessionExpired;
     statusCode;
@@ -29,7 +29,7 @@ export class LambderApiRefusal extends Error {
     constructor(message, options = {}) {
         super(message, options.cause !== undefined ? { cause: options.cause } : undefined);
         this.name = "LambderApiRefusal";
-        this.errorMessage = refusalMessageOf(options.errorMessage ?? message);
+        this.refusal = refusalMessageOf(options.refusal ?? message);
         this.notAuthorized = options.notAuthorized;
         this.sessionExpired = options.sessionExpired;
         this.statusCode = options.statusCode;
@@ -40,7 +40,7 @@ export class LambderApiRefusal extends Error {
 export const isLambderApiRefusal = (err) => err instanceof Error && err.isLambderApiRefusal === true;
 const REFUSAL_MESSAGE_TYPES = ["warning", "error", "info"];
 /**
- * An errorMessage as the one shape a reader handles: a plain string becomes
+ * An refusal as the one shape a reader handles: a plain string becomes
  * an "error" message with that content, and a value that is not a message
  * at all becomes one describing it. The envelope writer applies it, so a
  * Lambder server only ever sends the object. A reader applies it too,
@@ -71,7 +71,7 @@ export const refusalMessageOf = (message) => {
  * than retyping the strings.
  */
 export const LAMBDER_REFUSAL_CODES = {
-    /** A rate-limit policy refused (429). A policy's own errorMessage inherits this unless it sets a code. */
+    /** A rate-limit policy refused (429). A policy's own message carries it. */
     rateLimited: "lambder/rate-limited",
     /** The original of an idempotent request is still processing (409). */
     duplicateInFlight: "lambder/duplicate-in-flight",
@@ -92,6 +92,9 @@ export const LAMBDER_REFUSAL_CODES = {
     /** An upload bucket would not sign a ticket for a file larger than the rule accepts. */
     uploadTooLarge: "lambder/upload-too-large",
 };
+const FRAMEWORK_REFUSAL_CODES = new Set(Object.values(LAMBDER_REFUSAL_CODES));
+/** Whether a code is one the framework stamps on its own refusals. */
+export const isLambderRefusalCode = (code) => typeof code === "string" && FRAMEWORK_REFUSAL_CODES.has(code);
 /**
  * Refuse the current API call: a routine business "no" (not found, invalid
  * input, not allowed) with a user-facing message. Throws a LambderApiRefusal
@@ -103,14 +106,19 @@ export const LAMBDER_REFUSAL_CODES = {
  * The const carries the annotation so TypeScript applies never-return
  * control-flow narrowing at call sites (`if (!row) refuse(...)` implies
  * `row` is defined afterwards).
+ *
+ * Its `code` and `data` are checked when the refusal is rendered, against the
+ * endpoint it answers. Inside an API handler, `ctx.refuse` takes the same
+ * arguments typed to that endpoint's declared codes (LambderDeclaredRefuse).
  */
 export const refuse = (content, options = {}) => {
     throw new LambderApiRefusal(content, {
-        errorMessage: {
+        refusal: {
             type: options.type ?? "warning",
             ...(options.code !== undefined ? { code: options.code } : {}),
             ...(options.title !== undefined ? { title: options.title } : {}),
             content,
+            ...(options.data !== undefined ? { data: options.data } : {}),
         },
         notAuthorized: options.notAuthorized,
         sessionExpired: options.sessionExpired,

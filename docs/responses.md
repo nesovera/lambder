@@ -57,31 +57,40 @@ with the same build methods. All accept an options object:
 | `res.status(code, body?, options?)` | Response with any status code |
 | `res.redirect(url, statusCode?, options?)` | Redirect, default 302. A path stays on this origin: a leading run of slashes and backslashes collapses to one slash (`//evil.example` is another host), so a Location built from the decoded `ctx.path` cannot leave the site; another host is named with its scheme. What a URL may not carry as it is (control characters, a space, a backslash, anything outside ASCII) is percent-encoded, so it cannot end the header either; `%` is left alone |
 | `res.status404(data, options?)` | 404 Not Found |
-| `res.versionExpired(options?)` | The stale-client refusal envelope, the one the signature gate answers: `res.api(null, { versionExpired: true })` |
+| `res.versionExpired(options?)` | The stale-client refusal envelope, the one the signature gate answers: `res.apiRefusal({ versionExpired: true })` |
 | `res.fileBase64(base64, mimeType, options?)` | File from base64 content |
 | `await res.file(path, options?)` | Serve a file from the `files` source (404 when missing) |
 | `await res.templateFile(path, data?, options?)` | Render an HTML file via `LambderTemplatingEngine` (cached; throws when missing) |
-| `res.api(payload, config?, options?)` | An API envelope written by hand, for code that answers an API call outside its handler; the payload is sent as given |
+| `res.apiRefusal(config, options?)` | An API call answered from outside its handler, always as a refusal; see below |
 
-`res.api` writes the answers an API handler does not give: what a hook, the
-API fallback, the input validation handler or the global error handler
-answers an API call with, usually `null` beside a refusal flag, an
-`errorMessage` or a crash. Nothing parses its payload through an output
-schema, so what it is handed is what goes out. An API handler never holds a
-resolver: it returns its output, parsed through its schema by the framework,
-or throws `refuse()`.
+### API answers outside a handler
+
+`res.apiRefusal` writes the answers an API handler does not give: what a
+hook, the API fallback, the input validation handler or the global error
+handler answers an API call with. It is always a refusal, never a success:
+its config carries a `refusal` or one of the `versionExpired`,
+`sessionExpired` and `notAuthorized` flags (a compile error and a thrown
+error otherwise), and the envelope's payload is null. That is what lets a
+caller trust a success: only a handler's own output, parsed through its
+schema, ever reads as one. An API handler never holds a resolver: it returns
+its output or refuses.
 
 ```typescript
 lambder.setGlobalErrorHandler((err, ctx, res) => {
     // An API call is answered in its envelope, which a caller reads as a failure of the server.
-    if (ctx?.api) return res.api(null, { errorMessage: "Something went wrong. Please try again." }, { statusCode: 500 });
+    if (ctx?.api) return res.apiRefusal({ refusal: "Something went wrong. Please try again." }, { statusCode: 500 });
     return res.status(500, "Internal Server Error");
 });
 ```
 
-**API config options** (the second argument of `res.api`):
-`{ notAuthorized, errorMessage, versionExpired, sessionExpired, logList, crash }`.
-`logList` defaults to what the request accumulated on `ctx.logList`.
+**The config** (the first argument):
+`{ refusal, notAuthorized, versionExpired, sessionExpired, logList, crash }`.
+`logList` defaults to what the request accumulated on `ctx.logList`. Its
+`refusal` carries a framework code or none, and never data: it answers
+outside any one endpoint's declared refusals, which are what a caller's types
+allow (see [Declared refusals](./apis.md#declared-refusals)). An app code there
+is a thrown error; a hook that means a declared code throws it with
+`refuse()`, and it is checked against the endpoint the call names.
 
 `crash` carries a failure described in full (name, message, stack, cause chain,
 and the request id it happened under), built with `describeCrash(err, ctx)`.
@@ -272,6 +281,6 @@ to what the gateway hands the function and what the function returns.
 that needs to build a response without being a handler (a hook helper, a
 shared error mapper). It has every build method a resolver has and no
 `res.die.*`: throwing a response short-circuits the request, and the code
-calling this is not inside one. Pass `ctx` so that `res.api()` carries the
+calling this is not inside one. Pass `ctx` so that `res.apiRefusal()` carries the
 `logList` the request accumulated; headers and cookies go through the context
 itself.

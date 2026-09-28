@@ -42,15 +42,16 @@ const serverGuards = {
     role: lambderGuard({
         guardInput: z.object({ wanted: z.enum(['admin', 'member']) }),
         session: true,
+        refusals: ['app/wrong-role'],
         handler: (ctx, { wanted }, _param: true) => {
-            if(ctx.session.data.role !== wanted) refuse('Wrong role.', { code: 'app/wrong-role', notAuthorized: true });
+            if(ctx.session.data.role !== wanted) refuse('Wrong role.', { code: 'app/wrong-role' });
             return { role: ctx.session.data.role };
         },
     }),
 };
 
 const createServer = (gate: ReturnType<typeof makeGate>) => {
-    const app = initLambder<SessionData>().create({
+    const app = initLambder<SessionData>().declareRefusals({ 'app/nope': {}, 'app/wrong-role': { notAuthorized: true } }).create({
         files: testPublicFiles(),
         apiPath: '/api',
         apiVersion: '1',
@@ -66,7 +67,7 @@ const createServer = (gate: ReturnType<typeof makeGate>) => {
     let counter = 0;
     return app
         .addApi('ok', { input: z.object({ n: z.number() }), output: z.object({ doubled: z.number() }) }, async (ctx) => ({ doubled: ctx.apiPayload.n * 2 }))
-        .addApi('refuse', { input: z.object({}), output: z.any() }, async () => refuse('Nope.', { code: 'app/nope', title: 'No' }))
+        .addApi('refuse', { input: z.object({}), output: z.any(), refusals: 'app/nope' }, async (ctx) => ctx.refuse('Nope.', { code: 'app/nope', title: 'No' }))
         .addApi('deny', { input: z.object({}), output: z.any() }, async () => refuse('Denied.', { notAuthorized: true }))
         .addApi('login', { input: z.object({ user: z.string(), role: z.enum(['admin', 'member']) }), output: z.object({ ok: z.boolean() }) },
             async (ctx) => { await app.getSessionController(ctx).createSession(ctx.apiPayload.user, { userId: ctx.apiPayload.user, role: ctx.apiPayload.role }); return { ok: true }; })
@@ -126,7 +127,7 @@ const createMock = (gate: ReturnType<typeof makeGate>) => {
         // to the contract, and this is the cell that compares its 422 to the
         // server's rather than only to itself.
         mockApp.publicApi('ok', { input: z.object({ n: z.number() }), handler: async ({ payload }) => ({ doubled: payload.n * 2 }) }),
-        mockApp.publicApi('refuse', async () => refuse('Nope.', { code: 'app/nope', title: 'No' })),
+        mockApp.publicApi('refuse', async (ctx) => ctx.refuse('Nope.', { code: 'app/nope', title: 'No' })),
         mockApp.publicApi('deny', async () => refuse('Denied.', { notAuthorized: true })),
         mockApp.publicApi('login', async ({ payload, sessionController }) => { await sessionController.createSession(payload.user, { userId: payload.user, role: payload.role }); return { ok: true }; }),
         mockApp.sessionApi('me', async ({ session }) => ({ userId: session.data.userId })),
@@ -237,7 +238,7 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
     it('a refusal with a code and a title, and a notAuthorized refusal', async () => {
         const sides = createSides();
         const refused = await same(sides, 'refuse', {});
-        expect(refused.seen.envelope).toEqual({ apiVersion: '1', payload: null, errorMessage: { type: 'warning', code: 'app/nope', title: 'No', content: 'Nope.' } });
+        expect(refused.seen.envelope).toEqual({ apiVersion: '1', payload: null, refusal: { type: 'warning', code: 'app/nope', title: 'No', content: 'Nope.' } });
         const denied = await same(sides, 'deny', {});
         expect(denied.seen.envelope).toMatchObject({ notAuthorized: true });
         expect(denied.mockOutcome.ok ? '' : denied.mockOutcome.reason).toBe('notAuthorized');
@@ -260,7 +261,7 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
         const allowed = await same(sides, 'guarded', {}, { guardInputs: { role: { wanted: 'member' } } });
         expect(allowed.seen.envelope).toMatchObject({ payload: { role: 'member' } });
         const refused = await same(sides, 'guarded', {}, { guardInputs: { role: { wanted: 'admin' } } });
-        expect(refused.seen.envelope).toMatchObject({ notAuthorized: true, errorMessage: { code: 'app/wrong-role' } });
+        expect(refused.seen.envelope).toMatchObject({ notAuthorized: true, refusal: { code: 'app/wrong-role' } });
         const missing = await same(sides, 'guarded', {}, { guardInputs: { role: {} as never } });
         expect(missing.seen.status).toBe(422);
         expect(missing.mockOutcome.ok ? '' : missing.mockOutcome.reason).toBe('validation');
@@ -297,7 +298,7 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
         const blocked = await same(sides, 'limited', {});
         expect(blocked.seen.status).toBe(429);
         expect(Number(blocked.seen.retryAfter)).toBeGreaterThanOrEqual(1);
-        expect(blocked.seen.envelope).toMatchObject({ errorMessage: { code: 'lambder/rate-limited' } });
+        expect(blocked.seen.envelope).toMatchObject({ refusal: { code: 'lambder/rate-limited' } });
     });
 
     it('idempotent replay: the same stored answer, the handler run once on each side', async () => {
@@ -315,7 +316,7 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
         await Promise.all([sides.serverGate.entered, sides.mockGate.entered]);
         const duplicate = await same(sides, 'slow', {}, { idempotencyKey: IDEMPOTENCY_KEY });
         expect(duplicate.seen.status).toBe(409);
-        expect(duplicate.seen.envelope).toMatchObject({ errorMessage: { code: 'lambder/duplicate-in-flight' } });
+        expect(duplicate.seen.envelope).toMatchObject({ refusal: { code: 'lambder/duplicate-in-flight' } });
         sides.serverGate.release();
         sides.mockGate.release();
         const [serverOriginal, mockOriginal] = await Promise.all(originals);
@@ -375,7 +376,7 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
         await same(sides, 'limitedPerCaller', {});
         const blocked = await same(sides, 'limitedPerCaller', {});
         expect(blocked.seen.status).toBe(429);
-        expect(blocked.seen.envelope).toMatchObject({ errorMessage: { code: 'lambder/rate-limited' } });
+        expect(blocked.seen.envelope).toMatchObject({ refusal: { code: 'lambder/rate-limited' } });
 
         // Another session is another counter, on both sides.
         await same(sides, 'login', { user: 'bob', role: 'member' }, { from: 'stranger' });
@@ -385,7 +386,7 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
 
     it('an unknown api: the same apiNotFound refusal', async () => {
         const { seen } = await same(createSides(), 'nope', {});
-        expect(seen.envelope).toEqual({ apiVersion: '1', payload: null, errorMessage: { type: 'warning', code: 'lambder/api-not-found', content: 'API not found.' } });
+        expect(seen.envelope).toEqual({ apiVersion: '1', payload: null, refusal: { type: 'warning', code: 'lambder/api-not-found', content: 'API not found.' } });
     });
 
     it('an unknown api from a signed caller: the signature gate answers first on both sides', async () => {
@@ -418,7 +419,7 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
 
     it('a crash: the same 500 envelope', async () => {
         const { seen, mockOutcome } = await same(createSides(), 'crash', {});
-        expect(seen).toMatchObject({ status: 500, envelope: { apiVersion: '1', payload: null, errorMessage: { type: 'error', content: 'Internal server error.' } } });
+        expect(seen).toMatchObject({ status: 500, envelope: { apiVersion: '1', payload: null, refusal: { type: 'error', content: 'Internal server error.' } } });
         expect(mockOutcome.ok ? '' : mockOutcome.reason).toBe('server');
     });
 

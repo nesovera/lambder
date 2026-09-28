@@ -107,9 +107,9 @@ describe('LambderS3UploadBucket.issueUploadTicket', () => {
         const { bucket } = makeBucket();
         const issue = (fileFacts: LambderUploadFileFacts) => bucket.issueUploadTicket({ objectKey: OBJECT_KEY, fileFacts, uploadRule: PDF_RULE });
 
-        expect((await refusalOf(issue({ ...INVOICE_FACTS, mimeType: 'image/png' }))).errorMessage).toMatchObject({ code: LAMBDER_REFUSAL_CODES.uploadTypeRejected, content: 'This type of file is not accepted.' });
-        expect((await refusalOf(issue({ ...INVOICE_FACTS, byteSize: PDF_RULE.maxBytes + 1 }))).errorMessage).toMatchObject({ code: LAMBDER_REFUSAL_CODES.uploadTooLarge });
-        expect((await refusalOf(issue({ ...INVOICE_FACTS, byteSize: 0 }))).errorMessage).toMatchObject({ code: LAMBDER_REFUSAL_CODES.uploadEmpty });
+        expect((await refusalOf(issue({ ...INVOICE_FACTS, mimeType: 'image/png' }))).refusal).toMatchObject({ code: LAMBDER_REFUSAL_CODES.uploadTypeRejected, content: 'This type of file is not accepted.' });
+        expect((await refusalOf(issue({ ...INVOICE_FACTS, byteSize: PDF_RULE.maxBytes + 1 }))).refusal).toMatchObject({ code: LAMBDER_REFUSAL_CODES.uploadTooLarge });
+        expect((await refusalOf(issue({ ...INVOICE_FACTS, byteSize: 0 }))).refusal).toMatchObject({ code: LAMBDER_REFUSAL_CODES.uploadEmpty });
         await expect(issue({ ...INVOICE_FACTS, byteSize: PDF_RULE.maxBytes })).resolves.toBeDefined();
     });
 
@@ -360,7 +360,7 @@ describe('LambderS3UploadBucket.issueUploadTicket with uploadMethod PUT', () => 
 
     it('refuses what the rule does not accept before signing, as a POST bucket does', async () => {
         const { bucket } = makePutBucket();
-        expect((await refusalOf(bucket.issueUploadTicket({ objectKey: OBJECT_KEY, fileFacts: { ...INVOICE_FACTS, mimeType: 'image/png' }, uploadRule: PDF_RULE }))).errorMessage)
+        expect((await refusalOf(bucket.issueUploadTicket({ objectKey: OBJECT_KEY, fileFacts: { ...INVOICE_FACTS, mimeType: 'image/png' }, uploadRule: PDF_RULE }))).refusal)
             .toMatchObject({ code: LAMBDER_REFUSAL_CODES.uploadTypeRejected });
     });
 });

@@ -27,16 +27,18 @@ export { apiSignatureOf } from "./api/LambderApiSignature.js";
 export { apiNameKeyOf, lookupApiSignature, readApiSignature, API_SIGNATURE_HEX_LENGTH, extensibleEnum } from "./shared/wire/LambderApiSignatureMap.js";
 export { RELOAD_LOOP_WINDOW_MS } from "./client/LambderReloadLoopBreaker.js";
 export { compareDottedVersions, isDottedVersion } from "./shared/wire/LambderVersionOrder.js";
-export { buildApiEnvelope, envelopeAnswer, refusalAnswer, validationAnswer, apiNotFoundAnswer, sessionExpiredAnswer, versionExpiredAnswer, invalidPayloadAnswer, crashAnswer, API_ANSWER_CONTENT_TYPE, } from "./api/LambderApiEnvelope.js";
+export { successEnvelope, refusalEnvelope, plainRefusalEnvelope, envelopeAnswer, refusalAnswer, validationAnswer, apiNotFoundAnswer, sessionExpiredAnswer, versionExpiredAnswer, invalidPayloadAnswer, crashAnswer, API_ANSWER_CONTENT_TYPE, } from "./api/LambderApiEnvelope.js";
 export { LambderApiValidationRefusal, isLambderApiValidationRefusal } from "./api/LambderApiValidationRefusal.js";
 export { LambderApiOutputValidationError } from "./api/LambderApiOutputValidationError.js";
+export { checkedRefusal } from "./api/LambderApiRefusals.js";
 // Calling a Lambder app from another lambda (server-only: the Lambda SDK, zlib)
 export { LambderInvokeError, isLambderInvokeError } from "./invoke/LambderInvokeOutcome.js";
 export { default as LambderInvokeCaller, LAMBDER_INVOKE_MAX_EVENT_BYTES, } from "./invoke/LambderInvokeCaller.js";
 // A crash described for a caller allowed to see it (the envelope's `crash` field)
 export { describeCrash, errorFromCrashDetail } from "./shared/wire/LambderCrashDetail.js";
 // Typed API refusals (isomorphic: shared code may throw them from anywhere)
-export { LambderApiRefusal, isLambderApiRefusal, refuse, refusalMessageOf, LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";
+export { LambderApiRefusal, isLambderApiRefusal, isLambderRefusalCode, refuse, refusalMessageOf, LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";
+export { isObjectPayload } from "./shared/wire/LambderObjectPayload.js";
 export { default as LambderResponseBuilder } from "./core/LambderResponseBuilder.js";
 export { default as LambderResolver } from "./core/LambderResolver.js";
 export { default as LambderSessionManager } from "./session/LambderSessionManager.js";
@@ -86,6 +88,8 @@ export { LambderMemoryIdempotencyStore } from "./stores/LambderMemoryIdempotency
 // Declarative per-API policies: guards
 export { lambderGuard, lambderRateLimitKey } from "./core/LambderPolicyBuilders.js";
 export { lambderGuardBuilder } from "./api/LambderApiGuards.js";
+// Declarative per-API policies: declared refusals
+export { LambderApiRefusalValidationError } from "./api/LambderApiRefusals.js";
 // Declarative per-API policies: rate limits
 export { lambderRateLimitKeyBuilder, rateLimitRefusal, DEFAULT_RATE_LIMIT_REFUSAL } from "./api/LambderApiRateLimits.js";
 // The declared options as plain data: what apiOptionEntries() reports and

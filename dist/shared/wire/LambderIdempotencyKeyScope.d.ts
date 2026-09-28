@@ -7,7 +7,8 @@ export type LambderIdempotentAttemptOutcome = {
     ok: boolean;
     reason?: string;
     status?: number;
-    errorMessage?: {
+    /** The refusal's message, when the answer carried one: only its code is read. */
+    refusal?: {
         code?: string;
     };
 };
@@ -43,7 +44,7 @@ export declare const createIdempotencyKey: () => string;
  * - A success settles it, and so does a key refused as reused for another
  *   request, since that key can never carry this one.
  * - A refusal of this request (a rejected input, not authorized, an
- *   errorMessage) settles it, unless another attempt under the same key is
+ *   refusal) settles it, unless another attempt under the same key is
  *   still in flight or went unanswered. That attempt may run or have run the
  *   operation, and guards, validation and rate limits refuse before the
  *   replay record is claimed, so the refusal of a retry or a double-tap says

@@ -23,9 +23,10 @@ export type { LambderApiAnswerOutcome, LambderApiSuccessOutcome, LambderApiCallF
 export type { LambderApiOutcome, LambderApiFailureReason, LambderValidationError, LambderCallOptions, LambderCallerOptions, LambderGuardInputsProvider, LambderProvidedGuardInputs, LambderLogListHandler, } from "./client/LambderCaller.js";
 export { createIdempotencyKey, createIdempotencyKeyScope } from "./shared/wire/LambderIdempotencyKeyScope.js";
 export type { LambderIdempotencyKeyScope } from "./shared/wire/LambderIdempotencyKeyScope.js";
-export { LambderApiRefusal, isLambderApiRefusal, refuse, refusalMessageOf, LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";
-export type { LambderApiRefusalOptions, LambderRefusalMessage, LambderAppRefusalMessage, LambderRefusalCode, LambderRefuseOptions } from "./shared/wire/LambderApiRefusal.js";
-export type { LambderApiContractShape, LambderApiMode, LambderApiEnvelopeBody, LambderApiResponseConfig, LambderGuardNamesIn, LambderContractMode, LambderContractKeysWithMode, LambderContractKeysWithGuard, LambderJsonOf, LambderJsonOutputOf, LambderContractGuardsOf, LambderContractGuardNames, LambderContractGuardInputsOf, LambderContractGuardInput, LambderContractGuardInputNames, LambderContractRateLimitOf, LambderContractRateLimitNames, LambderContractIdempotencyOf, } from "./shared/wire/LambderApiContract.js";
+export { LambderApiRefusal, isLambderApiRefusal, isLambderRefusalCode, refuse, refusalMessageOf, LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";
+export type { LambderApiRefusalOptions, LambderRefusalMessage, LambderPlainRefusalMessage, LambderUncheckedRefusalMessage, LambderRefusalCode, LambderRefuseOptions, LambderDeclaredRefuseOptions, LambderDeclaredRefuse, } from "./shared/wire/LambderApiRefusal.js";
+export { isObjectPayload } from "./shared/wire/LambderObjectPayload.js";
+export type { LambderApiContractShape, LambderApiMode, LambderApiEnvelopeBody, LambderApiSuccessEnvelope, LambderApiRefusalEnvelope, LambderRefusalEnvelopeFields, LambderApiRefusalConfig, LambderGuardNamesIn, LambderContractMode, LambderContractKeysWithMode, LambderContractKeysWithGuard, LambderJsonOf, LambderContractRefusalsOf, LambderContractRefusalMessage, LambderContractRefusals, LambderContractAnyRefusalMessage, LambderContractGuardsOf, LambderContractGuardNames, LambderContractGuardInputsOf, LambderContractGuardInput, LambderContractGuardInputNames, LambderContractRateLimitOf, LambderContractRateLimitNames, LambderContractIdempotencyOf, } from "./shared/wire/LambderApiContract.js";
 export { apiGuardParam } from "./shared/wire/LambderApiOptionEntries.js";
 export type { LambderApiOptionEntries, LambderApiOptionEntry, LambderRateLimitPolicyEntry, LambderGuardDeclarationEntry, LambderApisWithGuard, LambderApisGuardedBy, LambderApisWithMode, LambderGuardParamOf, } from "./shared/wire/LambderApiOptionEntries.js";
 export { describeCrash, errorFromCrashDetail } from "./shared/wire/LambderCrashDetail.js";
@@ -37,7 +38,7 @@ export type { LambderCompressionOption, LambderCompressionSettingsBase } from ".
 export { html, xml, raw, jsonScript, escapeHtml, renderHtmlValue, LambderSafeHtml, type LambderHtmlValue } from "./shared/LambderHtml.js";
 export { createLambderI18n } from "./shared/LambderI18n.js";
 export type { LambderLanguageMeta, LambderI18nConfig, LambderI18nInstance, LambderI18nTranslator, LambderI18nExtractParams, LambderI18nDictionaryLoader, LambderI18nCodes, LambderI18nKeys, LambderI18nTranslatorFor, } from "./shared/LambderI18n.js";
-export type { LambderHttpStatusCode } from "./shared/wire/LambderHttpStatus.js";
+export type { LambderHttpStatusCode, LambderRefusalStatusCode } from "./shared/wire/LambderHttpStatus.js";
 export { LambderBackoffTimer } from "./shared/util/LambderBackoffTimer.js";
 export type { LambderBackoffTimerOptions } from "./shared/util/LambderBackoffTimer.js";
 export { LambderSignedClaims, keyedDigest, randomSecret } from "./shared/util/LambderSignedClaims.js";

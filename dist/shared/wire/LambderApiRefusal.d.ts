@@ -1,13 +1,13 @@
 import type { LambderHttpStatusCode } from "./LambderHttpStatus.js";
 export type LambderApiRefusalOptions = {
     /**
-     * User-facing failure detail placed on the API envelope's `errorMessage`
+     * User-facing failure detail placed on the API envelope's `refusal`
      * field: a refusal message (`{ type: "warning", content: "..." }`, with
      * an app's own `code`) or a plain string, which becomes an "error"
      * message with that content. Defaults to the error message, so a bare
      * `throw new LambderApiRefusal("...")` is still visible to the client.
      */
-    errorMessage?: LambderAppRefusalMessage | string;
+    refusal?: LambderUncheckedRefusalMessage | string;
     /** Sets the envelope's `notAuthorized` flag (routed to the caller's notAuthorizedHandler). */
     notAuthorized?: boolean;
     /** Sets the envelope's `sessionExpired` flag (the caller clears session cookies and calls sessionExpiredHandler). */
@@ -27,7 +27,7 @@ export type LambderApiRefusalOptions = {
  * A typed refusal: "this request is denied/invalid" as opposed to "the server
  * crashed". Throw it from anywhere in an API call's call stack (handlers,
  * hooks, guards or nested helpers) and the render pipeline maps it onto the
- * structured API envelope (its errorMessage, notAuthorized and
+ * structured API envelope (its refusal, notAuthorized and
  * sessionExpired) instead of routing it through setGlobalErrorHandler, so refusals never reach crash
  * logging and clients receive a parseable response.
  *
@@ -45,8 +45,8 @@ export declare class LambderApiRefusal extends Error {
      * across them while this marker does not. The pipeline checks the brand.
      */
     readonly isLambderApiRefusal = true;
-    /** What the envelope's errorMessage carries: always a message object, a plain string given to the options made into one. */
-    readonly errorMessage: LambderAppRefusalMessage;
+    /** What the envelope's refusal carries: always a message object, a plain string given to the options made into one. */
+    readonly refusal: LambderUncheckedRefusalMessage;
     readonly notAuthorized?: boolean;
     readonly sessionExpired?: boolean;
     readonly statusCode?: LambderHttpStatusCode;
@@ -55,44 +55,70 @@ export declare class LambderApiRefusal extends Error {
 }
 /** Brand-based type guard (see LambderApiRefusal.isLambderApiRefusal). */
 export declare const isLambderApiRefusal: (err: unknown) => err is LambderApiRefusal;
-/**
- * The standard shape refusals carry on the envelope's errorMessage field.
- * `code` is the refusal's machine-readable identity: clients branch and
- * translate on it and never string-match `content`, which stays the
- * human-readable fallback for codes a client does not know yet. The
- * framework's own refusals carry a LambderRefusalCode; apps put their own
- * typed vocabulary in `code`. The caller's errorMessageHandler receives the
- * object as-is, typed as LambderAppRefusalMessage; a server that wrote a
- * plain string reaches it as `{ type: "error", content }` (refusalMessageOf).
- */
-export type LambderRefusalMessage<TAppCode extends string = never> = {
+/** What every refusal message carries, whatever its code. */
+type LambderRefusalMessageFields = {
+    /** Rendering intent for the client: how loud to be about it. */
     type: "warning" | "error" | "info";
-    /**
-     * Machine-readable identity of the refusal: a LambderRefusalCode, plus
-     * whatever vocabulary the reader names in TAppCode.
-     *
-     * Parameterized rather than widened with `string & {}`: a union with
-     * `string` in it does not narrow, so a `switch(message.code)` could not
-     * end in a `default: never` exhaustiveness check, which is what the codes
-     * exist for. A client that reads its own vocabulary declares it
-     * (`LambderRefusalMessage<"app/not-verified" | ...>`) and gets a checked
-     * switch; a value an app WRITES takes LambderAppRefusalMessage, where any
-     * code is welcome.
-     */
-    code?: LambderRefusalCode | TAppCode;
+    /** Optional heading shown above the content. */
     title?: string;
+    /**
+     * The human-readable text: what a client shows when it has nothing better.
+     * A client that translates reads the code and the data instead, and falls
+     * back to this for a code it does not know.
+     */
     content: string;
 };
 /**
- * The refusal shape an app authors: any code, with the framework's own still
- * autocompleting. Every option that takes a message from an app is typed as
- * this (a rate-limit policy's errorMessage, the mock's failure injection);
- * LambderRefusalMessage itself defaults to the framework's codes alone, so a
- * reader's switch over it is exhaustive.
+ * A refusal no app declared: one the framework wrote itself (a
+ * LambderRefusalCode), or an app's `refuse("...")` without a code. It never
+ * carries data.
  */
-export type LambderAppRefusalMessage = LambderRefusalMessage<string & {}>;
+export type LambderPlainRefusalMessage = LambderRefusalMessageFields & {
+    code?: LambderRefusalCode;
+    data?: undefined;
+};
 /**
- * An errorMessage as the one shape a reader handles: a plain string becomes
+ * One declared code's message: the code, and its data when the code declares
+ * data. TDeclaration is the code's value in a contract entry's `refusals`:
+ * `{ data: D }` or `{}`.
+ */
+type LambderDeclaredRefusalMessage<TCode extends string, TDeclaration> = LambderRefusalMessageFields & {
+    code: TCode;
+} & (TDeclaration extends {
+    data: infer TData;
+} ? {
+    data: TData;
+} : {
+    data?: undefined;
+});
+/**
+ * The refusal message a reader receives, discriminated by `code`.
+ *
+ * TRefusals maps each code the endpoint declares to its contract value
+ * (`{ data: D }` or `{}`; see LambderContractRefusalsOf). Every declared code
+ * is one arm, carrying its own data type, and the framework's codes and the
+ * uncoded refusal are one more arm with no data. A `switch (message.code)`
+ * therefore narrows `data` in each case, and a `default: never` holds: the
+ * server refuses to send a code the endpoint did not declare (see
+ * LambderApiRefusalValidationError), so no other code can arrive.
+ *
+ * Left without an argument it is the framework's own vocabulary alone.
+ */
+export type LambderRefusalMessage<TRefusals = {}> = 0 extends 1 & TRefusals ? LambderUncheckedRefusalMessage : LambderPlainRefusalMessage | {
+    [TCode in keyof TRefusals & string]: LambderDeclaredRefusalMessage<TCode, TRefusals[TCode]>;
+}[keyof TRefusals & string];
+/**
+ * The refusal shape an app writes, and the widest a reader can be handed:
+ * any code (the framework's still autocomplete) and any data. What
+ * LambderApiRefusal carries and refusalMessageOf reads; a reader that knows
+ * the endpoint reads the narrower LambderRefusalMessage instead.
+ */
+export type LambderUncheckedRefusalMessage = LambderRefusalMessageFields & {
+    code?: LambderRefusalCode | (string & {});
+    data?: unknown;
+};
+/**
+ * An refusal as the one shape a reader handles: a plain string becomes
  * an "error" message with that content, and a value that is not a message
  * at all becomes one describing it. The envelope writer applies it, so a
  * Lambder server only ever sends the object. A reader applies it too,
@@ -100,7 +126,7 @@ export type LambderAppRefusalMessage = LambderRefusalMessage<string & {}>;
  * mock answer (an MSW handler, a test double) or a proxy that wrote its own
  * body can put anything there.
  */
-export declare const refusalMessageOf: (message: unknown) => LambderAppRefusalMessage;
+export declare const refusalMessageOf: (message: unknown) => LambderUncheckedRefusalMessage;
 /**
  * Codes the framework stamps on the refusals it authors itself, under the
  * reserved `lambder/` prefix so app codes never collide. Compare against
@@ -108,7 +134,7 @@ export declare const refusalMessageOf: (message: unknown) => LambderAppRefusalMe
  * than retyping the strings.
  */
 export declare const LAMBDER_REFUSAL_CODES: {
-    /** A rate-limit policy refused (429). A policy's own errorMessage inherits this unless it sets a code. */
+    /** A rate-limit policy refused (429). A policy's own message carries it. */
     readonly rateLimited: "lambder/rate-limited";
     /** The original of an idempotent request is still processing (409). */
     readonly duplicateInFlight: "lambder/duplicate-in-flight";
@@ -130,18 +156,31 @@ export declare const LAMBDER_REFUSAL_CODES: {
     readonly uploadTooLarge: "lambder/upload-too-large";
 };
 export type LambderRefusalCode = (typeof LAMBDER_REFUSAL_CODES)[keyof typeof LAMBDER_REFUSAL_CODES];
+/** Whether a code is one the framework stamps on its own refusals. */
+export declare const isLambderRefusalCode: (code: unknown) => code is LambderRefusalCode;
 export type LambderRefuseOptions = {
-    /** Rendering intent for the client's errorMessageHandler. Default: "warning". */
+    /** Rendering intent for the client's refusalHandler. Default: "warning". */
     type?: LambderRefusalMessage["type"];
-    /** Machine-readable identity of the refusal, for clients to branch and translate on. */
+    /**
+     * Machine-readable identity of the refusal, for clients to branch and
+     * translate on: a code the endpoint declares in its `refusals` option (or
+     * through one of its guards). A code it does not declare is a crash, not
+     * a refusal; see LambderApiRefusalValidationError.
+     */
     code?: string;
+    /**
+     * The code's data, when the code declares data: parsed through the
+     * declared schema before it is sent, as an output is. A refusal without
+     * a declared code carries none.
+     */
+    data?: unknown;
     /** Optional heading shown above the content. */
     title?: string;
-    /** Sets the envelope's notAuthorized flag (routed to the caller's notAuthorizedHandler). */
+    /** Sets the envelope's notAuthorized flag (routed to the caller's notAuthorizedHandler). A declared code's flag is its declaration's, and a refusal with such a code that sets it here is a crash. */
     notAuthorized?: boolean;
-    /** Sets the envelope's sessionExpired flag. */
+    /** Sets the envelope's sessionExpired flag. Not for a refusal with a declared code, whose flags are its declaration's. */
     sessionExpired?: boolean;
-    /** HTTP status of the refusal. Default 200; avoid 5xx (caller treats as crash) and 422 (reserved for validation). */
+    /** HTTP status of the refusal. Default 200; avoid 5xx (caller treats as crash) and 422 (reserved for validation). A declared code's status is its declaration's, and a refusal with such a code that sets one here is a crash. */
     statusCode?: LambderHttpStatusCode;
     /** Extra response headers on the refusal (e.g. Retry-After). */
     headers?: Record<string, string>;
@@ -159,5 +198,51 @@ export type LambderRefuseOptions = {
  * The const carries the annotation so TypeScript applies never-return
  * control-flow narrowing at call sites (`if (!row) refuse(...)` implies
  * `row` is defined afterwards).
+ *
+ * Its `code` and `data` are checked when the refusal is rendered, against the
+ * endpoint it answers. Inside an API handler, `ctx.refuse` takes the same
+ * arguments typed to that endpoint's declared codes (LambderDeclaredRefuse).
  */
 export declare const refuse: (content: string, options?: LambderRefuseOptions) => never;
+/** refuse()'s options other than the refusal's identity. */
+type LambderRefuseFlagOptions = Omit<LambderRefuseOptions, "code" | "data">;
+/** What a raise site of a declared code still chooses: the code's declaration owns its status and its flags. */
+type LambderDeclaredCodeOptions = Omit<LambderRefuseFlagOptions, "statusCode" | "notAuthorized" | "sessionExpired">;
+/**
+ * refuse()'s options where the endpoint's declarations are known: `code` is
+ * one of TRefusals' codes, `data` is required when that code declares data
+ * and absent otherwise, and the status and flags are the code's
+ * declaration's, so they cannot be set here. TRefusals maps each code to
+ * `{ data: D }` or `{}`, D being what the handler hands over (the schema's
+ * input form on the server, the wire form in the mock). A discriminated
+ * union rather than a generic over the code, so a code widened to a union
+ * cannot loosen `data`. With TCodeRequired (declareRefusals's requireCodes)
+ * the uncoded arm is gone: every refusal names a code.
+ */
+export type LambderDeclaredRefuseOptions<TRefusals, TCodeRequired extends boolean = false> = (TCodeRequired extends true ? never : LambderRefuseFlagOptions & {
+    code?: undefined;
+    data?: undefined;
+}) | {
+    [TCode in keyof TRefusals & string]: LambderDeclaredCodeOptions & {
+        code: TCode;
+    } & (TRefusals[TCode] extends {
+        data: infer TData;
+    } ? {
+        data: TData;
+    } : {
+        data?: undefined;
+    });
+}[keyof TRefusals & string];
+/**
+ * The refuse an API handler's context carries, typed to the endpoint's
+ * declared codes (a guard's to the guard's, the init's to the whole
+ * vocabulary). It throws what refuse() throws. Where the app requires codes,
+ * the options are not optional: a refusal is a code.
+ *
+ * TypeScript narrows after a never-returning call only when every name in it
+ * carries an explicit annotation, which a handler's contextually typed `ctx`
+ * does not. Where the code after it relies on the refusal, write
+ * `return ctx.refuse(...)`; the free refuse() narrows on its own.
+ */
+export type LambderDeclaredRefuse<TRefusals, TCodeRequired extends boolean = false> = TCodeRequired extends true ? (content: string, options: LambderDeclaredRefuseOptions<TRefusals, true>) => never : (content: string, options?: LambderDeclaredRefuseOptions<TRefusals, false>) => never;
+export {};

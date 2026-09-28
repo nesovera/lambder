@@ -1,5 +1,5 @@
 /**
- * Two assertions over a call's outcome, for tests.
+ * Three assertions over a call's outcome, for tests.
  *
  * An outcome is a discriminated union, so a test that expects a refusal must
  * narrow before it can read what the refusal carries: check `ok`, branch on
@@ -10,7 +10,7 @@
  *
  * These narrow through an `asserts` signature, so the lines after one read
  * the arm it proved, and they throw a plain Error naming what the outcome
- * was. No test runner is imported: the same two functions serve vitest, jest
+ * was. No test runner is imported: the same functions serve vitest, jest
  * and node:test, from `lambder/testing` over a real server and from
  * `lambder/mock` over a mock one. Pure and dependency-free, like the outcome
  * vocabulary they read.
@@ -37,10 +37,27 @@ type LambderFailureWithReason<TOutcome, TReason> = TOutcome extends { ok: false;
     ? [TReason & TArmReason] extends [never] ? never : TOutcome & { reason: TReason & TArmReason }
     : never;
 
+/** The refusal message a failure of this outcome union carries: the endpoint's, with its declared codes. */
+type LambderRefusalMessageOf<TOutcome> = TOutcome extends { ok: false; refusal?: infer TMessage } ? TMessage : never;
+
+/** Every code a failure of this outcome union can be refused with: the endpoint's declared codes and the framework's. */
+type LambderRefusalCodeOf<TOutcome> = LambderRefusalMessageOf<TOutcome> extends infer TMessage
+    ? TMessage extends { code?: infer TCode } ? Exclude<TCode, undefined> & string : never
+    : never;
+
+/**
+ * The arm of a refusal message that carries code C: the declared code's own
+ * arm, with its data. A framework code has no arm of its own (it shares the
+ * uncoded one), and neither does any code of a message typed as any code, so
+ * those are the message with the code pinned.
+ */
+type LambderRefusalWithCode<TMessage, TCode> =
+    [Extract<TMessage, { code: TCode }>] extends [never] ? TMessage & { code: TCode } : Extract<TMessage, { code: TCode }>;
+
 /** What else a failure is expected to carry, beside its reason. */
-export type LambderExpectedFailure = {
-    /** The refusal's machine-readable code (`errorMessage.code`), e.g. a LAMBDER_REFUSAL_CODES value or the app's own. */
-    code?: string;
+export type LambderExpectedFailure<TCode extends string = string> = {
+    /** The refusal's machine-readable code (`refusal.code`): one the endpoint declares, or a LAMBDER_REFUSAL_CODES value. */
+    code?: TCode;
     /** The HTTP status the answer came with. */
     status?: number;
 };
@@ -71,10 +88,10 @@ const errorOf = (outcome: LambderOutcomeShape): Error | undefined => {
 /** One line saying what an outcome was, for the message of an assertion it failed. */
 const describeOutcome = (outcome: LambderOutcomeShape): string => {
     if(outcome.ok) return `a success carrying ${describeValue((outcome as { payload?: unknown }).payload)}`;
-    const failure = outcome as { reason: string; status?: number; errorMessage?: unknown; error?: unknown; zodError?: { message?: unknown } };
+    const failure = outcome as { reason: string; status?: number; refusal?: unknown; error?: unknown; zodError?: { message?: unknown } };
     const details: string[] = [];
     if(failure.status !== undefined) details.push(`status ${failure.status}`);
-    if(failure.errorMessage !== undefined) details.push(`errorMessage ${describeValue(failure.errorMessage)}`);
+    if(failure.refusal !== undefined) details.push(`refusal ${describeValue(failure.refusal)}`);
     if(failure.zodError !== undefined) details.push(`zodError ${describeValue(failure.zodError.message)}`);
     // The error's own message, and its cause when it has one: an in-process
     // transport reports a handler that threw as a failure whose cause is
@@ -108,13 +125,13 @@ export function assertApiSuccess<TOutcome extends LambderOutcomeShape>(outcome: 
  *
  * ```typescript
  * assertApiFailure(await member.apiOutcome("org.delete", { id }), "notAuthorized");
- * assertApiFailure(await guest.apiOutcome("signup", form), "errorMessage", { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
+ * assertApiFailure(await guest.apiOutcome("signup", form), "refusal", { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
  * ```
  */
 export function assertApiFailure<TOutcome extends LambderOutcomeShape, TReason extends LambderFailureReasonOf<TOutcome> = LambderFailureReasonOf<TOutcome>>(
     outcome: TOutcome,
     reason?: TReason,
-    expected: LambderExpectedFailure = {},
+    expected: LambderExpectedFailure<LambderRefusalCodeOf<TOutcome>> = {},
 ): asserts outcome is LambderFailureWithReason<TOutcome, TReason> {
     const wanted = [
         reason !== undefined ? `reason "${String(reason)}"` : null,
@@ -127,10 +144,40 @@ export function assertApiFailure<TOutcome extends LambderOutcomeShape, TReason e
     if(outcome.ok) return refuse();
     if(reason !== undefined && outcome.reason !== reason) return refuse();
     if(expected.code !== undefined){
-        // Only the structured errorMessage carries a code; a plain string has none to match.
-        const errorMessage = (outcome as { errorMessage?: unknown }).errorMessage;
-        const code = errorMessage && typeof errorMessage === "object" ? (errorMessage as { code?: unknown }).code : undefined;
+        // Only the structured refusal carries a code; a plain string has none to match.
+        const refusal = (outcome as { refusal?: unknown }).refusal;
+        const code = refusal && typeof refusal === "object" ? (refusal as { code?: unknown }).code : undefined;
         if(code !== expected.code) return refuse();
     }
     if(expected.status !== undefined && (outcome as { status?: number }).status !== expected.status) return refuse();
+}
+
+/**
+ * Asserts that a call was refused with the given code, whichever reason it
+ * arrived under (a refusal flagged notAuthorized carries its code too), and
+ * narrows the outcome's refusal to that code's message, so its `data`
+ * reads with the type the code declares.
+ *
+ * ```typescript
+ * const outcome = await visitor.apiOutcome("order.pay", { orderId });
+ * assertApiRefusal(outcome, "wallet-short");
+ * expect(outcome.refusal.data.available).toBe(1250);
+ * ```
+ *
+ * The code is checked against the outcome's own codes, so one the endpoint
+ * does not declare is a compile error rather than an assertion that can
+ * never pass.
+ */
+// `const`: the constraint depends on TOutcome, and without it the code
+// argument widens to that whole constraint instead of staying the literal
+// passed, which would narrow to every declared code at once.
+export function assertApiRefusal<TOutcome extends LambderOutcomeShape, const TCode extends LambderRefusalCodeOf<TOutcome>>(
+    outcome: TOutcome,
+    code: TCode,
+): asserts outcome is Extract<TOutcome, { ok: false }> & { refusal: LambderRefusalWithCode<LambderRefusalMessageOf<TOutcome>, TCode> } {
+    const refusal = outcome.ok ? undefined : (outcome as { refusal?: unknown }).refusal;
+    const received = refusal && typeof refusal === "object" ? (refusal as { code?: unknown }).code : undefined;
+    if(received !== code){
+        throw new Error(`Expected the call to be refused with code "${code}", but it was ${describeOutcome(outcome)}.`, { cause: errorOf(outcome) });
+    }
 }

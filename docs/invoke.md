@@ -241,15 +241,14 @@ failure to `undefined` so a UI keeps rendering, and the difference is deliberate
 lambda calling a lambda has a failed dependency, which is a failed request. The
 throw carries the whole outcome and reaches the app's own global error handler
 with the callee's error chained as its `cause`, which is what a call site
-would otherwise have had to write by hand. Its result is the output the
-callee declared: a callee's handler returns that output, `null` only where the
-output schema allows null, and says no by throwing `refuse()`, which arrives
-here as a failure (see [APIs](./apis.md#defining-apis)). So a nullable output
-is where `null` arrives, and a non-nullable one never needs a guard.
+would otherwise have had to write by hand. Its result is exactly the output
+the callee declared: only a callee handler's own answer reads as a success,
+an output is always an object or an array, and every "no" arrives here as a
+failure (see [APIs](./apis.md#defining-apis)).
 
 ```typescript
-// Throws on any failure; typed as the declared output, here `{ body, contentType } | null`.
-const file = await gatewayCaller.api("files.read", { bucketName, filePath });
+// Throws on any failure; typed as the declared output, here `{ file: { body, contentType } | null }`.
+const { file } = await gatewayCaller.api("files.read", { bucketName, filePath });
 ```
 
 `apiOutcome()` never throws and resolves to a discriminated union, for sites
@@ -259,7 +258,7 @@ that degrade rather than fail:
 const outcome = await gatewayCaller.apiOutcome("verifyToken", { provider, token });
 if (outcome.ok) {
     signIn(outcome.payload);
-} else if (outcome.reason === "errorMessage") {
+} else if (outcome.reason === "refusal") {
     refuse("Authentication failed. Please try again.");
 } else {
     showTemporaryFailure();   // outcome.error is ready to throw or report
@@ -269,13 +268,16 @@ if (outcome.ok) {
 A success outcome carries `payload`, the parsed envelope as `response`,
 `logList` and `cookies`. A failure carries `reason`, always an `error` (the
 `LambderInvokeError` `api()` would have thrown), `logList` and `cookies`, and
-`status`, `errorMessage` and `retryAfterSeconds` whenever the callee answered.
+`status`, `refusal` and `retryAfterSeconds` whenever the callee answered.
+`refusal` is typed from the callee's contract, one arm per code the
+endpoint declares, so its `code` narrows its `data` as on the browser caller
+(see [Declared refusals](./apis.md#declared-refusals)).
 
 The rest is per reason, because the failure side is a discriminated union
 rather than one arm of optional fields: `validation` always carries `zodError`,
 `crash` always carries `functionError`, `payloadTooLarge` always carries
 `bytes`, and `versionExpired`, `sessionExpired`, `notAuthorized` and
-`errorMessage` always carry `response`, the parsed envelope (`network`,
+`refusal` always carry `response`, the parsed envelope (`network`,
 `timeout`, `server`, `protocol` and `unknown` carry it too when the callee
 answered with Lambder's own envelope, which is how `crash` and `logList` arrive
 with a 5xx). So narrowing on `reason` narrows to what that reason actually has,
@@ -309,7 +311,7 @@ The first nine are the same reasons, in the same order of precedence, that
 | `versionExpired` | The callee answered `versionExpired`: this caller's signature for the endpoint is not the callee's |
 | `sessionExpired` | The carried session is missing or expired |
 | `notAuthorized` | The envelope's `notAuthorized` flag |
-| `errorMessage` | A structured refusal (`refuse()`, `LambderApiRefusal`); `errorMessage` carries it |
+| `refusal` | A structured refusal (`refuse()`, `LambderApiRefusal`); `refusal` carries it |
 | `unknown` | Anything else, including a `guardInputsProvider` that threw before the call was sent |
 | `crash` | Lambda reported a `FunctionError`: the callee failed outside the framework (an init failure, a timeout, out of memory). `functionError` carries the runtime's `errorType`, `errorMessage` and `trace` |
 | `protocol` | The invoke was answered, but not by the callee: the Lambda service refused it (`AccessDeniedException`, `ResourceNotFoundException`, `RequestEntityTooLargeException`, a throttle), the answer is not a Lambda HTTP response object, or its compressed body could not be restored. A permission, wiring or size fault to fix, which is why it is not reported as flaky connectivity |
@@ -339,11 +341,11 @@ on the callee, and its answers go plain for this caller as for a browser
 ```typescript
 lambder.addApi("files.read", {
     input: z.object({ bucketName: z.string(), filePath: z.string() }),
-    output: z.object({ body: z.string(), contentType: z.string() }).nullable(),
+    output: z.object({ file: z.object({ body: z.string(), contentType: z.string() }).nullable() }),
     guards: "arrivedByInvoke",
     // A multi-megabyte base64 body would cost tens of milliseconds to compress and arrive no smaller.
     compress: false,
-}, async ({ apiPayload }) => await readStoredFile(apiPayload.bucketName, apiPayload.filePath));
+}, async ({ apiPayload }) => ({ file: await readStoredFile(apiPayload.bucketName, apiPayload.filePath) }));
 ```
 
 The restore is capped by `maxResponsePayloadBytes` (default 20,000,000), so a
@@ -392,7 +394,7 @@ better codec.
 
 A callee often cannot write to the caller's error store (another VPC, another
 role), so anything worth recording has to travel back with the answer. Four
-things carry it: the envelope's `errorMessage` for a refusal, its `crash` for a
+things carry it: the envelope's `refusal` for a refusal, its `crash` for a
 failure inside the framework, its `logList` for whatever the handler logged,
 and Lambda's own `FunctionError` payload when the callee died outside the
 framework entirely.
@@ -423,7 +425,7 @@ The caller turns whatever it learned into one `LambderInvokeError`:
   chain (`errorFromCrashDetail`), or from Lambda's `FunctionError` payload, or
   the SDK's rejection. A reporter that walks causes stores the callee's stack
   without being taught anything about this protocol.
-- `reason`, `apiName`, `functionName`, `status`, `errorMessage`, `crash`,
+- `reason`, `apiName`, `functionName`, `status`, `refusal`, `crash`,
   `functionError`, `logList`, `zodError`, `retryAfterSeconds`, `bytes` and the
   full `outcome` are properties.
 - `isLambderInvokeError(err)` detects it through a brand, so it survives two
@@ -438,7 +440,7 @@ the write lands rather than racing a frozen container:
 const reportFailure: LambderInvokeFailureHandler =
     async (failure, { apiName, functionName }) => {
         // A refusal, a rejected input or a version answer is the callee saying no, not a crash.
-        if (failure.reason === "errorMessage") return;
+        if (failure.reason === "refusal") return;
         if (failure.reason === "validation" || failure.reason === "versionExpired") return;
         await reportError(failure.error, {
             apiName: `${functionName}:${apiName}`,
@@ -630,7 +632,7 @@ event a call would send, with a plain payload, for a boot check that hands a
 built deployment package an event file and asserts it answers. Calling an API
 name that does not exist is a useful smoke test on its own: unless the callee
 registered its own `setApiFallbackHandler`, the answer is a 200 envelope whose
-`errorMessage` carries `LAMBDER_REFUSAL_CODES.apiNotFound`, which proves the
+`refusal` carries `LAMBDER_REFUSAL_CODES.apiNotFound`, which proves the
 whole bundle loaded and the pipeline ran.
 
 ```typescript

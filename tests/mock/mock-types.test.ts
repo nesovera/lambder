@@ -33,7 +33,7 @@ const serverGuards = {
     open: lambderGuard({ handler: (_ctx, _payload, _reason: string) => {} }),
 };
 
-const _server = initLambder<SessionData>().create({
+const _server = initLambder<SessionData>().declareRefusals({ 'user-gone': { data: z.object({ removedAt: z.date() }) }, 'last-admin': {} }).create({
     apiPath: '/api',
     session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
     guards: serverGuards,
@@ -42,7 +42,7 @@ const _server = initLambder<SessionData>().create({
 })
     .addApi('user.get', { input: z.object({ userId: z.string() }), output: z.object({ id: z.string(), name: z.string() }), guards: { open: 'public profile' } }, async (_ctx) => ({ id: '1', name: 'Ada' }))
     .addApi('feedback.submit', { input: z.object({ text: z.string() }), output: z.object({ code: z.string() }), guards: 'captcha', idempotency: true }, async (_ctx) => ({ code: 'c' }))
-    .addSessionApi('users.remove', { input: z.object({ userId: z.string() }), output: z.object({ removed: z.boolean() }), guards: { orgPermission: 'USERS.MANAGE' } }, async (_ctx) => ({ removed: true }))
+    .addSessionApi('users.remove', { input: z.object({ userId: z.string() }), output: z.object({ removed: z.boolean() }), guards: { orgPermission: 'USERS.MANAGE' }, refusals: ['user-gone', 'last-admin'] }, async (_ctx) => ({ removed: true }))
     .addSessionApi('me', { input: z.object({}), output: z.object({ userId: z.string() }), guards: 'sessionOnly' }, async (ctx) => ({ userId: ctx.session.data.userId }))
     .addApi('admin.exportOrders', { input: z.object({ month: z.string() }), output: z.any(), guards: { open: 'signed' } }, async (_ctx) => null)
     // Declares no guards, which is the one shape the bare-handler form is for.
@@ -91,16 +91,18 @@ describe('Mock registry types - builders', () => {
         mockApp.publicApi('user.get', { guards: { open: 'public profile' }, handler: async () => ({ id: 'x' }) });
     });
 
-    it('an endpoint whose output is void is mocked by a handler that answers nothing', () => {
-        const _voidServer = initLambder().create({ apiPath: '/api' })
-            .addApi('ping', { input: z.object({}), output: z.void() }, async (_ctx) => {})
-            .addApi('maybe', { input: z.object({}), output: z.string().optional() }, async (_ctx) => undefined);
-        type Output<K extends keyof typeof _voidServer.ApiContract> = (typeof _voidServer.ApiContract)[K]['output'];
-        expectTypeOf<Output<'ping'>>().toEqualTypeOf<void>();
-        expectTypeOf<Output<'maybe'>>().toEqualTypeOf<string | undefined>();
-        const voidMock = initLambderMock<typeof _voidServer.ApiContract>().create({});
-        voidMock.publicApi('ping', async () => {});
-        voidMock.publicApi('maybe', async () => undefined);
+    it('an endpoint with nothing to answer answers an empty object, and its mock handler does too', () => {
+        const _emptyServer = initLambder().create({ apiPath: '/api' })
+            .addApi('ping', { input: z.object({}), output: z.object({}) }, async (_ctx) => ({}))
+            .addApi('maybe', { input: z.object({}), output: z.object({ note: z.string().optional() }) }, async (_ctx) => ({}));
+        type Output<K extends keyof typeof _emptyServer.ApiContract> = (typeof _emptyServer.ApiContract)[K]['output'];
+        expectTypeOf<Output<'ping'>>().toEqualTypeOf<Record<string, never>>();
+        expectTypeOf<Output<'maybe'>>().toEqualTypeOf<{ note?: string }>();
+        const emptyMock = initLambderMock<typeof _emptyServer.ApiContract>().create({});
+        emptyMock.publicApi('ping', async () => ({}));
+        emptyMock.publicApi('maybe', async () => ({}));
+        // @ts-expect-error a mock handler answers the output too, never nothing
+        emptyMock.publicApi('ping', async () => undefined);
     });
 
     it('a session endpoint sees a typed session and a public one sees null', () => {
@@ -465,8 +467,8 @@ describe('Mock app options - what the contract makes required', () => {
         overriding.create({ rateLimits: { policies: { tight: { perMin: 5, per: 'ip' } } } });
         // @ts-expect-error burst overrides tight's windows
         overriding.create({ rateLimits: { policies: { tight: { perMin: 5, per: 'ip', budget: 'perPolicy' } } } });
-        // An errorMessage alone is overridable on either budget.
-        initLambderMock<{ burst: { input: {}; output: { n: number }; mode: 'public'; rateLimit: { tight: { errorMessage: { type: 'warning'; content: 'Slow down.' } } } } }>()
+        // An refusal alone is overridable on either budget.
+        initLambderMock<{ burst: { input: {}; output: { n: number }; mode: 'public'; rateLimit: { tight: { refusal: { type: 'warning'; content: 'Slow down.' } } } } }>()
             .create({ rateLimits: { policies: { tight: { perMin: 5, per: 'ip', budget: 'perPolicy' } } } });
     });
 });
@@ -654,5 +656,35 @@ describe('The mock guards map is checked for surplus keys', () => {
         // @ts-expect-error sesion is not a guard option
         mock.create({ ...requiredOptions, guards: { ...mockGuards, extra: { sesion: true, handler: async () => undefined } } });
         expect(() => mock.create({ ...requiredOptions, guards: { ...mockGuards, extra: { session: true, handler: async () => undefined } } })).not.toThrow();
+    });
+});
+
+describe('Mock registry types - declared refusals', () => {
+    it('types a handler\'s ctx.refuse and an injected refusal to the endpoint\'s codes, the data in the form it arrives in', () => {
+        mockApp.sessionApi('users.remove', {
+            guards: { orgPermission: 'USERS.MANAGE' },
+            handler: async (ctx) => {
+                if(ctx.payload.userId === 'last') return ctx.refuse('The last admin stays.', { code: 'last-admin' });
+                // @ts-expect-error the server's Date arrives as its string, which is what a mock writes
+                if(ctx.payload.userId === 'dated') return ctx.refuse('Gone.', { code: 'user-gone', data: { removedAt: new Date() } });
+                // @ts-expect-error a code users.remove does not declare
+                if(ctx.payload.userId === 'other') return ctx.refuse('No.', { code: 'not-a-code' });
+                return ctx.refuse('Gone.', { code: 'user-gone', data: { removedAt: '2026-01-01T00:00:00.000Z' } });
+            },
+        });
+        mockApp.publicApi('health', async (ctx) => {
+            // @ts-expect-error health declares no refusals
+            ctx.refuse('No.', { code: 'last-admin' });
+            return { ok: true };
+        });
+
+        mockApp.failNext('users.remove', { reason: 'refusal', message: { type: 'warning', code: 'user-gone', content: 'Gone.', data: { removedAt: '2026-01-01T00:00:00.000Z' } } });
+        mockApp.failNext('users.remove', { reason: 'notAuthorized', message: { type: 'warning', code: 'last-admin', content: 'Stays.' } });
+        // @ts-expect-error a code the endpoint does not declare cannot be injected either
+        mockApp.failNext('users.remove', { reason: 'refusal', message: { type: 'warning', code: 'not-a-code', content: 'No.' } });
+        // @ts-expect-error a rate limit's message carries no code
+        mockApp.failNext('limited', { reason: 'rateLimited', message: { type: 'warning', code: 'app/slow', content: 'Slow.' } });
+        mockApp.reset();
+        expect(mockApp).toBeDefined();
     });
 });

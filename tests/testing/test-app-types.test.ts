@@ -41,7 +41,7 @@ describe('lambderTestApp: what the instance types', () => {
 
         const visitor = app.visitor();
         expectTypeOf(visitor).toEqualTypeOf<LambderTestVisitor<typeof server.ApiContract, SessionData, never>>();
-        expectTypeOf(await visitor.api('echo', { text: 'hi' })).toEqualTypeOf<{ text: string } | null | undefined>();
+        expectTypeOf(await visitor.api('echo', { text: 'hi' })).toEqualTypeOf<{ text: string } | undefined>();
 
         // @ts-expect-error not an API of this contract
         await visitor.apiOutcome('nope', {});
@@ -83,7 +83,7 @@ describe('assertApiSuccess / assertApiFailure: what they narrow to', () => {
 
     it('narrows a success to its payload', () => {
         assertApiSuccess(outcome);
-        expectTypeOf(outcome.payload).toEqualTypeOf<{ text: string } | null | undefined>();
+        expectTypeOf(outcome.payload).toEqualTypeOf<{ text: string }>();
     });
 
     it('narrows a named reason to the arm that carries it, including a reason several share one arm with', () => {
@@ -95,7 +95,7 @@ describe('assertApiSuccess / assertApiFailure: what they narrow to', () => {
         expectTypeOf(crashed.error).toEqualTypeOf<Error>();
 
         assertApiFailure(refused, 'notAuthorized');
-        expectTypeOf(refused.response.payload).toEqualTypeOf<{ text: string } | null | undefined>();
+        expectTypeOf(refused.response.payload).toEqualTypeOf<null>();
     });
 
     it('narrows to the whole failure side when no reason is named', () => {

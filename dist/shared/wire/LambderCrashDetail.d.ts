@@ -6,7 +6,7 @@
  * one, a developer holding a debug cookie) can get the error's name, message,
  * stack, cause chain and where it happened, to store in its own error log
  * and find the right CloudWatch stream. The envelope carries it in `crash`
- * beside errorMessage; LambderInvokeCaller rebuilds an Error from it as the
+ * beside refusal; LambderInvokeCaller rebuilds an Error from it as the
  * `cause` of the error it throws, so a reporter that walks causes sees the
  * callee's stack unaided.
  *

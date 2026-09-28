@@ -24,7 +24,7 @@ const caller = new LambderCaller<ApiContractType>({
     fetchEndedHandler: ({ fetchParams, fetchResult, activeFetchList }) => {
         console.log("Ongoing calls:", activeFetchList.length);
     },
-    errorMessageHandler: (message) => showToast(message),
+    refusalHandler: (message) => showToast(message),
     sessionExpiredHandler: () => redirectToLogin(),
 });
 
@@ -52,7 +52,7 @@ in the frontend's type check. In a large app, import it instead from the file
 | `transport` | fetch | How a call reaches the server; see [Transports](#transports) |
 | `versionExpiredHandler` | none | The server answered `versionExpired`: this build's signature for the endpoint is not the server's. Usually reloads. Asked one at a time per page, whichever of the page's callers hears it: a refusal heard while it runs calls nothing, and one heard after it returned with the page still here asks again. Not called for a bundle the reload brought back, see [The signature map](#the-signature-map) |
 | `sessionExpiredHandler` | none | The session is missing or expired. Called, and the CSRF cookie cleared, only while that cookie is still the one the call sent or is gone: a call sent before a login that answers after it comes back as its `sessionExpired` outcome, with no handler called and nothing touched. Over a cookie jar (the mock's memory mode, `lambder/testing`, `lambderCookieJarTransport`) the jar's CSRF cookie is the one compared, since that session never reaches `document.cookie` |
-| `errorMessageHandler` | none | The envelope carried an `errorMessage` (a refusal), handed over as the message object |
+| `refusalHandler` | none | The envelope carried a `refusal`, handed over as the message object |
 | `notAuthorizedHandler` | none | The envelope carried `notAuthorized` |
 | `errorHandler` | none | Network, timeout, server or unknown failure |
 | `apiInputValidationErrorHandler` | none | The server rejected the input (422), with the Zod issues |
@@ -133,11 +133,13 @@ Every constructor handler can be overridden in the options of a single
 
 ## Failure semantics
 
-`api()` collapses every failure to `undefined`, which is indistinguishable
-from a legitimately-undefined payload (a structured refusal is the one
-exception: it hands back whatever payload the envelope carried, usually
-`null`). When the call site needs to know why, use `apiOutcome()`; it never
-throws and resolves to a discriminated union:
+`api()` resolves to the endpoint's output on success and to `undefined` on
+every failure, refusals included. An output is always an object or an array
+(see [APIs](./apis.md#defining-apis)), so the result is truthy exactly when
+the call succeeded, and `if (!result) return` is a complete check once the
+constructor's handlers have told the user why. When the call site needs to
+know why, use `apiOutcome()`; it never throws and resolves to a discriminated
+union:
 
 ```typescript
 const outcome = await caller.apiOutcome("getCompanyPage", { companyName: "Acme" });
@@ -149,8 +151,8 @@ if (outcome.ok) {
     redirectToLogin();
 } else {
     // 'server' (5xx / non-envelope body), 'validation' (422), 'versionExpired',
-    // 'notAuthorized', 'errorMessage' (structured refusal), 'unknown'
-    showError(outcome.errorMessage);
+    // 'notAuthorized', 'refusal' (structured refusal), 'unknown'
+    showError(outcome.refusal);
 }
 ```
 
@@ -158,12 +160,12 @@ if (outcome.ok) {
 | --- | --- |
 | `network` | The request never completed |
 | `timeout` | `timeoutMs` elapsed and the fetch was aborted |
-| `server` | 5xx, a body that is not a Lambder envelope (API Gateway's own `{"message": ...}` errors included, on a 5xx too: an object is an envelope only when it carries `apiVersion`), a non-2xx envelope that names no reason, or a transport failure naming `protocol` |
+| `server` | 5xx, a body that is not a Lambder envelope (API Gateway's own `{"message": ...}` errors included, on a 5xx too: an object is an envelope only when it carries `apiVersion`), a non-2xx envelope that names no reason, a 2xx envelope that names none but whose payload is not an object or an array (no handler of the API wrote it), or a transport failure naming `protocol` |
 | `validation` | 422; `zodError` carries the issue detail |
 | `versionExpired` | This build's signature for the endpoint is not the server's, its version is below the server's `minApiVersion`, or the app answered `res.versionExpired` |
 | `sessionExpired` | No valid session |
 | `notAuthorized` | The envelope's `notAuthorized` flag |
-| `errorMessage` | A structured refusal; `errorMessage` carries it |
+| `refusal` | A structured refusal; `refusal` carries it |
 | `unknown` | Anything else |
 
 Failure outcomes also carry `retryAfterSeconds` (from the answer's
@@ -171,11 +173,11 @@ Failure outcomes also carry `retryAfterSeconds` (from the answer's
 and the rest by reason, because the failure side is a discriminated union
 rather than one arm of optional fields: `network`, `timeout`, `server` and
 `unknown` always carry `error`; `validation` always carries `zodError`; and
-`versionExpired`, `sessionExpired`, `notAuthorized` and `errorMessage` always
+`versionExpired`, `sessionExpired`, `notAuthorized` and `refusal` always
 carry `response`, the parsed envelope (a `server` failure carries it too when
 the server answered with Lambder's own 500 body, which is how `crash` and
 `logList` arrive; a gateway's or a proxy's JSON on a 5xx is not that body, so
-none of its fields reach `response`, `errorMessage` or `logList`). So
+none of its fields reach `response`, `refusal` or `logList`). So
 narrowing on `reason` narrows to what that reason
 actually has, with no optional reads and no `!`.
 
@@ -185,31 +187,44 @@ branch on the outcome. An answer's `logList` reaches `logListHandler` whatever
 the outcome, a 5xx and a 422 included, which is where a crashed call's log
 trail arrives.
 
-A refusal's `errorMessage` always reaches a reader as the message object,
-`{ type, code?, title?, content }`, on the outcome and in
-`errorMessageHandler` alike. The server may be handed a plain string
+A success's `payload` is typed as exactly the endpoint's output, with no
+`null` or `undefined` beside it: only the handler's own parsed output reads as
+a success (see [APIs](./apis.md#defining-apis)).
+
+A refusal's `refusal` always reaches a reader as the message object,
+`{ type, code?, title?, content, data? }`, on the outcome and in
+`refusalHandler` alike. The server may be handed a plain string
 (`new LambderApiRefusal("Denied.")`, or an error handler's
-`res.api(null, { errorMessage: "Denied." })`), and it sends it as
+`res.apiRefusal({ refusal: "Denied." })`), and it sends it as
 `{ type: "error", content: "Denied." }`. The
 caller still reads whatever arrives that way before anything sees it, since a
 body no Lambder server wrote (a hand-built mock answer, a proxy) can carry a
 string or no message at all, so no reader narrows.
 `refusalMessageOf(value)` is that reading, for code that holds a raw envelope
-(`outcome.response.errorMessage` is the wire value, left as it came):
+(`outcome.response.refusal` is the wire value, left as it came):
+
+**The message is typed from the contract.** An outcome's `refusal`, on
+every failure arm, is one arm per code the endpoint declares (with that
+code's `data`) plus one for the framework's codes and the uncoded refusal
+(see [Declared refusals](./apis.md#declared-refusals)); a per-call
+`refusalHandler` is handed the same type, and the constructor's the
+union across every endpoint of the contract:
 
 ```typescript
-const showRefusal = (message: LambderAppRefusalMessage) => {
-    if (message.code === LAMBDER_REFUSAL_CODES.rateLimited) return showRetryLater(message.content);
-    showToast(message.content, { type: message.type, title: message.title });
+const showRefusal = (message: LambderContractAnyRefusalMessage<ApiContractType>) => {
+    switch (message.code) {
+        case "wallet-short": return showTopUp(message.data.available);
+        case LAMBDER_REFUSAL_CODES.rateLimited: return showRetryLater(message.content);
+        default: return showToast(message.content, { type: message.type, title: message.title });
+    }
 };
 
-const caller = new LambderCaller<ApiContractType>({ ..., errorMessageHandler: showRefusal });
+const caller = new LambderCaller<ApiContractType>({ ..., refusalHandler: showRefusal });
 ```
 
-A client with its own code vocabulary annotates the object half as
-`LambderRefusalMessage<"app/not-verified" | "app/over-quota">` and gets a
-`switch (message.code)` the compiler checks, `default: never` included; see
-[Responses](./responses.md).
+A switch over every declared code and the framework's, ending in
+`default: never`, is checked by the compiler, since the server never sends a
+code the endpoint does not declare.
 
 ## Guard inputs
 
@@ -252,7 +267,7 @@ operation:
 - A success settles it, and so does `lambder/idempotency-key-reused`: the
   server refuses a key reused for a different payload, so that key can never
   carry the person's new request.
-- A refusal of this request (an `errorMessage`, a rejected input, not
+- A refusal of this request (a `refusal`, a rejected input, not
   authorized) settles it too, so the person's next attempt, a corrected form
   included, is a new operation. The exception is a key an earlier attempt
   may have used: after a timeout, a network failure, a 5xx or a duplicate of

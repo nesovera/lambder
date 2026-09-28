@@ -1,6 +1,6 @@
 import type { z } from "zod";
-import type { LambderApiEnvelopeBody, LambderApiResponseConfig } from "../shared/wire/LambderApiContract.js";
-import { LAMBDER_REFUSAL_CODES, refusalMessageOf, type LambderApiRefusal, type LambderRefusalMessage } from "../shared/wire/LambderApiRefusal.js";
+import type { LambderApiEnvelopeBody, LambderRefusalEnvelopeFields, LambderApiRefusalConfig, LambderApiRefusalEnvelope, LambderApiSuccessEnvelope } from "../shared/wire/LambderApiContract.js";
+import { LAMBDER_REFUSAL_CODES, isLambderRefusalCode, refusalMessageOf, type LambderApiRefusal, type LambderRefusalMessage } from "../shared/wire/LambderApiRefusal.js";
 import { setAnswerHeader } from "../shared/wire/LambderAnswerHeaders.js";
 import type { LambderCrashDetail } from "../shared/wire/LambderCrashDetail.js";
 import type { LambderApiAnswer } from "./LambderApiAnswer.js";
@@ -10,43 +10,78 @@ import type { LambderApiAnswer } from "./LambderApiAnswer.js";
  * kind of protocol outcome onto an answer: a success, a thrown refusal, a
  * rejected input, an unknown name, a missing session, a stale client, a
  * malformed compressed payload, and the last-resort crash. The server's API
- * path and res.api(), the mock runtime and the pipeline all build through these
+ * path and res.apiRefusal(), the mock runtime and the pipeline all build through these
  * functions, so server and mock cannot drift on a single byte of the wire
  * format. Pure: no Node built-ins, no response classes.
  */
 
 export const API_ANSWER_CONTENT_TYPE = "application/json; charset=utf-8";
 
-/** The envelope's config plus the logList channel the call accumulated. */
-export type LambderApiEnvelopeConfig = LambderApiResponseConfig & { logList?: unknown[] };
-
 /**
- * The wire envelope for one answer. Flags are only present when set, so a
- * plain success is `{ apiVersion, payload }` and nothing else; an empty
- * logList is omitted.
+ * A handler's answer as the wire envelope: its parsed output and the logList
+ * the call accumulated, nothing else. The only envelope a reader takes for a
+ * success; an empty logList is omitted.
  */
-export const buildApiEnvelope = <T>(
-    apiVersion: string | null | undefined,
-    payload: T | null,
-    {
-        versionExpired, sessionExpired, notAuthorized,
-        errorMessage, logList, crash,
-    }: LambderApiEnvelopeConfig = {},
-): LambderApiEnvelopeBody<T> => ({
+export const successEnvelope = <T>(apiVersion: string | null | undefined, payload: T, logList?: unknown[]): LambderApiSuccessEnvelope<T> => ({
     apiVersion: apiVersion ?? null,
     payload,
-    ...(versionExpired ? { versionExpired } : {}),
-    ...(sessionExpired ? { sessionExpired } : {}),
-    ...(notAuthorized ? { notAuthorized } : {}),
+    ...(logList?.length ? { logList } : {}),
+});
+
+/**
+ * Every other answer as the wire envelope: a null payload beside the
+ * refusal's message and flags. Flags are only present when set, and an
+ * empty logList is omitted.
+ */
+export const refusalEnvelope = (
+    apiVersion: string | null | undefined,
+    { versionExpired, sessionExpired, notAuthorized, refusal, logList, crash }: LambderRefusalEnvelopeFields,
+): LambderApiRefusalEnvelope => ({
+    apiVersion: apiVersion ?? null,
+    payload: null,
+    ...(versionExpired ? { versionExpired: true as const } : {}),
+    ...(sessionExpired ? { sessionExpired: true as const } : {}),
+    ...(notAuthorized ? { notAuthorized: true as const } : {}),
     // Presence, not truthiness: these channels carry app values, and an app
-    // that refuses with errorMessage: "" (or 0) meant to say something. The
+    // that refuses with refusal: "" (or 0) meant to say something. The
     // flags above are booleans, where false and absent mean the same. An
-    // errorMessage goes out as a message object whatever form it was written
+    // refusal goes out as a message object whatever form it was written
     // in, so every reader meets one shape.
-    ...(errorMessage !== undefined ? { errorMessage: refusalMessageOf(errorMessage) } : {}),
+    ...(refusal !== undefined ? { refusal: refusalMessageOf(refusal) } : {}),
     ...(crash !== undefined ? { crash } : {}),
     ...(logList?.length ? { logList } : {}),
 });
+
+/**
+ * An API call answered from outside its handler (res.apiRefusal on the
+ * server, onInvalidInput in the mock) as its envelope, once the config is
+ * known to be a refusal: a refusal message or one of the three flags, so a
+ * reader never takes it for the handler's output, and a message with a
+ * framework code or none and no data, since it answers outside any one
+ * endpoint's declared refusals. `writer` names the call in the error, and
+ * the logList is the config's own or the one given.
+ */
+export const plainRefusalEnvelope = (
+    apiVersion: string | null | undefined,
+    config: LambderApiRefusalConfig,
+    writer: string,
+    logList?: unknown[],
+): LambderApiRefusalEnvelope => {
+    const { refusal, versionExpired, sessionExpired, notAuthorized } = config;
+    if(refusal === undefined && !versionExpired && !sessionExpired && !notAuthorized){
+        throw new Error(`Lambder: ${writer} needs a refusal message or one of the versionExpired, sessionExpired and notAuthorized flags. An API call answered from outside its handler is always a refusal.`);
+    }
+    if(refusal !== undefined){
+        const message = refusalMessageOf(refusal);
+        if(message.code !== undefined && !isLambderRefusalCode(message.code)){
+            throw new Error(`Lambder: ${writer} was given the code "${message.code}". It answers outside any one API's declared refusals, so its message carries a framework code or none.`);
+        }
+        if(message.data !== undefined){
+            throw new Error(`Lambder: ${writer} was given a message with data. Only a code an API declares carries data, and this answer is outside any one API's declaration.`);
+        }
+    }
+    return refusalEnvelope(apiVersion, { ...config, logList: config.logList ?? logList });
+};
 
 /** An envelope as an answer: JSON body, JSON content type, the status and headers given (200 and none by default). */
 export const envelopeAnswer = (
@@ -63,7 +98,7 @@ export const envelopeAnswer = (
 };
 
 /**
- * A thrown refusal as an answer: its errorMessage and flags on the envelope,
+ * A thrown refusal as an answer: its refusal and flags on the envelope,
  * its status (200 unless it set one) and its extra headers (Retry-After on a
  * rate limit). The logList the call accumulated rides along, as it does on
  * a success.
@@ -73,8 +108,8 @@ export const refusalAnswer = (
     apiVersion: string | null | undefined,
     logList?: unknown[],
 ): LambderApiAnswer => envelopeAnswer(
-    buildApiEnvelope(apiVersion, null, {
-        ...(err.errorMessage !== undefined ? { errorMessage: err.errorMessage } : {}),
+    refusalEnvelope(apiVersion, {
+        ...(err.refusal !== undefined ? { refusal: err.refusal } : {}),
         ...(err.notAuthorized ? { notAuthorized: true } : {}),
         ...(err.sessionExpired ? { sessionExpired: true } : {}),
         logList,
@@ -200,24 +235,24 @@ export const validationAnswer = (zodError: z.ZodError, logList?: unknown[]): Lam
 
 /** No API is registered under the requested name: a refusal, not a 404, so a typed caller reads it. */
 export const apiNotFoundAnswer = (apiVersion: string | null | undefined, logList?: unknown[]): LambderApiAnswer => envelopeAnswer(
-    buildApiEnvelope(apiVersion, null, {
-        errorMessage: { type: "warning", code: LAMBDER_REFUSAL_CODES.apiNotFound, content: "API not found." } satisfies LambderRefusalMessage,
+    refusalEnvelope(apiVersion, {
+        refusal: { type: "warning", code: LAMBDER_REFUSAL_CODES.apiNotFound, content: "API not found." } satisfies LambderRefusalMessage,
         logList,
     }),
 );
 
 /** A session API called without a live session: the protocol's sessionExpired flag, which the caller clears its cookies on. */
 export const sessionExpiredAnswer = (apiVersion: string | null | undefined, logList?: unknown[]): LambderApiAnswer =>
-    envelopeAnswer(buildApiEnvelope(apiVersion, null, { sessionExpired: true, logList }));
+    envelopeAnswer(refusalEnvelope(apiVersion, { sessionExpired: true, logList }));
 
 /** The caller was built against another shape of the endpoint (the signature gate), or the app judged it stale: the protocol's versionExpired flag, which the caller reloads on. */
 export const versionExpiredAnswer = (apiVersion: string | null | undefined): LambderApiAnswer =>
-    envelopeAnswer(buildApiEnvelope(apiVersion, null, { versionExpired: true }));
+    envelopeAnswer(refusalEnvelope(apiVersion, { versionExpired: true }));
 
 /** A compressed request payload that could not be restored: a 400 with the reason, never a crash. */
 export const invalidPayloadAnswer = (apiVersion: string | null | undefined, message: string): LambderApiAnswer => envelopeAnswer(
-    buildApiEnvelope(apiVersion, null, {
-        errorMessage: { type: "error", code: LAMBDER_REFUSAL_CODES.invalidRequestPayload, content: message } satisfies LambderRefusalMessage,
+    refusalEnvelope(apiVersion, {
+        refusal: { type: "error", code: LAMBDER_REFUSAL_CODES.invalidRequestPayload, content: message } satisfies LambderRefusalMessage,
     }),
     { statusCode: 400 },
 );
@@ -234,6 +269,6 @@ export const crashAnswer = (
     apiVersion: string | null | undefined,
     revealed?: { crash: LambderCrashDetail; logList: unknown[] },
 ): LambderApiAnswer => envelopeAnswer(
-    buildApiEnvelope(apiVersion, null, { errorMessage: "Internal server error.", ...revealed }),
+    refusalEnvelope(apiVersion, { refusal: "Internal server error.", ...revealed }),
     { statusCode: 500 },
 );

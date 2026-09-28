@@ -772,7 +772,7 @@ describe('Session Endpoint Protection', () => {
         apiPath: '/api',
         session: { store, sessionSalt: 'test-salt' },
     }).setGlobalErrorHandler((err, ctx, responseBuilder) => {
-        if (ctx?.api) return responseBuilder.api({ error: err.message });
+        if (ctx?.api) return responseBuilder.apiRefusal({ refusal: err.message });
         return responseBuilder.html(`<h1>Error: ${err.message}</h1>`);
     });
 

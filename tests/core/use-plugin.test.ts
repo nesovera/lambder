@@ -380,11 +380,11 @@ describe('Plugin System - Type Safety', () => {
 
 describe('Plugin System - Non-Generic Plugins', () => {
     it('should accumulate types correctly when using non-generic plugins', () => {
-        const plugin1 = (l: Lambder) => l.addApi('api1', { input: z.void(), output: z.void() }, async (_ctx) => {});
-        const plugin2 = (l: Lambder) => l.addApi('api2', { input: z.void(), output: z.void() }, async (_ctx) => {});
+        const plugin1 = (l: Lambder) => l.addApi('api1', { input: z.void(), output: z.object({}) }, async (_ctx) => ({}));
+        const plugin2 = (l: Lambder) => l.addApi('api2', { input: z.void(), output: z.object({}) }, async (_ctx) => ({}));
 
         const _lambder = new Lambder({ files: new LambderLocalFileSource({ root: '' }), apiPath: '/api' })
-            .addApi('initialApi', { input: z.void(), output: z.void() }, async (_ctx) => {})
+            .addApi('initialApi', { input: z.void(), output: z.object({}) }, async (_ctx) => ({}))
             .use(plugin1)
             .use(plugin2);
 

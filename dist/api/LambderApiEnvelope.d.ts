@@ -1,26 +1,38 @@
 import type { z } from "zod";
-import type { LambderApiEnvelopeBody, LambderApiResponseConfig } from "../shared/wire/LambderApiContract.js";
+import type { LambderApiEnvelopeBody, LambderRefusalEnvelopeFields, LambderApiRefusalConfig, LambderApiRefusalEnvelope, LambderApiSuccessEnvelope } from "../shared/wire/LambderApiContract.js";
 import { type LambderApiRefusal } from "../shared/wire/LambderApiRefusal.js";
 import type { LambderCrashDetail } from "../shared/wire/LambderCrashDetail.js";
 import type { LambderApiAnswer } from "./LambderApiAnswer.js";
 export declare const API_ANSWER_CONTENT_TYPE = "application/json; charset=utf-8";
-/** The envelope's config plus the logList channel the call accumulated. */
-export type LambderApiEnvelopeConfig = LambderApiResponseConfig & {
-    logList?: unknown[];
-};
 /**
- * The wire envelope for one answer. Flags are only present when set, so a
- * plain success is `{ apiVersion, payload }` and nothing else; an empty
- * logList is omitted.
+ * A handler's answer as the wire envelope: its parsed output and the logList
+ * the call accumulated, nothing else. The only envelope a reader takes for a
+ * success; an empty logList is omitted.
  */
-export declare const buildApiEnvelope: <T>(apiVersion: string | null | undefined, payload: T | null, { versionExpired, sessionExpired, notAuthorized, errorMessage, logList, crash, }?: LambderApiEnvelopeConfig) => LambderApiEnvelopeBody<T>;
+export declare const successEnvelope: <T>(apiVersion: string | null | undefined, payload: T, logList?: unknown[]) => LambderApiSuccessEnvelope<T>;
+/**
+ * Every other answer as the wire envelope: a null payload beside the
+ * refusal's message and flags. Flags are only present when set, and an
+ * empty logList is omitted.
+ */
+export declare const refusalEnvelope: (apiVersion: string | null | undefined, { versionExpired, sessionExpired, notAuthorized, refusal, logList, crash }: LambderRefusalEnvelopeFields) => LambderApiRefusalEnvelope;
+/**
+ * An API call answered from outside its handler (res.apiRefusal on the
+ * server, onInvalidInput in the mock) as its envelope, once the config is
+ * known to be a refusal: a refusal message or one of the three flags, so a
+ * reader never takes it for the handler's output, and a message with a
+ * framework code or none and no data, since it answers outside any one
+ * endpoint's declared refusals. `writer` names the call in the error, and
+ * the logList is the config's own or the one given.
+ */
+export declare const plainRefusalEnvelope: (apiVersion: string | null | undefined, config: LambderApiRefusalConfig, writer: string, logList?: unknown[]) => LambderApiRefusalEnvelope;
 /** An envelope as an answer: JSON body, JSON content type, the status and headers given (200 and none by default). */
 export declare const envelopeAnswer: (envelope: LambderApiEnvelopeBody<unknown>, options?: {
     statusCode?: number;
     headers?: Record<string, string | string[]>;
 }) => LambderApiAnswer;
 /**
- * A thrown refusal as an answer: its errorMessage and flags on the envelope,
+ * A thrown refusal as an answer: its refusal and flags on the envelope,
  * its status (200 unless it set one) and its extra headers (Retry-After on a
  * rate limit). The logList the call accumulated rides along, as it does on
  * a success.

@@ -124,6 +124,7 @@ describe('ApiContract - the guards option on the contract', () => {
                 input: z.object({}),
                 output: z.object({ data: z.unknown(), meta: z.record(z.string(), z.unknown()), doc: z.json(), cells: z.array(z.string().optional()) }),
             }, async (_ctx) => ({ data: 1, meta: {}, doc: null, cells: [] }))
+            // @ts-expect-error an unknown output may be anything, and an API answers with an object or an array
             .addApi('anything', { input: z.object({}), output: z.unknown() }, async (_ctx) => 1);
 
         type Contract = typeof _app.ApiContract;

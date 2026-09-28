@@ -1,6 +1,6 @@
 import type { z } from "zod";
 import type { LambderApiSignatureMap } from "../shared/wire/LambderApiSignatureMap.js";
-import type { LambderApiResponseConfig } from "../shared/wire/LambderApiContract.js";
+import type { LambderApiRefusalConfig } from "../shared/wire/LambderApiContract.js";
 import type { LambderHttpStatusCode } from "../shared/wire/LambderHttpStatus.js";
 import type { MaybePromise } from "../shared/util/LambderTypeUtilities.js";
 
@@ -306,12 +306,11 @@ export type LambderMockAppOptions<
 
 /**
  * What the server's input validation handler answers, as a mock states it:
- * the handler's `res.api(payload, config)` as data, with the status it went
- * out with (200 unless named).
+ * the handler's `res.apiRefusal(config)` as data, with the status it went
+ * out with (200 unless named). Like res.apiRefusal it is always a refusal.
  */
 export type LambderMockInvalidInputAnswer = {
-    payload?: unknown;
-    config?: LambderApiResponseConfig;
+    config: LambderApiRefusalConfig;
     statusCode?: LambderHttpStatusCode;
 };
 

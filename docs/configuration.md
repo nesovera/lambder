@@ -41,9 +41,16 @@ policy types; the curried creator is the canonical entry.
 | `requirePublicApiGuards` | `false` | Make `guards` a required field of every `addApi` |
 | `crashes` | none | `{ report, reportTimeoutMs, reveal }`: a reporter told every crash on every path (API, route, event, startup) and waited for up to `reportTimeoutMs` (default 3000, a positive integer), and who may read a crash in the framework's 500. Without a reporter, a crash nothing answered is logged to the console. See [Routing](./routing.md#crashes) |
 
+The app's refusal vocabulary is not a `create()` option. It is declared on the
+init, `initLambder<SessionData>().declareRefusals(vocabulary, { requireCodes? })`,
+before any guard is built, so the init's `guard()` and `refuse` are typed to
+it and its `create()` hands it to the instance; `declareRefusals()` checks
+each code of the vocabulary the way the table below is checked. See
+[Declared refusals](./apis.md#declared-refusals).
+
 A key the options type does not have is a compile error, one level down as
 well: `session` (and `session.cookie`), `idempotency`, `crashes`, `rateLimits` and each
-of its `policies`, each guard in `guards`, the object form of `files`, and
+of its `policies` (and a policy's `refusal`), each guard in `guards`, the object form of `files`, and
 `cors` and `compression` when either is written as an object. Inferring the
 options as a `const` generic is what makes an app's declaration typed, and it
 also switches TypeScript's own excess-property check off for the whole
@@ -211,7 +218,7 @@ store. [API policies](./api-policies.md) is the full guide.
 ```typescript
 rateLimits: {
     limiter: new LambderDdbRateLimiter({ tableName, region }),
-    policies: { /* name: { perMin, perHour, per, budget, errorMessage } */ },
+    policies: { /* name: { perMin, perHour, per, budget, refusal } */ },
 },
 guards: { /* name: initLambder<SessionData>().guard({ ... }) */ },
 idempotency: {

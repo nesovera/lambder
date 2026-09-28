@@ -14,15 +14,17 @@ export const lambderGuard = lambderGuardBuilder();
 /** Builder for the server's rate-limit keys: the handler sees the render context. */
 export const lambderRateLimitKey = lambderRateLimitKeyBuilder();
 /**
- * The same two builders bound to one app's session data, which is what
- * initLambder<SessionData>() hands out beside create(): a guard's
- * `ctx.session.data` and `ctx.sessionController` are SessionData where the standalone
- * lambderGuard() leaves them `any`. The server's counterpart of the mock's
- * `guard` and `rateLimitKey`.
+ * The same two builders bound to one app's session data and refusal
+ * vocabulary, which is what initLambder<SessionData>() hands out beside
+ * create(): a guard's `ctx.session.data` and `ctx.sessionController` are
+ * SessionData where the standalone lambderGuard() leaves them `any`, and its
+ * `ctx.refuse` is typed to the guard's refusals from the vocabulary
+ * declareRefusals() gave (null: none declared, so a guard names no code).
+ * The server's counterpart of the mock's `guard` and `rateLimitKey`.
  */
-export const policyBuildersFor = () => ({
-    /** Builds a guard whose handler sees this app's session type. */
-    guard: lambderGuardBuilder(),
+export const policyBuildersFor = (vocabulary) => ({
+    /** Builds a guard whose handler sees this app's session type and, on ctx.refuse, the guard's own refusal codes. */
+    guard: lambderGuardBuilder(vocabulary),
     /** Builds a rate-limit key whose handler sees this app's session type; the counterpart of `guard`. */
     rateLimitKey: lambderRateLimitKeyBuilder(),
 });

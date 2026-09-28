@@ -16,7 +16,7 @@
 import { describe, it, expect } from 'vitest';
 import nodeCrypto from 'node:crypto';
 import { z } from 'zod';
-import Lambder from '../../src/core/Lambder.js';
+import Lambder, { initLambder } from '../../src/core/Lambder.js';
 import { LambderMemorySessionStore } from '../../src/stores/LambderMemorySessionStore.js';
 import { LambderWebCrypto } from '../../src/session/LambderSessionCrypto.js';
 import { buildTransportEnvelope } from '../../src/shared/transport/LambderApiTransport.js';
@@ -64,7 +64,7 @@ describe('The request envelope', () => {
 });
 
 describe('The response envelope', () => {
-    const app = () => new Lambder({
+    const app = () => initLambder().declareRefusals({ 'app/no': {} }).create({
         files: testPublicFiles(),
         apiPath: '/api',
         apiVersion: '3',
@@ -84,16 +84,16 @@ describe('The response envelope', () => {
     });
 
     it('carries the logList channel when the call wrote to it', async () => {
-        const lambder = app().addApi('logs', schema, async (ctx) => { ctx.logList.push('note'); return null; });
+        const lambder = app().addApi('logs', schema, async (ctx) => { ctx.logList.push('note'); return {}; });
 
-        expect(await bodyOf(lambder, 'logs')).toBe('{"apiVersion":"3","payload":null,"logList":["note"]}');
+        expect(await bodyOf(lambder, 'logs')).toBe('{"apiVersion":"3","payload":{},"logList":["note"]}');
     });
 
-    it('answers a refusal as a null payload beside the errorMessage shape', async () => {
-        const lambder = app().addApi('no', schema, async () => refuse('Not today.', { code: 'app/no', title: 'Refused' }));
+    it('answers a refusal as a null payload beside the refusal shape', async () => {
+        const lambder = app().addApi('no', { ...schema, refusals: 'app/no' }, async () => refuse('Not today.', { code: 'app/no', title: 'Refused' }));
 
         expect(await bodyOf(lambder, 'no')).toBe(
-            '{"apiVersion":"3","payload":null,"errorMessage":{"type":"warning","code":"app/no","title":"Refused","content":"Not today."}}',
+            '{"apiVersion":"3","payload":null,"refusal":{"type":"warning","code":"app/no","title":"Refused","content":"Not today."}}',
         );
     });
 
@@ -102,7 +102,7 @@ describe('The response envelope', () => {
 
         expect(await bodyOf(lambder, 'secret')).toBe('{"apiVersion":"3","payload":null,"sessionExpired":true}');
         expect(await bodyOf(lambder, 'nope')).toBe(
-            '{"apiVersion":"3","payload":null,"errorMessage":{"type":"warning","code":"lambder/api-not-found","content":"API not found."}}',
+            '{"apiVersion":"3","payload":null,"refusal":{"type":"warning","code":"lambder/api-not-found","content":"API not found."}}',
         );
         expect(await bodyOf(lambder, 'secret', { apiName: 'secret', payload: { value: 'x' }, version: '3', signature: 'an-older-shape' }))
             .toBe('{"apiVersion":"3","payload":null,"versionExpired":true}');
@@ -112,7 +112,7 @@ describe('The response envelope', () => {
         const lambder = app().addApi('boom', schema, async () => { throw new Error('the real reason'); });
 
         const body = await bodyOf(lambder, 'boom');
-        expect(body).toBe('{"apiVersion":"3","payload":null,"errorMessage":{"type":"error","content":"Internal server error."}}');
+        expect(body).toBe('{"apiVersion":"3","payload":null,"refusal":{"type":"error","content":"Internal server error."}}');
         expect(body).not.toContain('the real reason');
     });
 });

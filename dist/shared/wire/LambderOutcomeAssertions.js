@@ -1,5 +1,5 @@
 /**
- * Two assertions over a call's outcome, for tests.
+ * Three assertions over a call's outcome, for tests.
  *
  * An outcome is a discriminated union, so a test that expects a refusal must
  * narrow before it can read what the refusal carries: check `ok`, branch on
@@ -10,7 +10,7 @@
  *
  * These narrow through an `asserts` signature, so the lines after one read
  * the arm it proved, and they throw a plain Error naming what the outcome
- * was. No test runner is imported: the same two functions serve vitest, jest
+ * was. No test runner is imported: the same functions serve vitest, jest
  * and node:test, from `lambder/testing` over a real server and from
  * `lambder/mock` over a mock one. Pure and dependency-free, like the outcome
  * vocabulary they read.
@@ -49,8 +49,8 @@ const describeOutcome = (outcome) => {
     const details = [];
     if (failure.status !== undefined)
         details.push(`status ${failure.status}`);
-    if (failure.errorMessage !== undefined)
-        details.push(`errorMessage ${describeValue(failure.errorMessage)}`);
+    if (failure.refusal !== undefined)
+        details.push(`refusal ${describeValue(failure.refusal)}`);
     if (failure.zodError !== undefined)
         details.push(`zodError ${describeValue(failure.zodError.message)}`);
     // The error's own message, and its cause when it has one: an in-process
@@ -84,7 +84,7 @@ export function assertApiSuccess(outcome) {
  *
  * ```typescript
  * assertApiFailure(await member.apiOutcome("org.delete", { id }), "notAuthorized");
- * assertApiFailure(await guest.apiOutcome("signup", form), "errorMessage", { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
+ * assertApiFailure(await guest.apiOutcome("signup", form), "refusal", { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
  * ```
  */
 export function assertApiFailure(outcome, reason, expected = {}) {
@@ -101,12 +101,38 @@ export function assertApiFailure(outcome, reason, expected = {}) {
     if (reason !== undefined && outcome.reason !== reason)
         return refuse();
     if (expected.code !== undefined) {
-        // Only the structured errorMessage carries a code; a plain string has none to match.
-        const errorMessage = outcome.errorMessage;
-        const code = errorMessage && typeof errorMessage === "object" ? errorMessage.code : undefined;
+        // Only the structured refusal carries a code; a plain string has none to match.
+        const refusal = outcome.refusal;
+        const code = refusal && typeof refusal === "object" ? refusal.code : undefined;
         if (code !== expected.code)
             return refuse();
     }
     if (expected.status !== undefined && outcome.status !== expected.status)
         return refuse();
+}
+/**
+ * Asserts that a call was refused with the given code, whichever reason it
+ * arrived under (a refusal flagged notAuthorized carries its code too), and
+ * narrows the outcome's refusal to that code's message, so its `data`
+ * reads with the type the code declares.
+ *
+ * ```typescript
+ * const outcome = await visitor.apiOutcome("order.pay", { orderId });
+ * assertApiRefusal(outcome, "wallet-short");
+ * expect(outcome.refusal.data.available).toBe(1250);
+ * ```
+ *
+ * The code is checked against the outcome's own codes, so one the endpoint
+ * does not declare is a compile error rather than an assertion that can
+ * never pass.
+ */
+// `const`: the constraint depends on TOutcome, and without it the code
+// argument widens to that whole constraint instead of staying the literal
+// passed, which would narrow to every declared code at once.
+export function assertApiRefusal(outcome, code) {
+    const refusal = outcome.ok ? undefined : outcome.refusal;
+    const received = refusal && typeof refusal === "object" ? refusal.code : undefined;
+    if (received !== code) {
+        throw new Error(`Expected the call to be refused with code "${code}", but it was ${describeOutcome(outcome)}.`, { cause: errorOf(outcome) });
+    }
 }

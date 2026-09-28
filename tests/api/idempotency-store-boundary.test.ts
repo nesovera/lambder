@@ -100,7 +100,7 @@ describe('The fingerprint a request is claimed under', () => {
         const body = `{"apiName":"order.place","payload":{"qty":1,"x":${'['.repeat(depth)}${']'.repeat(depth)}},"idempotencyKey":"${KEY}"}`;
         const answer = await app.visitor().request('POST', '/api', { body, headers: { 'content-type': 'application/json' } });
         expect(answer.statusCode).toBe(400);
-        expect(answer.json()).toMatchObject({ errorMessage: { code: LAMBDER_REFUSAL_CODES.invalidRequestPayload } });
+        expect(answer.json()).toMatchObject({ refusal: { code: LAMBDER_REFUSAL_CODES.invalidRequestPayload } });
         expect(handlerRuns).toBe(0);
         expect(crashes).toEqual([]);
     });

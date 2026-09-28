@@ -1,6 +1,6 @@
 import { LAMBDER_REFUSAL_CODES } from "../shared/wire/LambderApiRefusal.js";
 import type { LambderApiAnswer } from "../api/LambderApiAnswer.js";
-import type { LambderApiMode, LambderApiEnvelopeBody } from "../shared/wire/LambderApiContract.js";
+import type { LambderApiMode, LambderApiEnvelopeBody, LambderApiRefusalEnvelope } from "../shared/wire/LambderApiContract.js";
 import type { LambderMockCallEvent, LambderMockCallRecord, LambderMockListener, LambderMockOutcome, LambderMockResponseEvent } from "./LambderMockTypes.js";
 
 /**
@@ -39,18 +39,21 @@ const envelopeOf = (answer: LambderApiAnswer): LambderApiEnvelopeBody<unknown> |
 };
 
 /** How an answer reads, in the runtime's vocabulary. */
-const classifyAnswer = (answer: LambderApiAnswer, envelope: LambderApiEnvelopeBody<unknown> | null): LambderMockOutcome => {
+const classifyAnswer = (answer: LambderApiAnswer, body: LambderApiEnvelopeBody<unknown> | null): LambderMockOutcome => {
+    // Read field by field: the body is whatever the answer carried, and a
+    // success envelope has none of a refusal's fields.
+    const envelope = body as LambderApiRefusalEnvelope | null;
     if(answer.statusCode >= 500) return "crash";
     if(answer.statusCode === 422) return "validation";
     if(!envelope) return "ok";
     if(envelope.versionExpired) return "versionExpired";
     if(envelope.sessionExpired) return "sessionExpired";
     if(envelope.notAuthorized) return "notAuthorized";
-    const code = (envelope.errorMessage as { code?: unknown } | undefined)?.code;
+    const code = (envelope.refusal as { code?: unknown } | undefined)?.code;
     if(code === LAMBDER_REFUSAL_CODES.rateLimited) return "rateLimited";
     if(code === LAMBDER_REFUSAL_CODES.notMocked) return "notMocked";
     if(code === LAMBDER_REFUSAL_CODES.apiNotFound) return "unknownApi";
-    if(envelope.errorMessage) return "refusal";
+    if(envelope.refusal) return "refusal";
     return "ok";
 };
 

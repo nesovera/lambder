@@ -41,7 +41,7 @@ const moduleFor = async (app: LambderApiSignatureSource, exportName = 'default')
 const write = async (app: LambderApiSignatureSource, options: Omit<LambderApiSignatureFileOptions, 'module'>) =>
     writeApiSignatures({ module: await moduleFor(app), verifyInFreshProcess: false, ...options });
 
-const appWith = (echoOutput: z.ZodType) => initLambder().create({ apiPath: '/api' })
+const appWith = (echoOutput: z.ZodType<object>) => initLambder().create({ apiPath: '/api' })
     .addApi('echo', { input: z.object({ text: z.string() }), output: echoOutput }, async (_ctx) => null as never)
     .addApi('ping', { input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (_ctx) => ({ ok: true }));
 

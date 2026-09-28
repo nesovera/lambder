@@ -37,7 +37,7 @@ const lambderInit = initLambder<SessionData>();
 
 const policies = {
     // Keyed by the code that charges it: one invited address.
-    invitesPerRecipient: { perMin: 2, errorMessage: { type: 'warning', content: 'That address was invited too often.' } },
+    invitesPerRecipient: { perMin: 2, refusal: { type: 'warning', content: 'That address was invited too often.' } },
     invitesShared: { perMin: 2, budget: 'perPolicy' },
     pairPerIp: { perMin: 2, per: 'ip' },
     remindPerSession: { perMin: 1, per: 'session' },
@@ -200,8 +200,8 @@ describe('ctx.rateLimit and ctx.isRateLimited', () => {
         assertApiSuccess(await visitor.apiOutcome('invite', { email: 'ada@example.com' }));
         const refused = await visitor.apiOutcome('invite', { email: 'ada@example.com' });
 
-        assertApiFailure(refused, 'errorMessage', { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
-        expect(refused.errorMessage?.content).toBe('That address was invited too often.');
+        assertApiFailure(refused, 'refusal', { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
+        expect(refused.refusal?.content).toBe('That address was invited too often.');
         expect(refused.retryAfterSeconds).toBeGreaterThan(0);
         // Another key has its own counter, from the same visitor.
         assertApiSuccess(await visitor.apiOutcome('invite', { email: 'grace@example.com' }));
@@ -218,7 +218,7 @@ describe('ctx.rateLimit and ctx.isRateLimited', () => {
 
         assertApiSuccess(await visitor.apiOutcome('inviteShared', { email: 'b@example.com' }));
         assertApiSuccess(await visitor.apiOutcome('inviteSharedAgain', { email: 'b@example.com' }));
-        assertApiFailure(await visitor.apiOutcome('inviteShared', { email: 'b@example.com' }), 'errorMessage', { status: 429 });
+        assertApiFailure(await visitor.apiOutcome('inviteShared', { email: 'b@example.com' }), 'refusal', { status: 429 });
     });
 
     it('answers the check result instead of refusing, and shares the counter the declared limit charges', async () => {
@@ -245,7 +245,7 @@ describe('ctx.rateLimit and ctx.isRateLimited', () => {
         const grace = await app.signIn('grace', { userId: 'grace', role: 'member' });
 
         assertApiSuccess(await ada.apiOutcome('remind', {}));
-        assertApiFailure(await ada.apiOutcome('remind', {}), 'errorMessage', { status: 429 });
+        assertApiFailure(await ada.apiOutcome('remind', {}), 'refusal', { status: 429 });
         assertApiSuccess(await grace.apiOutcome('remind', {}));
     });
 
@@ -307,9 +307,9 @@ describe('ctx.rateLimit and ctx.isRateLimited', () => {
         }));
         const call = app.visitor().apiOutcome as (apiName: string, payload: unknown) => Promise<LambderApiOutcome<unknown>>;
 
-        assertApiFailure(await call('nope0', {}), 'errorMessage', { code: LAMBDER_REFUSAL_CODES.apiNotFound });
-        assertApiFailure(await call('nope1', {}), 'errorMessage', { code: LAMBDER_REFUSAL_CODES.apiNotFound });
-        assertApiFailure(await call('nope2', {}), 'errorMessage', { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
+        assertApiFailure(await call('nope0', {}), 'refusal', { code: LAMBDER_REFUSAL_CODES.apiNotFound });
+        assertApiFailure(await call('nope1', {}), 'refusal', { code: LAMBDER_REFUSAL_CODES.apiNotFound });
+        assertApiFailure(await call('nope2', {}), 'refusal', { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
     });
 
     it('takes a policy typed as the general config wherever its per may fit', () => {

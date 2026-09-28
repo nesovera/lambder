@@ -10,6 +10,7 @@
  * Pure and dependency-free, so the browser entry can include it.
  */
 import { refusalMessageOf } from "./LambderApiRefusal.js";
+import { isObjectPayload } from "./LambderObjectPayload.js";
 /**
  * Whether a parsed body is Lambder's envelope, which always carries
  * apiVersion (null when the server set none). An object without it is
@@ -21,15 +22,25 @@ const isApiEnvelope = (value) => value !== null && typeof value === "object" && 
 /**
  * Reads one HTTP answer into an outcome. A 5xx is a server failure that keeps
  * the envelope when the server sent one (Lambder's own 500 body carries
- * errorMessage, and a global error handler may add crash and logList); a
+ * refusal, and a global error handler may add crash and logList); a
  * 422 is a validation failure only with Lambder's validation body; anything
  * else must be a JSON envelope, whose flags are honoured in a fixed order.
  * A failure read off any answer but a 422 carries the answer's Retry-After
  * as retryAfterSeconds.
+ *
+ * A success is a 2xx envelope with no flag and no refusal whose payload
+ * is an object or an array: what only a handler's parsed output is. Anything
+ * else that says nothing is wrong (a null or primitive payload a hand-built
+ * body, a proxy or an old stored answer carries) is a server failure, so a
+ * success's payload is always the contract's output and never falsy.
+ *
+ * TMessage is the endpoint's refusal message type: the reader cannot check
+ * a code against declarations it does not have, and relies on the server,
+ * which never sends a code the endpoint did not declare.
  */
 export const resolveApiOutcome = async (answer) => {
     const status = answer.status;
-    const errorMessageOf = (envelope) => envelope?.errorMessage !== undefined ? { errorMessage: refusalMessageOf(envelope.errorMessage) } : {};
+    const refusalOf = (envelope) => envelope?.refusal !== undefined ? { refusal: refusalMessageOf(envelope.refusal) } : {};
     // Retry-After (delta-seconds) rides every refusal that knows its reset
     // time, e.g. a rate limit, and a 503 that says when to come back; absent
     // or unreadable is undefined.
@@ -53,7 +64,7 @@ export const resolveApiOutcome = async (answer) => {
         catch { /* body unavailable */ }
         return {
             ok: false, reason: 'server', status,
-            ...errorMessageOf(envelope),
+            ...refusalOf(envelope),
             logList: envelope?.logList,
             ...(envelope ? { response: envelope } : {}),
             error: new Error("Request failed: " + status + " - " + (answer.statusText ?? "")),
@@ -91,21 +102,27 @@ export const resolveApiOutcome = async (answer) => {
         const gatewayMessage = typeof data.message === "string" ? `: ${data.message}` : "";
         return { ok: false, reason: 'server', status, error: new Error(`Request failed: ${status} - the answer is not a Lambder envelope${gatewayMessage}`), ...retryAfter };
     }
+    const asRefusal = data;
     if (data.versionExpired)
-        return { ok: false, reason: 'versionExpired', status, ...errorMessageOf(data), response: data, logList: data.logList, ...retryAfter };
+        return { ok: false, reason: 'versionExpired', status, ...refusalOf(data), response: asRefusal, logList: data.logList, ...retryAfter };
     if (data.sessionExpired)
-        return { ok: false, reason: 'sessionExpired', status, ...errorMessageOf(data), response: data, logList: data.logList, ...retryAfter };
+        return { ok: false, reason: 'sessionExpired', status, ...refusalOf(data), response: asRefusal, logList: data.logList, ...retryAfter };
     if (data.notAuthorized)
-        return { ok: false, reason: 'notAuthorized', status, ...errorMessageOf(data), response: data, logList: data.logList, ...retryAfter };
-    // Presence, not truthiness: the writer keeps an errorMessage an app set
+        return { ok: false, reason: 'notAuthorized', status, ...refusalOf(data), response: asRefusal, logList: data.logList, ...retryAfter };
+    // Presence, not truthiness: the writer keeps a refusal an app set
     // to the empty string, and a refusal that says nothing is still a
     // refusal, not a success.
-    if (data.errorMessage !== undefined)
-        return { ok: false, reason: 'errorMessage', status, errorMessage: refusalMessageOf(data.errorMessage), response: data, logList: data.logList, ...retryAfter };
+    if (data.refusal !== undefined)
+        return { ok: false, reason: 'refusal', status, refusal: refusalMessageOf(data.refusal), response: asRefusal, logList: data.logList, ...retryAfter };
     // An envelope that says nothing is wrong is still not a success when the
-    // status says otherwise.
+    // status says otherwise, nor when its payload is not what a handler
+    // answers. Neither is a refusal either, so neither carries the body as
+    // one: the error says what it was.
     if (status < 200 || status >= 300) {
-        return { ok: false, reason: 'server', status, response: data, logList: data.logList, error: new Error(`Request failed: ${status} - ${answer.statusText ?? ""}`), ...retryAfter };
+        return { ok: false, reason: 'server', status, logList: data.logList, error: new Error(`Request failed: ${status} - ${answer.statusText ?? ""}`), ...retryAfter };
+    }
+    if (!isObjectPayload(data.payload)) {
+        return { ok: false, reason: 'server', status, logList: data.logList, error: new Error("Request failed: the answer's payload is not an object or an array, so no handler of this API wrote it") };
     }
     return { ok: true, payload: data.payload, response: data, logList: data.logList };
 };

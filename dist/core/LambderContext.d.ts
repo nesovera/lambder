@@ -120,7 +120,7 @@ export type LambderRenderContext<TApiPayload = any, TPathParams extends Record<s
     /**
      * Counts one attempt against a named rate-limit policy and refuses the
      * request when it is over: a 429 envelope on an API call, a plain 429 on
-     * a route, with Retry-After and the policy's errorMessage either way. A
+     * a route, with Retry-After and the policy's refusal either way. A
      * policy without `per` takes the key as the second argument; a `per:
      * "ip"` or `per: "session"` one reads it off the request. The instance's
      * limiter, failOpen and key bounding apply, as for a declared limit.

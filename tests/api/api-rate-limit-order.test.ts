@@ -184,7 +184,7 @@ describe('Custom keys and the guards', () => {
 
         const attacker = app.visitor({ clientIp: '198.51.100.1' });
         for(let attempt = 0; attempt < 5; attempt += 1){
-            assertApiFailure(await attacker.apiOutcome('code.send', { email: 'victim@example.com' }, { guardInputs: { captcha: { token: 'wrong' } } }), 'errorMessage');
+            assertApiFailure(await attacker.apiOutcome('code.send', { email: 'victim@example.com' }, { guardInputs: { captcha: { token: 'wrong' } } }), 'refusal');
         }
 
         const victim = app.visitor({ clientIp: '203.0.113.9' });
@@ -358,7 +358,7 @@ describe('Per-IP counters and IPv6', () => {
 
         assertApiSuccess(await app.visitor({ clientIp: '2001:db8:1:2::a' }).apiOutcome('ping', {}));
         assertApiSuccess(await app.visitor({ clientIp: '2001:db8:1:2::b' }).apiOutcome('ping', {}));
-        assertApiFailure(await app.visitor({ clientIp: '2001:db8:1:2::c' }).apiOutcome('ping', {}), 'errorMessage', { status: 429 });
+        assertApiFailure(await app.visitor({ clientIp: '2001:db8:1:2::c' }).apiOutcome('ping', {}), 'refusal', { status: 429 });
         assertApiSuccess(await app.visitor({ clientIp: '2001:db8:1:3::a' }).apiOutcome('ping', {}));
     });
 

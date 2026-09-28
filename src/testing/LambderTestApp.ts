@@ -55,7 +55,7 @@ export type LambderTestAppOptions = {
  * their calls against plain members rather than the chained intersection.
  */
 export type LambderTestedInstance<TSessionData, TContract> =
-    Lambder<TSessionData, any, any, any, any, any, any, any> & { readonly ApiContract: TContract };
+    Lambder<TSessionData, any, any, any, any, any, any, any, any, any> & { readonly ApiContract: TContract };
 
 /**
  * A real Lambder app under test: the instance an app already has, with memory

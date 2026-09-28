@@ -6,6 +6,7 @@ import { DEFAULT_API_PATH } from "../shared/wire/LambderDefaultApiPath.js";
 import { LAMBDER_INVOKE_API_ID, LAMBDER_LOCAL_API_ID } from "../shared/wire/LambderInvokeApiId.js";
 import { bindCallTools, responseToolsOf } from "../api/LambderApiCallContext.js";
 import { decodeRequestPath } from "./LambderRequestPath.js";
+import { refuse } from "../shared/wire/LambderApiRefusal.js";
 /** True for API Gateway HTTP API / Lambda Function URL (payload v2) events. */
 export const isV2HttpEvent = (event) => !!event && typeof event === "object"
     && event.version === "2.0"
@@ -23,6 +24,10 @@ export const bindContextTools = (ctx, tools) => {
         methods: {
             rateLimit: async (policy, key) => { await tools.chargeRateLimit(bound, policy, key, true); },
             isRateLimited: (policy, key) => tools.chargeRateLimit(bound, policy, key, false),
+            // refuse() itself: what an API handler's context types as the
+            // endpoint's declared codes (LambderDeclaredRefuse). The check
+            // against the declaration happens where the refusal is rendered.
+            refuse,
             ...responseToolsOf(bound, bound.host),
         },
     });

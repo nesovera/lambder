@@ -5,7 +5,7 @@
  */
 
 import type { LambderCrashDetail } from "./LambderCrashDetail.js";
-import type { LambderAppRefusalMessage } from "./LambderApiRefusal.js";
+import type { LambderUncheckedRefusalMessage, LambderPlainRefusalMessage, LambderRefusalMessage } from "./LambderApiRefusal.js";
 // The option shapes a contract carries are the real ones the engines read,
 // rather than restatements of them, so `mode: "sesion"` and a misspelled
 // option value are compile errors.
@@ -40,27 +40,26 @@ export type LambderApiContractShape = Record<string, {
     rateLimit?: LambderRateLimitOptionValue;
     /** Present when the API declares idempotency: the `idempotency` option exactly as written. */
     idempotency?: LambderApiIdempotencyOption;
+    /** Present when the API can refuse with a declared code: each code mapped to `{ data }` or `{}`. See LambderContractRefusalsOf. */
+    refusals?: Record<string, { data?: unknown }>;
 }>;
 
 /**
- * Envelope flags and channels beside (or instead of) the payload: what a
- * refusal, the pipeline's own answers, a hook or an error handler set. An API
- * handler sets none of them itself: it returns its output or refuses.
+ * What a refusal envelope may carry besides its null payload: the flags a
+ * caller routes on, the refusal's message, the call's logList, and a crash
+ * described for a caller allowed to see it. The one shape the envelope
+ * writer takes for every answer that is not a handler's output.
  */
-export type LambderApiResponseConfig = {
+export type LambderRefusalEnvelopeFields = {
     versionExpired?: boolean;
     sessionExpired?: boolean;
     notAuthorized?: boolean;
     /**
-     * A refusal message, or a plain string when writing (a refusal thrown
-     * with refuse(), or an error handler's `res.api(null, { errorMessage })`): the envelope goes out with
-     * the message object either way. Read off the wire it can still be a
-     * string, or no message at all, wherever a Lambder server did not write
-     * the body (a hand-built mock answer, a proxy); refusalMessageOf reads
-     * whatever arrives as a message.
+     * The refusal's message, or a plain string: the envelope goes out with
+     * the message object either way (refusalMessageOf).
      */
-    errorMessage?: LambderAppRefusalMessage | string;
-    logList?: any[];
+    refusal?: LambderUncheckedRefusalMessage | string;
+    logList?: unknown[];
     /**
      * A crash described in full (name, message, stack, cause chain, where it
      * happened), for a caller that is allowed to see it: a global error
@@ -69,19 +68,56 @@ export type LambderApiResponseConfig = {
      * the browser caller ignores it.
      */
     crash?: LambderCrashDetail;
-}
+};
 
 /**
- * The API wire envelope both sides speak: the server writes it around a
- * handler's output or a refusal, LambderCaller parses it. `apiVersion` is always there (null when the server set none):
- * it is how a reader tells a Lambder envelope from another JSON answer, such
- * as API Gateway's own `{ "message": ... }` errors, so an answer without it
- * reads as a server failure.
+ * What `res.apiRefusal` writes: an answer to an API call from outside its
+ * handler (a hook, a fallback, the input validation handler, the global
+ * error handler). It is always a refusal, never a success: it carries an
+ * refusal or one of the three flags, which is what a reader tells it
+ * from a handler's output by, so a caller's success is only ever the
+ * handler's parsed output.
+ *
+ * Its message carries a framework code or none, and never data: it answers
+ * outside any one endpoint's declared refusals, which are what a reader's
+ * types allow.
  */
-export type LambderApiEnvelopeBody<T> = LambderApiResponseConfig & {
+export type LambderApiRefusalConfig = Omit<LambderRefusalEnvelopeFields, "refusal"> & { refusal?: LambderPlainRefusalMessage | string } & (
+    | { refusal: LambderPlainRefusalMessage | string }
+    | { versionExpired: true }
+    | { sessionExpired: true }
+    | { notAuthorized: true }
+);
+
+/** What every API envelope carries. `apiVersion` is always there (null when the server set none): it is how a reader tells a Lambder envelope from another JSON answer, such as API Gateway's own `{ "message": ... }` errors. */
+type LambderApiEnvelopeFields = {
     apiVersion: string | null;
-    payload?: T | null;
-}
+    logList?: unknown[];
+};
+
+/** A handler's answer on the wire: its output, parsed through the API's output schema, and nothing else. */
+export type LambderApiSuccessEnvelope<T> = LambderApiEnvelopeFields & {
+    payload: T;
+};
+
+/**
+ * Every other answer on the wire: a null payload beside the refusal's
+ * message and flags. The flags are present only when set. `refusal` is
+ * as it came off the wire, which a reader normalizes (refusalMessageOf),
+ * since a body no Lambder server wrote (a hand-built mock answer, a proxy)
+ * can put anything there.
+ */
+export type LambderApiRefusalEnvelope = LambderApiEnvelopeFields & {
+    payload: null;
+    versionExpired?: true;
+    sessionExpired?: true;
+    notAuthorized?: true;
+    refusal?: LambderUncheckedRefusalMessage | string;
+    crash?: LambderCrashDetail;
+};
+
+/** The API wire envelope both sides speak: the server writes it, LambderCaller and LambderInvokeCaller read it. */
+export type LambderApiEnvelopeBody<T> = LambderApiSuccessEnvelope<T> | LambderApiRefusalEnvelope;
 
 /** A value that is already JSON, recursive structures such as z.json() included. */
 type LambderJsonValue = string | number | boolean | null | LambderJsonValue[] | { [key: string]: LambderJsonValue };
@@ -130,16 +166,6 @@ export type LambderJsonOf<T> =
     : never;
 
 /**
- * What an API's output reaches the client as: LambderJsonOf of the schema's
- * output, except at the top, where an envelope carries no payload at all
- * rather than a JSON `undefined`. A void or undefined output keeps its type,
- * so a handler and a mock handler answer nothing, and an output that may be
- * undefined keeps that member, which LambderJsonOf drops as it would a
- * member of an object.
- */
-export type LambderJsonOutputOf<T> = [T] extends [void] ? T : (undefined extends T ? undefined : never) | LambderJsonOf<T>;
-
-/**
  * One contract entry as addApi/addSessionApi record it: the payload types,
  * the mode, and every declarative option exactly as written. Options that
  * were not written are absent rather than undefined, so `keyof` an entry
@@ -150,9 +176,15 @@ export type LambderJsonOutputOf<T> = [T] extends [void] ? T : (undefined extends
  * what it receives (the output schema's z.output as JSON, see
  * LambderJsonOf). The handler's own types are the other side of each, and
  * are not recorded here.
+ *
+ * `Refusals` is the one member not recorded as written: it is every code the
+ * endpoint can refuse with, its own `refusals` option and those of the guards
+ * it declares together, each mapped to `{ data }` (the data as JSON) or `{}`.
+ * A reader needs the whole set, and the guards' part is not in the entry.
  */
-export type LambderContractEntry<In, Out, Mode extends LambderApiMode, GuardInputs = never, Guards = never, RateLimit = never, Idempotency = never> =
+export type LambderContractEntry<In, Out, Mode extends LambderApiMode, GuardInputs = never, Guards = never, RateLimit = never, Idempotency = never, Refusals = never> =
     { input: In; output: Out; mode: Mode }
+    & ([Refusals] extends [never] ? {} : { refusals: Refusals })
     & ([GuardInputs] extends [never] ? {} : { guardInputs: GuardInputs })
     & ([Guards] extends [never] ? {} : { guards: Guards })
     & ([RateLimit] extends [never] ? {} : { rateLimit: RateLimit })
@@ -241,3 +273,38 @@ export type LambderContractRateLimitNames<C, M extends LambderApiMode = LambderA
 
 /** The endpoint's idempotency option as written, or never. */
 export type LambderContractIdempotencyOf<C, K extends keyof C> = C[K] extends { idempotency: infer I } ? I : never;
+
+/**
+ * The codes endpoint K can refuse with, each mapped to `{ data }` or `{}`;
+ * `{}` when it declares none.
+ */
+export type LambderContractRefusalsOf<C, K extends keyof C> = C[K] extends { refusals: infer R } ? R : {};
+
+/**
+ * The refusal message a call to endpoint K can come back with: one arm per
+ * code it declares, plus the framework's and the uncoded refusal. An untyped
+ * contract (one with an index signature) is read as any code.
+ */
+export type LambderContractRefusalMessage<C, K extends keyof C> =
+    0 extends 1 & C ? LambderUncheckedRefusalMessage
+    : string extends keyof C ? LambderUncheckedRefusalMessage
+    : LambderRefusalMessage<LambderContractRefusalsOf<C, K>>;
+
+type LambderContractRefusalMaps<C> = { [K in keyof C]: LambderContractRefusalsOf<C, K> }[keyof C];
+type LambderContractRefusalCodes<C> = LambderContractRefusalMaps<C> extends infer TMap ? TMap extends unknown ? keyof TMap & string : never : never;
+
+/**
+ * Every code any endpoint of the contract declares, mapped to its `{ data }`
+ * or `{}`. Built code by code, not by joining the endpoints' own maps, so a
+ * code many endpoints declare is one arm rather than one per endpoint (the
+ * vocabulary gives a code one data shape wherever it is used).
+ */
+export type LambderContractRefusals<C> = {
+    [TCode in LambderContractRefusalCodes<C>]: Extract<LambderContractRefusalMaps<C>, Record<TCode, unknown>>[TCode];
+};
+
+/** The refusal message any call of the contract can come back with: what a handler for every endpoint at once (a caller's refusalHandler) is handed. */
+export type LambderContractAnyRefusalMessage<C> =
+    0 extends 1 & C ? LambderUncheckedRefusalMessage
+    : string extends keyof C ? LambderUncheckedRefusalMessage
+    : LambderRefusalMessage<LambderContractRefusals<C>>;

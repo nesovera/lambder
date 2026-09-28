@@ -51,7 +51,7 @@ export type LambderTestAppOptions = {
  * (`lambderTestApp<SessionData, ApiContractType>(lambder)`), so the tests type
  * their calls against plain members rather than the chained intersection.
  */
-export type LambderTestedInstance<TSessionData, TContract> = Lambder<TSessionData, any, any, any, any, any, any, any> & {
+export type LambderTestedInstance<TSessionData, TContract> = Lambder<TSessionData, any, any, any, any, any, any, any, any, any> & {
     readonly ApiContract: TContract;
 };
 /**

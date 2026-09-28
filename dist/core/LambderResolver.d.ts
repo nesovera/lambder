@@ -14,7 +14,7 @@ interface DieResolverMethods {
     redirect: SyncDie<LambderResponseBuilder["redirect"]>;
     versionExpired: SyncDie<LambderResponseBuilder["versionExpired"]>;
     fileBase64: SyncDie<LambderResponseBuilder["fileBase64"]>;
-    api: SyncDie<LambderResponseBuilder["api"]>;
+    apiRefusal: SyncDie<LambderResponseBuilder["apiRefusal"]>;
     file: AsyncDie<LambderResponseBuilder["file"]>;
     templateFile: AsyncDie<LambderResponseBuilder["templateFile"]>;
 }

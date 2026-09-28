@@ -4,9 +4,11 @@ import { z } from "zod";
  * the declared shape, so the payload was not sent and the call is answered
  * as a crash. Either the schema rejected the payload, or the parse threw: an
  * async refinement or transform (the output is parsed synchronously, so an
- * output schema cannot be async), or a transform that threw. The output
- * side's counterpart of LambderApiValidationRefusal, with the API it happened
- * in, for a crash reporter.
+ * output schema cannot be async), or a transform that threw. Or the parsed
+ * output is not an object or an array, which every answer is (see
+ * isObjectPayload). The output side's counterpart of
+ * LambderApiValidationRefusal, with the API it happened in, for a crash
+ * reporter.
  *
  * Its own class because it is a crash after the fact: the handler ran to
  * its answer, whatever it wrote or charged along the way included. The
@@ -22,11 +24,15 @@ export declare class LambderApiOutputValidationError extends Error {
     readonly zodError: z.ZodError | null;
     /**
      * `failure` is how the parse ended: `{ zodError }` when the schema
-     * rejected the payload, `{ thrown }` when parsing it threw.
+     * rejected the payload, `{ thrown }` when parsing it threw, `{ notObject }`
+     * when what it produced is not an object or an array (the kind named, the
+     * value never).
      */
     constructor(apiName: string, failure: {
         zodError: z.ZodError;
     } | {
         thrown: unknown;
+    } | {
+        notObject: string;
     });
 }

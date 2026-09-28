@@ -1,5 +1,5 @@
 import type { LambderApiMode } from "../shared/wire/LambderApiContract.js";
-import type { LambderRateLimitOptionValue, LambderRateLimitOverride } from "../shared/wire/LambderApiOptionValues.js";
+import type { LambderRateLimitMessage, LambderRateLimitOptionValue, LambderRateLimitOverride } from "../shared/wire/LambderApiOptionValues.js";
 import { joinKeyFields } from "../shared/util/joinKeyFields.js";
 import { boundKeyField } from "../shared/util/boundKeyField.js";
 import type { z } from "zod";
@@ -13,7 +13,7 @@ import {
     type LambderRateLimitWindow,
 } from "../shared/contracts/LambderRateLimiter.js";
 import type { LambderSessionRecord } from "../shared/contracts/LambderSessionStore.js";
-import { LambderApiRefusal, LAMBDER_REFUSAL_CODES, type LambderAppRefusalMessage, type LambderRefusalMessage } from "../shared/wire/LambderApiRefusal.js";
+import { LambderApiRefusal, LAMBDER_REFUSAL_CODES, type LambderRefusalMessage } from "../shared/wire/LambderApiRefusal.js";
 import { parsePreflightSlice } from "./LambderApiValidationRefusal.js";
 import type { LambderNonEmptyOptionMap } from "../shared/util/LambderTypeUtilities.js";
 import { assertNonNegativeInteger } from "../shared/util/LambderOptionChecks.js";
@@ -27,20 +27,41 @@ export const DEFAULT_RATE_LIMIT_REFUSAL = { type: "warning", code: LAMBDER_REFUS
 
 /**
  * The refusal a rate-limited call answers with: a 429 envelope carrying the
- * framework code (a policy's own message inherits it unless it sets a more
- * specific one) and a Retry-After header. The engine throws it; the mock
- * runtime's failure injection throws the same one, so an injected rate
- * limit is indistinguishable from a real one.
+ * framework code, whatever message a policy or an API wrote, and a
+ * Retry-After header. The engine throws it; the mock runtime's failure
+ * injection throws the same one, so an injected rate limit is
+ * indistinguishable from a real one.
+ *
+ * The code goes on after the message, so a message that carries one anyway
+ * (a plain-JS caller, a cast) cannot replace it: a rate limit is never a code
+ * an endpoint declares, and the pipeline would refuse to send one it did not.
  */
 export const rateLimitRefusal = (
     detail: string,
     retryAfterSeconds: number,
-    message?: LambderAppRefusalMessage,
+    message?: LambderRateLimitMessage,
 ): LambderApiRefusal => new LambderApiRefusal(detail, {
-    errorMessage: message ? { code: LAMBDER_REFUSAL_CODES.rateLimited, ...message } satisfies LambderAppRefusalMessage : DEFAULT_RATE_LIMIT_REFUSAL,
+    refusal: message ? { type: message.type, ...(message.title !== undefined ? { title: message.title } : {}), content: message.content, code: LAMBDER_REFUSAL_CODES.rateLimited } satisfies LambderRefusalMessage : DEFAULT_RATE_LIMIT_REFUSAL,
     statusCode: 429,
     headers: { "Retry-After": String(Math.max(1, Math.floor(retryAfterSeconds))) },
 });
+
+/**
+ * A rate-limit message carries no code of its own and no data: its code is
+ * always the framework's, which rateLimitRefusal sets, and a code there would
+ * read as one the app chose for clients to branch on when it never reaches
+ * them.
+ */
+const assertRateLimitMessage = (where: string, message: unknown): void => {
+    if(message === undefined) return;
+    const { code, data } = message as { code?: unknown; data?: unknown };
+    if(code !== undefined){
+        throw new Error(`Lambder: ${where} sets a refusal code. A rate-limit refusal is always "${LAMBDER_REFUSAL_CODES.rateLimited}", so an endpoint never has to declare it; write the type, title and content only.`);
+    }
+    if(data !== undefined){
+        throw new Error(`Lambder: ${where} sets refusal data. A rate-limit refusal carries none.`);
+    }
+};
 
 /**
  * A custom rate-limit key. `apiInput` names the fields of the API's OWN
@@ -124,8 +145,8 @@ export type LambderApiRateLimitPolicyConfig<TCtx = any> = LambderRateLimitPolicy
      * takes it: `per: "ip"` and `per: "session"` have one place each.
      */
     chargeAt?: LambderRateLimitChargeAt;
-    /** Envelope errorMessage for refused requests; inherits code "lambder/rate-limited" unless it sets its own. Default: a warning saying too many requests. */
-    errorMessage?: LambderAppRefusalMessage;
+    /** The refusal's message for refused requests: its type, title and content, under the code "lambder/rate-limited". Default: a warning saying too many requests. */
+    refusal?: LambderRateLimitMessage;
 };
 
 export type LambderApiRateLimitsConfig<TPolicies extends Record<string, LambderApiRateLimitPolicyConfig<any>>> = {
@@ -217,7 +238,7 @@ export type LambderRateLimitCheckResult = false | (LambderRateLimitExceeded & { 
 /**
  * `ctx.rateLimit(policy, key?)`: counts one attempt against a named policy
  * and, when it is over, refuses the request the way a declared limit does (a
- * 429 with Retry-After and the policy's errorMessage). For a limit whose key
+ * 429 with Retry-After and the policy's refusal). For a limit whose key
  * only the handler knows, or one to charge only on some paths through it.
  *
  * The key tuple is NoInfer: left inferable, a key passed where none belongs
@@ -250,7 +271,7 @@ export type LambderRateLimitChargeResult = {
 };
 
 type LambderRateLimitOverrideFor<TPolicy> =
-    TPolicy extends { budget: "perPolicy" } ? Pick<LambderRateLimitOverride, "errorMessage"> : LambderRateLimitOverride;
+    TPolicy extends { budget: "perPolicy" } ? Pick<LambderRateLimitOverride, "refusal"> : LambderRateLimitOverride;
 
 /** The map form's full shape: every referable policy name, each carrying its own override. */
 type LambderRateLimitMap<TPolicies, TPayload, TIncludeSession extends boolean> = {
@@ -403,6 +424,7 @@ export class LambderApiRateLimitsEngine {
                     throw new Error(`Lambder: rate-limit policy "${name}" sets chargeAt, which only a policy keyed by a { apiInput?, handler } key takes: per "ip" and per "session" each run at one fixed place, and a policy without per is charged by the code that names it.`);
                 }
             }
+            assertRateLimitMessage(`rate-limit policy "${name}"`, policy.refusal);
             const budget = policy.budget as LambderRateLimitBudget | undefined;
             if(budget !== undefined && budget !== "perApi" && budget !== "perPolicy"){
                 throw new Error(`Lambder: rate-limit policy "${name}" has budget "${String(budget)}"; use "perApi" (default: each referencing API counts separately) or "perPolicy" (one counter shared by every referencing API).`);
@@ -453,6 +475,7 @@ export class LambderApiRateLimitsEngine {
                 throw new Error(`Lambder: API "${apiName}" uses rate-limit policy "${name}" (per "session"), which requires addSessionApi.`);
             }
             if(override) assertWindowLimits(`API "${apiName}" override of rate-limit policy "${name}"`, override);
+            if(override) assertRateLimitMessage(`API "${apiName}" override of rate-limit policy "${name}"`, override.refusal);
             if(override && hasWindowOverride(override) && !RATE_LIMIT_WINDOW_KEYS.some((key) => (override[key] ?? policy[key]))){
                 throw new Error(
                     `Lambder: API "${apiName}" overrides rate-limit policy "${name}" down to no enforced window, which limits nothing. ` +
@@ -492,7 +515,7 @@ export class LambderApiRateLimitsEngine {
                 throw rateLimitRefusal(
                     `Rate limited: "${apiName}" exceeded policy "${name}" (${exceeded.window}: ${exceeded.limit}).`,
                     this.retryAfterOf(exceeded),
-                    override?.errorMessage ?? policy.errorMessage,
+                    override?.refusal ?? policy.refusal,
                 );
             }
         }
@@ -518,7 +541,7 @@ export class LambderApiRateLimitsEngine {
         const retryAfterSeconds = this.retryAfterOf(exceeded);
         return {
             checkResult: { ...exceeded, retryAfterSeconds },
-            refusal: rateLimitRefusal(`Rate limited: ${where} exceeded policy "${name}" (${exceeded.window}: ${exceeded.limit}).`, retryAfterSeconds, policy.errorMessage),
+            refusal: rateLimitRefusal(`Rate limited: ${where} exceeded policy "${name}" (${exceeded.window}: ${exceeded.limit}).`, retryAfterSeconds, policy.refusal),
         };
     }
 

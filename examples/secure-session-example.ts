@@ -73,7 +73,7 @@ const lambder = lambderApp
     const { username, password } = ctx.apiPayload;
 
     // Validate credentials (implement your own logic). Wrong ones are a
-    // refusal rather than an output: the caller's errorMessageHandler shows
+    // refusal rather than an output: the caller's refusalHandler shows
     // the message, and the output schema describes a signed-in answer only.
     const user = await authenticateUser(username, password);
     if (!user) refuse("Wrong username or password.");

@@ -15,6 +15,7 @@ export const lambder = storeApp()
         input: z.object({ orderId: z.string(), amount: z.number() }),
         output: z.object({ refunded: z.boolean() }),
         guards: { storePermission: "orders.manage" },
+        refusals: ["order-closed", "refund-too-large"],
     }, async (_ctx) => ({ refunded: true }))
     .addApi("store.hours", {
         input: z.void(),

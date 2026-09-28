@@ -1,3 +1,4 @@
+import { assertRefusalCodesDeclared, readRefusalVocabulary } from "../api/LambderApiRefusals.js";
 import { assertPositiveInteger } from "../shared/util/LambderOptionChecks.js";
 /**
  * Everything create() refuses before an instance exists, in one place: a
@@ -24,6 +25,15 @@ export const assertCreateOptions = (options) => {
     const cors = options.cors;
     if (typeof cors === "object" && cors.credentials && (cors.origins === undefined || cors.origins === "*")) {
         throw new Error('Lambder: cors.credentials needs cors.origins to be an allowlist or a predicate. With every origin allowed, any website could make credentialed calls and read the answers.');
+    }
+    // The vocabulary, and every code a guard names against it: a guard built
+    // by the standalone lambderGuard() meets the vocabulary here first.
+    const vocabulary = readRefusalVocabulary(options.refusals);
+    for (const [name, guard] of Object.entries(options.guards ?? {})) {
+        assertRefusalCodesDeclared(`guard "${name}"`, (guard?.refusals ?? []), vocabulary);
+    }
+    if (options.requireRefusalCodes && !vocabulary) {
+        throw new Error("Lambder: requireRefusalCodes needs a refusals vocabulary to name codes from; declare one with initLambder().declareRefusals().");
     }
     if ((options.requireSessionApiGuards || options.requirePublicApiGuards) && !options.guards) {
         const requireFlag = options.requireSessionApiGuards ? "requireSessionApiGuards" : "requirePublicApiGuards";

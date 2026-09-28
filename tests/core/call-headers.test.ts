@@ -13,7 +13,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { z } from 'zod';
-import Lambder from '../../src/core/Lambder.js';
+import Lambder, { initLambder } from '../../src/core/Lambder.js';
 import type LambderResolver from '../../src/core/LambderResolver.js';
 import type { LambderRenderContext } from '../../src/core/LambderContext.js';
 import type { LambderResponse } from '../../src/core/LambderResponse.js';
@@ -23,7 +23,7 @@ import { decodeBody, createMockEvent, createApiEvent, createMockContext, testPub
 
 const files = () => testPublicFiles();
 
-const app = () => new Lambder({
+const app = () => initLambder().declareRefusals({ 'app/nope': {} }).create({
     files: files(),
     apiPath: '/api',
     session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt', tokenCookieKey: 'sid', csrfCookieKey: 'csid' },
@@ -54,7 +54,7 @@ describe('Headers written during a call', () => {
 
     it('survive an afterRender hook that throws a refusal over the answer', async () => {
         const lambder = app()
-            .addApi('login', { input: z.any(), output: z.any() }, async (ctx) => {
+            .addApi('login', { input: z.any(), output: z.any(), refusals: 'app/nope' }, async (ctx) => {
                 await lambder.getSessionController(ctx).createSession('user-1', { role: 'user' });
                 return { ok: true };
             })
@@ -62,7 +62,7 @@ describe('Headers written during a call', () => {
 
         const result = await call(lambder, 'login');
 
-        expect(JSON.parse(decodeBody(result)).errorMessage.code).toBe('app/nope');
+        expect(JSON.parse(decodeBody(result)).refusal.code).toBe('app/nope');
         expect((result.multiValueHeaders?.['Set-Cookie'] ?? []).length).toBe(2);
     });
 
@@ -134,7 +134,7 @@ describe('Headers written during a call', () => {
         expect(result.multiValueHeaders?.['X-Handler']).toEqual(['ran']);
         expect(result.multiValueHeaders?.['Access-Control-Allow-Origin']).toEqual(['https://site.example']);
         // Still the structured crash envelope a client can parse.
-        expect(JSON.parse(decodeBody(result)).errorMessage).toEqual({ type: 'error', content: 'Internal server error.' });
+        expect(JSON.parse(decodeBody(result)).refusal).toEqual({ type: 'error', content: 'Internal server error.' });
     });
 });
 

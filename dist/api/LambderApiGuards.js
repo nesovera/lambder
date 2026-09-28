@@ -1,4 +1,5 @@
 import { parsePreflightSlice } from "./LambderApiValidationRefusal.js";
+import { assertRefusalCodesDeclared } from "./LambderApiRefusals.js";
 import { LAMBDER_RESPONSE_BRAND, isLambderResponseLike } from "../shared/util/LambderResponseBrand.js";
 /**
  * A guard builder bound to a pair of context types. The server's
@@ -6,7 +7,14 @@ import { LAMBDER_RESPONSE_BRAND, isLambderResponseLike } from "../shared/util/La
  * binds it to its own handler contexts, so mock guards are the same shape
  * as server guards and run through the same engine.
  */
-export const lambderGuardBuilder = () => ((guard) => guard);
+export const lambderGuardBuilder = (vocabulary) => ((guard) => {
+    // An init's builder knows the vocabulary (null: the init declared
+    // none) and refuses a guard naming a code outside it as it is built.
+    // The standalone builder passes nothing, and create() checks then.
+    if (vocabulary !== undefined)
+        assertRefusalCodesDeclared("a guard", Array.isArray(guard.refusals) ? guard.refusals : [], vocabulary);
+    return guard;
+});
 /** Normalize the three guards-option forms into ordered { name, param } entries. Read by the engine, and by the signature digest for the names alone. */
 export const toGuardEntries = (value) => {
     if (value === undefined)
@@ -64,6 +72,10 @@ export class LambderApiGuardsEngine {
                 throw new Error(`Lambder: guard "${name}" has no handler function.`);
             if (guardDef.apiInput && guardDef.guardInput)
                 throw new Error(`Lambder: guard "${name}" declares both apiInput and guardInput; pick one.`);
+            const refusals = guardDef.refusals;
+            if (refusals !== undefined && (!Array.isArray(refusals) || refusals.some((code) => typeof code !== "string" || code === ""))) {
+                throw new Error(`Lambder: guard "${name}" has a refusals option that is not a list of refusal codes.`);
+            }
             const runAt = guardDef.runAt;
             if (runAt !== undefined && runAt !== "beforeInputValidation" && runAt !== "afterInputValidation") {
                 throw new Error(`Lambder: guard "${name}" has runAt "${String(runAt)}"; use "beforeInputValidation" (default) or "afterInputValidation".`);

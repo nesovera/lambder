@@ -20,7 +20,7 @@ export { lambderTestApp } from "./testing/LambderTestApp.js";
 // their types are exported: what a helper that takes one has to name.
 export type { LambderTestApp, LambderTestAppOptions, LambderTestedInstance } from "./testing/LambderTestApp.js";
 export type { LambderTestVisitor, LambderTestVisitorOptions, LambderTestRequestInit } from "./testing/LambderTestVisitor.js";
-export { assertApiSuccess, assertApiFailure } from "./shared/wire/LambderOutcomeAssertions.js";
+export { assertApiSuccess, assertApiFailure, assertApiRefusal } from "./shared/wire/LambderOutcomeAssertions.js";
 export type { LambderExpectedFailure } from "./shared/wire/LambderOutcomeAssertions.js";
 
 // The rules each store interface promises, as cases an app registers with its

@@ -105,7 +105,8 @@ export type LambderApiExec<TCtx> = (ctx: TCtx) => Promise<LambderApiAnswer>;
  * Steps whose subsystem is not configured are skipped. A LambderApiRefusal
  * thrown by any step, guard or handler is rendered here, in one place: a
  * validation error through onInvalidInput, any other refusal as the refusal
- * envelope, and a session ended while the handler held it
+ * envelope once checked against the endpoint's declared codes
+ * (checkedRefusal), and a session ended while the handler held it
  * (LambderSessionNotFoundError) as sessionExpired. Anything else propagates, because only the adapter knows what a
  * crash means (a global error handler, a mock event).
  *

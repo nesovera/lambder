@@ -67,9 +67,10 @@ own, so **a retry does count against an `ip` budget**. Size those policies for
 the store traffic a caller may cause, not for the handler runs they allow.
 
 Refusals ride the envelope via `LambderApiRefusal` (429 rate limited, 409
-duplicate in flight), carrying the standard `LambderRefusalMessage` shape
-unless a policy names its own `errorMessage`, so the caller's
-`errorMessageHandler` surfaces them with zero client code. A 429 also carries
+duplicate in flight), carrying the standard message shape under a framework
+code (`lambder/rate-limited`, `lambder/duplicate-in-flight`), in a policy's
+own words when it names a `refusal`, so the caller's
+`refusalHandler` surfaces them with zero client code. A 429 also carries
 `Retry-After` (the exceeded fixed window's reset; `LambderCaller` outcomes
 expose it as `retryAfterSeconds`, and the CORS layer lists it in
 `Access-Control-Expose-Headers` by default).
@@ -112,7 +113,7 @@ rateLimits: {
                 apiInput: z.object({ email: z.string() }),
                 handler: (_ctx, { email }) => email.trim().toLowerCase(),
             }),
-            errorMessage: { type: "warning", content: "Too many attempts for this address." },
+            refusal: { type: "warning", content: "Too many attempts for this address." },
         },
     },
 },
@@ -124,7 +125,7 @@ rateLimits: {
 | `per` | `"ip"`, `"session"`, `lambderRateLimitKey({...})`, or left out | What one counter tracks. `"session"` is only referable from `addSessionApi`. Left out, the handler that charges the policy supplies the key (see [Charging a policy from code](#charging-a-policy-from-code)), and no API can declare it |
 | `budget` | `"perApi"` (default), `"perPolicy"` | Whether each referencing API gets its own counter or they share one |
 | `chargeAt` | `"afterGuards"` (default), `"beforeGuards"` | For a custom-keyed policy only: charged after the guards and the input schema passed, or before them, so an attempt they refuse is counted too (a limit on guessing a code a guard checks) |
-| `errorMessage` | `LambderAppRefusalMessage` | The refusal body; inherits code `lambder/rate-limited` unless it sets a code |
+| `refusal` | `LambderRateLimitMessage` | The refusal's words: its type, title and content. Its code is always `lambder/rate-limited` and it carries no data, so no endpoint has to declare a rate limit as one of its refusals; a code or data here is a compile error and a creation error |
 
 A `per: "ip"` counter keys an IPv6 caller by its /64 (`ipv6PrefixLength`),
 since a subscriber, a VPS included, holds at least that much and may rotate
@@ -158,7 +159,7 @@ rateLimit: ["authPerIp", "codePerEmail"],
 
 // Map form: tune a perApi policy for this API. Overrides merge over the
 // policy's windows (perMin here, the policy's other windows still apply) and
-// errorMessage is overridable too. Window overrides on a perPolicy policy are
+// refusal is overridable too. Window overrides on a perPolicy policy are
 // a startup error: one shared counter has one set of limits.
 rateLimit: { writePerUser: { perMin: 10 } },
 ```
@@ -173,7 +174,7 @@ handler. For those, the handler charges a named policy itself:
 ```typescript
 policies: {
     // No `per`: the code charging it passes the key.
-    invitesPerRecipient: { perMonth: 3, budget: "perPolicy", errorMessage: { type: "warning", content: "That address was invited too often." } },
+    invitesPerRecipient: { perMonth: 3, budget: "perPolicy", refusal: { type: "warning", content: "That address was invited too often." } },
     pairPerIp: { perMin: 5, per: "ip" },
 },
 
@@ -194,7 +195,7 @@ lambder.addApi("device.pair", { input, output }, async (ctx) => {
 
 `ctx.rateLimit(policy, key?)` counts one attempt and, when the policy is over,
 refuses the request exactly as a declared limit does: a 429 envelope with
-`Retry-After` and the policy's `errorMessage` on an API call, and a plain 429
+`Retry-After` and the policy's `refusal` on an API call, and a plain 429
 with the same header and text on a route. `ctx.isRateLimited(policy, key?)`
 counts the same way and answers `false`, or the window that refused with its
 `retryAfterSeconds`, without refusing anything.
@@ -331,6 +332,32 @@ otherwise have. A guard says no by throwing, with `refuse()` or a
 `LambderApiRefusal`, which the pipeline renders as the structured refusal
 envelope; guards build no responses, which is what lets the same engine run
 them on the server and in the mock runtime.
+
+### Guards that refuse with a code
+
+A guard names the codes it refuses with, from the app's refusal vocabulary,
+in its own `refusals` option; they join the codes of every API that declares
+the guard, so each such API's contract lists them and its callers narrow on
+them (see [Declared refusals](./apis.md#declared-refusals)):
+
+```typescript
+const orgPermission = lambderInit.guard({
+    session: true,
+    refusals: ["missing-permission"],
+    handler: (ctx, _payload, permission: PermissionString) => {
+        if (!hasPermission(ctx.session.data, permission)) {
+            refuse("You are missing a permission.", { code: "missing-permission", notAuthorized: true });
+        }
+    },
+});
+```
+
+The guard is built before the instance that holds the vocabulary, so a code it
+names is checked where it is put into the guards option at `create()`: a
+compile error and a creation error when the vocabulary does not hold it. A
+guard raising a code it does not name is a crash when the refusal is
+rendered, as an API raising one is. Adding a code to a guard changes the
+signature of every API declaring it.
 
 ### Input modes
 

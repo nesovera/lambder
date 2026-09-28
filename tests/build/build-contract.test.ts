@@ -324,6 +324,8 @@ describe('writeApiContract over an app', () => {
         expect(printed).toContain('        guards: {\n            storePermission: "orders.read";\n        };');
         expect(printed).toContain('        guards: readonly ["captcha"];');
         expect(printed).toContain('        guardInputs: {\n            captcha: {\n                token: string;\n            };\n        };');
+        // Every code the endpoint can refuse with, its guard's included.
+        expect(printed).toContain('        refusals: {\n            "not-permitted": {};\n            "order-closed": {};\n        };');
 
         const check = await writeApiContract({ ...storeV1, check: true });
         expect(check).toMatchObject({ ok: true, written: false, changed: [], added: [], removed: [] });
@@ -359,6 +361,9 @@ describe('writeApiContract over an app', () => {
             'export type StoreContract = Accepted<ApiContractType>;',
             'export type RefundCall = LambderCaller<ApiContractType>["api"];',
             'export const refundAmount = (input: ApiContractType["orders.refund"]["input"]): number => input.amount;',
+            `import type { LambderContractRefusalMessage } from ${JSON.stringify(CLIENT_ENTRY)};`,
+            // A refusal's data, printed as it arrives: the Date is its string.
+            'export const refundable = (message: LambderContractRefusalMessage<ApiContractType, "orders.refund">): string => message.code === "refund-too-large" ? `${message.data.refundable} since ${message.data.placedAt.slice(0, 10)}` : message.content;',
         ].join('\n'));
 
         expect(diagnosticsOf([consumer], { module: ts.ModuleKind.NodeNext, moduleResolution: ts.ModuleResolutionKind.NodeNext, lib: ['lib.esnext.d.ts', 'lib.dom.d.ts'], types: ['node'], skipLibCheck: true })).toEqual([]);

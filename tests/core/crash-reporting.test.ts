@@ -92,7 +92,7 @@ describe('crashes.report', () => {
         const { reports, report } = recorder();
         const app = lambderTestApp(createApp({ report }));
 
-        assertApiFailure(await app.visitor().apiOutcome('refused', {}), 'errorMessage');
+        assertApiFailure(await app.visitor().apiOutcome('refused', {}), 'refusal');
         assertApiSuccess(await app.visitor().apiOutcome('fine', {}));
         expect(reports).toEqual([]);
     });
@@ -194,11 +194,11 @@ describe('crashes.reveal', () => {
         expect(hidden.response?.crash).toBeUndefined();
         expect(error.mock.calls.some((call) => String(call[0]).includes('crashes.reveal threw'))).toBe(true);
 
-        const handled = lambderTestApp(createApp({ reveal: () => true }).setGlobalErrorHandler((_err, _ctx, res) => res.api(null, { errorMessage: 'Ours.' }, { statusCode: 500 })));
+        const handled = lambderTestApp(createApp({ reveal: () => true }).setGlobalErrorHandler((_err, _ctx, res) => res.apiRefusal({ refusal: 'Ours.' }, { statusCode: 500 })));
         const answered = await handled.visitor().apiOutcome('crash', {});
         assertApiFailure(answered, 'server');
         expect(answered.response?.crash).toBeUndefined();
-        expect(answered.errorMessage?.content).toBe('Ours.');
+        expect(answered.refusal?.content).toBe('Ours.');
     });
 });
 

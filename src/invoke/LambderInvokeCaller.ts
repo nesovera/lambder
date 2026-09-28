@@ -36,9 +36,9 @@ import {
 import { DEFAULT_SESSION_TOKEN_COOKIE_KEY } from "../shared/wire/LambderSessionCookieNames.js";
 import { readApiSignature, type LambderApiSignatureMap } from "../shared/wire/LambderApiSignatureMap.js";
 import type { LambdaClient, LambdaClientConfig } from "@aws-sdk/client-lambda";
-import type { LambderApiContractShape, LambderApiEnvelopeBody } from "../shared/wire/LambderApiContract.js";
+import type { LambderApiContractShape, LambderApiRefusalEnvelope, LambderContractRefusalMessage } from "../shared/wire/LambderApiContract.js";
 import { resolveApiOutcome, type LambderValidationError } from "../shared/wire/LambderApiOutcome.js";
-import type { LambderAppRefusalMessage } from "../shared/wire/LambderApiRefusal.js";
+import type { LambderUncheckedRefusalMessage } from "../shared/wire/LambderApiRefusal.js";
 import {
     mergeGuardInputs,
     type LambderCallArgs,
@@ -214,7 +214,7 @@ type FailureInitFields = Omit<LambderInvokeErrorInit, "message" | "apiName" | "f
     /** The answer's Set-Cookie values, when an answer came back. */
     cookies?: string[];
     /** The parsed envelope, when one came back. */
-    response?: LambderApiEnvelopeBody<any>;
+    response?: LambderApiRefusalEnvelope;
     /** Replaces the derived one-line detail in the error message. */
     detail?: string;
 };
@@ -230,8 +230,8 @@ type FailureInit = FailureInitFields & (
     | { reason: 'validation'; zodError: LambderValidationError }
     | { reason: 'crash'; functionError: LambderInvokeFunctionError }
     | { reason: 'payloadTooLarge'; bytes: number }
-    | { reason: 'versionExpired' | 'sessionExpired' | 'notAuthorized'; response: LambderApiEnvelopeBody<any> }
-    | { reason: 'errorMessage'; errorMessage: LambderAppRefusalMessage; response: LambderApiEnvelopeBody<any> }
+    | { reason: 'versionExpired' | 'sessionExpired' | 'notAuthorized'; response: LambderApiRefusalEnvelope }
+    | { reason: 'refusal'; refusal: LambderUncheckedRefusalMessage; response: LambderApiRefusalEnvelope }
     | { reason: 'network' | 'timeout' | 'server' | 'protocol' | 'unknown' }
 );
 
@@ -433,7 +433,7 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
             apiName,
             functionName: this.functionName,
             status: init.status,
-            errorMessage: init.errorMessage,
+            refusal: init.refusal,
             crash: init.crash,
             functionError: init.functionError,
             logList,
@@ -452,7 +452,7 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
             logList,
             cookies: init.cookies ?? [],
             ...(init.status !== undefined ? { status: init.status } : {}),
-            ...(init.errorMessage !== undefined ? { errorMessage: init.errorMessage } : {}),
+            ...(init.refusal !== undefined ? { refusal: init.refusal } : {}),
             ...(init.retryAfterSeconds !== undefined ? { retryAfterSeconds: init.retryAfterSeconds } : {}),
             ...(init.zodError !== undefined ? { zodError: init.zodError } : {}),
             ...(init.crash !== undefined ? { crash: init.crash } : {}),
@@ -484,13 +484,16 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
      * One call, one outcome. Never throws; api() is what throws. A key scope
      * is told how the attempt ended, as it is on LambderCaller.
      */
-    private async dispatch<TOutput>(
+    private async dispatch<TOutput, TMessage extends LambderUncheckedRefusalMessage>(
         apiName: string,
         payload: unknown,
         options: LambderInvokeCallOptions = {},
-    ): Promise<LambderInvokeOutcome<TOutput>> {
+    ): Promise<LambderInvokeOutcome<TOutput, TMessage>> {
         const idempotentAttempt = beginIdempotentAttempt(options.idempotencyKey);
-        const outcome = await this.dispatchAttempt<TOutput>(apiName, payload, options, idempotentAttempt);
+        // The reader cannot check a refusal's code against declarations it
+        // does not have; the callee never sends one its endpoint did not
+        // declare, which is what the endpoint's message type stands for.
+        const outcome = await this.dispatchAttempt<TOutput>(apiName, payload, options, idempotentAttempt) as LambderInvokeOutcome<TOutput, TMessage>;
         // Only the first settle counts: an attempt that never left settled
         // itself as not sent.
         idempotentAttempt.settle(outcome);
@@ -589,10 +592,9 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
         // The answer's Set-Cookie values, so a session the callee rotated or
         // cleared is visible to whoever is carrying it.
         const cookies = http.cookies;
-        // The declared output, by the callee's own typing: a handler returns
-        // its output, so a success payload is null only where the output
-        // allows null.
-        if(outcome.ok) return { ok: true, payload: (outcome.payload ?? null) as TOutput, response: outcome.response, logList, cookies };
+        // The callee handler's output: only a handler's answer reads as a
+        // success, and an output is always an object or an array.
+        if(outcome.ok) return { ok: true, payload: outcome.payload, response: outcome.response, logList, cookies };
 
         const shared = { status: outcome.status, retryAfterSeconds: outcome.retryAfterSeconds, logList, cookies };
         // Each failure reason carries different evidence, and the outcome
@@ -610,7 +612,7 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
             return await this.failureOutcome(apiName, {
                 ...shared,
                 reason: 'server',
-                errorMessage: outcome.errorMessage,
+                refusal: outcome.refusal,
                 response: outcome.response,
                 crash: outcome.response?.crash,
                 cause: outcome.error,
@@ -619,7 +621,7 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
         }
         return await this.failureOutcome(apiName, {
             ...shared,
-            ...(outcome.reason === 'errorMessage' ? { reason: outcome.reason, errorMessage: outcome.errorMessage } : { reason: outcome.reason }),
+            ...(outcome.reason === 'refusal' ? { reason: outcome.reason, refusal: outcome.refusal } : { reason: outcome.reason }),
             response: outcome.response,
             crash: outcome.response.crash,
         });
@@ -634,28 +636,27 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
     async apiOutcome<TApiName extends keyof TContract & string = string>(
         apiName: TApiName,
         ...rest: LambderCallArgs<TContract, TApiName, TProvidedGuards, LambderInvokeCallOptions>
-    ): Promise<LambderInvokeOutcome<LambderContractOutputOf<TContract, TApiName>>> {
+    ): Promise<LambderInvokeOutcome<LambderContractOutputOf<TContract, TApiName>, LambderContractRefusalMessage<TContract, TApiName>>> {
         // The tuple is a conditional type on an unresolved TApiName, so its
         // elements read as unknown here; the contract already checked them at
         // the call site.
         const [payload, options] = rest as [unknown, LambderInvokeCallOptions | undefined];
-        return await this.dispatch<LambderContractOutputOf<TContract, TApiName>>(apiName, payload, options);
+        return await this.dispatch(apiName, payload, options);
     }
 
     /**
      * The declared output, or a thrown LambderInvokeError carrying the
      * outcome. A failed dependency is a failed request: the throw reaches the
-     * app's global error handler with the callee's error as its cause. The
-     * resolver lets a handler answer null only when the output allows it or
-     * beside a reason (LambderApiAnswer), so null arrives only for a
-     * nullable output.
+     * app's global error handler with the callee's error as its cause. Only
+     * the callee handler's own output reads as a success, so what this
+     * returns is always the contract's output.
      */
     async api<TApiName extends keyof TContract & string = string>(
         apiName: TApiName,
         ...rest: LambderCallArgs<TContract, TApiName, TProvidedGuards, LambderInvokeCallOptions>
     ): Promise<LambderContractOutputOf<TContract, TApiName>> {
         const [payload, options] = rest as [unknown, LambderInvokeCallOptions | undefined];
-        const outcome = await this.dispatch<LambderContractOutputOf<TContract, TApiName>>(apiName, payload, options);
+        const outcome = await this.dispatch<LambderContractOutputOf<TContract, TApiName>, LambderContractRefusalMessage<TContract, TApiName>>(apiName, payload, options);
         if(!outcome.ok) throw outcome.error;
         return outcome.payload;
     }

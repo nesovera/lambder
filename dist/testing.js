@@ -15,7 +15,7 @@
  * writes itself.
  */
 export { lambderTestApp } from "./testing/LambderTestApp.js";
-export { assertApiSuccess, assertApiFailure } from "./shared/wire/LambderOutcomeAssertions.js";
+export { assertApiSuccess, assertApiFailure, assertApiRefusal } from "./shared/wire/LambderOutcomeAssertions.js";
 // The rules each store interface promises, as cases an app registers with its
 // own runner's `it` and `expect` to hold a store it writes over its own
 // database to the same rules Lambder's memory and DynamoDB stores meet.

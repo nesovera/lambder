@@ -278,7 +278,7 @@ describe('Request compression - the server side', () => {
         );
 
         expect(result.statusCode).toBe(400);
-        expect(JSON.parse(decodeBody(result)).errorMessage.code).toBe(LAMBDER_REFUSAL_CODES.invalidRequestPayload);
+        expect(JSON.parse(decodeBody(result)).refusal.code).toBe(LAMBDER_REFUSAL_CODES.invalidRequestPayload);
     });
 
     it('refuses a missing or invalid payloadBytes', async () => {
@@ -289,7 +289,7 @@ describe('Request compression - the server side', () => {
                 createMockContext(),
             );
             expect(result.statusCode).toBe(400);
-            expect(JSON.parse(decodeBody(result)).errorMessage.content).toMatch(/byte length/);
+            expect(JSON.parse(decodeBody(result)).refusal.content).toMatch(/byte length/);
         }
     });
 
@@ -307,7 +307,7 @@ describe('Request compression - the server side', () => {
         const result = await lambder.render(await compressedApiEvent('echo', bigPayload()), createMockContext());
 
         expect(result.statusCode).toBe(400);
-        expect(JSON.parse(decodeBody(result)).errorMessage.content).toMatch(/exceeds the 1000 byte limit/);
+        expect(JSON.parse(decodeBody(result)).refusal.content).toMatch(/exceeds the 1000 byte limit/);
     });
 
     it('refuses a body that decompresses to a different length than declared (zip bomb guard)', async () => {
@@ -320,7 +320,7 @@ describe('Request compression - the server side', () => {
         );
 
         expect(result.statusCode).toBe(400);
-        expect(JSON.parse(decodeBody(result)).errorMessage.content).toMatch(/could not be decompressed|does not match/);
+        expect(JSON.parse(decodeBody(result)).refusal.content).toMatch(/could not be decompressed|does not match/);
     });
 
     it('refuses a truncated body', async () => {
@@ -332,7 +332,7 @@ describe('Request compression - the server side', () => {
         );
 
         expect(result.statusCode).toBe(400);
-        expect(JSON.parse(decodeBody(result)).errorMessage.content).toMatch(/could not be decompressed/);
+        expect(JSON.parse(decodeBody(result)).refusal.content).toMatch(/could not be decompressed/);
     });
 
     it('refuses bytes that are not gzip at all', async () => {
@@ -342,7 +342,7 @@ describe('Request compression - the server side', () => {
         );
 
         expect(result.statusCode).toBe(400);
-        expect(JSON.parse(decodeBody(result)).errorMessage.content).toMatch(/could not be decompressed/);
+        expect(JSON.parse(decodeBody(result)).refusal.content).toMatch(/could not be decompressed/);
     });
 
     it('refuses a body that decompresses to invalid JSON', async () => {
@@ -357,7 +357,7 @@ describe('Request compression - the server side', () => {
         );
 
         expect(result.statusCode).toBe(400);
-        expect(JSON.parse(decodeBody(result)).errorMessage.content).toMatch(/not valid JSON/);
+        expect(JSON.parse(decodeBody(result)).refusal.content).toMatch(/not valid JSON/);
     });
 
     it('lets a compressed payload win over a plain one sent alongside it', async () => {
@@ -434,7 +434,7 @@ describe('Request compression - the deployment shape (HTTP API v2 + CORS)', () =
 
         expect(result.statusCode).toBe(400);
         expect((result.headers as Record<string, string>)['Access-Control-Allow-Origin']).toBeDefined();
-        expect(JSON.parse(decodeBody(result)).errorMessage.code).toBe(LAMBDER_REFUSAL_CODES.invalidRequestPayload);
+        expect(JSON.parse(decodeBody(result)).refusal.code).toBe(LAMBDER_REFUSAL_CODES.invalidRequestPayload);
     });
 });
 
@@ -527,8 +527,8 @@ describe('Request compression - Brotli from a Node caller (payloadBr)', () => {
 
         expect(result.statusCode).toBe(400);
         const body = JSON.parse(decodeBody(result));
-        expect(body.errorMessage.code).toBe(LAMBDER_REFUSAL_CODES.invalidRequestPayload);
-        expect(body.errorMessage.content).toContain('both');
+        expect(body.refusal.code).toBe(LAMBDER_REFUSAL_CODES.invalidRequestPayload);
+        expect(body.refusal.content).toContain('both');
     });
 
     it('a payloadBr that is not Brotli, or lies about its length, is refused like a bad payloadGz', async () => {
@@ -545,6 +545,6 @@ describe('Request compression - Brotli from a Node caller (payloadBr)', () => {
             apiName: 'echo', payloadBr: compressed!.payloadBr, payloadBytes: compressed!.payloadBytes + 1,
         }), createMockContext());
         expect(wrongLength.statusCode).toBe(400);
-        expect(JSON.parse(decodeBody(wrongLength)).errorMessage.content).toContain('declared length');
+        expect(JSON.parse(decodeBody(wrongLength)).refusal.content).toContain('declared length');
     });
 });

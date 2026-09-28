@@ -13,8 +13,8 @@ import { LAMBDER_REFUSAL_CODES, refuse } from '../../src/shared/wire/LambderApiR
 import { beginIdempotentAttempt, createIdempotencyKeyScope } from '../../src/shared/wire/LambderIdempotencyKeyScope.js';
 import { lambderTestApp, assertApiFailure } from '../../src/testing.js';
 
-const duplicateInFlight = { ok: false, reason: 'errorMessage', status: 409, errorMessage: { code: LAMBDER_REFUSAL_CODES.duplicateInFlight } };
-const outOfStock = { ok: false, reason: 'errorMessage', errorMessage: { code: 'app/out-of-stock' } };
+const duplicateInFlight = { ok: false, reason: 'refusal', status: 409, refusal: { code: LAMBDER_REFUSAL_CODES.duplicateInFlight } };
+const outOfStock = { ok: false, reason: 'refusal', refusal: { code: 'app/out-of-stock' } };
 
 describe('A key scope under a double-tap', () => {
     it('moves on after the first tap\'s refusal, so the corrected order is placed rather than refused as a reused key', async () => {
@@ -26,10 +26,10 @@ describe('A key scope under a double-tap', () => {
         let firstTapEntered = () => {};
         const firstTapInHandler = new Promise<void>((resolve) => { firstTapEntered = resolve; });
         let handlerRuns = 0;
-        const app = lambderTestApp(initLambder().create({
+        const app = lambderTestApp(initLambder().declareRefusals({ 'app/out-of-stock': {} }).create({
             apiPath: '/api',
             idempotency: { store: new LambderMemoryIdempotencyStore() },
-        }).addApi('order.place', { input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true },
+        }).addApi('order.place', { input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true, refusals: 'app/out-of-stock' },
             async (ctx) => {
                 handlerRuns += 1;
                 if(handlerRuns === 1){
@@ -47,9 +47,9 @@ describe('A key scope under a double-tap', () => {
         const firstTap = visitor.apiOutcome('order.place', { qty: 10 }, { idempotencyKey: scope });
         await firstTapInHandler;
         const secondTap = await visitor.apiOutcome('order.place', { qty: 10 }, { idempotencyKey: scope });
-        assertApiFailure(secondTap, 'errorMessage', { code: LAMBDER_REFUSAL_CODES.duplicateInFlight, status: 409 });
+        assertApiFailure(secondTap, 'refusal', { code: LAMBDER_REFUSAL_CODES.duplicateInFlight, status: 409 });
         releaseFirstTap();
-        assertApiFailure(await firstTap, 'errorMessage');
+        assertApiFailure(await firstTap, 'refusal');
         expect(scope.current).not.toBe(firstKey);
 
         expect(await visitor.api('order.place', { qty: 2 }, { idempotencyKey: scope })).toEqual({ placed: 2 });

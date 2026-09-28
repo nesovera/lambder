@@ -42,7 +42,10 @@ const envelopeOf = (answer) => {
     }
 };
 /** How an answer reads, in the runtime's vocabulary. */
-const classifyAnswer = (answer, envelope) => {
+const classifyAnswer = (answer, body) => {
+    // Read field by field: the body is whatever the answer carried, and a
+    // success envelope has none of a refusal's fields.
+    const envelope = body;
     if (answer.statusCode >= 500)
         return "crash";
     if (answer.statusCode === 422)
@@ -55,14 +58,14 @@ const classifyAnswer = (answer, envelope) => {
         return "sessionExpired";
     if (envelope.notAuthorized)
         return "notAuthorized";
-    const code = envelope.errorMessage?.code;
+    const code = envelope.refusal?.code;
     if (code === LAMBDER_REFUSAL_CODES.rateLimited)
         return "rateLimited";
     if (code === LAMBDER_REFUSAL_CODES.notMocked)
         return "notMocked";
     if (code === LAMBDER_REFUSAL_CODES.apiNotFound)
         return "unknownApi";
-    if (envelope.errorMessage)
+    if (envelope.refusal)
         return "refusal";
     return "ok";
 };

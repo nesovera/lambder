@@ -23,10 +23,12 @@ describe('An API handler answers with its output or refuses', () => {
             // @ts-expect-error null is not the declared output; a reason for not answering is a refusal
             .addApi('bare', schema, async (_ctx) => null)
             // @ts-expect-error the handler has no response builder: refuse() is the one way to say no
-            .addApi('built', schema, async (_ctx, res) => res.api(null, { notAuthorized: true }))
+            .addApi('built', schema, async (_ctx, res) => res.apiRefusal({ notAuthorized: true }))
             .addApi('refused', schema, async (_ctx) => refuse('No.', { notAuthorized: true }))
             .addApi('answered', schema, async (_ctx) => ({ id: '1' }))
-            .addApi('nullable', { input: z.object({}), output: z.object({ id: z.string() }).nullable() }, async (_ctx) => null);
+            // @ts-expect-error an output is an object or an array, so a nullable one is refused where it is written
+            .addApi('nullable', { input: z.object({}), output: z.object({ id: z.string() }).nullable() }, async (_ctx) => null)
+            .addApi('nullableMember', { input: z.object({}), output: z.object({ found: z.object({ id: z.string() }).nullable() }) }, async (_ctx) => ({ found: null }));
         expect(lambder).toBeDefined();
     });
 });
