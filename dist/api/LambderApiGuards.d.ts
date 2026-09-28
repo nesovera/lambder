@@ -168,7 +168,7 @@ export type LambderGuardBuilder<TCtx, TSessionCtx, TVocabulary = never, TCodesRe
         session: true;
         handler: (ctx: TSessionCtx & LambderGuardRefuse<TVocabulary, TRefusals, TCodesRequired>, payload: z.output<TInput>, param: TParam) => TOutput | Promise<TOutput>;
     } & LambderGuardPlacement & LambderGuardRefusals<TRefusals> & LambderGuardRefusalsKnownIn<TVocabulary, TRefusals> & LambderGuardAnswerCheck<TOutput>): LambderGuardOf<TOutput, {
-        refusals?: TRefusals;
+        refusals?: NoInfer<TRefusals>;
         apiInput: TInput;
         guardInput?: undefined;
         session: true;
@@ -178,7 +178,7 @@ export type LambderGuardBuilder<TCtx, TSessionCtx, TVocabulary = never, TCodesRe
         apiInput: TInput;
         handler: (ctx: TCtx & LambderGuardRefuse<TVocabulary, TRefusals, TCodesRequired>, payload: z.output<TInput>, param: TParam) => TOutput | Promise<TOutput>;
     } & LambderGuardPlacement & LambderGuardRefusals<TRefusals> & LambderGuardRefusalsKnownIn<TVocabulary, TRefusals> & LambderGuardAnswerCheck<TOutput>): LambderGuardOf<TOutput, {
-        refusals?: TRefusals;
+        refusals?: NoInfer<TRefusals>;
         apiInput: TInput;
         guardInput?: undefined;
         session?: undefined;
@@ -189,7 +189,7 @@ export type LambderGuardBuilder<TCtx, TSessionCtx, TVocabulary = never, TCodesRe
         session: true;
         handler: (ctx: TSessionCtx & LambderGuardRefuse<TVocabulary, TRefusals, TCodesRequired>, payload: z.output<TInput>, param: TParam) => TOutput | Promise<TOutput>;
     } & LambderGuardPlacement & LambderGuardRefusals<TRefusals> & LambderGuardRefusalsKnownIn<TVocabulary, TRefusals> & LambderGuardAnswerCheck<TOutput>): LambderGuardOf<TOutput, {
-        refusals?: TRefusals;
+        refusals?: NoInfer<TRefusals>;
         guardInput: TInput;
         apiInput?: undefined;
         session: true;
@@ -199,7 +199,7 @@ export type LambderGuardBuilder<TCtx, TSessionCtx, TVocabulary = never, TCodesRe
         guardInput: TInput;
         handler: (ctx: TCtx & LambderGuardRefuse<TVocabulary, TRefusals, TCodesRequired>, payload: z.output<TInput>, param: TParam) => TOutput | Promise<TOutput>;
     } & LambderGuardPlacement & LambderGuardRefusals<TRefusals> & LambderGuardRefusalsKnownIn<TVocabulary, TRefusals> & LambderGuardAnswerCheck<TOutput>): LambderGuardOf<TOutput, {
-        refusals?: TRefusals;
+        refusals?: NoInfer<TRefusals>;
         guardInput: TInput;
         apiInput?: undefined;
         session?: undefined;
@@ -209,7 +209,7 @@ export type LambderGuardBuilder<TCtx, TSessionCtx, TVocabulary = never, TCodesRe
         session: true;
         handler: (ctx: TSessionCtx & LambderGuardRefuse<TVocabulary, TRefusals, TCodesRequired>, payload: undefined, param: TParam) => TOutput | Promise<TOutput>;
     } & LambderGuardPlacement & LambderGuardRefusals<TRefusals> & LambderGuardRefusalsKnownIn<TVocabulary, TRefusals> & LambderGuardAnswerCheck<TOutput>): LambderGuardOf<TOutput, {
-        refusals?: TRefusals;
+        refusals?: NoInfer<TRefusals>;
         apiInput?: undefined;
         guardInput?: undefined;
         session: true;
@@ -218,7 +218,7 @@ export type LambderGuardBuilder<TCtx, TSessionCtx, TVocabulary = never, TCodesRe
     <TParam = undefined, TOutput = void, const TRefusals extends readonly string[] = readonly []>(guard: {
         handler: (ctx: TCtx & LambderGuardRefuse<TVocabulary, TRefusals, TCodesRequired>, payload: undefined, param: TParam) => TOutput | Promise<TOutput>;
     } & LambderGuardPlacement & LambderGuardRefusals<TRefusals> & LambderGuardRefusalsKnownIn<TVocabulary, TRefusals> & LambderGuardAnswerCheck<TOutput>): LambderGuardOf<TOutput, {
-        refusals?: TRefusals;
+        refusals?: NoInfer<TRefusals>;
         apiInput?: undefined;
         guardInput?: undefined;
         session?: undefined;
