@@ -1,6 +1,24 @@
 import { assertRefusalCodesDeclared, readRefusalVocabulary } from "../api/LambderApiRefusals.js";
 import { assertPositiveInteger } from "../shared/util/LambderOptionChecks.js";
 /**
+ * A named-maps option as one map: a lone map as it is, a list merged in
+ * order. A name declared in two maps of the list is refused.
+ */
+export const mergeNamedMaps = (option, what) => {
+    if (!Array.isArray(option))
+        return option;
+    const merged = {};
+    for (const map of option) {
+        for (const [name, declaration] of Object.entries(map)) {
+            if (Object.prototype.hasOwnProperty.call(merged, name)) {
+                throw new Error(`Lambder: the ${what} "${name}" is declared in two of the maps given to create(). Declare each name once.`);
+            }
+            merged[name] = declaration;
+        }
+    }
+    return merged;
+};
+/**
  * Everything create() refuses before an instance exists, in one place: a
  * value that cannot work is a startup error naming the option, not a 404 on
  * every API call (an apiPath with no leading slash) or a 500 on every

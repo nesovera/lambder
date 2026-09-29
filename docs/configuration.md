@@ -34,8 +34,8 @@ policy types; the curried creator is the canonical entry.
 | `trustedClientIpHeaders` | none | Headers that may name the caller's own address, in order of preference. Empty means `ctx.ip` is the address the gateway observed (below) |
 | `trustedHostHeaders` | none | Headers that may name the host the viewer asked for, in order of preference. Empty means `ctx.host` is the Host the gateway received (below) |
 | `session` | none | Sessions over a store of your choosing; `addSessionApi` and `addSessionRoute` are compile errors without it. See [Sessions](./sessions.md) |
-| `rateLimits` | none | A limiter (`LambderRateLimiter`: DynamoDB, memory, or your own) plus named policies APIs reference by name. See [API policies](./api-policies.md#rate-limits) |
-| `guards` | none | Named guards APIs reference by name; build each with `initLambder<SessionData>().guard()` (typed to the app's session) or `lambderGuard()`. See [API policies](./api-policies.md#guards) |
+| `rateLimits` | none | A limiter (`LambderRateLimiter`: DynamoDB, memory, or your own) plus named policies APIs reference by name, in one map or a list of maps (below). See [API policies](./api-policies.md#rate-limits) |
+| `guards` | none | Named guards APIs reference by name; build each with `initLambder<SessionData>().guard()` (typed to the app's session) or `lambderGuard()`. One map or a list of maps (below). See [API policies](./api-policies.md#guards) |
 | `idempotency` | none | An idempotency store (`LambderIdempotencyStore`: DynamoDB, memory, or your own) plus replay defaults. See [API policies](./api-policies.md#idempotency) |
 | `requireSessionApiGuards` | `false` | Make `guards` a required field of every `addSessionApi` |
 | `requirePublicApiGuards` | `false` | Make `guards` a required field of every `addApi` |
@@ -50,7 +50,7 @@ each code of the vocabulary the way the table below is checked. See
 
 A key the options type does not have is a compile error, one level down as
 well: `session` (and `session.cookie`), `idempotency`, `crashes`, `rateLimits` and each
-of its `policies` (and a policy's `refusal`), each guard in `guards`, the object form of `files`, and
+of its `policies` (and a policy's `refusal`), each guard in `guards` (in every map of a list), the object form of `files`, and
 `cors` and `compression` when either is written as an object. Inferring the
 options as a `const` generic is what makes an app's declaration typed, and it
 also switches TypeScript's own excess-property check off for the whole
@@ -227,6 +227,26 @@ idempotency: {
     failOpen: true,
 },
 ```
+
+### An app made of parts
+
+An app whose parts each declare their own guards or rate-limit policies,
+beside the APIs that use them, hands `create()` a list of maps instead of one.
+The instance declares every name in the list, so an API names a guard from
+any part as it would a guard from the only map. A name two maps declare is a
+compile error on the list and a throw at creation, rather than one quietly
+replacing the other as a spread would:
+
+```typescript
+rateLimits: { limiter, policies: [corePolicies, ordersPolicies, catalogPolicies] },
+guards: [coreGuards, ordersGuards],
+```
+
+The maps have to exist before the instance does, because the instance's type
+is built from them, so a part keeps them in a file of their own that imports
+none of its API files; the part's API files import the instance's type, and
+the part registers them with `use()` after creation. The mock runtime's
+`create()` takes one map of each.
 
 ## Sharing the instance type across files
 

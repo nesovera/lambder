@@ -97,6 +97,11 @@ import { LambderCrashHandling } from "./LambderCrashHandling.js";
 import { policyBuildersFor } from "./LambderPolicyBuilders.js";
 import {
     assertCreateOptions,
+    mergeNamedMaps,
+    type LambderGuardsMap,
+    type LambderMergedCreateOptions,
+    type LambderMergedNamedMaps,
+    type LambderNamedMapsOption,
     type LambderRouteHandler,
     type LambderActionFilter,
     type LambderInputValidationHandler,
@@ -216,8 +221,8 @@ export default class Lambder<
     private readonly pipeline: LambderApiPipeline<LambderRenderContext, TSessionData>;
     /** Every registered API by name: the duplicate-name check, and what apiSignatures() digests. */
     private readonly apiDefinitions = new Map<string, LambderApiDefinition>();
-    /** The guards map given at creation, kept for apiSignatures(): a guard's schema is part of the signature of every endpoint declaring it. */
-    private readonly guards: LambderCreateOptions<TSessionData>["guards"];
+    /** The guards given at creation, merged into one map, kept for apiSignatures(): a guard's schema is part of the signature of every endpoint declaring it. */
+    private readonly guards: LambderGuardsMap<TSessionData> | undefined;
     /** The rate-limit policies given at creation, kept for apiOptionEntries(), which records each one less its key handler. */
     private readonly rateLimitPolicies: Record<string, LambderApiRateLimitPolicyConfig> | undefined;
     /** The refusal vocabulary given at creation: what each API's and each guard's refusal codes resolve against. Null without the option. */
@@ -255,7 +260,15 @@ export default class Lambder<
     private readonly trustedHostHeaders: readonly string[];
     private requirePublicApiGuards: boolean;
 
-    constructor(options: LambderCreateOptions<TSessionData> = {}){
+    constructor(given: LambderCreateOptions<TSessionData> = {}){
+        // The guards and the rate-limit policies as one map each, whether
+        // they were given as one or as a list; a name two maps declare
+        // throws here.
+        const options: LambderMergedCreateOptions<TSessionData> = {
+            ...given,
+            guards: given.guards && mergeNamedMaps(given.guards, "guard"),
+            rateLimits: given.rateLimits && { ...given.rateLimits, policies: mergeNamedMaps(given.rateLimits.policies, "rate-limit policy") },
+        };
         assertCreateOptions(options);
         this.files = options.files ? new LambderFiles(options.files) : null;
         this.apiPath = options.apiPath ?? DEFAULT_API_PATH;
@@ -1360,8 +1373,10 @@ const lambderInitOf = <TSessionData, TRefusals extends LambderRefusalVocabulary,
     ): Lambder<
         TSessionData,
         {},
-        TOptions["rateLimits"] extends { policies: infer TPolicies extends Record<string, LambderApiRateLimitPolicyConfig> } ? TPolicies : {},
-        TOptions["guards"] extends Record<string, LambderApiGuard<any, any, any>> ? LambderGuardMetaMap<TOptions["guards"]> : {},
+        TOptions["rateLimits"] extends { policies: infer TPolicies }
+            ? LambderMergedNamedMaps<TPolicies> extends infer TMerged extends Record<string, LambderApiRateLimitPolicyConfig> ? TMerged : {}
+            : {},
+        TOptions["guards"] extends LambderNamedMapsOption<Record<string, LambderApiGuard<any, any, any>>> ? LambderGuardMetaMap<LambderMergedNamedMaps<TOptions["guards"]>> : {},
         TOptions["idempotency"] extends LambderApiIdempotencyConfig ? true : false,
         // Read as "off unless it says otherwise" rather than "on only when it
         // says true", so a widened boolean (a spread of a separately typed

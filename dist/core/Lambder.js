@@ -27,7 +27,7 @@ import { COMPRESSED_PAYLOAD_GZ_FIELD, COMPRESSED_PAYLOAD_BR_FIELD, COMPRESSED_PA
 import { coerceToError } from "../shared/wire/LambderCrashDetail.js";
 import { LambderCrashHandling } from "./LambderCrashHandling.js";
 import { policyBuildersFor } from "./LambderPolicyBuilders.js";
-import { assertCreateOptions, } from "./LambderCreateOptions.js";
+import { assertCreateOptions, mergeNamedMaps, } from "./LambderCreateOptions.js";
 /** The refusals of a name no API is registered under: no code, and none required. */
 const NO_DECLARED_REFUSALS = { codes: new Map(), codeRequired: false };
 /**
@@ -88,7 +88,7 @@ export default class Lambder {
     pipeline;
     /** Every registered API by name: the duplicate-name check, and what apiSignatures() digests. */
     apiDefinitions = new Map();
-    /** The guards map given at creation, kept for apiSignatures(): a guard's schema is part of the signature of every endpoint declaring it. */
+    /** The guards given at creation, merged into one map, kept for apiSignatures(): a guard's schema is part of the signature of every endpoint declaring it. */
     guards;
     /** The rate-limit policies given at creation, kept for apiOptionEntries(), which records each one less its key handler. */
     rateLimitPolicies;
@@ -121,7 +121,15 @@ export default class Lambder {
     trustedClientIpHeaders;
     trustedHostHeaders;
     requirePublicApiGuards;
-    constructor(options = {}) {
+    constructor(given = {}) {
+        // The guards and the rate-limit policies as one map each, whether
+        // they were given as one or as a list; a name two maps declare
+        // throws here.
+        const options = {
+            ...given,
+            guards: given.guards && mergeNamedMaps(given.guards, "guard"),
+            rateLimits: given.rateLimits && { ...given.rateLimits, policies: mergeNamedMaps(given.rateLimits.policies, "rate-limit policy") },
+        };
         assertCreateOptions(options);
         this.files = options.files ? new LambderFiles(options.files) : null;
         this.apiPath = options.apiPath ?? DEFAULT_API_PATH;

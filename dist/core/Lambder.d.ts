@@ -24,7 +24,7 @@ import type { LambderApiIdempotencyConfig } from "../api/LambderApiIdempotency.j
 import type { LambderContractEntry, LambderJsonOf, LambderMergeContract } from "../shared/wire/LambderApiContract.js";
 import { type LambderHttpEvent, type LambderRenderContext, type LambderSessionRenderContext } from "./LambderContext.js";
 import type { LambderReadonlyDeep, MaybePromise } from "../shared/util/LambderTypeUtilities.js";
-import { type LambderRouteHandler, type LambderInputValidationHandler, type LambderFallbackHandler, type LambderGlobalErrorHandler, type LambderAfterRenderHook, type LambderBeforeRenderHook, type LambderFallbackHook, type LambderActionTools, type LambderCreateOptions, type LambderGivenOption, type LambderHandler, type LambderNestedOptionChecks, type LambderObjectOutputCheck, type LambderRequirableGuardsField, type LambderSessionEnabledInstance, type LambderSessionRouteHandler } from "./LambderCreateOptions.js";
+import { type LambderMergedNamedMaps, type LambderNamedMapsOption, type LambderRouteHandler, type LambderInputValidationHandler, type LambderFallbackHandler, type LambderGlobalErrorHandler, type LambderAfterRenderHook, type LambderBeforeRenderHook, type LambderFallbackHook, type LambderActionTools, type LambderCreateOptions, type LambderGivenOption, type LambderHandler, type LambderNestedOptionChecks, type LambderObjectOutputCheck, type LambderRequirableGuardsField, type LambderSessionEnabledInstance, type LambderSessionRouteHandler } from "./LambderCreateOptions.js";
 /** Everything `lambder/testing` may put under a built instance: the pipeline's stores, and the source its files are read from. */
 export type LambderInstanceBackends = LambderPipelineBackends & {
     fileSource?: LambderFileSource;
@@ -96,7 +96,7 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
     private readonly pipeline;
     /** Every registered API by name: the duplicate-name check, and what apiSignatures() digests. */
     private readonly apiDefinitions;
-    /** The guards map given at creation, kept for apiSignatures(): a guard's schema is part of the signature of every endpoint declaring it. */
+    /** The guards given at creation, merged into one map, kept for apiSignatures(): a guard's schema is part of the signature of every endpoint declaring it. */
     private readonly guards;
     /** The rate-limit policies given at creation, kept for apiOptionEntries(), which records each one less its key handler. */
     private readonly rateLimitPolicies;
@@ -129,7 +129,7 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
     private readonly trustedClientIpHeaders;
     private readonly trustedHostHeaders;
     private requirePublicApiGuards;
-    constructor(options?: LambderCreateOptions<TSessionData>);
+    constructor(given?: LambderCreateOptions<TSessionData>);
     setRouteFallbackHandler(routeFallbackHandler: LambderFallbackHandler): this;
     setApiFallbackHandler(apiFallbackHandler: LambderFallbackHandler): this;
     setApiInputValidationErrorHandler(apiInputValidationErrorHandler: LambderInputValidationHandler): this;
@@ -518,9 +518,9 @@ export declare const initLambder: <TSessionData = any>() => {
          * endpoint's codes alone.
          */
         refuse: LambderDeclaredRefuse<LambderHandlerRefusalsOf<TRefusals, keyof TRefusals & string>, TRequireCodes>;
-        create<const TOptions extends LambderInitCreateOptions<TSessionData>>(options: TOptions & Record<Exclude<keyof TOptions, "session" | "guards" | "idempotency" | "apiVersion" | "cors" | "apiPath" | "apiSignatures" | "trustedClientIpHeaders" | "trustedHostHeaders" | "files" | "etag" | "minApiVersion" | "compression" | "maxResponseBytes" | "maxRequestPayloadBytes" | "rateLimits" | "requireSessionApiGuards" | "requirePublicApiGuards" | "crashes">, never> & LambderNestedOptionChecks<TSessionData, TOptions, TRefusals>): Lambder<TSessionData, {}, TOptions["rateLimits"] extends {
-            policies: infer TPolicies extends Record<string, LambderApiRateLimitPolicyConfig>;
-        } ? TPolicies : {}, TOptions["guards"] extends Record<string, LambderApiGuard<any, any, any>> ? LambderGuardMetaMap<TOptions["guards"]> : {}, TOptions["idempotency"] extends LambderApiIdempotencyConfig ? true : false, [LambderGivenOption<TOptions, "requireSessionApiGuards">] extends [false | undefined] ? false : true, [LambderGivenOption<TOptions, "requirePublicApiGuards">] extends [false | undefined] ? false : true, [LambderGivenOption<TOptions, "session">] extends [undefined] ? false : true, TRefusals, TRequireCodes>;
+        create<const TOptions extends LambderInitCreateOptions<TSessionData>>(options: TOptions & Record<Exclude<keyof TOptions, "session" | "guards" | "idempotency" | "apiVersion" | "cors" | "apiPath" | "apiSignatures" | "trustedClientIpHeaders" | "trustedHostHeaders" | "files" | "etag" | "rateLimits" | "minApiVersion" | "compression" | "maxResponseBytes" | "maxRequestPayloadBytes" | "requireSessionApiGuards" | "requirePublicApiGuards" | "crashes">, never> & LambderNestedOptionChecks<TSessionData, TOptions, TRefusals>): Lambder<TSessionData, {}, TOptions["rateLimits"] extends {
+            policies: infer TPolicies;
+        } ? LambderMergedNamedMaps<TPolicies> extends infer TMerged extends Record<string, LambderApiRateLimitPolicyConfig> ? TMerged : {} : {}, TOptions["guards"] extends LambderNamedMapsOption<Record<string, LambderApiGuard<any, any, any>>> ? LambderGuardMetaMap<LambderMergedNamedMaps<TOptions["guards"]>> : {}, TOptions["idempotency"] extends LambderApiIdempotencyConfig ? true : false, [LambderGivenOption<TOptions, "requireSessionApiGuards">] extends [false | undefined] ? false : true, [LambderGivenOption<TOptions, "requirePublicApiGuards">] extends [false | undefined] ? false : true, [LambderGivenOption<TOptions, "session">] extends [undefined] ? false : true, TRefusals, TRequireCodes>;
         guard: import("../api/LambderApiGuards.js").LambderGuardBuilder<LambderRenderContext<any, Record<string, string>, {}, TSessionData>, LambderSessionRenderContext<any, TSessionData>, TRefusals, TRequireCodes>;
         rateLimitKey: import("../api/LambderApiRateLimits.js").LambderRateLimitKeyBuilder<LambderRenderContext<any, Record<string, string>, {}, TSessionData>>;
     };
@@ -544,9 +544,9 @@ export declare const initLambder: <TSessionData = any>() => {
         code?: undefined;
         data?: undefined;
     }) | undefined) => never;
-    create<const TOptions extends LambderInitCreateOptions<TSessionData>>(options: TOptions & Record<Exclude<keyof TOptions, "session" | "guards" | "idempotency" | "apiVersion" | "cors" | "apiPath" | "apiSignatures" | "trustedClientIpHeaders" | "trustedHostHeaders" | "files" | "etag" | "minApiVersion" | "compression" | "maxResponseBytes" | "maxRequestPayloadBytes" | "rateLimits" | "requireSessionApiGuards" | "requirePublicApiGuards" | "crashes">, never> & LambderNestedOptionChecks<TSessionData, TOptions, {}>): Lambder<TSessionData, {}, TOptions["rateLimits"] extends {
-        policies: infer TPolicies extends Record<string, LambderApiRateLimitPolicyConfig>;
-    } ? TPolicies : {}, TOptions["guards"] extends Record<string, LambderApiGuard<any, any, any>> ? LambderGuardMetaMap<TOptions["guards"]> : {}, TOptions["idempotency"] extends LambderApiIdempotencyConfig ? true : false, [LambderGivenOption<TOptions, "requireSessionApiGuards">] extends [false | undefined] ? false : true, [LambderGivenOption<TOptions, "requirePublicApiGuards">] extends [false | undefined] ? false : true, [LambderGivenOption<TOptions, "session">] extends [undefined] ? false : true, {}, false>;
+    create<const TOptions extends LambderInitCreateOptions<TSessionData>>(options: TOptions & Record<Exclude<keyof TOptions, "session" | "guards" | "idempotency" | "apiVersion" | "cors" | "apiPath" | "apiSignatures" | "trustedClientIpHeaders" | "trustedHostHeaders" | "files" | "etag" | "rateLimits" | "minApiVersion" | "compression" | "maxResponseBytes" | "maxRequestPayloadBytes" | "requireSessionApiGuards" | "requirePublicApiGuards" | "crashes">, never> & LambderNestedOptionChecks<TSessionData, TOptions, {}>): Lambder<TSessionData, {}, TOptions["rateLimits"] extends {
+        policies: infer TPolicies;
+    } ? LambderMergedNamedMaps<TPolicies> extends infer TMerged extends Record<string, LambderApiRateLimitPolicyConfig> ? TMerged : {} : {}, TOptions["guards"] extends LambderNamedMapsOption<Record<string, LambderApiGuard<any, any, any>>> ? LambderGuardMetaMap<LambderMergedNamedMaps<TOptions["guards"]>> : {}, TOptions["idempotency"] extends LambderApiIdempotencyConfig ? true : false, [LambderGivenOption<TOptions, "requireSessionApiGuards">] extends [false | undefined] ? false : true, [LambderGivenOption<TOptions, "requirePublicApiGuards">] extends [false | undefined] ? false : true, [LambderGivenOption<TOptions, "session">] extends [undefined] ? false : true, {}, false>;
     guard: import("../api/LambderApiGuards.js").LambderGuardBuilder<LambderRenderContext<any, Record<string, string>, {}, TSessionData>, LambderSessionRenderContext<any, TSessionData>, {}, false>;
     rateLimitKey: import("../api/LambderApiRateLimits.js").LambderRateLimitKeyBuilder<LambderRenderContext<any, Record<string, string>, {}, TSessionData>>;
 };

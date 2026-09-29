@@ -278,6 +278,11 @@ guards: {
 },
 ```
 
+An app made of parts can give `guards` as a list of maps, one per part, and
+`rateLimits.policies` the same way: the instance declares every name in the
+list, and a name two maps declare is a compile error and a throw at creation.
+See [Configuration](./configuration.md#an-app-made-of-parts).
+
 A guard's handler is `(ctx, input, param)`: the render context (session-typed
 when `session: true`), its validated input slice or `undefined`, and the
 per-API parameter. The context carries `ctx.sessionController` like a handler's, so a
