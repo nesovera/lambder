@@ -9,6 +9,24 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [10.1.1] - 2026-09-28
+
+A minor for an app made of parts. Each part can declare its own guards and
+rate-limit policies beside the APIs that use them, and the instance composes
+the maps at creation.
+
+### Added
+
+- **`guards` and `rateLimits.policies` take a list of maps** as well as one
+  map. The instance declares every name in the list, so an API names a guard
+  or a policy from any map as it would from the only one, and
+  `apiSignatures()` and `apiOptionEntries()` read the merged map. A name two
+  maps declare is a compile error on the list, whose message names it, and a
+  throw at creation, where a spread would have let one replace the other
+  without a word. Every map of a list is held to the same surplus-key and
+  refusal-code checks as a lone map. The mock runtime's `create()` still
+  takes one map of each.
+
 ## [10.0.2] - 2026-09-28
 
 ### Fixed

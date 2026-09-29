@@ -14,11 +14,18 @@
 
 import { testPublicFiles } from '../helpers.js';
 import { describe, it, expect, vi } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 import { z } from 'zod';
 import Lambder, { initLambder, type LambderInitCreateOptions } from '../../src/core/Lambder.js';
 import { LambderMemorySessionStore } from '../../src/stores/LambderMemorySessionStore.js';
 import { LambderMemoryRateLimiter } from '../../src/stores/LambderMemoryRateLimiter.js';
 import { LambderMemoryIdempotencyStore } from '../../src/stores/LambderMemoryIdempotencyStore.js';
+import { lambderGuard } from '../../src/core/LambderPolicyBuilders.js';
+import { lambderTestApp, assertApiSuccess } from '../../src/testing.js';
 
 const store = new LambderMemorySessionStore();
 const limiter = new LambderMemoryRateLimiter();
@@ -140,6 +147,93 @@ describe('create(): surplus keys one level down', () => {
             apiPath: '/api',
             // @ts-expect-error sesion, one s: the guard would read a context with no session
             guards: { g: { sesion: true, handler: () => true } },
+        });
+    });
+});
+
+describe('create(): guards and rate-limit policies as a list of maps', () => {
+    const ordersGuards = { orderOwner: lambderGuard({ handler: () => 'owner' }) };
+    const catalogGuards = { catalogEditor: lambderGuard({ handler: () => 'editor' }) };
+    const ordersPolicies = { checkoutPerIp: { perMin: 5, per: 'ip' } } as const;
+    const catalogPolicies = { searchPerIp: { perMin: 60, per: 'ip' } } as const;
+
+    it('declares every name in the list, so an API names a guard or a policy from any map', async () => {
+        const lambder = initLambder().create({
+            apiPath: '/api',
+            rateLimits: { limiter, policies: [ordersPolicies, catalogPolicies] },
+            guards: [ordersGuards, catalogGuards],
+        })
+            .addApi('orders.checkout', { input: z.object({}), output: z.object({ by: z.string() }), guards: 'orderOwner', rateLimit: 'checkoutPerIp' },
+                async (ctx) => ({ by: ctx.guardData.orderOwner }))
+            .addApi('catalog.edit', { input: z.object({}), output: z.object({ by: z.string() }), guards: 'catalogEditor', rateLimit: 'searchPerIp' },
+                async (ctx) => ({ by: ctx.guardData.catalogEditor }));
+
+        const visitor = lambderTestApp(lambder).visitor();
+        const checkout = await visitor.apiOutcome('orders.checkout', {});
+        assertApiSuccess(checkout);
+        expect(checkout.payload).toEqual({ by: 'owner' });
+        const edit = await visitor.apiOutcome('catalog.edit', {});
+        assertApiSuccess(edit);
+        expect(edit.payload).toEqual({ by: 'editor' });
+        expect(Object.keys(lambder.apiOptionEntries().guards).sort()).toEqual(['catalogEditor', 'orderOwner']);
+        // @ts-expect-error a guard no map declares
+        expect(() => lambder.addApi('orders.refund', { input: z.object({}), output: z.object({}), guards: 'refundClerk' }, async () => ({})))
+            .toThrow(/unknown guard "refundClerk"/);
+    });
+
+    it('refuses a name two maps declare, at compile time and at creation', () => {
+        expect(() => initLambder().create({
+            apiPath: '/api',
+            // @ts-expect-error orderOwner is declared in both maps
+            guards: [ordersGuards, { orderOwner: lambderGuard({ handler: () => 'someone else' }) }],
+        })).toThrow(/guard "orderOwner" is declared in two of the maps/);
+        expect(() => initLambder().create({
+            apiPath: '/api',
+            // @ts-expect-error checkoutPerIp is declared in both maps
+            rateLimits: { limiter, policies: [ordersPolicies, { checkoutPerIp: { perMin: 1, per: 'ip' } }] },
+        })).toThrow(/rate-limit policy "checkoutPerIp" is declared in two of the maps/);
+    });
+
+    it('names the repeated name in the compile error, however different the two declarations are', () => {
+        // Compiled apart with the package's own compiler options, since a
+        // file that fails to compile cannot sit among the tests. The two
+        // declarations of each name differ in shape, as they do when two
+        // parts of an app pick the same name for different things.
+        const directory = mkdtempSync(join(tmpdir(), 'lambder-named-maps-'));
+        try {
+            const sourceOf = (path: string) => JSON.stringify(fileURLToPath(new URL(path, import.meta.url)));
+            const app = join(directory, 'app.mts');
+            writeFileSync(app, [
+                `import { initLambder } from ${sourceOf('../../src/core/Lambder.js')};`,
+                `import { lambderGuard } from ${sourceOf('../../src/core/LambderPolicyBuilders.js')};`,
+                `import { LambderMemoryRateLimiter } from ${sourceOf('../../src/stores/LambderMemoryRateLimiter.js')};`,
+                `initLambder().create({ guards: [{ orderOwner: lambderGuard({ handler: () => 'owner' }) }, { orderOwner: lambderGuard({ handler: () => {} }) }] });`,
+                `initLambder().create({ rateLimits: { limiter: new LambderMemoryRateLimiter(), policies: [{ checkoutPerIp: { perMin: 5, per: 'ip' } }, { checkoutPerIp: { perHour: 100, per: 'ip' } }] } });`,
+            ].join('\n'));
+            const config = ts.getParsedCommandLineOfConfigFile(fileURLToPath(new URL('../../tsconfig.json', import.meta.url)), {}, { ...ts.sys, onUnRecoverableConfigFileDiagnostic: () => {} });
+            const program = ts.createProgram([app], { ...config!.options, noEmit: true, declaration: false, rootDir: undefined, outDir: undefined });
+            const messages = ts.getPreEmitDiagnostics(program).map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n'));
+
+            expect(messages).toHaveLength(2);
+            expect(messages[0]).toContain('lambder: a name is declared in more than one of these maps');
+            expect(messages[0]).toContain('"orderOwner"');
+            expect(messages[1]).toContain('lambder: a name is declared in more than one of these maps');
+            expect(messages[1]).toContain('"checkoutPerIp"');
+        } finally {
+            rmSync(directory, { recursive: true, force: true });
+        }
+    }, 120_000);
+
+    it('holds every map of a list to the same surplus-key checks as a lone map', () => {
+        initLambder().create({
+            apiPath: '/api',
+            // @ts-expect-error budgt, inside a policy of the second map
+            rateLimits: { limiter, policies: [ordersPolicies, { p: { perMin: 1, per: 'ip', budgt: 'perPolicy' } }] },
+        });
+        initLambder().create({
+            apiPath: '/api',
+            // @ts-expect-error sesion, inside a guard of the second map
+            guards: [ordersGuards, { g: { sesion: true, handler: () => true } }],
         });
     });
 });

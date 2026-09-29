@@ -143,6 +143,54 @@ type AssertAssignable<T extends true> = T;
 type _AssertHandlerV1 = AssertAssignable<LambderHandler extends APIGatewayProxyHandler ? true : false>;
 type _AssertHandlerV2 = AssertAssignable<LambderHandler extends APIGatewayProxyHandlerV2 ? true : false>;
 
+// ---------------------------------------------------------------------------
+// Named maps: the guards and the rate-limit policies, each declared in one
+// map or in a list of maps (one per part of an app), merged in order.
+// ---------------------------------------------------------------------------
+/**
+ * One map of named declarations, or a list of them. An app made of parts,
+ * each declaring its own guards or rate-limit policies beside its APIs, hands
+ * create() the list, and the instance declares every name in it. A name two
+ * maps declare is refused rather than one quietly replacing the other.
+ */
+export type LambderNamedMapsOption<TMap> = TMap | readonly TMap[];
+
+/** The one map a named-maps option declares: a list's members intersected, a lone map as it is. */
+export type LambderMergedNamedMaps<T> =
+    T extends readonly [] ? {}
+    : T extends readonly [infer TFirst, ...infer TRest] ? TFirst & LambderMergedNamedMaps<TRest>
+    : T extends readonly (infer TMember)[] ? TMember
+    : T;
+
+/** The names a list declares in more than one of its maps: never for a lone map, or for a list whose members are not known one by one. */
+type LambderRepeatedNames<T, TSeen extends PropertyKey = never> =
+    T extends readonly [infer TFirst, ...infer TRest]
+        ? (keyof TFirst & TSeen) | LambderRepeatedNames<TRest, TSeen | keyof TFirst>
+        : never;
+
+/** Intersected onto a list: a name declared in two of its maps is a compile error, and the property name is the message. */
+type LambderNoRepeatedNames<T> = [LambderRepeatedNames<T>] extends [never]
+    ? unknown
+    : { readonly "lambder: a name is declared in more than one of these maps. Declare each guard and each rate-limit policy once.": LambderRepeatedNames<T> };
+
+/**
+ * A named-maps option as one map: a lone map as it is, a list merged in
+ * order. A name declared in two maps of the list is refused.
+ */
+export const mergeNamedMaps = <TMap extends Record<string, unknown>>(option: LambderNamedMapsOption<TMap>, what: "guard" | "rate-limit policy"): TMap => {
+    if(!Array.isArray(option)) return option as TMap;
+    const merged: Record<string, unknown> = {};
+    for(const map of option as readonly TMap[]){
+        for(const [name, declaration] of Object.entries(map)){
+            if(Object.prototype.hasOwnProperty.call(merged, name)){
+                throw new Error(`Lambder: the ${what} "${name}" is declared in two of the maps given to create(). Declare each name once.`);
+            }
+            merged[name] = declaration;
+        }
+    }
+    return merged as TMap;
+};
+
 /** Session configuration (the `session` option of create/new): where sessions rest, and how their cookies are scoped. */
 export type LambderSessionOptions<TSessionData = any> = {
     /**
@@ -177,6 +225,25 @@ export type LambderSessionOptions<TSessionData = any> = {
     dataRefresh?: LambderSessionDataRefreshConfig<TSessionData>;
     /** Hashing and randomness for the session tokens. Default: WebCrypto. */
     crypto?: LambderSessionCrypto;
+};
+
+/** One map of the server's guards, each pinned to the render contexts of the app's session type. */
+export type LambderGuardsMap<TSessionData = any> =
+    Record<string, LambderApiGuard<any, any, any, LambderRenderContext<any, Record<string, string>, {}, TSessionData>, LambderSessionRenderContext<any, TSessionData>>>;
+
+/** One map of the server's rate-limit policies. */
+export type LambderRateLimitPoliciesMap = Record<string, LambderApiRateLimitPolicyConfig<LambderRenderContext>>;
+
+/** The `rateLimits` option of create(): the engine's config, with `policies` as one map or a list of maps. */
+export type LambderCreateRateLimitsOption = Omit<LambderApiRateLimitsConfig<LambderRateLimitPoliciesMap>, "policies"> & {
+    /** Named policies referenced (typed) from addApi/addSessionApi: one map, or a list of maps merged in order. */
+    policies: LambderNamedMapsOption<LambderRateLimitPoliciesMap>;
+};
+
+/** The options as the instance holds them: the guards and the rate-limit policies merged into one map each. */
+export type LambderMergedCreateOptions<TSessionData = any> = Omit<LambderCreateOptions<TSessionData>, "guards" | "rateLimits"> & {
+    guards?: LambderGuardsMap<TSessionData>;
+    rateLimits?: LambderApiRateLimitsConfig<LambderRateLimitPoliciesMap>;
 };
 
 /**
@@ -276,16 +343,22 @@ export type LambderCreateOptions<TSessionData = any> = {
     cors?: boolean | LambderCorsConfig;
     /** Sessions over a store of your choosing; required for addSessionApi/addSessionRoute. */
     session?: LambderSessionOptions<TSessionData>;
-    /** Declarative per-API rate limiting: your limiter plus named policies APIs reference (typed) via the `rateLimit` option. */
-    rateLimits?: LambderApiRateLimitsConfig<Record<string, LambderApiRateLimitPolicyConfig<LambderRenderContext>>>;
+    /**
+     * Declarative per-API rate limiting: your limiter plus named policies APIs
+     * reference (typed) via the `rateLimit` option. `policies` is one map, or
+     * a list of maps (one per part of the app) that the instance merges.
+     */
+    rateLimits?: LambderCreateRateLimitsOption;
     /**
      * Named guards APIs reference (typed) via the `guards` option; build each
      * with `initLambder<SessionData>().guard()`, whose handlers see the app's
      * session type, or lambderGuard(). Pinned to the render contexts, so a
      * guard built for another adapter, or for another session type, is
      * rejected here rather than reading fields that are not on its context.
+     * One map, or a list of maps (one per part of the app) that the instance
+     * merges.
      */
-    guards?: Record<string, LambderApiGuard<any, any, any, LambderRenderContext<any, Record<string, string>, {}, TSessionData>, LambderSessionRenderContext<any, TSessionData>>>;
+    guards?: LambderNamedMapsOption<LambderGuardsMap<TSessionData>>;
     /**
      * The app's refusal vocabulary: every code an API or a guard may refuse
      * with, each declared once with the schema of its data (`{ data: schema }`
@@ -448,6 +521,35 @@ type LambderGuardRefusalsKnown<TGuard, TRefusals> =
             : unknown
         : unknown;
 
+/*
+ * The policies and the guards are checked map by map. A map of a list is
+ * held to its own entries, never to the merged map: two maps declaring one
+ * name differently would meet there as one impossible entry, and that
+ * conflict would be reported in place of the repeated name.
+ */
+
+/** Every policy in a map, or in each map of a list, held to the policy shape, its message included; a list also declares no name twice. */
+type LambderRateLimitPolicyChecks<TPolicies> = TPolicies extends readonly unknown[]
+    ? { [TIndex in keyof TPolicies]: LambderRateLimitPolicyChecks<TPolicies[TIndex]> } & LambderNoRepeatedNames<TPolicies>
+    : {
+        [TPolicy in keyof TPolicies]:
+            LambderNoExtraKeys<TPolicies[TPolicy], LambderApiRateLimitPolicyConfig<LambderRenderContext>>
+            // A code or data on the message: a rate limit is always the
+            // framework's code, so nothing there would reach a client.
+            & (TPolicies[TPolicy] extends { refusal: infer TMessage }
+                ? { refusal?: LambderNoExtraKeys<TMessage, LambderRateLimitMessage> }
+                : unknown);
+    };
+
+/** Every guard in a map, or in each map of a list, held to the guard shape and its refusals to the vocabulary; a list also declares no name twice. */
+type LambderGuardChecks<TSessionData, TGuards, TRefusals> = TGuards extends readonly unknown[]
+    ? { [TIndex in keyof TGuards]: LambderGuardChecks<TSessionData, TGuards[TIndex], TRefusals> } & LambderNoRepeatedNames<TGuards>
+    : {
+        [TGuard in keyof TGuards]:
+            LambderNoExtraKeys<TGuards[TGuard], LambderGuardsMap<TSessionData>[string]>
+            & LambderGuardRefusalsKnown<TGuards[TGuard], TRefusals>;
+    };
+
 /**
  * The surplus-key rule one level down, over the option objects a typo is
  * worst on. Excess-property checking is off for the WHOLE literal under
@@ -467,21 +569,9 @@ export type LambderNestedOptionChecks<TSessionData, TOptions extends LambderCrea
     idempotency?: LambderNoExtraKeys<NonNullable<TOptions["idempotency"]>, LambderOptionShape<TSessionData, "idempotency">>;
     crashes?: LambderNoExtraKeys<NonNullable<TOptions["crashes"]>, LambderOptionShape<TSessionData, "crashes">>;
     rateLimits?: LambderNoExtraKeys<NonNullable<TOptions["rateLimits"]>, LambderOptionShape<TSessionData, "rateLimits">> & {
-        policies?: {
-            [TPolicy in keyof NonNullable<TOptions["rateLimits"]>["policies"]]:
-                LambderNoExtraKeys<NonNullable<TOptions["rateLimits"]>["policies"][TPolicy], LambderApiRateLimitPolicyConfig<LambderRenderContext>>
-                // A code or data on the message: a rate limit is always the
-                // framework's code, so nothing there would reach a client.
-                & (NonNullable<TOptions["rateLimits"]>["policies"][TPolicy] extends { refusal: infer TMessage }
-                    ? { refusal?: LambderNoExtraKeys<TMessage, LambderRateLimitMessage> }
-                    : unknown);
-        };
+        policies?: LambderRateLimitPolicyChecks<NonNullable<TOptions["rateLimits"]>["policies"]>;
     };
-    guards?: {
-        [TGuard in keyof NonNullable<TOptions["guards"]>]:
-            LambderNoExtraKeys<NonNullable<TOptions["guards"]>[TGuard], LambderOptionShape<TSessionData, "guards">[string]>
-            & LambderGuardRefusalsKnown<NonNullable<TOptions["guards"]>[TGuard], TRefusals>;
-    };
+    guards?: LambderGuardChecks<TSessionData, NonNullable<TOptions["guards"]>, TRefusals>;
     // The object form of `files` (`{ source, memoryCache }`); a bare source
     // is a class instance and has nothing to misspell.
     files?: TOptions["files"] extends { source: unknown }
@@ -506,7 +596,7 @@ export type LambderNestedOptionChecks<TSessionData, TOptions extends LambderCrea
  * every API call (an apiPath with no leading slash) or a 500 on every
  * response (maxResponseBytes: 0) that an app discovers in production.
  */
-export const assertCreateOptions = (options: LambderCreateOptions<any>): void => {
+export const assertCreateOptions = (options: LambderMergedCreateOptions<any>): void => {
     // The path is compared to ctx.path, which always starts with a slash, so
     // apiPath: "api" would make every API call a 404 with no reason given.
     if(options.apiPath !== undefined && (options.apiPath === "" || !options.apiPath.startsWith("/"))){
