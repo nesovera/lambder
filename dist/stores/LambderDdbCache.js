@@ -202,7 +202,7 @@ export class LambderDdbCache {
     compression;
     maxValueBytes;
     memory;
-    /** getOrSet's single-flight and fail-open, shared with LambderMemoryCache (see LambderCacheFiller). */
+    /** getOrSet's single-flight and fail-open, shared with the other caches (see LambderCacheFiller). */
     filler;
     now;
     /** This instance's own writes, as its reads and its memory layer need to know them (see LocalWriteLedger). */

@@ -16,7 +16,7 @@ export interface LambderMemoryCacheOptions {
  * refuses, stores a value's JSON text and hands back a fresh parse of it,
  * expires entries on the same TTL, and lists sort keys in the same order.
  *
- * getOrSet runs through the LambderCacheFiller both caches hold: concurrent
+ * getOrSet runs through the LambderCacheFiller every cache holds: concurrent
  * calls for one key share a load, every call (the filling one included)
  * answers the stored JSON parsed, a loader's undefined comes back uncached,
  * and a set, delete or deletePartition of the key while the loader runs
@@ -29,7 +29,7 @@ export interface LambderMemoryCacheOptions {
  */
 export declare class LambderMemoryCache implements LambderCache {
     private readonly entries;
-    /** getOrSet's single-flight and fail-open, shared with LambderDdbCache (see LambderCacheFiller). */
+    /** getOrSet's single-flight and fail-open, shared with the other caches (see LambderCacheFiller). */
     private readonly filler;
     private readonly defaultTtlSeconds;
     private readonly maxValueBytes;

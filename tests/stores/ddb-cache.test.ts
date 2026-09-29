@@ -25,7 +25,9 @@ import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LambderDdbCache, type LambderDdbCacheGetOrSetOptions } from "../../src/stores/LambderDdbCache.js";
 import { LambderMemoryCache } from "../../src/stores/LambderMemoryCache.js";
+import { LambderStorageBackedCache } from "../../src/stores/LambderStorageBackedCache.js";
 import type { LambderCache } from "../../src/shared/contracts/LambderCache.js";
+import { MemoryCacheStorage } from "../helpers.js";
 
 type Item = Record<string, AttributeValue>;
 
@@ -1340,11 +1342,12 @@ describe("LambderDdbCache - grouped keys", () => {
 });
 
 /**
- * One set of rules, both caches. Code is written against LambderCache and
+ * One set of rules, every cache. Code is written against LambderCache and
  * tested over LambderMemoryCache, which is only sound while the memory cache
  * answers as the table-backed one does: the same keys refused, the same JSON
- * round trip, the same expiry, the same listing. Each rule below runs over
- * both, through one clock that moves only when the test moves it.
+ * round trip, the same expiry, the same listing. An app's own storage under
+ * LambderStorageBackedCache is held to the same rules. Each rule below runs
+ * over all three, through one clock that moves only when the test moves it.
  */
 describe.each([
     {
@@ -1354,6 +1357,10 @@ describe.each([
     {
         name: "LambderMemoryCache",
         create: (now: () => number): LambderCache => new LambderMemoryCache({ now }),
+    },
+    {
+        name: "LambderStorageBackedCache",
+        create: (now: () => number): LambderCache => new LambderStorageBackedCache({ storage: new MemoryCacheStorage(), now }),
     },
 ])("LambderCache conformance: $name", ({ create }) => {
     const START = 1_700_000_000_000;
@@ -1454,6 +1461,18 @@ describe.each([
         await expect(cache.listSortKeys("cities", { prefix: "New", limit: 1 })).resolves.toEqual(["New York City"]);
     });
 
+    it("orders keys holding \"#\" or \"~\" by their escaped form, as the table ranges them", async () => {
+        const cache = build();
+        await cache.set({ pk: "reports", sk: "a#b" }, 1);
+        await cache.set({ pk: "reports", sk: "a~b" }, 2);
+        await cache.set({ pk: "reports", sk: "a~1b" }, 3);
+        await cache.set({ pk: "reports", sk: "ab" }, 4);
+
+        // "~" escapes as "~0" and "#" as "~1", so both land past every letter.
+        await expect(cache.listSortKeys("reports")).resolves.toEqual(["ab", "a~1b", "a~b", "a#b"]);
+        await expect(cache.listSortKeys("reports", { prefix: "a~" })).resolves.toEqual(["a~1b", "a~b"]);
+    });
+
     it("drops a partition's grouped entries in one call and counts them", async () => {
         const cache = build();
         await cache.set({ pk: "store", sk: "a" }, 1);
@@ -1463,6 +1482,17 @@ describe.each([
         await expect(cache.deletePartition("store")).resolves.toBe(2);
         await expect(cache.listSortKeys("store")).resolves.toEqual([]);
         await expect(cache.get({ pk: "other", sk: "a" })).resolves.toBe(3);
+    });
+
+    it("drops and counts a plain key sharing the partition, and leaves other partitions' plain keys alone", async () => {
+        const cache = build();
+        await cache.set("store", "a plain key sharing the partition");
+        await cache.set({ pk: "store", sk: "a" }, 1);
+        await cache.set("other", "a plain key of its own");
+
+        await expect(cache.deletePartition("store")).resolves.toBe(2);
+        await expect(cache.get("store")).resolves.toBeUndefined();
+        await expect(cache.get("other")).resolves.toBe("a plain key of its own");
     });
 
     it("loads once for concurrent getOrSet calls, then serves what it stored", async () => {

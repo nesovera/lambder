@@ -145,7 +145,7 @@ Required IAM actions on the table: `dynamodb:GetItem`, `PutItem`, `DeleteItem`, 
 
 `key` is a string or `{ pk, sk }` ([Grouped keys](#grouped-keys)); `deletePartition` and `listSortKeys` take the `pk` part on its own.
 
-Exported types: `LambderCacheKey`, `LambderCacheSetOptions`, `LambderCacheListOptions` (shared with `LambderMemoryCache`), `LambderDdbCacheOptions`, `LambderDdbCacheGetOrSetOptions`, `LambderCompressionOption`.
+Exported types: `LambderCacheKey`, `LambderCacheSetOptions`, `LambderCacheListOptions` (shared with `LambderMemoryCache` and `LambderStorageBackedCache`), `LambderDdbCacheOptions`, `LambderDdbCacheGetOrSetOptions`, `LambderCompressionOption`.
 
 ## The LambderCache interface and the memory twin
 
@@ -166,8 +166,8 @@ swap it (see [Testing](./testing.md#what-the-app-constructs-itself)); the
 memory twin is what a test swaps it for, by whatever means the app's tests
 already use for its own modules.
 
-`LambderMemoryCache` keeps the same rules, and a conformance suite drives both
-through them: it refuses the keys and values the table refuses, stores a
+`LambderMemoryCache` keeps the same rules, and a conformance suite drives every
+cache here through them: it refuses the keys and values the table refuses, stores a
 value's JSON and hands back a fresh parse of it, expires entries on the same
 TTL (the expiry second itself included), lists sort keys in the table's order
 (UTF-8 bytes, escaped as above), counts only live entries in what `delete` and
@@ -192,3 +192,146 @@ the ones closest to expiring first.
 `reset()` forgets every entry. Exported types: `LambderCache`,
 `LambderCacheSetOptions`, `LambderCacheListOptions`,
 `LambderMemoryCacheOptions`.
+
+## A cache over your own storage
+
+An app that keeps its cache somewhere else (a SQL table, Redis) does not
+implement `LambderCache` itself. It implements `LambderCacheStorage`, five
+small methods that read and write entries, and hands it to
+`LambderStorageBackedCache`, which brings every rule above: the key checks,
+the JSON round trip, the TTL, the listing order, the live-only counts, and
+`getOrSet`'s single-flight, its fail-open and a write winning over a fill in
+progress. The conformance suite that drives the table and the memory twin
+drives it too, so it answers as `LambderMemoryCache` does.
+
+```typescript
+interface LambderCacheStoredEntry {
+    json: string;       // the value's JSON text
+    expiresAt: number;  // epoch seconds
+}
+
+interface LambderCacheStorage {
+    read(address: LambderCacheAddress): Promise<LambderCacheStoredEntry | null>;
+    write(address: LambderCacheAddress, entry: LambderCacheStoredEntry): Promise<void>;
+    delete(address: LambderCacheAddress, nowSeconds: number): Promise<boolean>;
+    deletePartition(partition: string, nowSeconds: number): Promise<number>;
+    listSortKeys(partition: string, prefix: string, nowSeconds: number): Promise<string[]>;
+}
+```
+
+A `LambderCacheAddress` is a key after the cache has checked it: `partition`
+(a plain key, or the `pk` of a pair), `sortKey` (`null` for a plain key) and
+`memoryKey`, one string that tells every address apart. An entry is live
+while `expiresAt` is greater than `nowSeconds`, so it expires at that second
+itself.
+
+| Method | What the storage does |
+| --- | --- |
+| `read(address)` | Hands back the entry, expired or not (the cache decides what is live), or `null` |
+| `write(address, entry)` | Creates the entry or replaces the one there |
+| `delete(address, nowSeconds)` | Removes the entry; `true` when it was live |
+| `deletePartition(partition, nowSeconds)` | Removes every entry under the partition, the plain key's included; answers how many were live |
+| `listSortKeys(partition, prefix, nowSeconds)` | Every live sort key under the partition starting with `prefix`, in any order; never the plain key's entry |
+
+Over a Postgres table through node-postgres, for example (any SQL database
+with an upsert works the same way):
+
+```sql
+create table cache_entry (
+    partition_key text   not null,
+    sort_key      text   not null,  -- '' for a plain key: a real sort key is never empty
+    value_json    text   not null,  -- text, not jsonb, which would reorder an object's keys
+    expires_at    bigint not null,  -- epoch seconds
+    primary key (partition_key, sort_key)
+);
+```
+
+```typescript
+import { LambderStorageBackedCache, type LambderCacheAddress, type LambderCacheStorage } from "lambder";
+import { Pool } from "pg";
+
+const pool = new Pool();
+const sortKeyOf = (address: LambderCacheAddress) => address.sortKey ?? "";
+
+const cacheEntryTable: LambderCacheStorage = {
+    async read(address) {
+        const { rows } = await pool.query(
+            "select value_json, expires_at from cache_entry where partition_key = $1 and sort_key = $2",
+            [address.partition, sortKeyOf(address)],
+        );
+        // node-postgres reads a bigint as a string.
+        return rows[0] ? { json: rows[0].value_json, expiresAt: Number(rows[0].expires_at) } : null;
+    },
+    async write(address, entry) {
+        await pool.query(
+            `insert into cache_entry (partition_key, sort_key, value_json, expires_at) values ($1, $2, $3, $4)
+             on conflict (partition_key, sort_key) do update set value_json = excluded.value_json, expires_at = excluded.expires_at`,
+            [address.partition, sortKeyOf(address), entry.json, entry.expiresAt],
+        );
+    },
+    async delete(address, nowSeconds) {
+        const { rows } = await pool.query(
+            "delete from cache_entry where partition_key = $1 and sort_key = $2 returning expires_at",
+            [address.partition, sortKeyOf(address)],
+        );
+        return rows.some((row) => Number(row.expires_at) > nowSeconds);
+    },
+    async deletePartition(partition, nowSeconds) {
+        const { rows } = await pool.query(
+            `with removed as (delete from cache_entry where partition_key = $1 returning expires_at)
+             select count(*) filter (where expires_at > $2) as live from removed`,
+            [partition, nowSeconds],
+        );
+        return Number(rows[0].live);
+    },
+    async listSortKeys(partition, prefix, nowSeconds) {
+        const { rows } = await pool.query(
+            `select sort_key from cache_entry
+             where partition_key = $1 and sort_key <> '' and starts_with(sort_key, $2) and expires_at > $3`,
+            [partition, prefix, nowSeconds],
+        );
+        return rows.map((row) => row.sort_key);
+    },
+};
+
+export const storeCache = new LambderStorageBackedCache({ storage: cacheEntryTable, defaultTtlSeconds: 3600 });
+
+await storeCache.getOrSet({ pk: "store:nyc-01", sk: "hours" }, async () => loadStoreHours("nyc-01"));
+```
+
+What to know before using it:
+
+- **Expired entries stay until something removes them.** The cache never
+  serves or counts one, but it deletes only what it is asked to, so give the
+  storage its own cleanup: a scheduled
+  `delete from cache_entry where expires_at <= extract(epoch from now())`, or
+  a native TTL where the storage has one (Redis's `EXPIREAT` takes the same
+  epoch seconds).
+- **The cache sorts a listing, so the storage cannot cut it short.** Sort
+  keys come back in the table's order (UTF-8 bytes of the escaped key, see
+  [What to know before grouping](#what-to-know-before-grouping)), which a SQL
+  `order by` does not reproduce, so `listSortKeys` reads every live key under
+  the prefix and `limit` applies after sorting.
+- **No fill lease across processes.** Concurrent `getOrSet` calls in one
+  process share a load, but two processes missing one key each run the
+  loader, and the last write stands. A fill whose write is already on its way
+  to the storage when a `set` of the same key arrives races it there, as two
+  overlapping `set` calls do.
+- **No memory layer.** Every read asks the storage, so a second process sees a
+  write or a delete at once.
+- **Only `getOrSet` fails open.** A storage that throws inside `getOrSet`
+  hands the loader's value back uncached and logs `Storage-backed cache
+  failed open`; every other method passes the storage's error to its caller,
+  as the other caches do.
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `storage` | required | The `LambderCacheStorage` the entries live in |
+| `defaultTtlSeconds` | 1 year | As the table's |
+| `maxValueBytes` | 32MB | As the table's, measured on the JSON |
+| `now` | `Date.now` | The clock entries are expired against, in epoch milliseconds |
+
+`getOrSet` checks the table's `leaseSeconds` and `waitForFillMs` options as
+every cache does, and otherwise ignores them. Exported types:
+`LambderStorageBackedCacheOptions`, `LambderCacheStorage`,
+`LambderCacheStoredEntry`, `LambderCacheAddress`.

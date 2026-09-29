@@ -12,6 +12,8 @@ import {
 import type { APIGatewayProxyEvent, APIGatewayProxyEventV2, Context } from 'aws-lambda';
 import type { LambderHttpResponse } from '../src/core/LambderResponse.js';
 import { lambderTestApp } from '../src/testing.js';
+import type { LambderCacheAddress } from '../src/stores/LambderCacheKeys.js';
+import type { LambderCacheStorage, LambderCacheStoredEntry } from '../src/stores/LambderStorageBackedCache.js';
 
 /**
  * A stranger's browser in front of an app under test, for the tests whose
@@ -409,6 +411,49 @@ export class MemoryDdbDocument {
 
     private conditionalFailure(): Error {
         return Object.assign(new Error("conditional request failed"), { name: "ConditionalCheckFailedException" });
+    }
+}
+
+/**
+ * A LambderCacheStorage in a Map, the few methods an app writes over its own
+ * table, for driving LambderStorageBackedCache. `read` hands back an entry
+ * past its expiry, as the interface allows, so what a test sees of expiry is
+ * the cache's own check. Entries are copied in, so a test reading `entries`
+ * sees what the cache wrote and nothing it changed afterwards.
+ */
+export class MemoryCacheStorage implements LambderCacheStorage {
+    readonly entries = new Map<string, { address: LambderCacheAddress; entry: LambderCacheStoredEntry }>();
+
+    async read(address: LambderCacheAddress): Promise<LambderCacheStoredEntry | null> {
+        const held = this.entries.get(address.memoryKey);
+        return held ? { ...held.entry } : null;
+    }
+
+    async write(address: LambderCacheAddress, entry: LambderCacheStoredEntry): Promise<void> {
+        this.entries.set(address.memoryKey, { address: { ...address }, entry: { ...entry } });
+    }
+
+    async delete(address: LambderCacheAddress, nowSeconds: number): Promise<boolean> {
+        const held = this.entries.get(address.memoryKey);
+        this.entries.delete(address.memoryKey);
+        return held !== undefined && held.entry.expiresAt > nowSeconds;
+    }
+
+    async deletePartition(partition: string, nowSeconds: number): Promise<number> {
+        let live = 0;
+        for(const [memoryKey, { address, entry }] of this.entries){
+            if(address.partition !== partition) continue;
+            this.entries.delete(memoryKey);
+            if(entry.expiresAt > nowSeconds) live += 1;
+        }
+        return live;
+    }
+
+    async listSortKeys(partition: string, prefix: string, nowSeconds: number): Promise<string[]> {
+        return [...this.entries.values()].flatMap(({ address, entry }) =>
+            address.partition === partition && address.sortKey !== null && address.sortKey.startsWith(prefix) && entry.expiresAt > nowSeconds
+                ? [address.sortKey]
+                : []);
     }
 }
 

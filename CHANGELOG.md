@@ -9,6 +9,35 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [10.2.1] - 2026-09-29
+
+A minor for an app that keeps its cache in its own storage. It writes a few
+small storage methods and gets a `LambderCache` that keeps the same rules as
+the DynamoDB cache and its memory twin, rather than rewriting those rules and
+drifting from them. Nothing existing changes.
+
+### Added
+
+- **`LambderStorageBackedCache`: a `LambderCache` over storage the app
+  supplies.** `new LambderStorageBackedCache({ storage, defaultTtlSeconds?,
+  maxValueBytes?, now? })` takes a `LambderCacheStorage`, five methods over
+  the app's own table (`read`, `write`, `delete`, `deletePartition`,
+  `listSortKeys`), and brings every rule itself: the same key checks, the
+  value stored as its JSON text and handed back as a fresh parse, the same
+  TTL and expiry second, only live entries counted by `delete` and
+  `deletePartition`, sort keys listed in the table's order whatever order the
+  storage finds them in, and `getOrSet`'s single-flight in one process, its
+  fail-open when the storage throws, and a `set`, `delete` or
+  `deletePartition` of a key winning over a fill in progress. The conformance
+  suite that drives `LambderDdbCache` and `LambderMemoryCache` drives it too.
+  It holds no fill lease across processes and no memory layer. The storage
+  receives a checked `LambderCacheAddress` (`partition`, `sortKey`, null for a
+  plain key, and `memoryKey`) and stores a `LambderCacheStoredEntry` (`json`,
+  `expiresAt` in epoch seconds). Exported with
+  `LambderStorageBackedCacheOptions`, `LambderCacheStorage`,
+  `LambderCacheStoredEntry` and `LambderCacheAddress`; docs/ddb-cache.md
+  shows a storage over a SQL table.
+
 ## [10.1.1] - 2026-09-28
 
 A minor for an app made of parts. Each part can declare its own guards and

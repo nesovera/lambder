@@ -20,8 +20,9 @@ import { asStoredJson } from "./LambderCacheValues.js";
  * write starts a load of its own instead of joining the old one. The old
  * fill's callers get its value uncached.
  *
- * LambderDdbCache and LambderMemoryCache each supply only their read-then-fill
- * and hold one filler, so the two cannot drift on any of the above.
+ * LambderDdbCache, LambderMemoryCache and LambderStorageBackedCache each
+ * supply only their read-then-fill and hold one filler, so they cannot drift
+ * on any of the above.
  */
 export class LambderCacheFiller {
     inFlight = new Map();

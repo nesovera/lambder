@@ -29,10 +29,11 @@ export interface LambderCacheListOptions {
     limit?: number;
 }
 /**
- * What an app asks of a cache. LambderDdbCache and LambderMemoryCache
- * implement it with the same rules (the same key limits, the same JSON round
- * trip, the same expiry), so code written against this interface behaves the
- * same over either.
+ * What an app asks of a cache. LambderDdbCache, LambderMemoryCache and
+ * LambderStorageBackedCache (over an app's own storage) implement it with the
+ * same rules (the same key limits, the same JSON round trip, the same
+ * expiry), so code written against this interface behaves the same over any
+ * of them.
  *
  * Values are JSON: what `set` is handed is stored as its JSON text and `get`
  * hands back a parse of it, never the object that was stored.

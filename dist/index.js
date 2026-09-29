@@ -74,6 +74,7 @@ export { LambderSessionDataRefreshError, LambderSessionReadError } from "./sessi
 export { LambderSessionNotFoundError, LambderSessionAmbiguousError } from "./session/LambderSessionController.js";
 export { LambderDdbCache } from "./stores/LambderDdbCache.js";
 export { LambderMemoryCache } from "./stores/LambderMemoryCache.js";
+export { LambderStorageBackedCache } from "./stores/LambderStorageBackedCache.js";
 // Fixed-window rate limiting: the shared vocabulary, the DynamoDB limiter and the in-memory one
 export { RATE_LIMIT_WINDOWS } from "./shared/contracts/LambderRateLimiter.js";
 export { LambderDdbRateLimiter } from "./stores/LambderDdbRateLimiter.js";

@@ -1,7 +1,7 @@
 import type { LambderCache, LambderCacheKey, LambderCacheListOptions, LambderCacheSetOptions } from "../shared/contracts/LambderCache.js";
 import { LambderExpiringMap } from "../shared/util/LambderExpiringMap.js";
 import { assertPositiveInteger } from "../shared/util/LambderOptionChecks.js";
-import { cacheMemoryKeyOf, encodeCacheSortKey, normalizeCacheKey, normalizeCachePartition, type LambderCacheAddress } from "./LambderCacheKeys.js";
+import { cacheMemoryKeyOf, compareCacheSortKeys, normalizeCacheKey, normalizeCachePartition, type LambderCacheAddress } from "./LambderCacheKeys.js";
 import {
     DEFAULT_MAX_VALUE_BYTES, DEFAULT_TTL_SECONDS, resolveCacheTtlSeconds, resolveGetOrSetOptions, serializeCacheValue,
 } from "./LambderCacheValues.js";
@@ -24,17 +24,6 @@ type MemoryCacheEntry = {
     address: LambderCacheAddress;
 };
 
-/** DynamoDB orders string range keys by their UTF-8 bytes, which is not JavaScript's UTF-16 order for every character. */
-const compareUtf8 = (first: string, second: string): number => {
-    const a = new TextEncoder().encode(first);
-    const b = new TextEncoder().encode(second);
-    const length = Math.min(a.length, b.length);
-    for(let index = 0; index < length; index += 1){
-        if(a[index] !== b[index]) return a[index]! - b[index]!;
-    }
-    return a.length - b.length;
-};
-
 /**
  * LambderDdbCache's twin, held in memory: the same LambderCache interface and
  * the same rules, so code written against the interface can be tested
@@ -42,7 +31,7 @@ const compareUtf8 = (first: string, second: string): number => {
  * refuses, stores a value's JSON text and hands back a fresh parse of it,
  * expires entries on the same TTL, and lists sort keys in the same order.
  *
- * getOrSet runs through the LambderCacheFiller both caches hold: concurrent
+ * getOrSet runs through the LambderCacheFiller every cache holds: concurrent
  * calls for one key share a load, every call (the filling one included)
  * answers the stored JSON parsed, a loader's undefined comes back uncached,
  * and a set, delete or deletePartition of the key while the loader runs
@@ -55,7 +44,7 @@ const compareUtf8 = (first: string, second: string): number => {
  */
 export class LambderMemoryCache implements LambderCache {
     private readonly entries: LambderExpiringMap<MemoryCacheEntry>;
-    /** getOrSet's single-flight and fail-open, shared with LambderDdbCache (see LambderCacheFiller). */
+    /** getOrSet's single-flight and fail-open, shared with the other caches (see LambderCacheFiller). */
     private readonly filler = new LambderCacheFiller("Memory cache failed open");
     private readonly defaultTtlSeconds: number;
     private readonly maxValueBytes: number;
@@ -110,11 +99,7 @@ export class LambderMemoryCache implements LambderCache {
         const limit = options.limit === undefined ? undefined : assertPositiveInteger(options.limit, "limit");
         const sortKeys = this.entries.values()
             .flatMap(({ address }) => address.partition === normalized && address.sortKey !== null && address.sortKey.startsWith(prefix) ? [address.sortKey] : [])
-            // Ordered as the table orders the items it lists: by the whole
-            // item sort key, which carries a "#" after the encoded key. So
-            // "New York City" sorts before "New York" there (" " is below
-            // "#"), and here too.
-            .sort((first, second) => compareUtf8(`${encodeCacheSortKey(first)}#`, `${encodeCacheSortKey(second)}#`));
+            .sort(compareCacheSortKeys);
         return limit === undefined ? sortKeys : sortKeys.slice(0, limit);
     }
 

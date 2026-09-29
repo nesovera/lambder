@@ -236,8 +236,9 @@ export type { LambderRestoreFailure, LambderRestoreBound } from "./shared/wire/L
 export { LambderSessionDataRefreshError, LambderSessionReadError } from "./session/LambderSessionManager.js";
 export { LambderSessionNotFoundError, LambderSessionAmbiguousError } from "./session/LambderSessionController.js";
 
-// Caches (standalone): the interface both implement, the DynamoDB-backed
-// compressed one (server-only) and its in-memory twin for tests
+// Caches (standalone): the interface they all implement, the DynamoDB-backed
+// compressed one (server-only), its in-memory twin for tests, and the one
+// over storage an app supplies, which brings the same rules itself
 export type { LambderCache, LambderCacheKey, LambderCacheSetOptions, LambderCacheListOptions } from "./shared/contracts/LambderCache.js";
 export { LambderDdbCache } from "./stores/LambderDdbCache.js";
 export type {
@@ -246,6 +247,13 @@ export type {
 } from "./stores/LambderDdbCache.js";
 export { LambderMemoryCache } from "./stores/LambderMemoryCache.js";
 export type { LambderMemoryCacheOptions } from "./stores/LambderMemoryCache.js";
+export { LambderStorageBackedCache } from "./stores/LambderStorageBackedCache.js";
+export type {
+    LambderStorageBackedCacheOptions,
+    LambderCacheStorage,
+    LambderCacheStoredEntry,
+} from "./stores/LambderStorageBackedCache.js";
+export type { LambderCacheAddress } from "./stores/LambderCacheKeys.js";
 
 // Fixed-window rate limiting: the shared vocabulary, the DynamoDB limiter and the in-memory one
 export { RATE_LIMIT_WINDOWS } from "./shared/contracts/LambderRateLimiter.js";

@@ -317,6 +317,14 @@ with no AWS, and an app may bring its own store (Redis, a database) by
 implementing the interface. `lambderTestApp` puts the memory ones under an
 app's built instance in one call; see [Testing](./testing.md).
 
+`LambderCache` has a third implementation for that case,
+`LambderStorageBackedCache`: an app implements `LambderCacheStorage` (read,
+write, delete, deletePartition and listSortKeys over its own table) and the
+class brings the key checks, the JSON round trip, the expiry, the listing
+order and `getOrSet`'s single-flight and fail-open, so the app's cache
+answers as `LambderMemoryCache` does. See
+[DynamoDB cache](./ddb-cache.md#a-cache-over-your-own-storage).
+
 ## Transports
 
 Both callers already funnel their answer through `resolveApiOutcome()`. The

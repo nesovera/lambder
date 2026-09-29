@@ -80,7 +80,7 @@ export declare class LambderDdbCache implements LambderCache {
     private readonly compression;
     private readonly maxValueBytes;
     private readonly memory;
-    /** getOrSet's single-flight and fail-open, shared with LambderMemoryCache (see LambderCacheFiller). */
+    /** getOrSet's single-flight and fail-open, shared with the other caches (see LambderCacheFiller). */
     private readonly filler;
     private readonly now;
     /** This instance's own writes, as its reads and its memory layer need to know them (see LocalWriteLedger). */
