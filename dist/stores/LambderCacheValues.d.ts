@@ -34,9 +34,9 @@ export declare const resolveCacheTtlSeconds: (ttlSeconds: number | undefined, de
  * cache failing: every call would log, hand the loader's value back
  * uncached, and caching would be off without the caller ever seeing why.
  *
- * The lease options are LambderDdbCache's. The memory cache holds no lease
- * but checks them all the same, so an options object that the table refuses
- * is refused by its twin too.
+ * The lease options are LambderDdbCache's. The other caches hold no lease
+ * but check them all the same, so an options object that the table refuses
+ * is refused by every cache.
  */
 export declare const resolveGetOrSetOptions: (options: {
     ttlSeconds?: number;

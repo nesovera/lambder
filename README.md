@@ -191,7 +191,7 @@ framework:
 | --- | --- | --- |
 | `html` / `xml` tags + `LambderTemplatingEngine` | [Templating](./docs/templating.md) | Type-safe tagged templates and a comment-only HTML template engine (build-pipeline-safe) |
 | `createLambderI18n` | [Translations](./docs/i18n.md) | Typed translations with enforced/optional languages, component-level extension, auto language detection and on-demand language loading (isomorphic) |
-| `LambderDdbCache` / `LambderMemoryCache` | [DynamoDB cache](./docs/ddb-cache.md) | JSON cache behind one `LambderCache` interface: DynamoDB-backed and compressed, with lease-based single-fill and grouped keys (server-only), or in memory for tests |
+| `LambderDdbCache` / `LambderMemoryCache` / `LambderStorageBackedCache` | [DynamoDB cache](./docs/ddb-cache.md) | JSON cache behind one `LambderCache` interface: DynamoDB-backed and compressed, with lease-based single-fill and grouped keys (server-only), in memory for tests, or over an app's own storage (a SQL table, Redis) with the same rules |
 | `LambderDdbRateLimiter` / `LambderMemoryRateLimiter` | [Rate limiter](./docs/ddb-rate-limiter.md) | Fixed-window rate limiter, atomic per window, in DynamoDB (server-only) or in memory |
 | `LambderDdbIdempotencyStore` / `LambderMemoryIdempotencyStore` | [Idempotency store](./docs/ddb-idempotency.md) | Idempotency records with owner-checked claims, in DynamoDB (compressed replays, server-only) or in memory |
 | `LambderMockApp` | [The mock runtime](./docs/mock.md) | The typed contract served from mock handlers over the real API pipeline, with failure injection, sessions and a call log (isomorphic) |

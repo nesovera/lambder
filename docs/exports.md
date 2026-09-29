@@ -202,6 +202,7 @@ implementations ship, and an app may bring its own.
 | --- | --- | --- |
 | `LambderDdbCache` | | Compressed JSON cache with a memory layer, fill lease and grouped keys |
 | `LambderMemoryCache` | | The same `LambderCache` rules in a bounded map, for tests |
+| `LambderStorageBackedCache` | | The same `LambderCache` rules over storage an app supplies (a SQL table, Redis) through `LambderCacheStorage`, which only reads and writes entries |
 | `LambderDdbRateLimiter` | | Fixed-window rate limiter in DynamoDB, atomic per window |
 | `LambderMemoryRateLimiter` | | The same windows and semantics in a `Map`, with an injectable clock |
 | `LambderDdbIdempotencyStore` | | Idempotency claims and replays in DynamoDB, owner-checked, compressed bodies |
@@ -215,7 +216,9 @@ Types: `LambderBackoffTimerOptions`; the interfaces `LambderRateLimiter`, `Lambd
 `LambderCache` (and `LambderSessionStore` above); cache, `LambderCacheKey`,
 `LambderCacheSetOptions`, `LambderCacheListOptions`,
 `LambderMemoryCacheOptions`, `LambderDdbCacheOptions`,
-`LambderDdbCacheGetOrSetOptions`; rate limiter, `LambderDdbRateLimiterOptions`,
+`LambderDdbCacheGetOrSetOptions`, `LambderStorageBackedCacheOptions`,
+`LambderCacheStorage` (what an app implements for it),
+`LambderCacheStoredEntry`, `LambderCacheAddress`; rate limiter, `LambderDdbRateLimiterOptions`,
 `LambderRateLimitWindow`, `LambderRateLimitPolicy`,
 `LambderRateLimitExceeded`, `LambderRateLimitResult`; idempotency,
 `LambderDdbIdempotencyStoreOptions`, `LambderIdempotencyBeginResult`,

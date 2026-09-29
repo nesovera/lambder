@@ -4,10 +4,11 @@ import { assertPositiveInteger } from "../shared/util/LambderOptionChecks.js";
  * What a cache value has to be, and how a cache call's options are read, for
  * every cache here.
  *
- * LambderDdbCache and LambderMemoryCache refuse the same values and the same
- * options for the reason they refuse the same keys (see LambderCacheKeys): a
- * test that runs over the memory cache must not accept what production then
- * throws on. So the rules are written once, here, and both caches call them.
+ * LambderDdbCache, LambderMemoryCache and LambderStorageBackedCache refuse the
+ * same values and the same options for the reason they refuse the same keys
+ * (see LambderCacheKeys): a test that runs over the memory cache must not
+ * accept what production then throws on. So the rules are written once, here,
+ * and every cache calls them.
  */
 
 /** How long an entry lives when neither the call nor the cache names a TTL: one year. */
@@ -67,9 +68,9 @@ export const resolveCacheTtlSeconds = (ttlSeconds: number | undefined, defaultTt
  * cache failing: every call would log, hand the loader's value back
  * uncached, and caching would be off without the caller ever seeing why.
  *
- * The lease options are LambderDdbCache's. The memory cache holds no lease
- * but checks them all the same, so an options object that the table refuses
- * is refused by its twin too.
+ * The lease options are LambderDdbCache's. The other caches hold no lease
+ * but check them all the same, so an options object that the table refuses
+ * is refused by every cache.
  */
 export const resolveGetOrSetOptions = (
     options: { ttlSeconds?: number, leaseSeconds?: number, waitForFillMs?: number },

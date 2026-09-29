@@ -41,7 +41,7 @@ order the first time.
 | Page | Covers |
 | --- | --- |
 | [DynamoDB tables](./ddb-tables.md) | Table shapes, TTL and IAM for sessions, cache, rate limits and idempotency |
-| [DynamoDB cache](./ddb-cache.md) | `LambderDdbCache`: compressed values, memory layer, fill lease, grouped keys; `LambderMemoryCache`, its twin for tests |
+| [DynamoDB cache](./ddb-cache.md) | `LambderDdbCache`: compressed values, memory layer, fill lease, grouped keys; `LambderMemoryCache`, its twin for tests; `LambderStorageBackedCache`, the same rules over an app's own storage (a SQL table, Redis) |
 | [Rate limiter](./ddb-rate-limiter.md) | `LambderDdbRateLimiter`: fixed windows, atomic counting, fail-open |
 | [Idempotency store](./ddb-idempotency.md) | `LambderDdbIdempotencyStore`: claims, replays, owner tokens, stored bodies |
 

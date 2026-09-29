@@ -286,7 +286,7 @@ export class LambderDdbCache implements LambderCache {
     private readonly compression: LambderCompressionSettings | null;
     private readonly maxValueBytes: number;
     private readonly memory: LRUCache<string, MemoryEntry> | null;
-    /** getOrSet's single-flight and fail-open, shared with LambderMemoryCache (see LambderCacheFiller). */
+    /** getOrSet's single-flight and fail-open, shared with the other caches (see LambderCacheFiller). */
     private readonly filler: LambderCacheFiller;
     private readonly now: () => number;
     /** This instance's own writes, as its reads and its memory layer need to know them (see LocalWriteLedger). */
