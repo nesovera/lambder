@@ -434,8 +434,10 @@ need, and more than a browser should carry. A screen that imports
 guard's parameter, the reason beside an open endpoint included, to every
 visitor, which undoes what the contract's type-only import and the
 signatures' hashed keys keep out of the bundle. A screen that gates on one
-guard needs that guard's parameter and nothing else, and `writeApiGuardParams`
-writes exactly that, beside the options file:
+guard needs that guard's parameter, for the endpoints it gates on, and
+nothing else. `writeApiGuardParams` writes that guard's parameters beside the
+options file, one export per API, so a bundle carries the ones its screens
+import and no others:
 
 ```typescript
 import { writeApiGuardParams } from "lambder/build";
@@ -451,20 +453,54 @@ const result = await writeApiGuardParams({
 
 ```typescript
 // web/src/generated/storeGuardParams.generated.ts, as written
-export const guardParams = {
-    "orders.list": "ORDERS.MANAGE",
-    "staff.invite": ["STAFF.MANAGE", "ORDERS.MANAGE"],
-} as const;
+import type { LambderApiGuardParam } from "lambder/client";
+
+/** What orders.list gives the "store" guard. */
+// prettier-ignore
+export const ordersListGuardParam = "ORDERS.MANAGE" as const as LambderApiGuardParam<"orders.list", "store", "ORDERS.MANAGE">;
+
+/** What staff.invite gives the "store" guard. */
+// prettier-ignore
+export const staffInviteGuardParam = ["STAFF.MANAGE","ORDERS.MANAGE"] as const as LambderApiGuardParam<"staff.invite", "store", readonly ["STAFF.MANAGE", "ORDERS.MANAGE"]>;
 ```
 
-One entry per API that declares the guard, holding the parameter as declared
-(`true` for the guard named without one), and no import. The table is `as
-const`, so a client reads its types straight off it: `keyof typeof
-guardParams` is the APIs behind the guard, and `(typeof
-guardParams)["orders.list"]` the literal that API declared. The names in it
-are the ones a client gating on the guard calls, and so names in its own code
-already. A guard the server does not declare fails the write; `check`,
-`header` and `semicolons` work as they do for the options file.
+One export per API that declares the guard, named after the API
+(`orders.list` exports `ordersListGuardParam`) and holding the parameter as
+declared (`true` for the guard named without one). A screen imports the
+ones it gates on:
+
+```typescript
+import { ordersListGuardParam } from "./generated/storeGuardParams.generated";
+
+if (canCall(ordersListGuardParam)) showOrders();
+```
+
+The bundler keeps the exports the client imports and drops the rest, and none of
+them carries the API's name into the bundle: the name sits in the export's
+type and doc comment, which a build strips, and in its identifier, which a
+minifier renames. What ships is the parameter alone.
+
+Each export is typed `LambderApiGuardParam<API, guard, literal>`: the
+literal the API declared, tagged with the API's name and the guard's in types
+alone. A client reads the union of a guard's parameters off the module with a
+type-only import, and a function typed to that union takes only generated
+parameters, so a hand-written literal, which would restate the server's
+declaration and could drift from it, does not compile:
+
+```typescript
+import type * as storeParams from "./generated/storeGuardParams.generated";
+
+type StoreGuardParam = (typeof storeParams)[keyof typeof storeParams];
+const canCall = (param: StoreGuardParam): boolean => { /* ... */ };
+
+canCall("ORDERS.MANAGE"); // a type error: not a generated parameter
+```
+
+A guard the server does not declare fails the write, as do two APIs whose
+names would export under one identifier (`order.sList` and `orderS.list`) and
+a parameter of `null`, which the tag cannot carry. A guard no API declares
+writes an empty module. `check`, `header` and `semicolons` work as they do
+for the options file.
 
 ### Generating every file at once
 

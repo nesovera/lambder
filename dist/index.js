@@ -97,7 +97,7 @@ export { LambderApiRefusalValidationError } from "./api/LambderApiRefusals.js";
 export { lambderRateLimitKeyBuilder, rateLimitRefusal, DEFAULT_RATE_LIMIT_REFUSAL } from "./api/LambderApiRateLimits.js";
 // The declared options as plain data: what apiOptionEntries() reports and
 // writeApiOptions writes, and the readers over the generated tables.
-export { apiGuardParam } from "./shared/wire/LambderApiOptionEntries.js";
+export { apiGuardParam, apiGuardParamExportName } from "./shared/wire/LambderApiOptionEntries.js";
 // Typed translations (standalone, isomorphic)
 export { createLambderI18n } from "./shared/LambderI18n.js";
 export { resolveApiOutcome } from "./shared/wire/LambderApiOutcome.js";

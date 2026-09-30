@@ -402,7 +402,7 @@ export type {
 
 // The declared options as plain data: what apiOptionEntries() reports and
 // writeApiOptions writes, and the readers over the generated tables.
-export { apiGuardParam } from "./shared/wire/LambderApiOptionEntries.js";
+export { apiGuardParam, apiGuardParamExportName } from "./shared/wire/LambderApiOptionEntries.js";
 export type {
     LambderApiOptionEntries,
     LambderApiOptionEntry,
@@ -412,6 +412,7 @@ export type {
     LambderApisGuardedBy,
     LambderApisWithMode,
     LambderGuardParamOf,
+    LambderApiGuardParam,
 } from "./shared/wire/LambderApiOptionEntries.js";
 
 // Typed translations (standalone, isomorphic)

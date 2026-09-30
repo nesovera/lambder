@@ -15,6 +15,7 @@
  * (when a guard runs, what a budget spans, when a custom key is charged) are
  * declared here too and re-exported by the engines that read them.
  */
+import { splitApiName } from "./LambderApiNames.js";
 /**
  * The parameter an API's guards option gives guard N, read off a generated
  * `apiOptions` table with the type the table pins: the literal a permission
@@ -32,4 +33,16 @@ export const apiGuardParam = (options, name, guard) => {
     else if (guards !== undefined && Object.prototype.hasOwnProperty.call(guards, guard))
         param = guards[guard];
     return param;
+};
+/**
+ * The identifier writeApiGuardParams exports an API's parameter under: its
+ * group, its action capitalized, then `GuardParam` (`orders.list` exports
+ * `ordersListGuardParam`). What code that reads a generated module by API
+ * name (a test comparing it with the server) looks each export up by.
+ */
+export const apiGuardParamExportName = (apiName) => {
+    const parts = splitApiName(apiName);
+    if (!parts)
+        throw new Error(`Lambder: "${apiName}" is not an endpoint name, so its guard parameter has no export name.`);
+    return `${parts.group}${parts.action[0].toUpperCase()}${parts.action.slice(1)}GuardParam`;
 };

@@ -72,7 +72,7 @@ describe('generateApiFiles', () => {
         const written = await generateApiFiles(storeConfig(root));
         expect(written.ok).toBe(true);
         expect(written.lines.filter((line) => line.startsWith('✓ Wrote'))).toHaveLength(3);
-        expect(readFileSync(join(root, 'staffGuardParams.generated.ts'), 'utf8')).toContain('"orders.list": "ORDERS.VIEW"');
+        expect(readFileSync(join(root, 'staffGuardParams.generated.ts'), 'utf8')).toContain('export const ordersListGuardParam = "ORDERS.VIEW" as const');
 
         const checked = await generateApiFiles(storeConfig(root), { check: true });
         expect(checked).toMatchObject({ ok: true });

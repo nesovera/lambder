@@ -20,6 +20,7 @@ import type { LambderApiMode, LambderGuardNamesIn } from "./LambderApiContract.j
 import type { LambderApiIdempotencyOption, LambderGuardsOptionValue, LambderRateLimitMessage, LambderRateLimitOptionValue, LambderRefusalsOptionValue } from "./LambderApiOptionValues.js";
 
 import type { LambderRateLimitPolicy } from "../contracts/LambderRateLimiter.js";
+import { splitApiName } from "./LambderApiNames.js";
 
 /**
  * When a guard runs, relative to the API's input validation.
@@ -178,3 +179,29 @@ export const apiGuardParam = <TOptions extends Record<string, LambderApiOptionEn
     else if(guards !== undefined && Object.prototype.hasOwnProperty.call(guards, guard)) param = (guards as Readonly<Record<string, unknown>>)[guard];
     return param as LambderGuardParamOf<TOptions[K], N>;
 };
+
+/**
+ * The identifier writeApiGuardParams exports an API's parameter under: its
+ * group, its action capitalized, then `GuardParam` (`orders.list` exports
+ * `ordersListGuardParam`). What code that reads a generated module by API
+ * name (a test comparing it with the server) looks each export up by.
+ */
+export const apiGuardParamExportName = (apiName: string): string => {
+    const parts = splitApiName(apiName);
+    if(!parts) throw new Error(`Lambder: "${apiName}" is not an endpoint name, so its guard parameter has no export name.`);
+    return `${parts.group}${parts.action[0]!.toUpperCase()}${parts.action.slice(1)}GuardParam`;
+};
+
+/** The key a generated guard parameter's tag sits under: declared and never created, so it exists in types alone. */
+declare const API_GUARD_PARAM_TAG: unique symbol;
+
+/**
+ * One API's parameter for one guard, as writeApiGuardParams exports it: the
+ * value TParam as declared (`true` for a guard named without one), tagged
+ * with the API's name and the guard's. The tag exists in types alone, so the
+ * names reach no bundle. A function typed to a guard's tagged parameters
+ * takes only generated ones: a hand-written literal, which would restate the
+ * server's declaration and could drift from it, does not compile.
+ */
+export type LambderApiGuardParam<TApi extends string, TGuard extends string, TParam> =
+    TParam & { readonly [API_GUARD_PARAM_TAG]: { readonly api: TApi; readonly guard: TGuard } };

@@ -97,7 +97,7 @@ export type {
 
 // The server's declared options as plain data (the generated options module's
 // entry types) and the readers a client derives its own facts from.
-export { apiGuardParam } from "./shared/wire/LambderApiOptionEntries.js";
+export { apiGuardParam, apiGuardParamExportName } from "./shared/wire/LambderApiOptionEntries.js";
 export type {
     LambderApiOptionEntries,
     LambderApiOptionEntry,
@@ -107,6 +107,7 @@ export type {
     LambderApisGuardedBy,
     LambderApisWithMode,
     LambderGuardParamOf,
+    LambderApiGuardParam,
 } from "./shared/wire/LambderApiOptionEntries.js";
 
 // A crash described for a caller allowed to see it (the envelope's `crash` field; pure, no Node built-ins).
