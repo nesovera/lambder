@@ -29,7 +29,7 @@ const EXACT_BUNDLER_HASH = "-(?=[\\w-]{0,7}[a-z])(?:(?=[\\w-]{0,7}[A-Z])(?=[\\w-
 const LONG_BUNDLER_HASH = "[-.](?=\\w*[A-Za-z])(?=\\w*\\d)\\w{8,}";
 const DEFAULT_IMMUTABLE_PATTERN = new RegExp(`(?:^|/)_next/static/|(?:^|/)(?:assets|static)/(?:[^/]+/)*[^/]*(?:${EXACT_BUNDLER_HASH}|${LONG_BUNDLER_HASH})(?:\\.chunk)?\\.[A-Za-z0-9]+$`);
 const DEFAULT_IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
-const DEFAULT_CACHE_CONTROL = "public, max-age=3600";
+const DEFAULT_CACHE_CONTROL = "no-cache";
 /**
  * Terminal public-file handler registered via lambder.servePublicFiles().
  * Runs only when no route matched, so it can never shadow routes registered

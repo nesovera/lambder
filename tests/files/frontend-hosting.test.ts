@@ -28,8 +28,21 @@ describe('servePublicFiles + templateFile fallback (frontend hosting recipe)', (
         const result = await buildHost().render(createMockEvent('/style.css'), createMockContext());
         expect(result.statusCode).toBe(200);
         expect(result.multiValueHeaders?.['Content-Type']?.[0]).toBe('text/css; charset=utf-8');
-        expect(result.multiValueHeaders?.['Cache-Control']).toEqual(['public, max-age=3600']);
+        expect(result.multiValueHeaders?.['Cache-Control']).toEqual(['no-cache']);
         expect(decodeBody(result)).toContain('color: red');
+    });
+
+    it('answers the revalidation no-cache asks for with a 304, so a hand-named file costs no body after a deploy', async () => {
+        const host = buildHost();
+        const first = await host.render(createMockEvent('/style.css'), createMockContext());
+        const etag = first.multiValueHeaders?.['ETag']?.[0];
+        expect(etag).toMatch(/^".+"$/);
+        const second = await host.render(
+            createMockEvent('/style.css', { headers: { Host: 'localhost', 'If-None-Match': etag! } }),
+            createMockContext(),
+        );
+        expect(second.statusCode).toBe(304);
+        expect(second.body).toBe('');
     });
 
     it('serves content-hashed assets with immutable cache headers', async () => {
