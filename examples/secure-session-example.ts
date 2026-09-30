@@ -27,7 +27,8 @@ const SESSION_COOKIE_NAME = "__Host-LMDRSESSIONTKID";
 const CSRF_COOKIE_NAME = "__Host-LMDRSESSIONCSTK";
 
 // The creation call is its own statement, which is how an app splits its
-// app.ts from its api modules: this value is the one they import the type of.
+// app.ts from its api modules: this value's defineApi and defineApiGroup are
+// what they import to declare their endpoints.
 const lambderApp = initLambder<SessionData>().create({
     apiPath: "/api",
     // Sessions over DynamoDB, with sliding expiration
@@ -46,224 +47,232 @@ const lambderApp = initLambder<SessionData>().create({
         // session cookie. Only for a domain whose every subdomain is yours.
         // cookie: { domain: ".example.com" },
     },
-    // Every API here states who may call it. Neither flag is on by default,
-    // because a no-op guard satisfies both and a framework should not demand
+    // Every API here states who may call it. The option is off by default,
+    // because a no-op guard satisfies it and a framework should not demand
     // a declaration before the first endpoint works. An app is the right
     // place to demand one: past a handful of endpoints, "which of these are
     // open, and why?" stops being answerable by reading them.
     guards: {
         // The session itself is the whole authorization: the signed-in user
-        // acting on their own account.
+        // acting on their own account. A guard that needs a session is also
+        // what makes an endpoint a session endpoint: its session is read and
+        // validated before it runs, and ctx.session is typed present.
         sessionOnly: lambderGuard({ session: true, handler: () => {} }),
         // Anyone may call, and the reason is recorded at the call site, so
         // `grep "open:"` lists every public door in the app with its reason.
         open: lambderGuard({ handler: (_ctx, _params, _reason: string) => {} }),
     },
-    requireSessionApiGuards: true,
-    requirePublicApiGuards: true,
+    requireApiGuards: true,
 });
+const { defineApi, defineApiGroup } = lambderApp;
 
-const lambder = lambderApp
-// Example: Login API with session regeneration
-.addApi("user.login", {
-    input: z.object({ username: z.string(), password: z.string() }),
-    output: z.object({ csrfToken: z.string() }),
-    guards: { open: "signing in is how a visitor gets a session; the password check here IS the control" },
-}, async (ctx) => {
-    const { username, password } = ctx.apiPayload;
+// The account endpoints, as an api module exports them: each is called at
+// /api/user/{action}, and from a caller as `caller.user.login(input)`.
+export const userApis = defineApiGroup("user", {
+    // Example: Login API with session regeneration
+    login: defineApi({
+        input: z.object({ username: z.string(), password: z.string() }),
+        output: z.object({ csrfToken: z.string() }),
+        guards: { open: "signing in is how a visitor gets a session; the password check here IS the control" },
+    }, async (ctx) => {
+        const { username, password } = ctx.apiPayload;
 
-    // Validate credentials (implement your own logic). Wrong ones are a
-    // refusal rather than an output: the caller's refusalHandler shows
-    // the message, and the output schema describes a signed-in answer only.
-    const user = await authenticateUser(username, password);
-    if (!user) refuse("Wrong username or password.");
+        // Validate credentials (implement your own logic). Wrong ones are a
+        // refusal rather than an output: the caller's refusalHandler shows
+        // the message, and the output schema describes a signed-in answer only.
+        const user = await authenticateUser(username, password);
+        if (!user) refuse("Wrong username or password.");
 
-    // Create new session. issueSession is createSession plus the raw tokens:
-    // the cookies are set either way, and the CSRF token is handed back so a
-    // client that keeps it in memory rather than reading document.cookie can.
-    const { sessionController } = ctx;
-    const created = await sessionController.issueSession(user.id, {
-        userId: user.id,
-        username: user.username,
-        role: user.role,
-    });
+        // Create new session. issueSession is createSession plus the raw tokens:
+        // the cookies are set either way, and the CSRF token is handed back so a
+        // client that keeps it in memory rather than reading document.cookie can.
+        const { sessionController } = ctx;
+        const created = await sessionController.issueSession(user.id, {
+            userId: user.id,
+            username: user.username,
+            role: user.role,
+        });
 
-    return { csrfToken: created.csrfToken };
-})
-// Example: Protected API that requires session
-.addSessionApi("user.profile", {
-    input: z.void(),
-    output: z.object({ userId: z.string(), username: z.string(), role: z.string() }),
-    guards: "sessionOnly",
-}, async (ctx) => {
-    // Session is automatically fetched and validated
-    const sessionData = ctx.session.data;
-
-    return {
-        userId: sessionData.userId,
-        username: sessionData.username,
-        role: sessionData.role,
-    };
-})
-// Example: Sensitive operation that replaces every session of the user
-.addSessionApi("user.changePassword", {
-    input: z.object({ oldPassword: z.string(), newPassword: z.string() }),
-    output: z.object({ csrfToken: z.string() }),
-    guards: "sessionOnly",
-}, async (ctx) => {
-    const { oldPassword, newPassword } = ctx.apiPayload;
-    const { sessionController } = ctx;
-    const { userId, username, role } = ctx.session.data;
-
-    // Validate old password
-    const isValid = await validatePassword(userId, oldPassword);
-    if (!isValid) refuse("The current password is wrong.");
-
-    // Update password
-    await updatePassword(userId, newPassword);
-
-    // Every session of this user goes, including this one: a password change
-    // is meant to end whatever a stolen token could still do. endSessionAll
-    // deletes every record under the subject, so the replacement has to be
-    // created AFTER it rather than before, or it would be deleted too and
-    // this answer would hand back the CSRF token of a session that no longer
-    // exists. The clearing Set-Cookie headers are emitted before the new
-    // pair, so the browser ends up holding the new session.
-    await sessionController.endSessionAll();
-    const renewed = await sessionController.issueSession(userId, { userId, username, role });
-
-    return { csrfToken: renewed.csrfToken }; // Send new CSRF token
-})
-// Example: Update session data
-.addSessionApi("user.updatePreferences", {
-    input: z.object({ theme: z.string(), language: z.string() }),
-    output: z.object({ success: z.boolean(), message: z.string() }),
-    guards: "sessionOnly",
-}, async (ctx) => {
-    const { theme, language } = ctx.apiPayload;
-    const { sessionController } = ctx;
-
-    // Update session data. The expiry is left alone: sliding expiration
-    // moves it on a session read, which also re-issues the cookies.
-    await sessionController.updateSessionData({
-        ...ctx.session.data,
-        preferences: { theme, language },
-    });
-
-    return {
-        success: true,
-        message: "Preferences updated",
-    };
-})
-// Example: Logout
-.addSessionApi("user.logout", {
-    input: z.void(),
-    output: z.object({ success: z.boolean(), message: z.string() }),
-    guards: "sessionOnly",
-}, async (ctx) => {
-    const { sessionController } = ctx;
-
-    // End current session
-    await sessionController.endSession();
-
-    return {
-        success: true,
-        message: "Logged out successfully",
-    };
-})
-// Example: Logout from all devices
-.addSessionApi("user.logoutAll", {
-    input: z.void(),
-    output: z.object({ success: z.boolean(), message: z.string() }),
-    guards: "sessionOnly",
-}, async (ctx) => {
-    const { sessionController } = ctx;
-
-    // End all sessions for this user (same sessionKey)
-    await sessionController.endSessionAll();
-
-    return {
-        success: true,
-        message: "Logged out from all devices",
-    };
-})
-// Example: Optional session (check if logged in)
-.addApi("user.checkAuth", {
-    input: z.object({}),
-    output: z.object({
-        authenticated: z.boolean(),
-        userId: z.string().optional(),
-        username: z.string().optional(),
+        return { csrfToken: created.csrfToken };
     }),
-    guards: { open: "reports whether the caller's own cookie names a live session, and nothing else" },
-}, async (ctx) => {
-    const { sessionController } = ctx;
+    // Example: Protected API that requires session
+    profile: defineApi({
+        input: z.void(),
+        output: z.object({ userId: z.string(), username: z.string(), role: z.string() }),
+        guards: "sessionOnly",
+    }, async (ctx) => {
+        // Session is automatically fetched and validated, since sessionOnly needs one
+        const sessionData = ctx.session.data;
 
-    // Try to fetch session without throwing error
-    const session = await sessionController.fetchSessionIfExists();
-
-    if (session) {
         return {
-            authenticated: true,
-            userId: session.data.userId,
-            username: session.data.username,
+            userId: sessionData.userId,
+            username: sessionData.username,
+            role: sessionData.role,
         };
-    } else {
+    }),
+    // Example: Sensitive operation that replaces every session of the user
+    changePassword: defineApi({
+        input: z.object({ oldPassword: z.string(), newPassword: z.string() }),
+        output: z.object({ csrfToken: z.string() }),
+        guards: "sessionOnly",
+    }, async (ctx) => {
+        const { oldPassword, newPassword } = ctx.apiPayload;
+        const { sessionController } = ctx;
+        const { userId, username, role } = ctx.session.data;
+
+        // Validate old password
+        const isValid = await validatePassword(userId, oldPassword);
+        if (!isValid) refuse("The current password is wrong.");
+
+        // Update password
+        await updatePassword(userId, newPassword);
+
+        // Every session of this user goes, including this one: a password change
+        // is meant to end whatever a stolen token could still do. endSessionAll
+        // deletes every record under the subject, so the replacement has to be
+        // created AFTER it rather than before, or it would be deleted too and
+        // this answer would hand back the CSRF token of a session that no longer
+        // exists. The clearing Set-Cookie headers are emitted before the new
+        // pair, so the browser ends up holding the new session.
+        await sessionController.endSessionAll();
+        const renewed = await sessionController.issueSession(userId, { userId, username, role });
+
+        return { csrfToken: renewed.csrfToken }; // Send new CSRF token
+    }),
+    // Example: Update session data
+    updatePreferences: defineApi({
+        input: z.object({ theme: z.string(), language: z.string() }),
+        output: z.object({ success: z.boolean(), message: z.string() }),
+        guards: "sessionOnly",
+    }, async (ctx) => {
+        const { theme, language } = ctx.apiPayload;
+        const { sessionController } = ctx;
+
+        // Update session data. The expiry is left alone: sliding expiration
+        // moves it on a session read, which also re-issues the cookies.
+        await sessionController.updateSessionData({
+            ...ctx.session.data,
+            preferences: { theme, language },
+        });
+
         return {
-            authenticated: false,
+            success: true,
+            message: "Preferences updated",
         };
-    }
-})
-// Example: Route with session, rendering a form that posts back
-.addSessionRoute("/dashboard", async (ctx, resolver) => {
-    // Session is automatically fetched and validated
-    const userData = ctx.session.data;
+    }),
+    // Example: Logout
+    logout: defineApi({
+        input: z.void(),
+        output: z.object({ success: z.boolean(), message: z.string() }),
+        guards: "sessionOnly",
+    }, async (ctx) => {
+        const { sessionController } = ctx;
 
-    // Type-safe templating: interpolations are auto-escaped.
-    // The session record stores only the CSRF token's hash, so a
-    // server-rendered form reads the raw token from the cookie the browser
-    // sent it in. That cookie is deliberately not HttpOnly, for exactly this.
-    const csrfToken = ctx.cookie[CSRF_COOKIE_NAME] ?? "";
-    return resolver.html(html`
-        <h1>Welcome, ${userData.username}</h1>
-        <form method="post" action="/dashboard/display-name">
-            <input type="hidden" name="csrf" value="${csrfToken}" />
-            <input name="displayName" value="${userData.username}" />
-            <button type="submit">Save</button>
-        </form>
-    `);
-})
-// Example: the POST the form above makes, and the check it needs
-.addSessionRoute("/dashboard/display-name", async (ctx, resolver) => {
-    // A session ROUTE gets no CSRF check from the framework: the controller
-    // is handed csrfToken: null for anything that is not an API call, so this
-    // handler runs on the session cookie alone. SameSite=Lax is then the only
-    // thing in front of it, and sameSite: "None" would remove that too, so a
-    // route that changes state asks for itself. isSessionCsrfTokenValid is
-    // the same check an API call gets: the posted value against the hash on
-    // the record, not against the cookie beside it.
-    const posted = typeof ctx.post.csrf === "string" ? ctx.post.csrf : null;
-    if (!await lambderApp.getSessionManager().isSessionCsrfTokenValid(ctx.session, posted)) {
-        return resolver.status(403, "This form is stale. Reload the page and try again.");
-    }
+        // End current session
+        await sessionController.endSession();
 
-    const displayName = typeof ctx.post.displayName === "string" ? ctx.post.displayName : ctx.session.data.username;
-    await ctx.sessionController.updateSessionData({ ...ctx.session.data, username: displayName });
+        return {
+            success: true,
+            message: "Logged out successfully",
+        };
+    }),
+    // Example: Logout from all devices
+    logoutAll: defineApi({
+        input: z.void(),
+        output: z.object({ success: z.boolean(), message: z.string() }),
+        guards: "sessionOnly",
+    }, async (ctx) => {
+        const { sessionController } = ctx;
 
-    return resolver.redirect("/dashboard");
-})
-// Example: Route with optional session
-.addRoute("/", async (ctx, resolver) => {
-    const { sessionController } = ctx;
-    const session = await sessionController.fetchSessionIfExists();
+        // End all sessions for this user (same sessionKey)
+        await sessionController.endSessionAll();
 
-    return resolver.html(html`
-        <h1>Home</h1>
-        ${session
-            ? html`<p>Logged in as ${session.data.username}</p>`
-            : html`<p><a href="/login">Log in</a></p>`}
-    `);
+        return {
+            success: true,
+            message: "Logged out from all devices",
+        };
+    }),
+    // Example: Optional session (check if logged in)
+    checkAuth: defineApi({
+        input: z.object({}),
+        output: z.object({
+            authenticated: z.boolean(),
+            userId: z.string().optional(),
+            username: z.string().optional(),
+        }),
+        guards: { open: "reports whether the caller's own cookie names a live session, and nothing else" },
+    }, async (ctx) => {
+        const { sessionController } = ctx;
+
+        // Try to fetch session without throwing error
+        const session = await sessionController.fetchSessionIfExists();
+
+        if (session) {
+            return {
+                authenticated: true,
+                userId: session.data.userId,
+                username: session.data.username,
+            };
+        } else {
+            return {
+                authenticated: false,
+            };
+        }
+    }),
 });
+
+// Every group registered in one call; the routes go on the instance it returns.
+const lambder = lambderApp.registerApiGroups(userApis)
+    // Example: Route with session, rendering a form that posts back
+    .addSessionRoute("/dashboard", async (ctx, resolver) => {
+        // Session is automatically fetched and validated
+        const userData = ctx.session.data;
+
+        // Type-safe templating: interpolations are auto-escaped.
+        // The session record stores only the CSRF token's hash, so a
+        // server-rendered form reads the raw token from the cookie the browser
+        // sent it in. That cookie is deliberately not HttpOnly, for exactly this.
+        const csrfToken = ctx.cookie[CSRF_COOKIE_NAME] ?? "";
+        return resolver.html(html`
+            <h1>Welcome, ${userData.username}</h1>
+            <form method="post" action="/dashboard/display-name">
+                <input type="hidden" name="csrf" value="${csrfToken}" />
+                <input name="displayName" value="${userData.username}" />
+                <button type="submit">Save</button>
+            </form>
+        `);
+    })
+    // Example: the POST the form above makes, and the check it needs
+    .addSessionRoute("/dashboard/display-name", async (ctx, resolver) => {
+        // A session ROUTE gets no CSRF check from the framework: the controller
+        // is handed csrfToken: null for anything that is not an API call, so this
+        // handler runs on the session cookie alone. SameSite=Lax is then the only
+        // thing in front of it, and sameSite: "None" would remove that too, so a
+        // route that changes state asks for itself. isSessionCsrfTokenValid is
+        // the same check an API call gets: the posted value against the hash on
+        // the record, not against the cookie beside it.
+        const posted = typeof ctx.post.csrf === "string" ? ctx.post.csrf : null;
+        if (!await lambderApp.getSessionManager().isSessionCsrfTokenValid(ctx.session, posted)) {
+            return resolver.status(403, "This form is stale. Reload the page and try again.");
+        }
+
+        const displayName = typeof ctx.post.displayName === "string" ? ctx.post.displayName : ctx.session.data.username;
+        await ctx.sessionController.updateSessionData({ ...ctx.session.data, username: displayName });
+
+        return resolver.redirect("/dashboard");
+    })
+    // Example: Route with optional session
+    .addRoute("/", async (ctx, resolver) => {
+        const { sessionController } = ctx;
+        const session = await sessionController.fetchSessionIfExists();
+
+        return resolver.html(html`
+            <h1>Home</h1>
+            ${session
+                ? html`<p>Logged in as ${session.data.username}</p>`
+                : html`<p><a href="/login">Log in</a></p>`}
+        `);
+    });
 
 // Dummy functions (implement these)
 async function authenticateUser(username: string, password: string) {

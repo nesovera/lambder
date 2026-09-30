@@ -2,7 +2,8 @@ import type { LambderApiOptionEntries } from "../shared/wire/LambderApiOptionEnt
 import { type LambderModuleLocation } from "./moduleLocation.js";
 /** What the generators read the options from: a Lambder instance, or anything else that reports them the same way. */
 export type LambderApiOptionsSource = {
-    apiOptionEntries(): LambderApiOptionEntries;
+    /** Asynchronous, since a Lambder instance loads its lazy groups before it can report every endpoint. */
+    apiOptionEntries(): Promise<LambderApiOptionEntries> | LambderApiOptionEntries;
 };
 /** Which names of one table moved: entries that changed, entries the file did not have, entries the file had and the instance no longer reports. */
 export type LambderNameChanges = {

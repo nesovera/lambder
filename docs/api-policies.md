@@ -21,7 +21,7 @@ const lambder = initLambder<SessionData>().create({
 ```
 version floor → signature gate → payload restore
   → rate limits keyed on the request alone (per: "ip")
-  → session (session APIs)
+  → session (endpoints whose guards need one)
   → idempotency replay lookup
   → rate limits keyed per session (per: "session"), and custom keys
     charged before the guards (chargeAt: "beforeGuards")
@@ -100,7 +100,7 @@ rateLimits: {
     ipv6PrefixLength: 64,
     policies: {
         authPerIp:    { perMin: 5, perHour: 30, per: "ip" },
-        writePerUser: { perMin: 30, per: "session" },   // only referable from addSessionApi (enforced at compile time)
+        writePerUser: { perMin: 30, per: "session" },   // only referable from an endpoint whose guards need a session (enforced at compile time)
         codePerEmail: {
             perMin: 3,
             // ONE combined budget across every API referencing this policy:
@@ -122,7 +122,7 @@ rateLimits: {
 | Policy field | Values | Meaning |
 | --- | --- | --- |
 | Window caps | `perMin`, `per10Min`, `perHour`, `perDay`, `perWeek`, `perMonth` | Fixed-window limits; an absent or zero window is not enforced |
-| `per` | `"ip"`, `"session"`, `lambderRateLimitKey({...})`, or left out | What one counter tracks. `"session"` is only referable from `addSessionApi`. Left out, the handler that charges the policy supplies the key (see [Charging a policy from code](#charging-a-policy-from-code)), and no API can declare it |
+| `per` | `"ip"`, `"session"`, `lambderRateLimitKey({...})`, or left out | What one counter tracks. `"session"` is only referable from an endpoint one of whose guards needs a session. Left out, the handler that charges the policy supplies the key (see [Charging a policy from code](#charging-a-policy-from-code)), and no API can declare it |
 | `budget` | `"perApi"` (default), `"perPolicy"` | Whether each referencing API gets its own counter or they share one |
 | `chargeAt` | `"afterGuards"` (default), `"beforeGuards"` | For a custom-keyed policy only: charged after the guards and the input schema passed, or before them, so an attempt they refuse is counted too (a limit on guessing a code a guard checks) |
 | `refusal` | `LambderRateLimitMessage` | The refusal's words: its type, title and content. Its code is always `lambder/rate-limited` and it carries no data, so no endpoint has to declare a rate limit as one of its refusals; a code or data here is a compile error and a creation error |
@@ -178,7 +178,7 @@ policies: {
     pairPerIp: { perMin: 5, per: "ip" },
 },
 
-lambder.addSessionApi("org.invite", { input, output, guards }, async (ctx) => {
+const invite = lambder.defineApi({ input, output, guards: "orgAdmin" }, async (ctx) => {
     // ...the refusals that mean nothing goes out come first; then:
     await ctx.rateLimit("invitesPerRecipient", `${orgId}:${email.toLowerCase()}`);
     await sendInvitation(orgId, email);
@@ -186,7 +186,7 @@ lambder.addSessionApi("org.invite", { input, output, guards }, async (ctx) => {
 });
 
 // A handler whose output has its own way of saying "too many" asks instead:
-lambder.addApi("device.pair", { input, output }, async (ctx) => {
+const pair = lambder.defineApi({ input, output, guards: "anyone" }, async (ctx) => {
     const limited = await ctx.isRateLimited("pairPerIp");
     if (limited) return { error: "too-many-attempts", retryAfterSeconds: limited.retryAfterSeconds };
     // ...
@@ -285,7 +285,14 @@ See [Configuration](./configuration.md#an-app-made-of-parts).
 
 A guard's handler is `(ctx, input, param)`: the render context (session-typed
 when `session: true`), its validated input slice or `undefined`, and the
-per-API parameter. The context carries `ctx.sessionController` like a handler's, so a
+per-API parameter.
+
+A guard declared `session: true` needs a session, and that is also what
+makes an endpoint a session endpoint: an endpoint declaring one is read with
+its session first, answered `sessionExpired` without one, and its handler's
+`ctx.session` is typed present. An endpoint none of whose guards needs a
+session is public. The guard is the one place an endpoint says who may call
+it, so nothing else states its mode. The context carries `ctx.sessionController` like a handler's, so a
 guard that has to rotate or expire a session reaches it without holding the
 instance.
 
@@ -404,68 +411,55 @@ declaration, which is exactly the ambiguity the option exists to remove.
 
 ## Requiring an authorization declaration
 
-By default a session API may declare no guards, which reads as "any signed-in
-user". Once an app has an authorization vocabulary, that silence is where
+By default an endpoint may declare no guards, which reads as "anyone may
+call". Once an app has an authorization vocabulary, that silence is where
 defects hide: the guard exists, a new endpoint forgets it, and nothing notices.
 
-### `requireSessionApiGuards`
+### `requireApiGuards`
 
-With `requireSessionApiGuards: true` at creation, `guards` becomes a required
-field of every `addSessionApi`: omitting it is a compile error at the
-registration site ("Property 'guards' is missing"), and a plain-JS registration
-throws. Public APIs are unaffected.
+With `requireApiGuards: true` at creation, `guards` becomes a required field
+of every `defineApi`: omitting it is a compile error at the declaration
+("Property 'guards' is missing"), and a plain-JS registration throws.
 
-An API that legitimately needs no authorization beyond the session (the
-signed-in user's own account, a log-out) declares a named no-op session guard,
-so the opt-out is explicit, greppable, and cannot be used on a public API:
+An endpoint that legitimately needs no authorization then says so with a
+named no-op guard, so every opt-out is explicit and greppable: one whose
+session is the whole authorization (the signed-in user's own account, a
+log-out) declares a no-op session guard, which also makes it a session
+endpoint; one anybody may call declares a no-op guard carrying the reason.
+Not every endpoint has a control that can be hoisted into a guard (an
+endpoint that checks a password IS the check), so the vocabulary is usually
+real guards for genuine preconditions plus named no-op guards for the rest.
 
 ```typescript
 const lambder = initLambder<SessionData>().create({
     apiPath: "/api",
+    session,
     guards: {
         orgPermission: lambderGuard({ session: true, handler: (ctx, _p, permission: PermissionString) => requireOrRefuse(ctx.session, permission) }),
-        // The one opt-out: the session itself is the whole authorization.
+        // The session itself is the whole authorization.
         sessionOnly: lambderGuard({ session: true, handler: () => {} }),
-    },
-    requireSessionApiGuards: true,
-});
-
-lambder.addSessionApi("secure.order.create", { input, output, guards: { orgPermission: "ORDERS.CREATE" } }, handler);
-lambder.addSessionApi("secure.me.logOut", { input, output, guards: "sessionOnly" }, handler);
-lambder.addSessionApi("secure.report.list", { input, output }, handler);              // compile error: which guard?
-lambder.addSessionApi("secure.report.list", { input, output, guards: {} }, handler);  // compile error: {} declares no guard
-```
-
-### `requirePublicApiGuards`
-
-Public APIs are open by default, and that remains the default. An app whose
-public surface has grown past a handful of endpoints can turn
-`requirePublicApiGuards: true` on to make each one's openness a written
-decision instead of an omission.
-
-Not every public endpoint has a control that can be hoisted into a guard (an
-endpoint that checks a password IS the check), so the vocabulary an app
-declares here is usually a real guard for what is a genuine precondition, plus
-named no-op guards for the rest. The two flags are independent; either or both
-may be on.
-
-```typescript
-const lambder = initLambder<SessionData>().create({
-    apiPath: "/api",
-    guards: {
         deviceToken: lambderGuard({ apiInput: z.object({ deviceToken: z.string().min(20) }), handler: (_c, { deviceToken }) => requireDevice(deviceToken) }),
         // Anyone may call, and the param records why: `grep "open:"` lists every public door.
         open: lambderGuard({ handler: (_c, _p, _reason: string) => {} }),
         // This endpoint establishes identity; the proof is the handler's own work.
         credentialFlow: lambderGuard({ handler: () => {} }),
     },
-    requirePublicApiGuards: true,
+    requireApiGuards: true,
 });
 
-lambder.addApi("public.device.report", { input, output, guards: "deviceToken" }, handler);
-lambder.addApi("public.translations", { input, output, guards: { open: "Static strings already in the bundle." } }, handler);
-lambder.addApi("public.login", { input, output, guards: "credentialFlow" }, handler);
-lambder.addApi("public.search", { input, output }, handler);   // compile error: open to anyone, or authorized how?
+const orders = lambder.defineApiGroup("orders", {
+    create: lambder.defineApi({ input, output, guards: { orgPermission: "ORDERS.CREATE" } }, handler),   // a session endpoint
+    report: lambder.defineApi({ input, output }, handler),              // compile error: which guard?
+    list: lambder.defineApi({ input, output, guards: {} }, handler),    // compile error: {} declares no guard
+});
+const account = lambder.defineApiGroup("account", {
+    logOut: lambder.defineApi({ input, output, guards: "sessionOnly" }, handler),                        // a session endpoint
+    login: lambder.defineApi({ input, output, guards: "credentialFlow" }, handler),                      // public
+});
+const device = lambder.defineApiGroup("device", {
+    report: lambder.defineApi({ input, output, guards: "deviceToken" }, handler),
+    translations: lambder.defineApi({ input, output, guards: { open: "Static strings already in the bundle." } }, handler),
+});
 ```
 
 ## Idempotency
@@ -503,7 +497,7 @@ idempotency exists to prevent. Raise it past your own function timeout, at
 creation or per API:
 
 ```typescript
-lambder.addApi("orders.place", { input, output, idempotency: { pendingTtlSeconds: 900 } }, handler);
+const place = lambder.defineApi({ input, output, guards: "signedIn", idempotency: { pendingTtlSeconds: 900 } }, handler);
 ```
 
 ### Semantics
@@ -513,9 +507,9 @@ The client sends an `idempotencyKey` per call (see
 operation with `createIdempotencyKey()` and reuse it on retries.
 
 - **Keys must be 16-200 characters and UNGUESSABLE random**; shorter keys
-  refuse with 400. On session APIs the scope is the user (the session's
+  refuse with 400. On session endpoints the scope is the user (the session's
   `sessionKey`, which every session of one user shares) + API name + key; on
-  public APIs it is the key itself + API name (plus `callerIdentity` when the
+  public endpoints it is the key itself + API name (plus `callerIdentity` when the
   app supplies one, see below), deliberately NOT the client IP, because the
   retry idempotency exists for (a timeout followed by a network switch)
   frequently arrives from a new IP. Every field is escaped before it is
@@ -644,7 +638,7 @@ these throw before a request is ever served:
 
 | Declaration | Why it throws |
 | --- | --- |
-| `guards: {}`, `guards: []` | Declaring the option is declaring a guard. The empty forms satisfied a `require*ApiGuards` check while running nothing. |
+| `guards: {}`, `guards: []` | Declaring the option is declaring a guard. The empty forms would satisfy `requireApiGuards` while running nothing. |
 | `guards: {}` or `rateLimits: { policies: {} }` at creation | An option declared with nothing in it configures nothing, and every API that names a guard or a policy would then be told the option was never given. |
 | `rateLimit: {}`, `rateLimit: []`, `rateLimit: { policy: undefined }` | Same rule for limits: the API announced one and enforced none. All three are compile errors too, built from the same non-empty construction the guards option uses. |
 | A policy with no window | A limiter needs something to count against. |
@@ -654,33 +648,43 @@ these throw before a request is ever served:
 | A guard whose handler returns a `LambderResponse`, on any branch | A guard authorizes, it does not answer. The returned value would land on `ctx.guardData` and the call would carry on. The builder rejects it at build time, a conditional `LambderResponse | undefined` included, and the engine throws if a cast smuggles one through. |
 | A guard built for the other adapter | The handler's context is part of a guard's type, so a server guard in the mock's map (or the reverse) is a compile error rather than a handler reading `ctx.ip` as undefined. |
 | An API referencing an unknown guard or policy | Names are resolved at registration, not per request. |
-| A `session`-keyed policy or a `session: true` guard on `addApi` | Neither has a session to read. |
+| A `session`-keyed policy on an endpoint none of whose guards needs a session | A public call has no session to count against. |
+| A guard that needs a session on an instance created without the `session` option | There is no session to read. |
 
-A registration that throws does not consume the API name, so catching one and
-fixing the declaration reports the real problem rather than a duplicate name.
+Each of these throws where the endpoint is registered (`registerApiGroups`,
+or the first call to a lazy group, which a boot check forces with
+`loadApiGroups()`). A registration that throws does not consume the API
+name, so catching one and fixing the declaration reports the real problem
+rather than a duplicate name.
 
 ## A complete example
 
 ```typescript
-lambder.addApi("public.resetPassword", {
-    // captchaToken is NOT declared here: it travels in the separate
-    // guardInputs channel, so the guard validates and consumes it and the
-    // handler never sees it. `email` IS declared: the codePerEmail key runs
-    // in apiInput mode against the API's own payload.
-    input: z.object({ email: z.email() }),
-    output: z.object({ ok: z.boolean() }),
-    rateLimit: ["authPerIp", "codePerEmail"],
-    guards: "captcha",
-}, handler);
+export const accountApis = lambder.defineApiGroup("account", {
+    resetPassword: lambder.defineApi({
+        // captchaToken is NOT declared here: it travels in the separate
+        // guardInputs channel, so the guard validates and consumes it and the
+        // handler never sees it. `email` IS declared: the codePerEmail key runs
+        // in apiInput mode against the API's own payload.
+        input: z.object({ email: z.email() }),
+        output: z.object({ ok: z.boolean() }),
+        rateLimit: ["authPerIp", "codePerEmail"],
+        guards: "captcha",
+    }, handler),
+});
 
-lambder.addSessionApi("secure.order.create", {
-    input: OrderSchema,
-    output: OrderResultSchema,
-    rateLimit: { writePerUser: { perMin: 10 } },
-    guards: { orgPermission: "ORDERS.CREATE" },
-    idempotency: true,   // or { ttlSeconds: 3600 }
-}, async (ctx) => {
-    const { organizationId } = ctx.guardData.orgPermission;   // typed guard output
-    // ...
+export const orderApis = lambder.defineApiGroup("orders", {
+    // orgPermission needs a session, so this is a session endpoint, and the
+    // per-session writePerUser limit may apply to it.
+    create: lambder.defineApi({
+        input: OrderSchema,
+        output: OrderResultSchema,
+        rateLimit: { writePerUser: { perMin: 10 } },
+        guards: { orgPermission: "ORDERS.CREATE" },
+        idempotency: true,   // or { ttlSeconds: 3600 }
+    }, async (ctx) => {
+        const { organizationId } = ctx.guardData.orgPermission;   // typed guard output
+        // ...
+    }),
 });
 ```

@@ -7,9 +7,10 @@ import type { LambderUploadFileFacts, LambderUploadTicket } from "../contracts/L
  * posts to the ticket endpoint, and the ticket it answers.
  *
  * ```ts
- * .addSessionApi("documents.requestUpload", {
+ * requestUpload: defineApi({
  *     input: z.object({ folderId: z.uuid(), fileFacts: LambderUploadFileFactsSchema }),
  *     output: z.object({ ticket: LambderUploadTicketSchema, documentId: z.uuid() }),
+ *     guards: "signedIn",
  * }, ...)
  * ```
  *

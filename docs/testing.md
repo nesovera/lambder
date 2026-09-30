@@ -23,9 +23,9 @@ it("lets only an admin rename the organization", async () => {
     const member = await app.signIn("user:bob", { userId: "bob", role: "member" });
     const guest = app.visitor();
 
-    expect(await admin.api("org.rename", { name: "Acme" })).toEqual({ ok: true });
-    assertApiFailure(await member.apiOutcome("org.rename", { name: "Nope" }), "notAuthorized");
-    assertApiFailure(await guest.apiOutcome("org.rename", { name: "Nope" }), "sessionExpired");
+    expect(await admin.org.rename({ name: "Acme" })).toEqual({ ok: true });
+    assertApiFailure(await member.org.rename.outcome({ name: "Nope" }), "notAuthorized");
+    assertApiFailure(await guest.org.rename.outcome({ name: "Nope" }), "sessionExpired");
 });
 ```
 
@@ -108,9 +108,9 @@ are cheap and independent.
 ```typescript
 const visitor = app.visitor({ headers: { "cf-ipcountry": "US" } });
 
-// API calls: a typed LambderCaller's api / apiOutcome, over the real handler
-const created = await visitor.api("order.create", { sku: "kettle" }, { idempotencyKey });
-const outcome = await visitor.apiOutcome("order.create", { sku: "" });
+// API calls: by group, as on a typed LambderCaller, over the real handler
+const created = await visitor.order.create({ sku: "kettle" }, { idempotencyKey });
+const outcome = await visitor.order.create.outcome({ sku: "" });
 
 // Everything else a browser sends
 const page = await visitor.request("GET", "/orders?page=2");
@@ -120,7 +120,8 @@ expect(page.text()).toContain("kettle");
 
 | Member | |
 | --- | --- |
-| `api(name, payload, options?)` | The endpoint's output on success, `undefined` on every failure. `LambderCaller.api`, typed by your contract |
+| `<group>.<action>(payload, options?)`, `<group>.<action>.outcome(payload, options?)` | Every endpoint of your contract by its group, as on a `LambderCaller`: `visitor.order.create(input)` is `api`, and its `.outcome` is `apiOutcome` |
+| `api(name, payload, options?)` | The endpoint's output on success, `undefined` on every failure. `LambderCaller.api`, typed by your contract, for a test that holds the name as a value |
 | `apiOutcome(name, payload, options?)` | The full outcome, never throwing. Pair it with the [assertions](#asserting-on-outcomes) |
 | `request(method, path, init?)` | One HTTP request that is not an API call: a route, a session route, a public file, the index page, a fallback. `init` is `{ query, headers, body }`. The answer comes back decoded (decompressed, header names lowercased) as `{ statusCode, headers, cookies, body, text(), json() }`. Redirects are not followed |
 | `signIn(sessionKey, data, options?)` | Signs this visitor in; returns the created session and its raw tokens, as `LambderMockApp.signIn` does |
@@ -166,19 +167,19 @@ say what it was:
 ```typescript
 import { assertApiSuccess, assertApiFailure, assertApiRefusal, LAMBDER_REFUSAL_CODES } from "lambder/testing";
 
-const outcome = await visitor.apiOutcome("order.create", { sku: "kettle" });
+const outcome = await visitor.order.create.outcome({ sku: "kettle" });
 assertApiSuccess(outcome);
 expect(outcome.payload.orderNumber).toBe(1);            // narrowed to the success arm: the output, exactly
 
-const invalid = await visitor.apiOutcome("order.create", { sku: "" });
+const invalid = await visitor.order.create.outcome({ sku: "" });
 assertApiFailure(invalid, "validation");
 expect(invalid.zodError.issues[0]?.path).toEqual(["sku"]);   // narrowed to the arm that carries zodError
 
-const short = await visitor.apiOutcome("order.pay", { orderId, amount: 250 });
+const short = await visitor.order.pay.outcome({ orderId, amount: 250 });
 assertApiRefusal(short, "wallet-short");                // one of the endpoint's declared codes
 expect(short.refusal.data.available).toBe(100);    // that code's data, typed
 
-assertApiFailure(await visitor.apiOutcome("signup", form), "refusal", { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
+assertApiFailure(await visitor.account.signUp.outcome(form), "refusal", { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
 ```
 
 ```
@@ -213,11 +214,11 @@ author needs the error and the line it came from. So the test app watches what
 the instance throws, without changing what it answers:
 
 - **On the outcome.** A crashed call's outcome is the `server` failure any
-  client would get, and through `visitor.apiOutcome` its `error.cause` is the
-  error the app threw, stack included. The assertions name it in their
-  message, and chain the failure's error as their own `cause`, so a runner
-  that prints cause chains (vitest, jest and `node:test` all do) shows the
-  handler's stack under the failed assertion:
+  client would get, and through a visitor's `.outcome()` (or its `apiOutcome`)
+  its `error.cause` is the error the app threw, stack included. The
+  assertions name it in their message, and chain the failure's error as their
+  own `cause`, so a runner that prints cause chains (vitest, jest and
+  `node:test` all do) shows the handler's stack under the failed assertion:
 
   ```
   Error: Expected the call to succeed, but it was a failure with reason "server", status 500,
@@ -262,7 +263,7 @@ mock.timers.enable({ apis: ["Date"] });                  // node:test
 
 const visitor = await app.signIn("user:ada", data, { ttlSeconds: 60 });
 vi.setSystemTime(Date.now() + 61_000);
-assertApiFailure(await visitor.apiOutcome("me", {}), "sessionExpired");
+assertApiFailure(await visitor.account.me.outcome({}), "sessionExpired");
 ```
 
 That moves the framework, the memory stores and your own handlers together,

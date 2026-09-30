@@ -1,4 +1,5 @@
 import LambderCaller from "../client/LambderCaller.js";
+import { withApiGroupCalls } from "../shared/wire/LambderApiGroupCalls.js";
 import { lambderHandlerTransport } from "../invoke/lambderHandlerTransport.js";
 import { decodeLambdaHttpResult, localLambdaContext, synthesizeLambdaHttpEvent, } from "../invoke/LambderLambdaEvent.js";
 import { LambderCookieJar } from "../shared/transport/LambderCookieJar.js";
@@ -15,7 +16,7 @@ import { DEFAULT_MAX_RESTORED_PAYLOAD_BYTES } from "../shared/wire/LambderReques
  *
  * Created by `LambderTestApp.visitor()` and `signIn()`, not constructed.
  */
-export class LambderTestVisitor {
+class LambderTestVisitorCore {
     host;
     clientIp;
     /**
@@ -37,19 +38,19 @@ export class LambderTestVisitor {
      * included, so a failing test points at the line in the handler.
      */
     apiOutcome;
-    wiring;
-    headers;
-    cookieJar;
-    seenResetCount;
+    #wiring;
+    #headers;
+    #cookieJar;
+    #seenResetCount;
     constructor(wiring, options) {
-        this.wiring = wiring;
+        this.#wiring = wiring;
         this.host = options.host;
         this.clientIp = options.clientIp;
-        this.headers = options.headers ?? {};
-        this.cookieJar = new LambderCookieJar({ host: this.host });
-        this.seenResetCount = wiring.resetCount();
+        this.#headers = options.headers ?? {};
+        this.#cookieJar = new LambderCookieJar({ host: this.host });
+        this.#seenResetCount = wiring.resetCount();
         const handlerTransport = lambderHandlerTransport(wiring.handler, { host: this.host, clientIp: this.clientIp, eventFormat: wiring.eventFormat });
-        const withVisitorHeaders = (request) => handlerTransport({ ...request, headers: { ...this.headers, ...request.headers } });
+        const withVisitorHeaders = (request) => handlerTransport({ ...request, headers: { ...this.#headers, ...request.headers } });
         this.caller = new LambderCaller({
             apiPath: wiring.apiPath,
             apiVersion: options.apiVersion,
@@ -69,13 +70,19 @@ export class LambderTestVisitor {
         if (wiring.sessionCookieNames) {
             this.caller.setSessionCookieKey(wiring.sessionCookieNames.tokenCookieKey, wiring.sessionCookieNames.csrfCookieKey);
         }
-        this.api = this.caller.api.bind(this.caller);
-        this.apiOutcome = (async (...callArgs) => {
-            const { result: outcome, crash } = await wiring.watchCrash(() => this.caller.apiOutcome(...callArgs));
+        const caller = this.caller;
+        const apiOutcome = async (apiName, ...callArgs) => {
+            const { result: outcome, crash } = await wiring.watchCrash(() => caller.apiOutcome(apiName, ...callArgs));
             if (crash && !outcome.ok && "error" in outcome && outcome.error.cause === undefined)
                 outcome.error.cause = crash;
             return outcome;
-        });
+        };
+        this.api = ((apiName, ...callArgs) => caller.api(apiName, ...callArgs));
+        this.apiOutcome = apiOutcome;
+        // Each group of the contract, as on a caller, through this visitor's
+        // own two calls: visitor.orders.place.outcome(input) carries the crash
+        // cause as visitor.apiOutcome does.
+        return withApiGroupCalls(this, (apiName, args) => caller.api(apiName, ...args), (apiName, args) => apiOutcome(apiName, ...args));
     }
     /**
      * This visitor's cookies, to inspect or clear; every call and request
@@ -84,12 +91,12 @@ export class LambderTestVisitor {
      * emptied store would read as signed in until an answer said otherwise.
      */
     get jar() {
-        const resetCount = this.wiring.resetCount();
-        if (resetCount !== this.seenResetCount) {
-            this.cookieJar.clear();
-            this.seenResetCount = resetCount;
+        const resetCount = this.#wiring.resetCount();
+        if (resetCount !== this.#seenResetCount) {
+            this.#cookieJar.clear();
+            this.#seenResetCount = resetCount;
         }
-        return this.cookieJar;
+        return this.#cookieJar;
     }
     /**
      * One HTTP request to the app that is not an API call, answered by
@@ -117,12 +124,12 @@ export class LambderTestVisitor {
             path: pathname,
             query,
             host: this.host,
-            headers: { ...this.headers, ...init.headers },
+            headers: { ...this.#headers, ...init.headers },
             clientIp: this.clientIp,
             cookies: this.jar.cookiePairs(cookieScope),
             body: init.body,
-        }, { invoke: false, eventFormat: this.wiring.eventFormat });
-        const result = await decodeLambdaHttpResult(await this.wiring.handler(event, localLambdaContext("lambder-test")), DEFAULT_MAX_RESTORED_PAYLOAD_BYTES);
+        }, { invoke: false, eventFormat: this.#wiring.eventFormat });
+        const result = await decodeLambdaHttpResult(await this.#wiring.handler(event, localLambdaContext("lambder-test")), DEFAULT_MAX_RESTORED_PAYLOAD_BYTES);
         if (result.cookies.length)
             this.jar.storeSetCookies(result.cookies, cookieScope);
         return result;
@@ -140,11 +147,11 @@ export class LambderTestVisitor {
      * answer sessionExpired with nothing to say why.
      */
     async signIn(sessionKey, data, options = {}) {
-        if (!this.wiring.sessionCookieNames)
+        if (!this.#wiring.sessionCookieNames)
             throw new Error("LambderTestVisitor: signIn() needs an app with sessions. Pass the session option to create().");
-        const { created, setCookies } = await this.wiring.issueSession(this.host, sessionKey, data, options.ttlSeconds);
+        const { created, setCookies } = await this.#wiring.issueSession(this.host, sessionKey, data, options.ttlSeconds);
         this.jar.storeSetCookies(setCookies, { host: this.host });
-        if (this.jar.get(this.wiring.sessionCookieNames.tokenCookieKey, { host: this.host, includeHttpOnly: true }) === undefined) {
+        if (this.jar.get(this.#wiring.sessionCookieNames.tokenCookieKey, { host: this.host, includeHttpOnly: true }) === undefined) {
             throw new Error(`LambderTestVisitor: the session cookie did not stick for host "${this.host}", the way a browser on that host would drop it. ` +
                 "The app most likely scopes its session cookie to a domain this host is not under: " +
                 "give the test app or this visitor a `host` the cookie domain covers.");
@@ -152,3 +159,4 @@ export class LambderTestVisitor {
         return created;
     }
 }
+export const LambderTestVisitor = LambderTestVisitorCore;

@@ -65,7 +65,7 @@ describe('Error Handling - Global Error Handler', () => {
     });
 
     it('should catch errors in API handlers', async () => {
-        const lambder = new Lambder({
+        const app = new Lambder({
             files: testPublicFiles(),
             apiPath: '/api'
         })
@@ -74,16 +74,18 @@ describe('Error Handling - Global Error Handler', () => {
                     return res.apiRefusal({ refusal: err.message });
                 }
                 return res.raw({ statusCode: 500, body: err.message });
-            })
-            .addApi('errorApi', {
+            });
+        const lambder = app.registerApiGroups(app.defineApiGroup('test', {
+            errorApi: app.defineApi({
                 input: z.object({ value: z.string() }),
                 output: z.object({ result: z.string() })
             }, async (ctx) => {
                 throw new Error('API handler error');
-            });
+            }),
+        }));
 
         const handler = lambder.getHandler();
-        const event = createApiEvent({ apiName: 'errorApi', payload: { value: 'test' } });
+        const event = createApiEvent({ apiName: 'test.errorApi', payload: { value: 'test' } });
         const result = await handler(event, createMockContext());
 
         expect(result.statusCode).toBe(200);
@@ -163,7 +165,7 @@ describe('Error Handling - Global Error Handler', () => {
 
 describe('Error Handling - Custom Error Responses', () => {
     it('should return custom error format for APIs', async () => {
-        const lambder = new Lambder({
+        const app = new Lambder({
             files: testPublicFiles(),
             apiPath: '/api'
         })
@@ -172,16 +174,18 @@ describe('Error Handling - Custom Error Responses', () => {
                     return res.apiRefusal({ refusal: { type: 'error', title: 'Failed', content: err.message } }, { statusCode: 500 });
                 }
                 return res.raw({ statusCode: 500, body: err.message });
-            })
-            .addApi('testApi', {
+            });
+        const lambder = app.registerApiGroups(app.defineApiGroup('test', {
+            testApi: app.defineApi({
                 input: z.void(),
                 output: z.object({ success: z.boolean() })
             }, async (ctx) => {
                 throw new Error('Custom error message');
-            });
+            }),
+        }));
 
         const handler = lambder.getHandler();
-        const event = createApiEvent({ apiName: 'testApi' });
+        const event = createApiEvent({ apiName: 'test.testApi' });
         const result = await handler(event, createMockContext());
 
         expect(result.statusCode).toBe(500);
@@ -408,11 +412,12 @@ describe('Error Handling - Default Error Behavior', () => {
 
 describe('Error Handling - Input Validation Errors', () => {
     it('should return 400 for invalid API input', async () => {
-        const lambder = new Lambder({
+        const app = new Lambder({
             files: testPublicFiles(),
             apiPath: '/api'
-        })
-            .addApi('testApi', {
+        });
+        const lambder = app.registerApiGroups(app.defineApiGroup('test', {
+            testApi: app.defineApi({
                 input: z.object({
                     email: z.email(),
                     age: z.number().positive()
@@ -420,10 +425,11 @@ describe('Error Handling - Input Validation Errors', () => {
                 output: z.object({ success: z.boolean() })
             }, async (ctx) => {
                 return { success: true };
-            });
+            }),
+        }));
 
         const handler = lambder.getHandler();
-        const event = createApiEvent({ apiName: 'testApi', payload: { email: 'invalid-email', age: -5 } });
+        const event = createApiEvent({ apiName: 'test.testApi', payload: { email: 'invalid-email', age: -5 } });
         const result = await handler(event, createMockContext());
 
         expect(result.statusCode).toBe(422);
@@ -433,23 +439,25 @@ describe('Error Handling - Input Validation Errors', () => {
     });
 
     it('should allow custom handling of validation errors', async () => {
-        const lambder = new Lambder({
+        const app = new Lambder({
             files: testPublicFiles(),
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
                 // This won't be called for validation errors since they're handled before the handler
                 return res.raw({ statusCode: 500, body: err.message });
-            })
-            .addApi('testApi', {
+            });
+        const lambder = app.registerApiGroups(app.defineApiGroup('test', {
+            testApi: app.defineApi({
                 input: z.object({ value: z.string().min(5) }),
                 output: z.object({ result: z.string() })
             }, async (ctx) => {
                 return { result: 'success' };
-            });
+            }),
+        }));
 
         const handler = lambder.getHandler();
-        const event = createApiEvent({ apiName: 'testApi', payload: { value: 'abc' } }); // Too short
+        const event = createApiEvent({ apiName: 'test.testApi', payload: { value: 'abc' } }); // Too short
         const result = await handler(event, createMockContext());
 
         expect(result.statusCode).toBe(422);
@@ -537,7 +545,7 @@ describe('Error Handling - Complex Error Scenarios', () => {
     it('should distinguish between route errors and API errors', async () => {
         const errorTypes: string[] = [];
 
-        const lambder = new Lambder({
+        const app = new Lambder({
             files: testPublicFiles(),
             apiPath: '/api'
         })
@@ -552,18 +560,20 @@ describe('Error Handling - Complex Error Scenarios', () => {
             })
             .addRoute('/route-error', (ctx, res) => {
                 throw new Error('Route error');
-            })
-            .addApi('errorApi', {
+            });
+        const lambder = app.registerApiGroups(app.defineApiGroup('test', {
+            errorApi: app.defineApi({
                 input: z.void(),
                 output: z.object({ error: z.string() })
             }, async (ctx) => {
                 throw new Error('API error');
-            });
+            }),
+        }));
 
         const handler = lambder.getHandler();
 
         await handler(createMockEvent('/route-error'), createMockContext());
-        await handler(createApiEvent({ apiName: 'errorApi' }), createMockContext());
+        await handler(createApiEvent({ apiName: 'test.errorApi' }), createMockContext());
 
         expect(errorTypes).toEqual(['route', 'api']);
     });
@@ -597,14 +607,15 @@ describe('Error Handling - A session that ended while the request held it', () =
     type SessionData = { userId: string; theme: string };
     const buildApp = (sessionExpiredRouteHandler?: LambderFallbackHandler) => {
         const reported: string[] = [];
-        const lambder = initLambder<SessionData>().create({
+        const app = initLambder<SessionData>().create({
             apiPath: '/api',
             session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
             crashes: { report: (crash) => { reported.push(crash.message); } },
-        })
+        });
+        const lambder = app
             .addHook('beforeRender', async (ctx) => {
                 // A hook that insists on a session for one area of the app.
-                if(ctx.path.startsWith('/members') || ctx.apiName === 'membersOnly') await ctx.sessionController.fetchSession();
+                if(ctx.path.startsWith('/members') || ctx.apiName === 'members.only') await ctx.sessionController.fetchSession();
                 return ctx;
             })
             .addHook('afterRender', async (ctx, res, response) => {
@@ -619,7 +630,9 @@ describe('Error Handling - A session that ended while the request held it', () =
             })
             .addRoute('/members/area', (ctx, res) => res.text('members'))
             .addRoute('/refreshed', (ctx, res) => res.text('refreshed'))
-            .addApi('membersOnly', { input: z.object({}), output: z.object({}) }, async (ctx) => ({}));
+            .registerApiGroups(app.defineApiGroup('members', {
+                only: app.defineApi({ input: z.object({}), output: z.object({}) }, async (ctx) => ({})),
+            }));
         if(sessionExpiredRouteHandler) lambder.setSessionExpiredRouteHandler(sessionExpiredRouteHandler);
         return { app: lambderTestApp(lambder), reported };
     };
@@ -656,7 +669,7 @@ describe('Error Handling - A session that ended while the request held it', () =
     it('answers an API call whose hook found no session with the sessionExpired envelope', async () => {
         const { app, reported } = buildApp();
 
-        assertApiFailure(await app.visitor().apiOutcome('membersOnly', {}), 'sessionExpired');
+        assertApiFailure(await app.visitor().apiOutcome('members.only', {}), 'sessionExpired');
         expect(app.crashes).toEqual([]);
         expect(reported).toEqual([]);
     });
@@ -676,20 +689,27 @@ describe('Error Handling - Session cookies that name more than one live session'
 
     const buildApp = () => {
         const reported: string[] = [];
-        const lambder = initLambder<{ userId: string }>().create({
+        const app = initLambder<{ userId: string }>().create({
             apiPath: '/api',
             session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
             crashes: { report: (crash) => { reported.push(crash.message); } },
-        })
+        });
+        const lambder = app
             .addHook('beforeRender', async (ctx) => {
-                if(ctx.path.startsWith('/members') || ctx.apiName === 'membersOnly') await ctx.sessionController.fetchSession();
+                if(ctx.path.startsWith('/members') || ctx.apiName === 'members.only') await ctx.sessionController.fetchSession();
                 return ctx;
             })
             .addRoute('/me', async (ctx, res) => res.text(`hi ${(await ctx.sessionController.fetchSession()).sessionKey}`))
             .addRoute('/members/area', (ctx, res) => res.text('members'))
-            .addApi('whoAmI', { input: z.object({}), output: z.object({ sessionKey: z.string() }) },
-                async (ctx) => ({ sessionKey: (await ctx.sessionController.fetchSession()).sessionKey }))
-            .addApi('membersOnly', { input: z.object({}), output: z.object({}) }, async (ctx) => ({}));
+            .registerApiGroups(
+                app.defineApiGroup('account', {
+                    whoAmI: app.defineApi({ input: z.object({}), output: z.object({ sessionKey: z.string() }) },
+                        async (ctx) => ({ sessionKey: (await ctx.sessionController.fetchSession()).sessionKey })),
+                }),
+                app.defineApiGroup('members', {
+                    only: app.defineApi({ input: z.object({}), output: z.object({}) }, async (ctx) => ({})),
+                }),
+            );
         return { lambder, reported };
     };
 
@@ -724,7 +744,7 @@ describe('Error Handling - Session cookies that name more than one live session'
         const { lambder, reported } = buildApp();
         const { headers, csrf } = await twoLiveSessions(lambder);
 
-        for(const apiName of ['whoAmI', 'membersOnly']){
+        for(const apiName of ['account.whoAmI', 'members.only']){
             const result = await lambder.render(createApiEvent({ apiName, token: csrf, payload: {} }, { headers }), createMockContext());
             expect(result.statusCode).toBe(200);
             expect(JSON.parse(decodeBody(result))).toMatchObject({ sessionExpired: true });

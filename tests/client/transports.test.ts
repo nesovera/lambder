@@ -23,6 +23,7 @@ import { initLambderMock } from '../../src/mock/LambderMockApp.js';
 import { lambderMockInvokeTransport } from '../../src/mock/lambderMockInvokeTransport.js';
 import { lambderMockMswHandler } from '../../src/mock/lambderMockMswHandler.js';
 import { assertApiFailure } from '../../src/shared/wire/LambderOutcomeAssertions.js';
+import { apiCallPath } from '../../src/shared/wire/LambderApiNames.js';
 
 type SessionData = { userId: string };
 
@@ -37,22 +38,28 @@ const createServer = () => {
         apiVersion: '1',
         apiSignatures: serverSignatures,
         session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
-    })
-        .addApi('echo', { input: z.object({ text: z.string() }), output: z.object({ text: z.string(), ip: z.string(), host: z.string() }) },
-            async (ctx) => ({ text: ctx.apiPayload.text, ip: ctx.ip, host: ctx.host }))
-        .addApi('big', { input: z.object({}), output: z.object({ rows: z.array(z.string()) }) },
-            async (_ctx) => ({ rows: Array.from({ length: 400 }, (_, i) => `row-${i} of the same text`) }))
-        .addApi('login', { input: z.object({ user: z.string() }), output: z.object({ ok: z.boolean() }) },
-            async (ctx) => { await app.getSessionController(ctx).createSession(ctx.apiPayload.user, { userId: ctx.apiPayload.user }); return { ok: true }; })
-        .addSessionApi('me', { input: z.object({}), output: z.object({ userId: z.string() }) },
-            async (ctx) => ({ userId: ctx.session.data.userId }))
-        .addApi('slow', { input: z.object({}), output: z.object({ ok: z.boolean() }) },
-            async (_ctx) => { await new Promise((resolve) => setTimeout(resolve, 300)); slowHandlerFinished = true; return { ok: true }; })
-        .addApi('crash', { input: z.object({}), output: z.any() }, async () => { throw new Error('boom'); });
-    return app;
+        guards: { signedIn: initLambder<SessionData>().guard({ session: true, handler: async () => {} }) },
+    });
+    return app.registerApiGroups(
+        app.defineApiGroup('test', {
+            echo: app.defineApi({ input: z.object({ text: z.string() }), output: z.object({ text: z.string(), ip: z.string(), host: z.string() }) },
+                async (ctx) => ({ text: ctx.apiPayload.text, ip: ctx.ip, host: ctx.host })),
+            big: app.defineApi({ input: z.object({}), output: z.object({ rows: z.array(z.string()) }) },
+                async (_ctx) => ({ rows: Array.from({ length: 400 }, (_, i) => `row-${i} of the same text`) })),
+            slow: app.defineApi({ input: z.object({}), output: z.object({ ok: z.boolean() }) },
+                async (_ctx) => { await new Promise((resolve) => setTimeout(resolve, 300)); slowHandlerFinished = true; return { ok: true }; }),
+            crash: app.defineApi({ input: z.object({}), output: z.any() }, async () => { throw new Error('boom'); }),
+        }),
+        app.defineApiGroup('account', {
+            login: app.defineApi({ input: z.object({ user: z.string() }), output: z.object({ ok: z.boolean() }) },
+                async (ctx) => { await app.getSessionController(ctx).createSession(ctx.apiPayload.user, { userId: ctx.apiPayload.user }); return { ok: true }; }),
+            me: app.defineApi({ input: z.object({}), output: z.object({ userId: z.string() }), guards: 'signedIn' },
+                async (ctx) => ({ userId: ctx.session.data.userId })),
+        }),
+    );
 };
 
-/** Set by the `slow` handler when its 300ms run ends: the timeout test proves the caller answered before that. */
+/** Set by the `test.slow` handler when its 300ms run ends: the timeout test proves the caller answered before that. */
 let slowHandlerFinished = false;
 let server = createServer();
 type Contract = typeof server.ApiContract;
@@ -62,33 +69,33 @@ describe('lambderHandlerTransport', () => {
 
     it('carries a browser-shaped call into a real handler and decodes the answer, compressed or not', async () => {
         const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false, apiVersion: '1', transport: lambderHandlerTransport(server.getHandler(), { host: 'app.test', clientIp: '5.6.7.8' }) });
-        expect(await caller.api('echo', { text: 'hi' })).toEqual({ text: 'hi', ip: '5.6.7.8', host: 'app.test' });
-        const big = await caller.api('big', {});
+        expect(await caller.api('test.echo', { text: 'hi' })).toEqual({ text: 'hi', ip: '5.6.7.8', host: 'app.test' });
+        const big = await caller.api('test.big', {});
         expect(big?.rows.length).toBe(400);
     });
 
     it('a caller built against another shape of the endpoint is answered versionExpired by the real gate', async () => {
-        const stale = { ...await server.apiSignatures(), [await apiNameKeyOf('echo')]: 'an-older-shape' };
+        const stale = { ...await server.apiSignatures(), [await apiNameKeyOf('test.echo')]: 'an-older-shape' };
         const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false, apiVersion: '1', apiSignatures: stale, transport: lambderHandlerTransport(server.getHandler()) });
-        const outcome = await caller.apiOutcome('echo', { text: 'hi' });
+        const outcome = await caller.apiOutcome('test.echo', { text: 'hi' });
         assertApiFailure(outcome, 'versionExpired');
     });
 
     it('a cookie jar keeps a real session across calls, and a fresh jar is a stranger', async () => {
         const jar = new LambderCookieJar();
         const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false, transport: lambderCookieJarTransport(lambderHandlerTransport(server.getHandler()), { jar }) });
-        expect(await caller.api('login', { user: 'ada' })).toEqual({ ok: true });
+        expect(await caller.api('account.login', { user: 'ada' })).toEqual({ ok: true });
         expect(jar.size).toBe(2);
-        expect(await caller.api('me', {})).toEqual({ userId: 'ada' });
+        expect(await caller.api('account.me', {})).toEqual({ userId: 'ada' });
 
         const stranger = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false, transport: lambderCookieJarTransport(lambderHandlerTransport(server.getHandler()), { jar: new LambderCookieJar() }) });
-        const outcome = await stranger.apiOutcome('me', {});
+        const outcome = await stranger.apiOutcome('account.me', {});
         assertApiFailure(outcome, 'sessionExpired');
     });
 
     it('a crash inside the app is its 500 envelope; a handler that throws outright is the error itself', async () => {
         const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false, transport: lambderHandlerTransport(server.getHandler()) });
-        const crash = await caller.apiOutcome('crash', {});
+        const crash = await caller.apiOutcome('test.crash', {});
         assertApiFailure(crash, 'server', { status: 500 });
 
         // A handler that threw answered nothing, so the call fails as a
@@ -96,7 +103,7 @@ describe('lambderHandlerTransport', () => {
         // synthetic 502 (what API Gateway would answer) would hand the caller
         // a status and lose the handler's error.
         const broken = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false, transport: lambderHandlerTransport(async () => { throw new Error('init failed'); }) });
-        const outcome = await broken.apiOutcome('echo', { text: 'x' });
+        const outcome = await broken.apiOutcome('test.echo', { text: 'x' });
         expect(outcome.ok).toBe(false);
         if(!outcome.ok && outcome.reason === 'server'){
             expect(outcome.error.message).toContain('init failed');
@@ -112,7 +119,7 @@ describe('lambderHandlerTransport', () => {
         // "https://api.test/api" matches no route, so a correctly wired app
         // would answer 404 to every call.
         const caller = new LambderCaller<Contract>({ apiPath: 'https://api.test/api', isCorsEnabled: false, apiVersion: '1', transport: lambderHandlerTransport(server.getHandler(), { clientIp: '5.6.7.8' }) });
-        expect(await caller.api('echo', { text: 'hi' })).toEqual({ text: 'hi', ip: '5.6.7.8', host: 'api.test' });
+        expect(await caller.api('test.echo', { text: 'hi' })).toEqual({ text: 'hi', ip: '5.6.7.8', host: 'api.test' });
     });
 
     it('stops waiting when the caller\'s timeout fires, rather than answering long after it', async () => {
@@ -121,7 +128,7 @@ describe('lambderHandlerTransport', () => {
         // would make timeoutMs a no-op, reporting success long after 20ms.
         const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false, timeoutMs: 20, transport: lambderHandlerTransport(server.getHandler()) });
 
-        const outcome = await caller.apiOutcome('slow', {});
+        const outcome = await caller.apiOutcome('test.slow', {});
 
         assertApiFailure(outcome, 'timeout');
         // The caller answered while the handler was still running, which is
@@ -143,7 +150,7 @@ describe('lambderHandlerTransport', () => {
             transport: lambderHandlerTransport((event: any, context: any) => { handlerRan = true; return handler(event, context); }),
         });
 
-        const outcome = await caller.apiOutcome('echo', { text: 'hi' }, { signal: controller.signal });
+        const outcome = await caller.apiOutcome('test.echo', { text: 'hi' }, { signal: controller.signal });
 
         assertApiFailure(outcome, 'network');
         expect(handlerRan).toBe(false);
@@ -161,7 +168,7 @@ describe('lambderHandlerTransport failures', () => {
             transport: lambderHandlerTransport(async () => { throw new Error('the connection pool is empty'); }),
         });
 
-        const outcome = await caller.apiOutcome('echo', { text: 'hi' });
+        const outcome = await caller.apiOutcome('test.echo', { text: 'hi' });
 
         expect(outcome.ok).toBe(false);
         if(!outcome.ok && outcome.reason === 'server'){
@@ -178,7 +185,7 @@ describe('lambderHandlerTransport failures', () => {
             transport: lambderHandlerTransport((async () => ({ notAnHttpResult: true })) as never),
         });
 
-        const outcome = await caller.apiOutcome('echo', { text: 'hi' });
+        const outcome = await caller.apiOutcome('test.echo', { text: 'hi' });
 
         expect(outcome.ok).toBe(false);
         if(!outcome.ok && outcome.reason === 'server'){
@@ -192,7 +199,7 @@ describe('lambderHandlerTransport failures', () => {
 describe('lambderFetchTransport', () => {
     afterEach(() => { vi.unstubAllGlobals(); });
 
-    it('posts the envelope to the api path with the browser fetch options and maps the Response', async () => {
+    it('posts the envelope to the endpoint\'s path under the api path with the browser fetch options and maps the Response', async () => {
         const fetchMock = vi.fn(async () => ({
             status: 201, statusText: 'Created',
             headers: { get: (name: string) => name === 'retry-after' ? '4' : null, getSetCookie: () => ['a=1; Path=/'] },
@@ -202,16 +209,16 @@ describe('lambderFetchTransport', () => {
         vi.stubGlobal('fetch', fetchMock);
         const transport = lambderFetchTransport({ cors: true });
         const signal = new AbortController().signal;
-        const answer = await transport({ apiPath: '/secure', apiName: 'x', version: '1', token: 't', siteHost: 'h', payload: { a: 1 }, guardInputs: { g: 1 }, idempotencyKey: 'k', headers: { 'X-Extra': 'e' }, signal });
+        const answer = await transport({ apiPath: '/secure', apiName: 'orders.place', version: '1', token: 't', siteHost: 'h', payload: { a: 1 }, guardInputs: { g: 1 }, idempotencyKey: 'k', headers: { 'X-Extra': 'e' }, signal });
 
         const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-        expect(url).toBe('/secure');
+        expect(url).toBe('/secure/orders/place');
         expect(init.method).toBe('POST');
         expect(init.mode).toBe('cors');
         expect(init.credentials).toBe('include');
         expect(init.signal).toBe(signal);
         expect(init.headers).toEqual({ 'Content-Type': 'application/json', 'X-Extra': 'e' });
-        expect(JSON.parse(init.body as string)).toEqual({ apiName: 'x', version: '1', token: 't', siteHost: 'h', payload: { a: 1 }, guardInputs: { g: 1 }, idempotencyKey: 'k' });
+        expect(JSON.parse(init.body as string)).toEqual({ version: '1', token: 't', siteHost: 'h', payload: { a: 1 }, guardInputs: { g: 1 }, idempotencyKey: 'k' });
         expect(answer.status).toBe(201);
         expect(answer.header('retry-after')).toBe('4');
         expect(await answer.json()).toEqual({ apiVersion: '1', payload: 1 });
@@ -221,10 +228,10 @@ describe('lambderFetchTransport', () => {
     it('sends the compressed pair in place of the payload, and same-origin credentials without cors', async () => {
         const fetchMock = vi.fn(async () => ({ status: 200, headers: { get: () => null }, json: async () => ({}), text: async () => '{}' }));
         vi.stubGlobal('fetch', fetchMock);
-        await lambderFetchTransport()({ apiPath: '/api', apiName: 'x', token: '', siteHost: '', compressed: { payloadGz: 'zz', payloadBytes: 3 } });
+        await lambderFetchTransport()({ apiPath: '/api', apiName: 'test.ping', token: '', siteHost: '', compressed: { payloadGz: 'zz', payloadBytes: 3 } });
         const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
         expect(init.credentials).toBe('same-origin');
-        expect(JSON.parse(init.body as string)).toEqual({ apiName: 'x', token: '', siteHost: '', payloadGz: 'zz', payloadBytes: 3 });
+        expect(JSON.parse(init.body as string)).toEqual({ token: '', siteHost: '', payloadGz: 'zz', payloadBytes: 3 });
     });
 
     it('sends the request\'s cookies as one Cookie header, so a jar over fetch is not write-only', async () => {
@@ -242,7 +249,7 @@ describe('lambderFetchTransport', () => {
             apiPath: 'https://api.test/api', isCorsEnabled: true,
             transport: lambderCookieJarTransport(lambderFetchTransport({ cors: true }), { jar }),
         });
-        await caller.apiOutcome('echo', { text: 'hi' });
+        await caller.apiOutcome('test.echo', { text: 'hi' });
 
         const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
         expect((init.headers as Record<string, string>).Cookie).toBe('LMDRSESSIONTKID=tok; LMDRSESSIONCSTK=csrf');
@@ -266,9 +273,9 @@ describe('lambderFetchTransport', () => {
             apiPath: 'https://api.test/api', isCorsEnabled: true,
             transport: lambderCookieJarTransport(lambderFetchTransport({ cors: true }), { jar }),
         });
-        await caller.apiOutcome('echo', { text: 'hi' }, { headers: { Cookie: 'planted=1', 'Content-Type': 'text/plain', 'X-Extra': 'kept' } });
+        await caller.apiOutcome('test.echo', { text: 'hi' }, { headers: { Cookie: 'planted=1', 'Content-Type': 'text/plain', 'X-Extra': 'kept' } });
         // Lowercase names too: fetch would merge them into the owned value.
-        await caller.apiOutcome('echo', { text: 'hi' }, { headers: { cookie: 'planted=1', 'content-type': 'text/plain' } });
+        await caller.apiOutcome('test.echo', { text: 'hi' }, { headers: { cookie: 'planted=1', 'content-type': 'text/plain' } });
 
         for(const [, init] of fetchMock.mock.calls as unknown as [string, RequestInit][]){
             const headers = new Headers(init.headers);
@@ -282,7 +289,7 @@ describe('lambderFetchTransport', () => {
     it('sends no Cookie header when the request carries no cookies', async () => {
         const fetchMock = vi.fn(async () => ({ status: 200, headers: { get: () => null }, json: async () => ({}), text: async () => '{}' }));
         vi.stubGlobal('fetch', fetchMock);
-        await lambderFetchTransport()({ apiPath: '/api', apiName: 'x', token: '', siteHost: '', cookies: [] });
+        await lambderFetchTransport()({ apiPath: '/api', apiName: 'test.ping', token: '', siteHost: '', cookies: [] });
         const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
         expect(init.headers).toEqual({ 'Content-Type': 'application/json' });
     });
@@ -292,7 +299,7 @@ describe('lambderFetchTransport', () => {
         const fetchMock = vi.fn(async () => ({ status: 200, headers: { get: () => null }, json: async () => ({}), text: async () => '{}' }));
         vi.stubGlobal('fetch', fetchMock);
         const modeOf = async (apiPath: string, options?: { cors?: boolean }) => {
-            await lambderFetchTransport(options)({ apiPath, apiName: 'x', token: '', siteHost: '' });
+            await lambderFetchTransport(options)({ apiPath, apiName: 'test.ping', token: '', siteHost: '' });
             const [, init] = fetchMock.mock.calls.at(-1) as unknown as [string, RequestInit];
             return { mode: init.mode, credentials: init.credentials };
         };
@@ -322,7 +329,7 @@ describe('The cookie jar as a browser would keep it', () => {
         const caller = new LambderCaller<Contract>({ apiPath: '/api', apiVersion: '1', isCorsEnabled: false, transport: lambderCookieJarTransport(inner, { jar }) });
         caller.setSessionCookieKey('MYTOKEN', 'MYCSRF');
 
-        await caller.apiOutcome('echo', { text: 'hi' });
+        await caller.apiOutcome('test.echo', { text: 'hi' });
 
         expect(seen[0]).toMatchObject({ token: 'token-from-the-jar' });
     });
@@ -335,7 +342,7 @@ describe('lambderFetchTransport outside a browser', () => {
         // reading it goes looking at their connection.
         const caller = new LambderCaller<Contract>({ apiPath: '/api', apiVersion: '1', isCorsEnabled: false });
 
-        const outcome = await caller.apiOutcome('echo', { text: 'hi' });
+        const outcome = await caller.apiOutcome('test.echo', { text: 'hi' });
 
         expect(outcome.ok).toBe(false);
         if(!outcome.ok && outcome.reason === 'server'){
@@ -355,12 +362,12 @@ describe('lambderCookieJarTransport', () => {
             seen.push(request);
             return { status: 200, header: () => null, json: async () => ({}), text: async () => '{}', setCookies: ['extra=1; Path=/'] };
         };
-        await lambderCookieJarTransport(inner, { jar })({ apiPath: '/api', apiName: 'x', token: '', siteHost: '', cookies: ['theme=dark'] });
+        await lambderCookieJarTransport(inner, { jar })({ apiPath: '/api', apiName: 'test.ping', token: '', siteHost: '', cookies: ['theme=dark'] });
         expect(seen[0]).toMatchObject({ token: 'csrf', cookies: ['theme=dark', 'LMDRSESSIONTKID=tok', 'LMDRSESSIONCSTK=csrf'] });
         expect(jar.get('extra')).toBe('1');
 
         // A token the caller read itself wins over the jar's.
-        await lambderCookieJarTransport(inner, { jar })({ apiPath: '/api', apiName: 'x', token: 'own', siteHost: '' });
+        await lambderCookieJarTransport(inner, { jar })({ apiPath: '/api', apiName: 'test.ping', token: 'own', siteHost: '' });
         expect(seen[1]).toMatchObject({ token: 'own' });
     });
 
@@ -376,16 +383,16 @@ describe('lambderCookieJarTransport', () => {
         };
         const transport = lambderCookieJarTransport(inner, { jar });
 
-        await transport({ apiPath: 'https://api.test/v1/api', apiName: 'x', token: '', siteHost: 'app.test' });
+        await transport({ apiPath: 'https://api.test/v1/api', apiName: 'test.ping', token: '', siteHost: 'app.test' });
 
         // Stored against the host the request reached, which is whose cookie
         // it is, rather than the page the caller happens to be served from.
         expect(jar.cookiePairs({ host: 'api.test', path: '/v1/api' })).toEqual(['sid=api-host']);
         expect(jar.cookiePairs({ host: 'app.test', path: '/v1/api' })).toEqual([]);
-        await transport({ apiPath: 'https://api.test/v1/api', apiName: 'x', token: '', siteHost: 'app.test' });
+        await transport({ apiPath: 'https://api.test/v1/api', apiName: 'test.ping', token: '', siteHost: 'app.test' });
         expect(seen[1]?.cookies).toEqual(['sid=api-host']);
         // A call to another host carries nothing of this one's.
-        await transport({ apiPath: 'https://other.test/v1/api', apiName: 'x', token: '', siteHost: 'app.test' });
+        await transport({ apiPath: 'https://other.test/v1/api', apiName: 'test.ping', token: '', siteHost: 'app.test' });
         expect(seen[2]?.cookies).toEqual([]);
     });
 
@@ -394,13 +401,13 @@ describe('lambderCookieJarTransport', () => {
 
         // Nothing but the page the caller is on: that is the last fallback.
         const fromPage = new LambderCookieJar();
-        await lambderCookieJarTransport(inner, { jar: fromPage })({ apiPath: '/api', apiName: 'x', token: '', siteHost: 'page.test' });
+        await lambderCookieJarTransport(inner, { jar: fromPage })({ apiPath: '/api', apiName: 'test.ping', token: '', siteHost: 'page.test' });
         expect(fromPage.cookiePairs({ host: 'page.test' })).toEqual(['sid=1']);
         expect(fromPage.cookiePairs({ host: 'elsewhere.test' })).toEqual([]);
 
         // A relative apiPath names no host, so the option is what scopes it.
         const pinned = new LambderCookieJar();
-        await lambderCookieJarTransport(inner, { jar: pinned, host: 'api.internal' })({ apiPath: '/api', apiName: 'x', token: '', siteHost: 'page.test' });
+        await lambderCookieJarTransport(inner, { jar: pinned, host: 'api.internal' })({ apiPath: '/api', apiName: 'test.ping', token: '', siteHost: 'page.test' });
         expect(pinned.cookiePairs({ host: 'api.internal' })).toEqual(['sid=1']);
         expect(pinned.cookiePairs({ host: 'page.test' })).toEqual([]);
 
@@ -408,7 +415,7 @@ describe('lambderCookieJarTransport', () => {
         // goes, and it outranks the option: the other way round, a transport
         // configured with one host would send that host's session to another.
         const crossOrigin = new LambderCookieJar();
-        await lambderCookieJarTransport(inner, { jar: crossOrigin, host: 'app.example.com' })({ apiPath: 'https://api.other.com/api', apiName: 'x', token: '', siteHost: 'page.test' });
+        await lambderCookieJarTransport(inner, { jar: crossOrigin, host: 'app.example.com' })({ apiPath: 'https://api.other.com/api', apiName: 'test.ping', token: '', siteHost: 'page.test' });
         expect(crossOrigin.cookiePairs({ host: 'api.other.com' })).toEqual(['sid=1']);
         expect(crossOrigin.cookiePairs({ host: 'app.example.com' })).toEqual([]);
     });
@@ -425,19 +432,19 @@ describe('A cookie jar and a stale sessionExpired', () => {
         const pollAnswerHeld = new Promise<void>((resolve) => { releasePollAnswer = resolve; });
         const answerInTransit: LambderApiTransport = async (request) => {
             const answer = await handler(request);
-            if(request.apiName === 'me') await pollAnswerHeld;
+            if(request.apiName === 'account.me') await pollAnswerHeld;
             return answer;
         };
         const sessionExpiredHandler = vi.fn();
         const caller = new LambderCaller<Contract>({ apiPath: '/api', sessionExpiredHandler, transport: lambderCookieJarTransport(answerInTransit, { jar }) });
 
-        const poll = caller.apiOutcome('me', {});
-        await caller.api('login', { user: 'ada' });
+        const poll = caller.apiOutcome('account.me', {});
+        await caller.api('account.login', { user: 'ada' });
         releasePollAnswer();
 
         assertApiFailure(await poll, 'sessionExpired');
         expect(sessionExpiredHandler).not.toHaveBeenCalled();
-        expect(await caller.api('me', {})).toEqual({ userId: 'ada' });
+        expect(await caller.api('account.me', {})).toEqual({ userId: 'ada' });
     });
 
     it('reports the token it posted and reads the one the jar holds when asked', async () => {
@@ -445,7 +452,7 @@ describe('A cookie jar and a stale sessionExpired', () => {
         jar.storeSetCookies(['LMDRSESSIONCSTK=before; Path=/']);
         const inner: LambderApiTransport = async () => ({ status: 200, header: () => null, json: async () => ({}), text: async () => '{}', setCookies: ['LMDRSESSIONCSTK=after; Path=/'] });
 
-        const answer = await lambderCookieJarTransport(inner, { jar })({ apiPath: '/api', apiName: 'x', token: '', siteHost: '' });
+        const answer = await lambderCookieJarTransport(inner, { jar })({ apiPath: '/api', apiName: 'test.ping', token: '', siteHost: '' });
 
         expect(answer.csrfTokens?.posted).toBe('before');
         expect(answer.csrfTokens?.held()).toBe('after');
@@ -465,14 +472,14 @@ describe('LambderCaller in-flight state', () => {
         });
 
         expect(caller.isLoading).toBe(false);
-        const pending = [caller.apiOutcome('slow', {}), caller.apiOutcome('slow', {})];
-        expect(caller.fetchTrackerList.map((tracker) => tracker.apiName)).toEqual(['slow', 'slow']);
+        const pending = [caller.apiOutcome('test.slow', {}), caller.apiOutcome('test.slow', {})];
+        expect(caller.fetchTrackerList.map((tracker) => tracker.apiName)).toEqual(['test.slow', 'test.slow']);
         expect(caller.isLoading).toBe(true);
         await Promise.all(pending);
         expect(caller.fetchTrackerList).toEqual([]);
         expect(caller.isLoading).toBe(false);
 
-        for(let i = 0; i < 5; i += 1) await caller.apiOutcome('echo', { text: 'x' });
+        for(let i = 0; i < 5; i += 1) await caller.apiOutcome('test.echo', { text: 'x' });
         expect(caller.fetchTrackerList).toEqual([]);
         expect(activeCounts).toEqual([1, 2, 1, 1, 1, 1, 1]);
     });
@@ -493,7 +500,7 @@ describe('LambderCaller in-flight state', () => {
             transport: deafToAbort,
         });
 
-        const outcome = await caller.apiOutcome('echo', { text: 'hi' });
+        const outcome = await caller.apiOutcome('test.echo', { text: 'hi' });
 
         assertApiFailure(outcome, 'timeout');
         expect(errors.length).toBe(1);
@@ -503,10 +510,10 @@ describe('LambderCaller in-flight state', () => {
 describe('The mock app as a callee', () => {
     const mock = initLambderMock<Contract, SessionData>();
     const createMockApp = () => {
-        const mockApp = mock.create({ apiVersion: '1', sessions: true });
+        const mockApp = mock.create({ apiVersion: '1', sessions: true, guards: { signedIn: mock.guard({ session: true, handler: async () => {} }) } });
         mockApp.registerPartial(mockApp.apiSlice(
-            mockApp.publicApi('echo', async ({ payload, request }) => ({ text: payload.text, ip: request.ip, host: request.host })),
-            mockApp.sessionApi('me', async ({ session }) => ({ userId: session.data.userId })),
+            mockApp.api('test.echo', async ({ payload, request }) => ({ text: payload.text, ip: request.ip, host: request.host })),
+            mockApp.api('account.me', { guards: 'signedIn', handler: async ({ session }) => ({ userId: session.data.userId }) }),
         ));
         return mockApp;
     };
@@ -515,11 +522,11 @@ describe('The mock app as a callee', () => {
         const mockApp = createMockApp();
         const created = await mockApp.signIn('ada', { userId: 'ada' });
         const caller = new LambderInvokeCaller<Contract>({ functionName: 'callee', apiVersion: '1', host: 'callee.internal', transport: lambderMockInvokeTransport(mockApp) });
-        expect(await caller.api('echo', { text: 'hi' }, { clientIp: '10.0.0.1' })).toEqual({ text: 'hi', ip: '10.0.0.1', host: 'callee.internal' });
-        expect(await caller.api('me', {}, { session: { token: created.sessionToken, csrf: created.csrfToken } })).toEqual({ userId: 'ada' });
-        const stranger = await caller.apiOutcome('me', {});
+        expect(await caller.api('test.echo', { text: 'hi' }, { clientIp: '10.0.0.1' })).toEqual({ text: 'hi', ip: '10.0.0.1', host: 'callee.internal' });
+        expect(await caller.api('account.me', {}, { session: { token: created.sessionToken, csrf: created.csrfToken } })).toEqual({ userId: 'ada' });
+        const stranger = await caller.apiOutcome('account.me', {});
         assertApiFailure(stranger, 'sessionExpired');
-        const unknown = await (caller as LambderInvokeCaller<any>).apiOutcome('nope', {});
+        const unknown = await (caller as LambderInvokeCaller<any>).apiOutcome('test.nope', {});
         assertApiFailure(unknown);
         expect(unknown.refusal?.code).toBe('lambder/api-not-found');
     });
@@ -534,31 +541,32 @@ describe('The mock app as a callee', () => {
         }
         const msw = { http: { post: (path: string, resolver: (info: { request: Request }) => Promise<unknown>) => { registered.push({ path, resolver }); return 'handler'; }, all: () => 'unused' }, HttpResponse: FakeHttpResponse };
         expect(lambderMockMswHandler(mockApp, { msw, apiPath: '/secure', cookieJar: jar })).toBe('handler');
-        expect(registered[0]!.path).toBe('/secure');
+        expect(registered[0]!.path).toBe('/secure/:group/:action');
         const resolve = registered[0]!.resolver;
 
-        const call = (body: unknown, cookie?: string) => resolve({ request: new Request('http://app.test/secure', { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) } }) });
+        const call = (apiName: string, body: unknown, cookie?: string) => resolve({ request: new Request(apiCallPath('http://app.test/secure', apiName), { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) } }) });
 
-        const echo = await call({ apiName: 'echo', payload: { text: 'hi' }, token: '', version: '1' }) as Response;
+        const echo = await call('test.echo', { payload: { text: 'hi' }, token: '', version: '1' }) as Response;
         expect(echo.status).toBe(200);
         expect(JSON.parse(await echo.text())).toEqual({ apiVersion: '1', payload: { text: 'hi', ip: '127.0.0.1', host: 'app.test' } });
 
         // MSW fills the Cookie header from its own store, which captures the
         // HttpOnly session cookie off mocked responses and keeps it across
         // reloads: a second, stale session there is not read.
-        const me = await call({ apiName: 'me', payload: {}, token: created.csrfToken }, 'LMDRSESSIONTKID=stale-from-msw-store') as Response;
+        const me = await call('account.me', { payload: {}, token: created.csrfToken }, 'LMDRSESSIONTKID=stale-from-msw-store') as Response;
         expect(JSON.parse(await me.text()).payload).toEqual({ userId: 'ada' });
 
         // And a cleared jar is signed out, whatever MSW's store still holds.
         jar.clear();
-        const after = await call({ apiName: 'me', payload: {}, token: created.csrfToken }, `LMDRSESSIONTKID=${created.sessionToken}`) as Response;
+        const after = await call('account.me', { payload: {}, token: created.csrfToken }, `LMDRSESSIONTKID=${created.sessionToken}`) as Response;
         expect(JSON.parse(await after.text())).toMatchObject({ sessionExpired: true });
 
-        expect(await call({ notAnEnvelope: true })).toBeUndefined();
-        expect(await resolve({ request: new Request('http://app.test/secure', { method: 'POST', body: 'not json' }) })).toBeUndefined();
+        // A path under the apiPath that names no endpoint is not a call, and neither is a body that is not JSON.
+        expect(await resolve({ request: new Request('http://app.test/secure/echo', { method: 'POST', body: JSON.stringify({ payload: {} }), headers: { 'content-type': 'application/json' } }) })).toBeUndefined();
+        expect(await resolve({ request: new Request('http://app.test/secure/test/echo', { method: 'POST', body: 'not json' }) })).toBeUndefined();
 
         mockApp.setOffline(true);
-        expect(((await call({ apiName: 'echo', payload: { text: 'x' }, token: '' })) as Response).status).toBe(599);
+        expect(((await call('test.echo', { payload: { text: 'x' }, token: '' })) as Response).status).toBe(599);
         expect(() => lambderMockMswHandler(mockApp, { msw: {} as never, apiPath: '/x' })).toThrow(/requires the msw module/);
     });
 
@@ -569,13 +577,13 @@ describe('The mock app as a callee', () => {
         // parsing them, which drops every cookie after the first. So no
         // request below carries a Cookie header, exactly as in a browser, and
         // the session still has to survive from one call to the next.
-        const mockApp = mock.create({ apiVersion: '1', sessions: true });
+        const mockApp = mock.create({ apiVersion: '1', sessions: true, guards: { signedIn: mock.guard({ session: true, handler: async () => {} }) } });
         mockApp.registerPartial(mockApp.apiSlice(
-            mockApp.publicApi('login', async ({ payload, sessionController }) => {
+            mockApp.api('account.login', async ({ payload, sessionController }) => {
                 await sessionController.createSession(payload.user, { userId: payload.user });
                 return { ok: true };
             }),
-            mockApp.sessionApi('me', async ({ session }) => ({ userId: session.data.userId })),
+            mockApp.api('account.me', { guards: 'signedIn', handler: async ({ session }) => ({ userId: session.data.userId }) }),
         ));
         const jar = new LambderCookieJar();
         const registered: ((info: { request: Request }) => Promise<unknown>)[] = [];
@@ -584,9 +592,9 @@ describe('The mock app as a callee', () => {
         }
         const msw = { http: { post: (_path: string, resolver: (info: { request: Request }) => Promise<unknown>) => { registered.push(resolver); return 'handler'; }, all: () => 'unused' }, HttpResponse: FakeHttpResponse };
         lambderMockMswHandler(mockApp, { msw, apiPath: '/api', cookieJar: jar });
-        const call = (body: unknown) => registered[0]!({ request: new Request('http://app.test/api', { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json' } }) }) as Promise<Response>;
+        const call = (apiName: string, body: unknown) => registered[0]!({ request: new Request(apiCallPath('http://app.test/api', apiName), { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json' } }) }) as Promise<Response>;
 
-        const login = await call({ apiName: 'login', payload: { user: 'ada' }, token: '', version: '1' });
+        const login = await call('account.login', { payload: { user: 'ada' }, token: '', version: '1' });
         expect(login.status).toBe(200);
 
         // Both cookies survived. A comma-joined read keeps only the first,
@@ -598,7 +606,7 @@ describe('The mock app as a callee', () => {
         // The session cookie stays invisible to page scripts, as it is HttpOnly.
         expect(jar.get('LMDRSESSIONTKID')).toBeUndefined();
 
-        const me = await call({ apiName: 'me', payload: {}, token: csrf, version: '1' });
+        const me = await call('account.me', { payload: {}, token: csrf, version: '1' });
         expect(JSON.parse(await me.text()).payload).toEqual({ userId: 'ada' });
     });
 });

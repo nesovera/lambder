@@ -20,6 +20,8 @@
  * LambderInvokeCaller.localTransport runs a callee's handler in-process for
  * tests.
  */
+import { apiCallPath } from "../shared/wire/LambderApiNames.js";
+import { withApiGroupCalls } from "../shared/wire/LambderApiGroupCalls.js";
 import { classifyDeliveryFailure, describeFailure, errorFromFunctionError, LambderInvokeError, parseFunctionError, } from "./LambderInvokeOutcome.js";
 import { DEFAULT_SESSION_TOKEN_COOKIE_KEY } from "../shared/wire/LambderSessionCookieNames.js";
 import { readApiSignature } from "../shared/wire/LambderApiSignatureMap.js";
@@ -40,46 +42,57 @@ import { buildEnvelopeJson, decodeLambdaHttpResult, localLambdaContext, sessionC
  */
 export const LAMBDER_INVOKE_MAX_EVENT_BYTES = 5_500_000;
 /**
+ * The invoke caller itself, before the groups: what LambderInvokeCaller is,
+ * less the callee's endpoints by group (LambderInvokeGroupCalls), which the
+ * constructor adds.
+ *
  * @typeParam TContract - The callee's API contract (`typeof lambder.ApiContract`, imported type-only), for typed names, payloads, results and guard inputs.
  * @typeParam TProvidedGuards - Guard names guardInputsProvider covers; those APIs' options argument becomes optional.
  */
-export default class LambderInvokeCaller {
-    functionName;
-    apiPath;
-    apiVersion;
-    apiSignatures;
-    host;
-    requestCompression;
-    maxResponsePayloadBytes;
-    timeoutMs;
-    onLogList;
-    onFailure;
-    guardInputsProvider;
-    sessionTokenCookieKey;
-    transport;
-    clientConfig;
-    client;
-    sdk;
+class LambderInvokeCallerCore {
+    #functionName;
+    #apiPath;
+    #apiVersion;
+    #apiSignatures;
+    #host;
+    #requestCompression;
+    #maxResponsePayloadBytes;
+    #timeoutMs;
+    #onLogList;
+    #onFailure;
+    #beforeCall;
+    #guardInputsProvider;
+    #sessionTokenCookieKey;
+    #transport;
+    #clientConfig;
+    #client;
+    #sdk;
     constructor(options) {
-        const { functionName, client, clientConfig, apiPath, apiVersion, apiSignatures, host, requestCompression, maxResponsePayloadBytes, timeoutMs, onLogList, onFailure, sessionTokenCookieKey, transport, guardInputsProvider, } = options;
+        const { functionName, client, clientConfig, apiPath, apiVersion, apiSignatures, host, requestCompression, maxResponsePayloadBytes, timeoutMs, onLogList, onFailure, beforeCall, sessionTokenCookieKey, transport, guardInputsProvider, } = options;
         if (!functionName?.trim())
             throw new Error("LambderInvokeCaller: functionName is required");
-        this.functionName = functionName;
-        this.client = client;
-        this.clientConfig = clientConfig;
-        this.apiPath = apiPath ?? DEFAULT_API_PATH;
-        this.apiVersion = apiVersion;
-        this.apiSignatures = apiSignatures;
-        this.host = host ?? functionName;
+        this.#functionName = functionName;
+        this.#client = client;
+        this.#clientConfig = clientConfig;
+        this.#apiPath = apiPath ?? DEFAULT_API_PATH;
+        this.#apiVersion = apiVersion;
+        this.#apiSignatures = apiSignatures;
+        this.#host = host ?? functionName;
         // `?? false`: like the browser caller, off unless asked for.
-        this.requestCompression = resolveCompressionOption(requestCompression ?? false, DEFAULT_INVOKE_REQUEST_COMPRESSION_SETTINGS);
-        this.maxResponsePayloadBytes = assertPositiveInteger(maxResponsePayloadBytes ?? DEFAULT_MAX_RESTORED_PAYLOAD_BYTES, "LambderInvokeCaller maxResponsePayloadBytes");
-        this.timeoutMs = timeoutMs;
-        this.onLogList = onLogList;
-        this.onFailure = onFailure;
-        this.guardInputsProvider = guardInputsProvider;
-        this.sessionTokenCookieKey = sessionTokenCookieKey ?? DEFAULT_SESSION_TOKEN_COOKIE_KEY;
-        this.transport = transport ?? ((_event, { eventJson, signal }) => this.invokeThroughSdk(eventJson, signal));
+        this.#requestCompression = resolveCompressionOption(requestCompression ?? false, DEFAULT_INVOKE_REQUEST_COMPRESSION_SETTINGS);
+        this.#maxResponsePayloadBytes = assertPositiveInteger(maxResponsePayloadBytes ?? DEFAULT_MAX_RESTORED_PAYLOAD_BYTES, "LambderInvokeCaller maxResponsePayloadBytes");
+        this.#timeoutMs = timeoutMs;
+        this.#onLogList = onLogList;
+        this.#onFailure = onFailure;
+        this.#beforeCall = beforeCall;
+        this.#guardInputsProvider = guardInputsProvider;
+        this.#sessionTokenCookieKey = sessionTokenCookieKey ?? DEFAULT_SESSION_TOKEN_COOKIE_KEY;
+        this.#transport = transport ?? ((_event, { eventJson, signal }) => this.#invokeThroughSdk(eventJson, signal));
+        // Each group of the callee's contract, as a property:
+        // caller.email.send(input) is caller.api("email.send", input), and
+        // .outcome the apiOutcome.
+        const byName = this;
+        return withApiGroupCalls(this, (apiName, args) => byName.api(apiName, ...args), (apiName, args) => byName.apiOutcome(apiName, ...args));
     }
     /**
      * The event api() would send for this call, with a plain payload. For
@@ -90,14 +103,13 @@ export default class LambderInvokeCaller {
         const tokenCookieKey = init.sessionTokenCookieKey ?? DEFAULT_SESSION_TOKEN_COOKIE_KEY;
         return synthesizeLambdaHttpEvent({
             method: "POST",
-            path: init.apiPath ?? DEFAULT_API_PATH,
+            path: apiCallPath(init.apiPath ?? DEFAULT_API_PATH, init.apiName),
             host,
             headers: init.headers,
             contentType: "application/json",
             clientIp: init.clientIp,
             cookies: sessionCookies(init.session, tokenCookieKey),
             body: buildEnvelopeJson({
-                apiName: init.apiName,
                 version: init.apiVersion,
                 signature: init.signature,
                 csrf: init.session?.csrf,
@@ -140,23 +152,23 @@ export default class LambderInvokeCaller {
             }
         };
     }
-    loadSdk() {
-        if (!this.sdk) {
-            this.sdk = import("@aws-sdk/client-lambda").catch(() => {
+    #loadSdk() {
+        if (!this.#sdk) {
+            this.#sdk = import("@aws-sdk/client-lambda").catch(() => {
                 throw new Error("LambderInvokeCaller requires @aws-sdk/client-lambda: npm install @aws-sdk/client-lambda");
             });
         }
-        return this.sdk;
+        return this.#sdk;
     }
-    async invokeThroughSdk(eventJson, signal) {
-        const { LambdaClient, InvokeCommand } = await this.loadSdk();
+    async #invokeThroughSdk(eventJson, signal) {
+        const { LambdaClient, InvokeCommand } = await this.#loadSdk();
         // One call is one delivery attempt, as LambderApiTransport promises:
         // the SDK's default of 3 would re-invoke a callee that already ran
         // when only the response was lost.
-        if (!this.client)
-            this.client = new LambdaClient({ maxAttempts: 1, ...this.clientConfig });
-        const output = await this.client.send(new InvokeCommand({
-            FunctionName: this.functionName,
+        if (!this.#client)
+            this.#client = new LambdaClient({ maxAttempts: 1, ...this.#clientConfig });
+        const output = await this.#client.send(new InvokeCommand({
+            FunctionName: this.#functionName,
             InvocationType: "RequestResponse",
             Payload: Buffer.from(eventJson, "utf8"),
         }), signal ? { abortSignal: signal } : undefined);
@@ -173,7 +185,7 @@ export default class LambderInvokeCaller {
         return { functionError: output.FunctionError ?? null, result };
     }
     /** Delivers one event, serialized exactly once; an event over the invoke cap, a rejected transport, or one that answered after the call was given up on, is a failure. */
-    async deliverEvent(event, eventJson, options) {
+    async #deliverEvent(event, eventJson, options) {
         // Measured here so every path that delivers an event is capped: an
         // oversized event would otherwise come back as the SDK's
         // RequestEntityTooLargeException, which classifies as `protocol` and
@@ -187,7 +199,7 @@ export default class LambderInvokeCaller {
         }
         // The same wiring the browser caller uses, so the two cannot drift on
         // what a late or abandoned call means.
-        const abort = createCallAbort({ timeoutMs: options.timeoutMs ?? this.timeoutMs, signal: options.signal });
+        const abort = createCallAbort({ timeoutMs: options.timeoutMs ?? this.#timeoutMs, signal: options.signal });
         try {
             // A call the site has already given up on does not reach the
             // transport: honouring the signal is the transport's obligation,
@@ -195,7 +207,7 @@ export default class LambderInvokeCaller {
             const refused = abort.abortFailure("beforeSending");
             if (refused)
                 return { failed: { reason: refused.reason, cause: refused.error, detail: refused.error.message } };
-            const sent = await this.transport(event, { functionName: this.functionName, eventJson, signal: abort.signal });
+            const sent = await this.#transport(event, { functionName: this.#functionName, eventJson, signal: abort.signal });
             // An answer that arrives after the abort is not a success: a
             // transport that ignores the signal resolves late, and trusting it
             // would hand the call site data it had already abandoned.
@@ -215,17 +227,17 @@ export default class LambderInvokeCaller {
         }
     }
     /** Builds the failure and its error, reports it once, and hands it back. */
-    async failureOutcome(apiName, init) {
+    async #failureOutcome(apiName, init) {
         const logList = init.logList ?? [];
         const cause = init.crash ? errorFromCrashDetail(init.crash)
             : init.functionError ? errorFromFunctionError(init.functionError)
                 : init.cause;
         const detail = init.detail ?? describeFailure(init);
         const error = new LambderInvokeError({
-            message: `${this.functionName} ${apiName} failed (${init.reason}): ${detail}`,
+            message: `${this.#functionName} ${apiName} failed (${init.reason}): ${detail}`,
             reason: init.reason,
             apiName,
-            functionName: this.functionName,
+            functionName: this.#functionName,
             status: init.status,
             refusal: init.refusal,
             crash: init.crash,
@@ -255,49 +267,51 @@ export default class LambderInvokeCaller {
             ...(init.response !== undefined ? { response: init.response } : {}),
         };
         error.outcome = failure;
-        if (this.onFailure) {
+        if (this.#onFailure) {
             // A reporting hook that breaks must not turn apiOutcome() into a
             // throwing call, nor replace the failure it was told about.
             try {
-                await this.onFailure(failure, { apiName, functionName: this.functionName });
+                await this.#onFailure(failure, { apiName, functionName: this.#functionName });
             }
             catch (err) {
-                console.error(`[lambder invoke] onFailure threw for ${this.functionName} ${apiName}`, err);
+                console.error(`[lambder invoke] onFailure threw for ${this.#functionName} ${apiName}`, err);
             }
         }
         return failure;
     }
-    async surfaceLogs(apiName, logList) {
+    async #surfaceLogs(apiName, logList) {
         if (!logList.length)
             return;
-        if (this.onLogList) {
+        if (this.#onLogList) {
             try {
-                await this.onLogList(apiName, logList);
+                await this.#onLogList(apiName, logList);
             }
             catch (err) {
-                console.error(`[lambder invoke] onLogList threw for ${this.functionName} ${apiName}`, err);
+                console.error(`[lambder invoke] onLogList threw for ${this.#functionName} ${apiName}`, err);
             }
             return;
         }
         for (const entry of logList)
-            console.log(`[lambder invoke] ${this.functionName} ${apiName}`, entry);
+            console.log(`[lambder invoke] ${this.#functionName} ${apiName}`, entry);
     }
     /**
-     * One call, one outcome. Never throws; api() is what throws. A key scope
-     * is told how the attempt ended, as it is on LambderCaller.
+     * One call, one outcome. Never throws, but for what beforeCall throws;
+     * api() is what throws. A key scope is told how the attempt ended, as it
+     * is on LambderCaller.
      */
-    async dispatch(apiName, payload, options = {}) {
+    async #dispatch(apiName, payload, options = {}) {
+        this.#beforeCall?.(apiName, { functionName: this.#functionName });
         const idempotentAttempt = beginIdempotentAttempt(options.idempotencyKey);
         // The reader cannot check a refusal's code against declarations it
         // does not have; the callee never sends one its endpoint did not
         // declare, which is what the endpoint's message type stands for.
-        const outcome = await this.dispatchAttempt(apiName, payload, options, idempotentAttempt);
+        const outcome = await this.#dispatchAttempt(apiName, payload, options, idempotentAttempt);
         // Only the first settle counts: an attempt that never left settled
         // itself as not sent.
         idempotentAttempt.settle(outcome);
         return outcome;
     }
-    async dispatchAttempt(apiName, payload, options, idempotentAttempt) {
+    async #dispatchAttempt(apiName, payload, options, idempotentAttempt) {
         const idempotencyKey = idempotentAttempt.key;
         // Everything before the event leaves can throw on the caller's own
         // inputs (a provider that rejects, a payload holding a cycle or a
@@ -310,10 +324,10 @@ export default class LambderInvokeCaller {
             // The callee's signature for this endpoint, when this caller was
             // built with the callee's map. A name the map lacks fails here,
             // as a provider that threw would: the map predates the endpoint.
-            const signature = this.apiSignatures ? await readApiSignature(this.apiSignatures, apiName) : undefined;
+            const signature = this.#apiSignatures ? await readApiSignature(this.#apiSignatures, apiName) : undefined;
             // Provider values underneath, per-call values on top.
-            const provided = this.guardInputsProvider
-                ? await this.guardInputsProvider(apiName)
+            const provided = this.#guardInputsProvider
+                ? await this.#guardInputsProvider(apiName)
                 : undefined;
             const guardInputs = mergeGuardInputs(provided, options.guardInputs);
             // Serialized once: the compression decision needs the JSON, and a
@@ -321,24 +335,23 @@ export default class LambderInvokeCaller {
             // Compressed when enabled and the JSON reaches the threshold;
             // `compressRequest` overrides both ways.
             const payloadJson = payload !== undefined ? JSON.stringify(payload) : undefined;
-            const compressionMinBytes = resolveRequestCompressionMinBytes(options.compressRequest, this.requestCompression);
+            const compressionMinBytes = resolveRequestCompressionMinBytes(options.compressRequest, this.#requestCompression);
             const compressed = compressionMinBytes !== null && payloadJson !== undefined
-                ? await compressPayloadBrotli(payloadJson, compressionMinBytes, this.requestCompression?.quality ?? DEFAULT_INVOKE_REQUEST_COMPRESSION_SETTINGS.quality)
+                ? await compressPayloadBrotli(payloadJson, compressionMinBytes, this.#requestCompression?.quality ?? DEFAULT_INVOKE_REQUEST_COMPRESSION_SETTINGS.quality)
                 : null;
             event = synthesizeLambdaHttpEvent({
                 method: "POST",
-                path: this.apiPath,
-                host: this.host,
+                path: apiCallPath(this.#apiPath, apiName),
+                host: this.#host,
                 headers: options.headers,
                 contentType: "application/json",
                 clientIp: options.clientIp,
-                cookies: sessionCookies(options.session, this.sessionTokenCookieKey),
+                cookies: sessionCookies(options.session, this.#sessionTokenCookieKey),
                 body: buildEnvelopeJson({
-                    apiName,
-                    version: this.apiVersion,
+                    version: this.#apiVersion,
                     signature,
                     csrf: options.session?.csrf,
-                    siteHost: this.host,
+                    siteHost: this.#host,
                     payloadJson: compressed ? undefined : payloadJson,
                     compressed,
                     guardInputs,
@@ -352,21 +365,21 @@ export default class LambderInvokeCaller {
             // Nothing was sent, so the key was not used: the same as the
             // browser caller's failure before sending.
             idempotentAttempt.settle(IDEMPOTENT_ATTEMPT_NOT_SENT);
-            return await this.failureOutcome(apiName, { reason: 'unknown', cause: coerceToError(err, "the call could not be built") });
+            return await this.#failureOutcome(apiName, { reason: 'unknown', cause: coerceToError(err, "the call could not be built") });
         }
-        const delivery = await this.deliverEvent(event, eventJson, options);
+        const delivery = await this.#deliverEvent(event, eventJson, options);
         if ("failed" in delivery)
-            return await this.failureOutcome(apiName, delivery.failed);
+            return await this.#failureOutcome(apiName, delivery.failed);
         if (delivery.sent.functionError) {
-            return await this.failureOutcome(apiName, { reason: 'crash', functionError: parseFunctionError(delivery.sent.result) });
+            return await this.#failureOutcome(apiName, { reason: 'crash', functionError: parseFunctionError(delivery.sent.result) });
         }
         let http;
         try {
-            http = await decodeLambdaHttpResult(delivery.sent.result, this.maxResponsePayloadBytes);
+            http = await decodeLambdaHttpResult(delivery.sent.result, this.#maxResponsePayloadBytes);
         }
         catch (err) {
             const cause = coerceToError(err, "the answer could not be decoded");
-            return await this.failureOutcome(apiName, { reason: 'protocol', cause, detail: cause.message });
+            return await this.#failureOutcome(apiName, { reason: 'protocol', cause, detail: cause.message });
         }
         const outcome = await resolveApiOutcome({
             status: http.statusCode,
@@ -377,7 +390,7 @@ export default class LambderInvokeCaller {
         // Every answer's logs arrive on outcome.logList, whether they came
         // from an envelope, a 500 body or a validation body.
         const logList = outcome.logList ?? [];
-        await this.surfaceLogs(apiName, logList);
+        await this.#surfaceLogs(apiName, logList);
         // The answer's Set-Cookie values, so a session the callee rotated or
         // cleared is visible to whoever is carrying it.
         const cookies = http.cookies;
@@ -390,15 +403,15 @@ export default class LambderInvokeCaller {
         // union says which: a rejected input has its issues and no envelope,
         // an envelope refusal has the envelope and no Error.
         if (outcome.reason === 'validation') {
-            return await this.failureOutcome(apiName, { ...shared, reason: 'validation', zodError: outcome.zodError });
+            return await this.#failureOutcome(apiName, { ...shared, reason: 'validation', zodError: outcome.zodError });
         }
         if (outcome.reason === 'server') {
             // A 404 text page is what a callee answers when apiPath does not
             // match: the one misconfiguration every first integration hits.
             const detail = http.statusCode === 404
-                ? `no API at ${this.apiPath} on ${this.functionName} (HTTP 404): does apiPath match the callee's?`
+                ? `no API at ${this.#apiPath} on ${this.#functionName} (HTTP 404): does apiPath match the callee's?`
                 : undefined;
-            return await this.failureOutcome(apiName, {
+            return await this.#failureOutcome(apiName, {
                 ...shared,
                 reason: 'server',
                 refusal: outcome.refusal,
@@ -408,7 +421,7 @@ export default class LambderInvokeCaller {
                 detail,
             });
         }
-        return await this.failureOutcome(apiName, {
+        return await this.#failureOutcome(apiName, {
             ...shared,
             ...(outcome.reason === 'refusal' ? { reason: outcome.reason, refusal: outcome.refusal } : { reason: outcome.reason }),
             response: outcome.response,
@@ -426,7 +439,7 @@ export default class LambderInvokeCaller {
         // elements read as unknown here; the contract already checked them at
         // the call site.
         const [payload, options] = rest;
-        return await this.dispatch(apiName, payload, options);
+        return await this.#dispatch(apiName, payload, options);
     }
     /**
      * The declared output, or a thrown LambderInvokeError carrying the
@@ -437,7 +450,7 @@ export default class LambderInvokeCaller {
      */
     async api(apiName, ...rest) {
         const [payload, options] = rest;
-        const outcome = await this.dispatch(apiName, payload, options);
+        const outcome = await this.#dispatch(apiName, payload, options);
         if (!outcome.ok)
             throw outcome.error;
         return outcome.payload;
@@ -451,28 +464,31 @@ export default class LambderInvokeCaller {
     async request(init) {
         const method = (init.method ?? "GET").toUpperCase();
         const name = `${method} ${init.path}`;
+        this.#beforeCall?.(name, { functionName: this.#functionName });
         const event = synthesizeLambdaHttpEvent({
             method,
             path: init.path,
             query: init.query,
-            host: this.host,
+            host: this.#host,
             headers: init.headers,
             clientIp: init.clientIp,
             cookies: init.cookies,
             body: init.body,
         }, { invoke: true });
-        const delivery = await this.deliverEvent(event, JSON.stringify(event), init);
+        const delivery = await this.#deliverEvent(event, JSON.stringify(event), init);
         if ("failed" in delivery)
-            throw (await this.failureOutcome(name, delivery.failed)).error;
+            throw (await this.#failureOutcome(name, delivery.failed)).error;
         if (delivery.sent.functionError) {
-            throw (await this.failureOutcome(name, { reason: 'crash', functionError: parseFunctionError(delivery.sent.result) })).error;
+            throw (await this.#failureOutcome(name, { reason: 'crash', functionError: parseFunctionError(delivery.sent.result) })).error;
         }
         try {
-            return await decodeLambdaHttpResult(delivery.sent.result, this.maxResponsePayloadBytes);
+            return await decodeLambdaHttpResult(delivery.sent.result, this.#maxResponsePayloadBytes);
         }
         catch (err) {
             const cause = coerceToError(err, "the answer could not be decoded");
-            throw (await this.failureOutcome(name, { reason: 'protocol', cause, detail: cause.message })).error;
+            throw (await this.#failureOutcome(name, { reason: 'protocol', cause, detail: cause.message })).error;
         }
     }
 }
+const LambderInvokeCaller = LambderInvokeCallerCore;
+export default LambderInvokeCaller;

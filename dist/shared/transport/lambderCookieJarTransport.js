@@ -1,5 +1,6 @@
 import { DEFAULT_SESSION_CSRF_COOKIE_KEY } from "../wire/LambderSessionCookieNames.js";
 import { resolveApiPathTarget } from "./LambderApiTransport.js";
+import { apiCallPath } from "../wire/LambderApiNames.js";
 /**
  * Makes any transport carry a cookie jar the way a browser carries its
  * cookies: the jar's cookies ride on every request, the answer's Set-Cookie
@@ -36,7 +37,7 @@ export const lambderCookieJarTransport = (inner, options) => {
         // absolute cross-origin apiPath. siteHost is "" outside a browser, and
         // an empty host would scope every cookie to nothing while claiming to
         // scope it.
-        const target = resolveApiPathTarget(request.apiPath);
+        const target = resolveApiPathTarget(apiCallPath(request.apiPath, request.apiName));
         const cookieScope = {
             host: target.host ?? options.host ?? (request.siteHost || undefined),
             path: target.path,

@@ -26,20 +26,23 @@ describe('A key scope under a double-tap', () => {
         let firstTapEntered = () => {};
         const firstTapInHandler = new Promise<void>((resolve) => { firstTapEntered = resolve; });
         let handlerRuns = 0;
-        const app = lambderTestApp(initLambder().declareRefusals({ 'app/out-of-stock': {} }).create({
+        const lambder = initLambder().declareRefusals({ 'app/out-of-stock': {} }).create({
             apiPath: '/api',
             idempotency: { store: new LambderMemoryIdempotencyStore() },
-        }).addApi('order.place', { input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true, refusals: 'app/out-of-stock' },
-            async (ctx) => {
-                handlerRuns += 1;
-                if(handlerRuns === 1){
-                    firstTapEntered();
-                    await firstTapHeld;
-                }
-                if(ctx.apiPayload.qty > 5) refuse('Only 5 in stock.', { code: 'app/out-of-stock' });
-                placed.push(ctx.apiPayload.qty);
-                return { placed: ctx.apiPayload.qty };
-            }));
+        });
+        const app = lambderTestApp(lambder.registerApiGroups(lambder.defineApiGroup('order', {
+            place: lambder.defineApi({ input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true, refusals: 'app/out-of-stock' },
+                async (ctx) => {
+                    handlerRuns += 1;
+                    if(handlerRuns === 1){
+                        firstTapEntered();
+                        await firstTapHeld;
+                    }
+                    if(ctx.apiPayload.qty > 5) refuse('Only 5 in stock.', { code: 'app/out-of-stock' });
+                    placed.push(ctx.apiPayload.qty);
+                    return { placed: ctx.apiPayload.qty };
+                }),
+        })));
         const visitor = app.visitor();
         const scope = createIdempotencyKeyScope();
         const firstKey = scope.current;

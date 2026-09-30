@@ -19,16 +19,18 @@ import type { LambderApiCallContext } from '../../src/api/LambderApiCallContext.
 describe('An API handler answers with its output or refuses', () => {
     it('takes the declared output, refuses null where the output is not nullable, and has no response builder to write a reason on', () => {
         const schema = { input: z.object({}), output: z.object({ id: z.string() }) };
-        const lambder = initLambder<{ userId: string }>().create({ files: testPublicFiles(), apiPath: '/api' })
+        const app = initLambder<{ userId: string }>().create({ files: testPublicFiles(), apiPath: '/api' });
+        const lambder = app.registerApiGroups(app.defineApiGroup('test', {
             // @ts-expect-error null is not the declared output; a reason for not answering is a refusal
-            .addApi('bare', schema, async (_ctx) => null)
+            bare: app.defineApi(schema, async (_ctx) => null),
             // @ts-expect-error the handler has no response builder: refuse() is the one way to say no
-            .addApi('built', schema, async (_ctx, res) => res.apiRefusal({ notAuthorized: true }))
-            .addApi('refused', schema, async (_ctx) => refuse('No.', { notAuthorized: true }))
-            .addApi('answered', schema, async (_ctx) => ({ id: '1' }))
+            built: app.defineApi(schema, async (_ctx, res) => res.apiRefusal({ notAuthorized: true })),
+            refused: app.defineApi(schema, async (_ctx) => refuse('No.', { notAuthorized: true })),
+            answered: app.defineApi(schema, async (_ctx) => ({ id: '1' })),
             // @ts-expect-error an output is an object or an array, so a nullable one is refused where it is written
-            .addApi('nullable', { input: z.object({}), output: z.object({ id: z.string() }).nullable() }, async (_ctx) => null)
-            .addApi('nullableMember', { input: z.object({}), output: z.object({ found: z.object({ id: z.string() }).nullable() }) }, async (_ctx) => ({ found: null }));
+            nullable: app.defineApi({ input: z.object({}), output: z.object({ id: z.string() }).nullable() }, async (_ctx) => null),
+            nullableMember: app.defineApi({ input: z.object({}), output: z.object({ found: z.object({ id: z.string() }).nullable() }) }, async (_ctx) => ({ found: null })),
+        }));
         expect(lambder).toBeDefined();
     });
 });
@@ -36,14 +38,16 @@ describe('An API handler answers with its output or refuses', () => {
 describe('A returned answer keeps its literals', () => {
     it('checks a literal field against the output from every branch, arrays included, and refuses one outside it', () => {
         const output = z.object({ status: z.enum(['open', 'closed']), reason: z.enum(['sold-out', 'too-late']).nullable(), aisles: z.array(z.string()) });
-        const lambder = initLambder().create({ files: testPublicFiles(), apiPath: '/api' })
-            .addApi('store.status', { input: z.object({ hour: z.number() }), output }, async (ctx) => {
+        const app = initLambder().create({ files: testPublicFiles(), apiPath: '/api' });
+        const lambder = app.registerApiGroups(app.defineApiGroup('store', {
+            status: app.defineApi({ input: z.object({ hour: z.number() }), output }, async (ctx) => {
                 if(ctx.apiPayload.hour < 9) return { status: 'closed', reason: 'too-late', aisles: [] };
                 return { status: 'open', reason: null, aisles: ['produce', 'bakery'] };
-            })
-            .addApi('store.statusSync', { input: z.object({ hour: z.number() }), output }, (ctx) => ({ status: ctx.apiPayload.hour < 9 ? 'closed' : 'open', reason: null, aisles: ['deli'] }))
+            }),
+            statusSync: app.defineApi({ input: z.object({ hour: z.number() }), output }, (ctx) => ({ status: ctx.apiPayload.hour < 9 ? 'closed' : 'open', reason: null, aisles: ['deli'] })),
             // @ts-expect-error a status the output does not declare
-            .addApi('store.statusWrong', { input: z.object({}), output }, async (_ctx) => ({ status: 'ajar', reason: null, aisles: [] }));
+            statusWrong: app.defineApi({ input: z.object({}), output }, async (_ctx) => ({ status: 'ajar', reason: null, aisles: [] })),
+        }));
         expect(lambder).toBeDefined();
     });
 });

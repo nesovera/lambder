@@ -20,6 +20,7 @@
  * LambderInvokeCaller.localTransport runs a callee's handler in-process for
  * tests.
  */
+import { type LambderContractActionOf, type LambderContractGroupsOf, type LambderContractNamesInGroup } from "../shared/wire/LambderApiGroupCalls.js";
 import type { APIGatewayProxyEventV2, Context } from "aws-lambda";
 import { type LambderInvokeFailure, type LambderInvokeOutcome } from "./LambderInvokeOutcome.js";
 import { type LambderApiSignatureMap } from "../shared/wire/LambderApiSignatureMap.js";
@@ -52,6 +53,10 @@ export type LambderInvokeTransport = (event: APIGatewayProxyEventV2, options: {
 }) => Promise<LambderInvokeTransportResult>;
 /** The onLogList option: each answer's logList, success or failure, when it has entries. */
 export type LambderInvokeLogListHandler = (apiName: string, logList: unknown[]) => void | Promise<void>;
+/** The beforeCall option: every call, by its endpoint name or `METHOD path`, before anything is built or sent. */
+export type LambderInvokeCallCheck = (name: string, info: {
+    functionName: string;
+}) => void;
 /** The onFailure option: every failed call, once, awaited before api() throws or apiOutcome() returns. */
 export type LambderInvokeFailureHandler = (failure: LambderInvokeFailure, info: {
     apiName: string;
@@ -119,6 +124,15 @@ type LambderInvokeCallerBaseOptions = {
      * apiOutcome() never throws.
      */
     onFailure?: LambderInvokeFailureHandler;
+    /**
+     * Run before every call, api(), apiOutcome(), a group's call and
+     * request() alike, before anything is built or sent: the place for a
+     * rule the calling code must keep, such as never calling out while a
+     * database transaction is open. What it throws is thrown to the caller,
+     * from apiOutcome() too, and is no failure of the callee: nothing was
+     * sent, so onFailure is not told.
+     */
+    beforeCall?: LambderInvokeCallCheck;
     /** The session token cookie's name, when a session is carried and the callee uses a non-default `tokenCookieKey`. The CSRF value rides in the envelope's `token` field, which has no name to configure. */
     sessionTokenCookieKey?: string;
     /** Replaces the Lambda SDK. */
@@ -159,26 +173,15 @@ export type LambderInvokeEventInit = {
     sessionTokenCookieKey?: string;
 };
 /**
+ * The invoke caller itself, before the groups: what LambderInvokeCaller is,
+ * less the callee's endpoints by group (LambderInvokeGroupCalls), which the
+ * constructor adds.
+ *
  * @typeParam TContract - The callee's API contract (`typeof lambder.ApiContract`, imported type-only), for typed names, payloads, results and guard inputs.
  * @typeParam TProvidedGuards - Guard names guardInputsProvider covers; those APIs' options argument becomes optional.
  */
-export default class LambderInvokeCaller<TContract extends LambderApiContractShape = any, TProvidedGuards extends string = never> {
-    private readonly functionName;
-    private readonly apiPath;
-    private readonly apiVersion?;
-    private readonly apiSignatures?;
-    private readonly host;
-    private readonly requestCompression;
-    private readonly maxResponsePayloadBytes;
-    private readonly timeoutMs?;
-    private readonly onLogList?;
-    private readonly onFailure?;
-    private readonly guardInputsProvider?;
-    private readonly sessionTokenCookieKey;
-    private readonly transport;
-    private readonly clientConfig;
-    private client;
-    private sdk;
+declare class LambderInvokeCallerCore<TContract extends LambderApiContractShape = any, TProvidedGuards extends string = never> {
+    #private;
     constructor(options: LambderInvokeCallerOptions<TContract, TProvidedGuards>);
     /**
      * The event api() would send for this call, with a plain payload. For
@@ -195,19 +198,6 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
      * completion regardless, but timeoutMs still frees the caller.
      */
     static localTransport(handler: (event: APIGatewayProxyEventV2, context: Context) => Promise<unknown>, context?: Partial<Context>): LambderInvokeTransport;
-    private loadSdk;
-    private invokeThroughSdk;
-    /** Delivers one event, serialized exactly once; an event over the invoke cap, a rejected transport, or one that answered after the call was given up on, is a failure. */
-    private deliverEvent;
-    /** Builds the failure and its error, reports it once, and hands it back. */
-    private failureOutcome;
-    private surfaceLogs;
-    /**
-     * One call, one outcome. Never throws; api() is what throws. A key scope
-     * is told how the attempt ended, as it is on LambderCaller.
-     */
-    private dispatch;
-    private dispatchAttempt;
     /**
      * Full-fidelity call: resolves to a discriminated LambderInvokeOutcome
      * instead of throwing, for sites that degrade gracefully. The output type
@@ -231,4 +221,31 @@ export default class LambderInvokeCaller<TContract extends LambderApiContractSha
      */
     request(init: LambderInvokeRequestInit): Promise<LambderLambdaHttpResult>;
 }
-export {};
+/**
+ * One endpoint of the callee as the invoke caller hands it out on its group:
+ * called, it is `api` for that endpoint (the output, or a thrown
+ * LambderInvokeError); `.outcome` is `apiOutcome` (the outcome, never
+ * throwing).
+ */
+export type LambderInvokeEndpoint<TContract, TName extends keyof TContract & string, TProvidedGuards extends string> = {
+    (...args: LambderCallArgs<TContract, TName, TProvidedGuards, LambderInvokeCallOptions>): Promise<LambderContractOutputOf<TContract, TName>>;
+    outcome(...args: LambderCallArgs<TContract, TName, TProvidedGuards, LambderInvokeCallOptions>): Promise<LambderInvokeOutcome<LambderContractOutputOf<TContract, TName>, LambderContractRefusalMessage<TContract, TName>>>;
+};
+/** Every endpoint of the callee's contract, by group: `caller.email.send(input)`. */
+export type LambderInvokeGroupCalls<TContract, TProvidedGuards extends string> = {
+    readonly [TGroup in LambderContractGroupsOf<TContract>]: {
+        readonly [TName in LambderContractNamesInGroup<TContract, TGroup> as LambderContractActionOf<TName>]: LambderInvokeEndpoint<TContract, TName, TProvidedGuards>;
+    };
+};
+/**
+ * A typed client of another Lambder function, over a direct Lambda invoke:
+ * `caller.email.send(input)` for the callee's endpoint `email.send`,
+ * `.outcome(input)` for its outcome, and `caller.api("email.send", input)`
+ * for code that has the name as a value.
+ */
+type LambderInvokeCaller<TContract extends LambderApiContractShape = any, TProvidedGuards extends string = never> = LambderInvokeCallerCore<TContract, TProvidedGuards> & LambderInvokeGroupCalls<TContract, TProvidedGuards>;
+declare const LambderInvokeCaller: Omit<typeof LambderInvokeCallerCore, "prototype"> & {
+    new <TContract extends LambderApiContractShape = any, TProvidedGuards extends string = never>(options: LambderInvokeCallerOptions<TContract, TProvidedGuards>): LambderInvokeCaller<TContract, TProvidedGuards>;
+    readonly prototype: LambderInvokeCallerCore<any, any>;
+};
+export default LambderInvokeCaller;

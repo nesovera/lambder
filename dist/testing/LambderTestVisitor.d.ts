@@ -1,4 +1,4 @@
-import LambderCaller from "../client/LambderCaller.js";
+import LambderCaller, { type LambderCallerGroupCalls, type LambderCallerMembers } from "../client/LambderCaller.js";
 import type { LambderHttpEventFormat } from "../core/LambderContext.js";
 import type { LambderHandler } from "../core/LambderCreateOptions.js";
 import { type LambderLambdaHttpResult } from "../invoke/LambderLambdaEvent.js";
@@ -84,7 +84,8 @@ export type LambderTestVisitorArgs<TOptions, TProvidedGuards extends string> = [
  *
  * Created by `LambderTestApp.visitor()` and `signIn()`, not constructed.
  */
-export declare class LambderTestVisitor<TContract extends LambderApiContractShape = any, TSessionData = any, TProvidedGuards extends string = never> {
+declare class LambderTestVisitorCore<TContract extends LambderApiContractShape = any, TSessionData = any, TProvidedGuards extends string = never> {
+    #private;
     readonly host: string;
     readonly clientIp: string;
     /**
@@ -95,7 +96,7 @@ export declare class LambderTestVisitor<TContract extends LambderApiContractShap
      */
     readonly caller: LambderCaller<TContract, TProvidedGuards>;
     /** The payload on success, `undefined` on a failure: LambderCaller.api, through this visitor. */
-    readonly api: LambderCaller<TContract, TProvidedGuards>["api"];
+    readonly api: LambderCallerMembers<TContract, TProvidedGuards>["api"];
     /**
      * The full outcome, never throwing: LambderCaller.apiOutcome, through
      * this visitor. Pair it with assertApiSuccess / assertApiFailure.
@@ -105,11 +106,7 @@ export declare class LambderTestVisitor<TContract extends LambderApiContractShap
      * 500"; here that error's `cause` is what the app actually threw, stack
      * included, so a failing test points at the line in the handler.
      */
-    readonly apiOutcome: LambderCaller<TContract, TProvidedGuards>["apiOutcome"];
-    private readonly wiring;
-    private readonly headers;
-    private readonly cookieJar;
-    private seenResetCount;
+    readonly apiOutcome: LambderCallerMembers<TContract, TProvidedGuards>["apiOutcome"];
     constructor(wiring: LambderTestVisitorWiring<TSessionData>, options: LambderTestVisitorOptions<TContract, TProvidedGuards> & {
         host: string;
         clientIp: string;
@@ -151,3 +148,14 @@ export declare class LambderTestVisitor<TContract extends LambderApiContractShap
         ttlSeconds?: number;
     }): Promise<LambderCreatedSession<TSessionData>>;
 }
+/**
+ * One simulated browser in front of a real Lambder app, with the app's
+ * endpoints by group as a caller has them: `visitor.orders.place(input)`,
+ * `visitor.orders.place.outcome(input)`.
+ */
+export type LambderTestVisitor<TContract extends LambderApiContractShape = any, TSessionData = any, TProvidedGuards extends string = never> = LambderTestVisitorCore<TContract, TSessionData, TProvidedGuards> & LambderCallerGroupCalls<TContract, TProvidedGuards>;
+export declare const LambderTestVisitor: {
+    new <TContract extends LambderApiContractShape = any, TSessionData = any, TProvidedGuards extends string = never>(...args: ConstructorParameters<typeof LambderTestVisitorCore<TContract, TSessionData, TProvidedGuards>>): LambderTestVisitor<TContract, TSessionData, TProvidedGuards>;
+    readonly prototype: LambderTestVisitorCore<any, any, any>;
+};
+export {};

@@ -1,4 +1,5 @@
 import { buildTransportEnvelope, LambderTransportFailure } from "../shared/transport/LambderApiTransport.js";
+import { apiCallPath } from "../shared/wire/LambderApiNames.js";
 /**
  * fetch, with a clearer error for one failure. Outside a page a relative
  * apiPath has nothing to resolve against, so fetch rejects with a URL parse
@@ -51,7 +52,7 @@ export const lambderFetchTransport = (options = {}) => async (request) => {
     // ("text/plain, application/json") rather than give way to it.
     const owned = new Set(['content-type', ...(request.cookies?.length ? ['cookie'] : [])]);
     const callerHeaders = Object.fromEntries(Object.entries(request.headers ?? {}).filter(([name]) => !owned.has(name.toLowerCase())));
-    const response = await fetchOrExplain(request.apiPath, {
+    const response = await fetchOrExplain(apiCallPath(request.apiPath, request.apiName), {
         method: 'POST', cache: 'no-cache',
         // Cross-origin API hosts need CORS mode and included credentials.
         mode: cors ? 'cors' : 'same-origin',

@@ -74,7 +74,7 @@ when the registry loads.
 | `idempotency` | off | Required when an endpoint declares idempotency. `true`, or `{ defaultTtlSeconds?, defaultPendingTtlSeconds?, failOpen?, store?, callerIdentity? }`: the server's own options, `callerIdentity` bound to the mock call context without its session, since it runs on public endpoints alone |
 | `guards` | none | The mock guard map; required whenever the contract declares a guard name, and checked against the contract (below) |
 | `guardDeclarations` | none | The generated `guardDeclarations` table: each mock guard of a name it has is held to the server guard's input mode and session requirement, and its refusal codes join the entries declaring it ([below](#declarations-policies-and-guards-from-the-generated-options)) |
-| `apiOptions` | none | The generated `apiOptions` table: every entry's guards, rate limit and idempotency are read off it rather than restated, and a rest answer runs under the mode it gives the name ([below](#declarations-policies-and-guards-from-the-generated-options)) |
+| `apiOptions` | none | The generated `apiOptions` table: every entry's mode, guards, rate limit and idempotency are read off it rather than restated, and a `notMocked` entry and a rest answer run under the mode it gives the name ([below](#declarations-policies-and-guards-from-the-generated-options)) |
 | `cookieHost` | the page's host, else `localhost` | The host this runtime's cookies belong to: what `signIn` plants them under, what the transport's jar sends them to, and what a call naming no `siteHost` is read as arriving at |
 | `maxRequestPayloadBytes` | `20_000_000` | Ceiling on what a compressed request payload may restore to |
 | `defaultClientIp` | `127.0.0.1` | The IP a call carrying none is read as; a transport may name its own, and the MSW adapter reads the same default |
@@ -144,15 +144,16 @@ a restated option is a compile error and a throw, since beside the table it
 could only be a second copy of the server's declaration:
 
 ```typescript
-mockApp.sessionApi("staff.invite", async ({ payload, guardData }) => ({ invited: true }))
+mockApp.api("staff.invite", async ({ payload, guardData }) => ({ invited: true }))
 ```
 
 The table has to cover the contract, each endpoint under its own mode, so a
-table generated before an endpoint was added fails at the option rather than
-when the endpoint's entry registers; an entry whose builder and table disagree
-on the mode is refused at registration. The mode is also what lets a
-`restNotMocked` answer read the session for a session endpoint nothing mocks
-(see [the rest of the contract](#the-rest-of-the-contract-for-an-app-adopting-the-mock)).
+table generated before an endpoint was added, or before one changed mode,
+fails at the option rather than when the endpoint's entry registers. An entry
+states no mode of its own and runs under the table's. The mode is also what
+lets a `notMocked` entry and a `restNotMocked` answer read the session for a
+session endpoint nothing mocks (see [the rest of the
+contract](#the-rest-of-the-contract-for-an-app-adopting-the-mock)).
 The table ships only with the mock, in development: a browser in production
 imports nothing of it (a screen that gates on one guard reads [that guard's
 parameters](./apis.md#one-guards-parameters-for-a-browser) instead).
@@ -200,14 +201,14 @@ guard decides is not data, and the table never pretends it is.
 
 ## The registry
 
-Entries carry their name, so a wrong mode, a stray name or a missing guard
-declaration is reported at the entry that wrote it:
+Entries carry their name, so a stray name or a missing guard declaration is
+reported at the entry that wrote it:
 
 ```typescript
 export const userMocks = mockApp.apiSlice(
-    mockApp.publicApi("user.get", async ({ payload }) => ({ id: payload.userId, name: "Ada" })),
+    mockApp.api("user.get", async ({ payload }) => ({ id: payload.userId, name: "Ada" })),
 
-    mockApp.sessionApi("order.create", {
+    mockApp.api("order.create", {
         guards: { orgPermission: "ORDERS.CREATE" },   // restated, pinned to the server's declaration
         idempotency: true,
         handler: async ({ payload, session, guardData }) => {
@@ -221,29 +222,38 @@ export const userMocks = mockApp.apiSlice(
 mockApp.register(userMocks, billingMocks, adminMocks);   // exhaustive over the contract, no overlaps
 ```
 
-`publicApi` mocks an `addApi` endpoint and `sessionApi` an `addSessionApi`
-one; the pipeline fetches the session before a session handler runs and
-answers `sessionExpired` without one. On a mock created with the generated
-`apiOptions` table, every entry may be a bare handler, as above. Without the
-table, an entry is a bare handler only where the contract declares nothing
-for the endpoint, and the options form, restating the declarations, wherever
-it declares guards, a rate limit or idempotency: the bare handler is the form
-that carries no restatement at all, so it is unavailable exactly where one is
-owed. `notMocked` and `sessionNotMocked` register an endpoint
-deliberately left without a mock: the call runs the protocol steps that precede
-dispatch (the signature gate, the compressed-payload restore, and for
-`sessionNotMocked` the session read) and then answers a refusal coded
+`api` mocks an endpoint under the server's mode: the pipeline fetches a
+session endpoint's session before its handler runs and answers
+`sessionExpired` without one. The mode is the `apiOptions` table's when
+`create()` was given it. Without the table, the guards the entry restates
+decide it by the server's rule: an entry naming a guard that needs a session
+(`session: true` on the mock guard, or in the `guardDeclarations` table) is a
+session endpoint, so `order.create` above is one, through `orgPermission`.
+Every session endpoint in the contract has to name at least one mock guard
+declared `session: true`, a compile error at the `guards` option otherwise
+(`LambderMockSessionGuardsCheck`), so an entry restating its guards can never
+run a session endpoint as a public one. On
+a mock created with the generated `apiOptions` table, every entry may be a
+bare handler. Without the table, an entry is a bare handler only where the
+contract declares nothing for the endpoint, and the options form, restating
+the declarations, wherever it declares guards, a rate limit or idempotency:
+the bare handler is the form that carries no restatement at all, so it is
+unavailable exactly where one is owed. `notMocked(name, reason)` registers an
+endpoint deliberately left without a mock: the call runs the protocol steps
+that precede dispatch (the signature gate, the compressed-payload restore, and
+for a session endpoint the session read) and then answers a refusal coded
 `lambder/not-mocked` carrying the reason, so the client can say "not mocked
 yet" rather than "unknown error", and a stale client still hears
 `versionExpired` exactly as it would from the server.
 
-The two are separate because the mode decides which of those steps run, and
-nothing at runtime can recover it: the contract is a type. Declaring a session
-endpoint with `notMocked` would switch its session read off, so a call with no
-session would answer "not mocked" where the server answers `sessionExpired`.
-Both go through the same registration checks the mocked builders do, so
-`sessionNotMocked` on a mock without the `sessions` option fails where it is
-written rather than 500ing at the first call.
+A `notMocked` entry takes the same mode `api` would: the `apiOptions`
+table's, and without the table the server's rule over its guards. A session
+endpoint on a mock created without the table restates them,
+`notMocked("admin.audit", { reason: "operator endpoint", guards: "signedIn" })`,
+a compile error otherwise, so a signed-out call answers `sessionExpired` as
+the server does; no guard runs. It goes through the same registration checks a mocked entry does, so a
+session endpoint left unmocked on a mock without the `sessions` option fails
+where it is written rather than 500ing at the first call.
 
 ### The rest of the contract, for an app adopting the mock
 
@@ -275,14 +285,13 @@ the table the one thing it cannot do is the session read. Its answer is then
 processed as a public endpoint: the steps before dispatch still run, so a
 stale client still hears `versionExpired` (given the signature map) and a
 compressed payload still reaches the events, but nothing reads the session,
-because the mode of a name nothing registered is not knowable at runtime.
-That is the same reason `notMocked` and `sessionNotMocked` are two builders,
-arriving where there is no builder to say it in. So a signed-out call to an
-unmocked session endpoint answers "not mocked" where the server answers
-`sessionExpired`; where that difference matters for an endpoint, declare that
-one with `sessionNotMocked` and leave the rest to the rest entry. The `mode`
-on the event and the call-log row is `null` for the same reason: the answer
-is public, the endpoint is unknown.
+because the mode of a name nothing registered is not knowable at runtime:
+the contract is a type, and a rest entry restates no guards. So a
+signed-out call to an unmocked session endpoint answers "not mocked" where
+the server answers `sessionExpired`; where that difference matters, give
+`create()` the `apiOptions` table. The `mode` on the event and the call-log
+row is `null` for the same reason: the answer is public, the endpoint is
+unknown.
 
 A rest entry and the MSW adapter's `onUnmocked: "passthrough"` are
 alternatives, and the rest entry wins: it leaves the runtime with an answer
@@ -295,14 +304,16 @@ What the compiler catches, with the contract still a type-only import:
 - **completeness**: `register()` fails when any endpoint of the contract has
   no entry, naming the missing ones, unless a `restNotMocked` entry stands
   for them;
-- **no strays**: a name the contract does not have fails at the builder, and
-  a slice keyed under one fails at `register()`;
+- **no strays**: a name the contract does not have fails where the entry is
+  built, and a slice keyed under one fails at `register()`;
 - **a countable list**: `register()` takes its slices as arguments or as a
   list declared `as const`. An array of slices (`const slices = [a, b]`
   without it) is refused, because its length is not in its type and none of
   these checks can be made over it;
-- **mode**: `publicApi` on a session endpoint fails at the name, and the
-  reverse;
+- **mode**: an entry states none. It is the table's, or it follows from the
+  guards the entry restates, which are pinned below, so the one place it can
+  drift is a mock guard's own `session`, which `guardDeclarations` holds to
+  the server guard's at the `guards` option;
 - **declarations from the table**: with `apiOptions` given, a restated
   `guards`, `rateLimit` or `idempotency` on an entry fails, and a table that
   lacks an endpoint of the contract, or gives one another mode, fails at the
@@ -330,13 +341,13 @@ a slice written by hand rather than through `apiSlice` is where the two can
 part, and a key that names another endpoint registers a mock nothing will
 call while leaving one unanswered.
 
-Why the mode is restated at all, and the declarations without the table: the
-contract is a type, and types are erased. The runtime needs the mode to know
-whether to fetch a session and the guards to know which to run with which
-parameter. The generated `apiOptions` table carries both as values, which is
-why an entry of a mock created with it restates no declaration; the builder
-still names the mode, which is what lets the compiler type the handler, and
-the table is held to agree with it.
+Why the declarations are restated at all without the table: the contract is
+a type, and types are erased. The runtime needs the guards to know which to
+run with which parameter, and whether to fetch a session, which the guards
+decide. The generated `apiOptions` table carries both as values, which is why
+an entry of a mock created with it restates no declaration. The handler is
+typed from the contract either way, `ctx.session` present on a session
+endpoint, and the table is held to the contract's modes.
 
 ### Partial registration, for tests
 
@@ -383,7 +394,7 @@ with a `.default()` passes, and one whose transform changes a field's type
 does not.
 
 ```typescript
-mockApp.publicApi("user.get", {
+mockApp.api("user.get", {
     input: z.object({ userId: z.string() }),
     handler: async ({ payload }) => ({ id: payload.userId, name: "Ada" }),
 });
@@ -428,7 +439,7 @@ survives: the runtime did not create it and does not know what else holds it.
 ## Handler context
 
 ```typescript
-mockApp.sessionApi("order.create", {
+mockApp.api("order.create", {
     guards: { orgPermission: "ORDERS.CREATE" },
     handler: async ({ apiName, payload, session, sessionController, guardData, guardInputs, idempotencyKey, request, setResponseHeader, setCookie, logList, signal }) => {
         // payload: the contract's input, never optional
@@ -452,7 +463,7 @@ contract entry declares, with each code's data in the form it arrives in
 string here):
 
 ```typescript
-mockApp.publicApi("order.pay", async (ctx) => {
+mockApp.api("order.pay", async (ctx) => {
     if (ctx.payload.amount > 100) return ctx.refuse("The wallet holds less than the total.", { code: "wallet-short", data: { available: 100, currency: "USD" } });
     return { paid: true };
 });
@@ -466,12 +477,15 @@ in and then threw still leaves the session cookie with the caller.
 A login mock is an ordinary handler:
 
 ```typescript
-mockApp.publicApi("login", async ({ payload, sessionController }) => {
+mockApp.api("account.login", async ({ payload, sessionController }) => {
     const user = users.find((u) => u.email === payload.email) ?? refuse("Wrong email or password.");
     await sessionController.createSession(user.id, { userId: user.id, memberships: user.memberships });
     return { ok: true };
 });
-mockApp.sessionApi("logout", async ({ sessionController }) => { await sessionController.endSession(); return { ok: true }; });
+mockApp.api("account.logOut", {
+    guards: "sessionOnly",   // a session guard, so a session endpoint, as on the server
+    handler: async ({ sessionController }) => { await sessionController.endSession(); return { ok: true }; },
+});
 ```
 
 ## Sessions and cookies
@@ -562,7 +576,10 @@ const caller = new LambderCaller<ApiContractType>({ apiPath: "/api", transport: 
 
 The mock app can also stand in for a callee Lambda in a server test, through
 `lambderMockInvokeTransport(mockApp)` on a `LambderInvokeCaller`, with the same
-registry.
+registry. It answers what the callee's server would read as a call, a JSON
+POST to `{apiPath}/{group}/{action}`, and 404s anything else, since a mock
+serves no routes; give it the callee's `apiPath` when that is not `"/api"`:
+`lambderMockInvokeTransport(mockApp, { apiPath: "/rpc" })`.
 
 `assertApiSuccess` and `assertApiFailure` are exported here too: they narrow an
 `apiOutcome` and say what it was when it is not what the test expected. To
@@ -572,8 +589,9 @@ test the real server rather than the mock handlers, see [Testing](./testing.md).
 
 The direct transport shows nothing in the browser's network panel, because no
 request leaves the page. Where seeing the calls as real requests is worth
-running a service worker, one MSW handler serves the whole API path over the
-same runtime:
+running a service worker, one MSW handler serves every call under the API
+path (`{apiPath}/{group}/{action}`, the endpoint read off the path as the
+server reads it) over the same runtime:
 
 ```typescript
 import * as msw from "msw";
@@ -585,7 +603,7 @@ await worker.start({
     // filter does not exempt, which knows nothing about an app's module
     // requests or external hosts. Scope it to the api path.
     onUnhandledRequest(request, print) {
-        if (new URL(request.url).pathname === "/api") print.error();
+        if (new URL(request.url).pathname.startsWith("/api/")) print.error();
     },
 });
 ```
@@ -740,8 +758,8 @@ on the server side.
 
 | Member | Description |
 | --- | --- |
-| `publicApi(name, handler \| options)`, `sessionApi(name, handler \| options)`, `notMocked(name, reason)`, `sessionNotMocked(name, reason)` | Registry entries |
-| `restNotMocked(reason)` | One entry for everything the slices leave out, passed to the same `register()` call; answered as a public endpoint |
+| `api(name, handler \| options)`, `notMocked(name, reason \| { reason, guards })` | Registry entries: a mock, and an endpoint left unmocked, each under the mode the `apiOptions` table or the restated guards give it |
+| `restNotMocked(reason)` | One entry for everything the slices leave out, passed to the same `register()` call; answered under the mode the `apiOptions` table gives the name, and as a public endpoint without the table |
 | `apiSlice(...entries)`, `register(...slices)`, `registerPartial(...slices)` | Slices and registration |
 | `override(name, handler)`, `restoreOverrides()`, `reset()` | Per-test control |
 | `transport(options?)`, `attach(caller, options?)`, `handle(transportRequest)`, `handleRequest(request)`, `requestFromTransport(transportRequest)` | The direct transport (its jar on it as `cookieJar`), the entry points behind it, and the one reading of a transport request every adapter shares |

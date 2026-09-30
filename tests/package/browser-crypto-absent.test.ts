@@ -70,7 +70,7 @@ describe('The mock on a page without crypto.subtle', () => {
         const mock = initLambderMock<Contract>();
         const app = mock.create({ idempotency: true });
         let sold = 0;
-        app.register(app.apiSlice(app.publicApi('ticket.buy', { idempotency: true, handler: async () => ({ ticketId: ++sold }) })));
+        app.register(app.apiSlice(app.api('ticket.buy', { idempotency: true, handler: async () => ({ ticketId: ++sold }) })));
         const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false, transport: app.transport() });
         const idempotencyKey = createIdempotencyKey();
 

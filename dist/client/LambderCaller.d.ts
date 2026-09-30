@@ -5,6 +5,7 @@ import { type LambderApiOutcome, type LambderValidationError } from '../shared/w
 import { type LambderCallArgs, type LambderContractOutputOf, type LambderGuardInputsProviderOption, type LambderSharedCallOptions } from '../shared/wire/LambderCallOptions.js';
 import { type LambderApiTransport } from '../shared/transport/LambderApiTransport.js';
 import { type LambderApiSignatureMap } from '../shared/wire/LambderApiSignatureMap.js';
+import { type LambderContractActionOf, type LambderContractGroupsOf, type LambderContractNamesInGroup } from '../shared/wire/LambderApiGroupCalls.js';
 export type { LambderApiOutcome, LambderApiFailureReason, LambderValidationError } from '../shared/wire/LambderApiOutcome.js';
 export type { LambderProvidedGuardInputs, LambderGuardInputsProvider } from '../shared/wire/LambderCallOptions.js';
 /** A handler told that something happened, with nothing to hand it. */
@@ -110,40 +111,23 @@ type LambderCallerBaseOptions<TMessage extends LambderUncheckedRefusalMessage = 
 /** Constructor options: the base options plus guardInputsProvider, mandatory once TProvided names guards. */
 export type LambderCallerOptions<TContract, TProvided extends string = never> = LambderCallerBaseOptions<LambderContractAnyRefusalMessage<TContract>> & LambderGuardInputsProviderOption<TContract, TProvided>;
 /**
+ * The caller itself, before the groups: what LambderCaller is, less the
+ * endpoints it reaches by group (LambderCallerGroupCalls), which the
+ * constructor adds.
+ *
  * @typeParam TContract - The API contract, for typed names, payloads and guard inputs.
  * @typeParam TProvidedGuards - Guard names guardInputsProvider covers; those APIs' options argument becomes optional.
  */
-export default class LambderCaller<TContract extends LambderApiContractShape = any, TProvidedGuards extends string = never> {
-    private apiPath;
-    private apiVersion?;
-    private apiSignatures?;
-    private timeoutMs?;
+declare class LambderCallerCore<TContract extends LambderApiContractShape = any, TProvidedGuards extends string = never> {
+    #private;
     /** The calls currently in flight, in the order they started. */
     fetchTrackerList: FetchTracker[];
     /** Whether any call is in flight. Derived from the list, so the two cannot drift apart. */
     get isLoading(): boolean;
-    private versionExpiredHandler?;
-    private sessionExpiredHandler?;
-    private refusalHandler?;
-    private notAuthorizedHandler?;
-    private errorHandler?;
-    private apiInputValidationErrorHandler?;
-    private logListHandler?;
-    private fetchStartedHandler?;
-    private fetchEndedHandler?;
-    private guardInputsProvider?;
-    private sessionTokenCookieKey;
-    private sessionCsrfCookieKey;
-    private sessionCookieDomain?;
-    private requestCompression;
-    private transport;
     constructor(options: LambderCallerOptions<TContract, TProvidedGuards>);
     setSessionCookieKey(sessionTokenCookieKey: string, sessionCsrfCookieKey: string): void;
     /** Replaces how calls reach the server: a mock runtime, an in-process handler, a decorated transport. */
     setTransport(transport: LambderApiTransport): this;
-    private clearSessionCookies;
-    /** One call, one outcome. Never throws; every failure path resolves to { ok: false }. */
-    private dispatch;
     /**
      * Full-fidelity call: resolves to a discriminated LambderApiOutcome
      * instead of collapsing every failure to undefined. Never throws. A
@@ -164,3 +148,32 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
      */
     api<TApiName extends keyof TContract & string = string>(apiName: TApiName, ...rest: LambderCallArgs<TContract, TApiName, TProvidedGuards, LambderCallOptions<LambderContractRefusalMessage<TContract, TApiName>>>): Promise<LambderContractOutputOf<TContract, TApiName> | undefined>;
 }
+/**
+ * One endpoint as a caller hands it out on its group: called, it is `api`
+ * for that endpoint (the output, or undefined on a failure); `.outcome` is
+ * `apiOutcome` (the full outcome, never throwing).
+ */
+export type LambderCallerEndpoint<TContract, TName extends keyof TContract & string, TProvidedGuards extends string> = {
+    (...args: LambderCallArgs<TContract, TName, TProvidedGuards, LambderCallOptions<LambderContractRefusalMessage<TContract, TName>>>): Promise<LambderContractOutputOf<TContract, TName> | undefined>;
+    outcome(...args: LambderCallArgs<TContract, TName, TProvidedGuards, LambderCallOptions<LambderContractRefusalMessage<TContract, TName>>>): Promise<LambderApiOutcome<LambderContractOutputOf<TContract, TName>, LambderContractRefusalMessage<TContract, TName>>>;
+};
+/** Every endpoint of a contract, by group: `caller.orders.place(input)`. */
+export type LambderCallerGroupCalls<TContract, TProvidedGuards extends string> = {
+    readonly [TGroup in LambderContractGroupsOf<TContract>]: {
+        readonly [TName in LambderContractNamesInGroup<TContract, TGroup> as LambderContractActionOf<TName>]: LambderCallerEndpoint<TContract, TName, TProvidedGuards>;
+    };
+};
+/**
+ * A typed client of a Lambder app: `caller.orders.place(input)` for the
+ * endpoint `orders.place`, `caller.orders.place.outcome(input)` for its full
+ * outcome, and `caller.api("orders.place", input)` for code that has the
+ * name as a value.
+ */
+type LambderCaller<TContract extends LambderApiContractShape = any, TProvidedGuards extends string = never> = LambderCallerCore<TContract, TProvidedGuards> & LambderCallerGroupCalls<TContract, TProvidedGuards>;
+/** The caller's own members, without the groups: what a wrapper of a caller (the test visitor) types its `api` and `apiOutcome` by. */
+export type LambderCallerMembers<TContract extends LambderApiContractShape = any, TProvidedGuards extends string = never> = LambderCallerCore<TContract, TProvidedGuards>;
+declare const LambderCaller: {
+    new <TContract extends LambderApiContractShape = any, TProvidedGuards extends string = never>(options: LambderCallerOptions<TContract, TProvidedGuards>): LambderCaller<TContract, TProvidedGuards>;
+    readonly prototype: LambderCallerCore<any, any>;
+};
+export default LambderCaller;

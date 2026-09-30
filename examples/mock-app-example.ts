@@ -26,8 +26,8 @@ type SessionData = {
 
 type ApiContractType = {
     "user.get": { input: { userId: string }; output: { id: string; name: string }; mode: "public"; refusals: { "app/not-found": {} } };
-    "login": { input: { email: string }; output: { ok: boolean }; mode: "public"; rateLimit: "authPerIp" };
-    "logout": { input: {}; output: { ok: boolean }; mode: "session"; guards: "sessionOnly" };
+    "account.login": { input: { email: string }; output: { ok: boolean }; mode: "public"; rateLimit: "authPerIp" };
+    "account.logout": { input: {}; output: { ok: boolean }; mode: "session"; guards: "sessionOnly" };
     "order.create": {
         input: { qty: number };
         output: { orderId: string; organizationId: string; qty: number };
@@ -82,22 +82,23 @@ const users = [{
 }];
 
 export const userMocks = mockApp.apiSlice(
-    mockApp.publicApi("user.get", async (ctx) => {
+    mockApp.api("user.get", async (ctx) => {
         const user = users.find((u) => u.id === ctx.payload.userId);
         // Typed to the endpoint's declared codes; `return` lets the compiler narrow `user` below.
         if (!user) return ctx.refuse("No such user.", { code: "app/not-found" });
         return { id: user.id, name: user.name };
     }),
-    mockApp.publicApi("login", { rateLimit: "authPerIp", handler: async ({ payload, sessionController }) => {
+    mockApp.api("account.login", { rateLimit: "authPerIp", handler: async ({ payload, sessionController }) => {
         const user = users.find((u) => u.email === payload.email) ?? refuse("Wrong email or password.");
         await sessionController.createSession(user.id, { userId: user.id, memberships: user.memberships });
         return { ok: true };
     } }),
-    mockApp.sessionApi("logout", { guards: "sessionOnly", handler: async ({ sessionController }) => { await sessionController.endSession(); return { ok: true }; } }),
+    // Its session guard, restated, is what makes the entry a session endpoint, as on the server.
+    mockApp.api("account.logout", { guards: "sessionOnly", handler: async ({ sessionController }) => { await sessionController.endSession(); return { ok: true }; } }),
 );
 
 export const orderMocks = mockApp.apiSlice(
-    mockApp.sessionApi("order.create", {
+    mockApp.api("order.create", {
         guards: { orgPermission: "ORDERS.CREATE" },   // pinned to the server's declaration
         idempotency: true,
         handler: async ({ payload, guardData }) => ({ orderId: "o_1", organizationId: guardData.orgPermission.organizationId, ...payload }),
@@ -130,11 +131,11 @@ export const exampleTest = async () => {
     const signedIn = new LambderCaller<ApiContractType>({ apiPath: "/api", transport: mockApp.transport({ cookies: jar }) });
 
     // The contract declares idempotency for this endpoint, so the call owes a key.
-    const order = await signedIn.api("order.create", { qty: 2 }, { guardInputs: { orgPermission: { organizationId: "org1" } }, idempotencyKey: "order-2f8c41d6" });
+    const order = await signedIn.api("order.create", { qty: 2 }, { guardInputs: { orgPermission: { organizationId: "org1" } }, idempotencyKey: "order-2f8c41d6e9a7" });
     console.log(order);   // { orderId: "o_1", organizationId: "org1", qty: 2 }
 
     mockApp.failNext("order.create", "network");
-    const outcome = await signedIn.apiOutcome("order.create", { qty: 2 }, { guardInputs: { orgPermission: { organizationId: "org1" } }, idempotencyKey: "order-9b3e07a5" });
+    const outcome = await signedIn.apiOutcome("order.create", { qty: 2 }, { guardInputs: { orgPermission: { organizationId: "org1" } }, idempotencyKey: "order-9b3e07a5c4d1" });
     console.log(outcome.ok ? "ok" : outcome.reason);   // "network"
 
     console.log(mockApp.calls.at(-1)?.outcome);   // "injected"

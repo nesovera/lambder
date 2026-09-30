@@ -2,6 +2,7 @@ import { coerceToError } from "../shared/wire/LambderCrashDetail.js";
 import type { Context } from "aws-lambda";
 import type { LambderApiTransport } from "../shared/transport/LambderApiTransport.js";
 import { buildTransportEnvelope, LambderTransportFailure, resolveApiPathTarget } from "../shared/transport/LambderApiTransport.js";
+import { apiCallPath } from "../shared/wire/LambderApiNames.js";
 import { DEFAULT_MAX_RESTORED_PAYLOAD_BYTES } from "../shared/wire/LambderRequestPayload.js";
 import { stopWaitingWhenAborted } from "../shared/util/LambderCallAbort.js";
 import { LOOPBACK_CLIENT_IP } from "../shared/util/LambderClientIp.js";
@@ -65,7 +66,7 @@ export const lambderHandlerTransport = (
         // outside a browser to configure) is a URL, and a URL as the event's
         // rawPath matches no route: every call would 404 on an app that is
         // wired correctly.
-        const target = resolveApiPathTarget(request.apiPath);
+        const target = resolveApiPathTarget(apiCallPath(request.apiPath, request.apiName));
         const host = options.host ?? target.host ?? "localhost";
         const event = synthesizeLambdaHttpEvent({
             method: "POST",

@@ -16,7 +16,7 @@ export const loadApiOptionEntries = async (location, generator) => {
     if (typeof source?.apiOptionEntries !== "function") {
         throw new Error(`${moduleUrl} has no export "${exportName}" that reports API options: name the export holding the instance in exportName`);
     }
-    return source.apiOptionEntries();
+    return await source.apiOptionEntries();
 };
 /** One table of a generated file, read back as data, or null for a file that does not hold it as written. */
 export const readGeneratedTable = (contents, exportName) => {

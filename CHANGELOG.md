@@ -9,6 +9,143 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [12.0.1] - 2026-09-30
+
+A major: endpoints are values. An app declares each endpoint with its
+instance's `defineApi`, gathers them into named groups with `defineApiGroup`,
+and registers every group in one `registerApiGroups()` call. An endpoint's
+guards decide its mode, its name is `group.action`, a call goes to
+`{apiPath}/{group}/{action}`, and every caller reaches it through its group:
+`caller.orders.place(input)`.
+
+### Changed (breaking)
+
+- **`addApi` and `addSessionApi` are replaced by `defineApi`,
+  `defineApiGroup` and `registerApiGroups`.** `defineApi(options, handler)`
+  takes the options and the handler `addApi` took, and registers nothing by
+  itself; `defineApiGroup(name, { action: declaration })` gathers a group
+  (`defineApiGroup(name, partA, partB)` for one declared across files, an
+  action two parts declare being refused); `registerApiGroups(...groups)`
+  registers them and returns the instance typed with their contract, one flat
+  mapped type. The three builders are arrow properties, so an app hands them
+  out with `export const { defineApi, defineApiGroup, lazyApiGroup } =
+  lambderApp;`.
+  - To move: turn each chain of `addApi`/`addSessionApi` calls into a group of
+    `defineApi` declarations and register the groups in one call. Handler
+    bodies do not change.
+- **An endpoint's mode is its guards'.** An endpoint declaring a guard that
+  needs a session (`session: true`) is a session endpoint: its session is read
+  first, a call without one is answered `sessionExpired`, and its handler's
+  `ctx.session` is typed present. Every other endpoint is public. A
+  per-session rate limit on an endpoint none of whose guards needs a session,
+  and a session guard on an instance created without the `session` option,
+  are compile errors and registration errors.
+  - To move: give an endpoint that was an `addSessionApi` and declares no
+    session guard one: a no-op `lambderGuard({ session: true, handler: () => {} })`
+    where the session is its whole authorization.
+- **`requireSessionApiGuards` and `requirePublicApiGuards` are replaced by
+  `requireApiGuards`**, which makes `guards` a required field of every
+  endpoint.
+- **An endpoint is named `group.action`**, both identifiers (a letter, then
+  letters, digits or underscores). A group may not take the name of a
+  caller's public member or one a runtime asks of any object
+  (`LAMBDER_RESERVED_GROUP_NAMES`), nor an action one a function or any
+  object answers for (`then`, `call`, `toString`, `valueOf`:
+  `LAMBDER_RESERVED_ACTION_NAMES`), so converting a group to a string calls
+  no endpoint. The callers keep their state in
+  `#private` fields, so a group may take any name their public members leave
+  free (`transport`, `client`, `headers`).
+- **A call is `POST {apiPath}/{group}/{action}`**, the envelope in the body
+  and no `apiName` in it, so a gateway, a CDN and a log can meter, limit and
+  read calls per endpoint. `buildTransportEnvelope` writes no `apiName`, and
+  `readApiEnvelope(post, info, apiName)` takes the name from the path. A JSON
+  POST to `apiPath` itself naming an endpoint in its body is a page built
+  before endpoints had paths, and is answered `versionExpired`, which reloads
+  it.
+  - To move: an API Gateway route or a CloudFront behavior that matches
+    `apiPath` exactly (`POST /api`) now misses every call; widen it to what
+    is under it (`/api/*`, `ANY /api/{proxy+}`). A cookie an API handler sets
+    with a raw `Set-Cookie` header and no `Path` now defaults to the call's
+    directory (`/api/orders`) rather than `/`, in a browser as in the cookie
+    jar; `ctx.setCookie` and the session cookies always write `Path=/`.
+- **A request under `apiPath` that nothing matched is the API's**: a GET to a
+  call path, or a path of another depth, is answered as an unknown API rather
+  than by the public files, the shell or the route fallback. A root `apiPath`
+  shares every path with the site, so there only `apiPath` itself and the
+  calls are.
+- **The instance takes one type parameter**, `Lambder<TApp, TContract>`,
+  where `TApp` is `LambderAppTypes` (the session data, policies, guards,
+  idempotency, the guard requirement, sessions and the refusal vocabulary),
+  in place of ten positional generics. It is readable as the type-only
+  `AppTypes` property beside `ApiContract`.
+- **`use(plugin)` registers routes, hooks and actions**, and hands back the
+  same instance: endpoints are registered as groups, so a plugin adds nothing
+  to the contract.
+- **A `registerApiGroups()` call's groups take their place in the first-match
+  chain where the call stands**, as each `addApi` did: a route registered
+  before them sees their calls first, one registered after them never does.
+  The beforeRender hooks run before a lazy group loads, and a call to an
+  action its group does not have is answered as an unmatched API call, the
+  fallback hooks first.
+- **`apiOptionEntries()` is asynchronous**, as `apiSignatures()` and
+  `apiSignatureEntries()` are: all three load lazy groups first.
+- **The mock's `publicApi` and `sessionApi` are replaced by `api`, and
+  `sessionNotMocked` by `notMocked`.** An entry's mode is the `apiOptions`
+  table's when the mock was given it, and otherwise the server's rule applied
+  to the guards the entry restates. `LambderMockPublicNames` and
+  `LambderMockSessionNames` are removed. Every session endpoint must name at
+  least one mock guard declared `session: true`, a compile error at the
+  `guards` option otherwise (`LambderMockSessionGuardsCheck`), and a session
+  endpoint left unmocked on a mock without the table restates its guards,
+  `notMocked(name, { reason, guards })`, so a signed-out call answers
+  `sessionExpired` as the server does. `lambderMockInvokeTransport(mockApp,
+  { apiPath })` answers what the callee's server reads as a call, a JSON POST
+  to a call path under `apiPath` (default `"/api"`), and 404s anything else.
+- **`LambderMergeContract` is removed**, and `LambderAllowedGuardNames`,
+  `LambderParamlessGuardNames`, `LambderGuardsOption`,
+  `LambderAllowedPolicyNames` and `LambderRateLimitOption` lose their second
+  type parameter: every guard and every policy with a `per` may be declared
+  on any endpoint, a session guard making it a session one.
+
+### Added
+
+- **Every caller reaches an endpoint through its group.**
+  `caller.orders.place(input)` is `caller.api("orders.place", input)`, and
+  `caller.orders.place.outcome(input)` its `apiOutcome`, on `LambderCaller`,
+  `LambderInvokeCaller` and the test visitor alike. The groups are read off
+  the contract's type, so a client that imports its contract as a type ships
+  no endpoint list. A name that is not `group.action` is refused before it is
+  sent.
+- **Lazy groups.** `lazyApiGroup(name, () => import(...).then((m) => m.group))`
+  registers a group loaded on the first call to one of its endpoints, so a
+  cold start parses none of it until then; `loadApiGroups()` loads every one,
+  for a build step or a boot check. A hook that answers a call spares it the
+  import; one that throws a refusal, or charges a per-API budget, loads the
+  group, so the refusal is checked and the budget counted against the
+  endpoint called, as for an eager group. A load that fails is forgotten, and
+  the next call tries again.
+- **Compile-time registration checks**: a group typed `any`, a lazy group
+  loading one, or a group whose endpoints are (its endpoints would be `any` to
+  every client), and a group name given twice, are refused where
+  `registerApiGroups()` is written, and a group registration is atomic:
+  refused anywhere, it leaves the instance as it was. A lazy group written
+  where a list of groups is expected (a `satisfies`, an annotated array)
+  keeps its loaded group's type, rather than taking the expected `any`.
+- **`beforeCall` on `LambderInvokeCaller`**: a check run before every call,
+  `api()`, `apiOutcome()`, a group's call and `request()` alike, before
+  anything is built or sent. What it throws is thrown to the caller, from
+  `apiOutcome()` too, and `onFailure` is not told, since nothing was sent. It
+  is where a rule the calling code must keep goes, such as never calling out
+  while a database transaction is open (`LambderInvokeCallCheck`).
+- **What registering endpoints costs the compiler grows linearly**: each
+  declaration is typed on its own, and eight hundred endpoints cost under four
+  times what two hundred do, which the type-cost suite holds.
+- Exports: `apiCallPath`, `apiNameOfCallPath`, `splitApiName`, `isGroupName`,
+  `isActionName`, `LAMBDER_API_NAME_SEGMENT`, `LAMBDER_CALLER_MEMBER_NAMES`,
+  `LAMBDER_RESERVED_GROUP_NAMES`, `LAMBDER_RESERVED_ACTION_NAMES`, and the
+  types of declarations, groups and group calls (see
+  [Exports](./docs/exports.md#endpoints-declarations-groups-and-names)).
+
 ## [11.1.1] - 2026-09-30
 
 A minor for an app whose shell files sit behind a shared cache: a file whose

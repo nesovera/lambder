@@ -17,21 +17,28 @@ import { lambderTestApp, assertApiSuccess, assertApiFailure, type LambderTestApp
 
 type SessionData = { userId: string; role: 'admin' | 'member' };
 
-const server = initLambder<SessionData>().create({
+const lambderApp = initLambder<SessionData>().create({
     session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
     guards: {
+        signedIn: lambderGuard({ session: true, handler: async () => {} }),
         tenant: lambderGuard({ guardInput: z.object({ tenantId: z.string() }), handler: (_ctx, input) => ({ tenantId: input.tenantId }) }),
     },
-})
-    .addApi('echo', { input: z.object({ text: z.string() }), output: z.object({ text: z.string() }) }, async (ctx) => ({ text: ctx.apiPayload.text }))
-    .addSessionApi('me', { input: z.object({}), output: z.object({ userId: z.string() }) }, async (ctx) => ({ userId: ctx.session.data.userId }))
-    .addApi('tenant.name', { input: z.object({}), output: z.object({ tenantId: z.string() }), guards: 'tenant' }, async (ctx) => ({ tenantId: ctx.guardData.tenant.tenantId }));
+});
+const server = lambderApp.registerApiGroups(
+    lambderApp.defineApiGroup('test', {
+        echo: lambderApp.defineApi({ input: z.object({ text: z.string() }), output: z.object({ text: z.string() }) }, async (ctx) => ({ text: ctx.apiPayload.text })),
+        me: lambderApp.defineApi({ input: z.object({}), output: z.object({ userId: z.string() }), guards: 'signedIn' }, async (ctx) => ({ userId: ctx.session.data.userId })),
+    }),
+    lambderApp.defineApiGroup('tenant', {
+        current: lambderApp.defineApi({ input: z.object({}), output: z.object({ tenantId: z.string() }), guards: 'tenant' }, async (ctx) => ({ tenantId: ctx.guardData.tenant.tenantId })),
+    }),
+);
 
 /** The contract as writeApiContract prints it for a large app's clients and tests: plain members. */
 type PrintedContract = {
-    echo: { input: { text: string }; output: { text: string }; mode: 'public' };
-    me: { input: Record<string, never>; output: { userId: string }; mode: 'session' };
-    'tenant.name': { input: Record<string, never>; output: { tenantId: string }; mode: 'public'; guards: 'tenant'; guardInputs: { tenant: { tenantId: string } } };
+    'test.echo': { input: { text: string }; output: { text: string }; mode: 'public' };
+    'test.me': { input: Record<string, never>; output: { userId: string }; mode: 'session'; guards: 'signedIn' };
+    'tenant.current': { input: Record<string, never>; output: { tenantId: string }; mode: 'public'; guards: 'tenant'; guardInputs: { tenant: { tenantId: string } } };
 };
 
 describe('lambderTestApp: what the instance types', () => {
@@ -41,23 +48,26 @@ describe('lambderTestApp: what the instance types', () => {
 
         const visitor = app.visitor();
         expectTypeOf(visitor).toEqualTypeOf<LambderTestVisitor<typeof server.ApiContract, SessionData, never>>();
-        expectTypeOf(await visitor.api('echo', { text: 'hi' })).toEqualTypeOf<{ text: string } | undefined>();
+        expectTypeOf(await visitor.api('test.echo', { text: 'hi' })).toEqualTypeOf<{ text: string } | undefined>();
+        expectTypeOf(await visitor.test.echo({ text: 'hi' })).toEqualTypeOf<{ text: string } | undefined>();
+        // @ts-expect-error not an action of this group
+        await visitor.test.nope({}).catch(() => {});
 
         // @ts-expect-error not an API of this contract
         await visitor.apiOutcome('nope', {});
         // @ts-expect-error the payload is the endpoint's input
-        await visitor.apiOutcome('echo', { text: 42 });
+        await visitor.apiOutcome('test.echo', { text: 42 });
         // @ts-expect-error the session data is the app's
         await app.signIn('ada', { userId: 'ada', role: 'owner' }).catch(() => {});
         // @ts-expect-error a guardInput guard nobody provides is the call's to pass
-        await visitor.apiOutcome('tenant.name', {});
-        expect(await visitor.api('tenant.name', {}, { guardInputs: { tenant: { tenantId: 'acme' } } })).toEqual({ tenantId: 'acme' });
+        await visitor.apiOutcome('tenant.current', {});
+        expect(await visitor.api('tenant.current', {}, { guardInputs: { tenant: { tenantId: 'acme' } } })).toEqual({ tenantId: 'acme' });
     });
 
     it('takes the contract generated for the app\'s clients by name, for an app large enough to have one', async () => {
         const app = lambderTestApp<SessionData, PrintedContract>(server);
         expectTypeOf(app).toEqualTypeOf<LambderTestApp<PrintedContract, SessionData>>();
-        expect(await app.visitor().api('echo', { text: 'hi' })).toEqual({ text: 'hi' });
+        expect(await app.visitor().api('test.echo', { text: 'hi' })).toEqual({ text: 'hi' });
     });
 
     it('requires the provider once a visitor names provided guards, as LambderCaller does', async () => {
@@ -69,9 +79,9 @@ describe('lambderTestApp: what the instance types', () => {
 
         const visitor = app.visitor<'tenant'>({ guardInputsProvider: () => ({ tenant: { tenantId: 'acme' } }) });
         // A guard the provider covers needs no options argument.
-        expect(await visitor.api('tenant.name', {})).toEqual({ tenantId: 'acme' });
+        expect(await visitor.api('tenant.current', {})).toEqual({ tenantId: 'acme' });
         const signedIn = await app.signIn<'tenant'>('ada', { userId: 'ada', role: 'member' }, { guardInputsProvider: () => ({ tenant: { tenantId: 'acme' } }) });
-        expect(await signedIn.api('tenant.name', {})).toEqual({ tenantId: 'acme' });
+        expect(await signedIn.api('tenant.current', {})).toEqual({ tenantId: 'acme' });
     });
 });
 

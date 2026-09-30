@@ -4,8 +4,35 @@ export default Lambder;
 export { initLambder } from './core/Lambder.js';
 // The created hook's parameter is the instance, so it is declared beside the class.
 export type { LambderCreatedHook } from './core/Lambder.js';
+// Endpoints as values: what defineApi, defineApiGroup, lazyApiGroup and registerApiGroups build and read.
+export type {
+    LambderAppTypes,
+    LambderPlainAppTypes,
+    LambderApiDeclaration,
+    LambderApiDeclarations,
+    LambderApiGroup,
+    LambderLazyApiGroup,
+    LambderRegistrableApiGroup,
+    LambderApiModeOf,
+    LambderEntryOf,
+    LambderContractOfGroups,
+} from './api/LambderApiDeclarations.js';
+// How an endpoint is named, and where a call to it goes.
+export {
+    apiCallPath,
+    apiNameOfCallPath,
+    splitApiName,
+    isGroupName,
+    isActionName,
+    LAMBDER_API_NAME_SEGMENT,
+    LAMBDER_CALLER_MEMBER_NAMES,
+    LAMBDER_RESERVED_GROUP_NAMES,
+    LAMBDER_RESERVED_ACTION_NAMES,
+} from './shared/wire/LambderApiNames.js';
+export type { LambderReservedGroupName, LambderReservedActionName } from './shared/wire/LambderApiNames.js';
+export type { LambderContractGroupsOf, LambderContractNamesInGroup, LambderContractActionOf } from './shared/wire/LambderApiGroupCalls.js';
 export { default as LambderCaller } from "./client/LambderCaller.js";
-export type { LambderApiOutcome, LambderApiFailureReason, LambderValidationError, LambderCallOptions, LambderCallerOptions, LambderGuardInputsProvider, LambderProvidedGuardInputs, LambderLogListHandler } from "./client/LambderCaller.js";
+export type { LambderApiOutcome, LambderApiFailureReason, LambderValidationError, LambderCallOptions, LambderCallerOptions, LambderGuardInputsProvider, LambderProvidedGuardInputs, LambderLogListHandler, LambderCallerEndpoint, LambderCallerGroupCalls, LambderCallerMembers } from "./client/LambderCaller.js";
 export { createIdempotencyKey, createIdempotencyKeyScope } from "./shared/wire/LambderIdempotencyKeyScope.js";
 export type { LambderIdempotencyKeyScope } from "./shared/wire/LambderIdempotencyKeyScope.js";
 
@@ -84,11 +111,14 @@ export type {
     LambderInvokeCallerOptions,
     LambderInvokeCallOptions,
     LambderInvokeFailureHandler,
+    LambderInvokeCallCheck,
     LambderInvokeLogListHandler,
     LambderInvokeTransport,
     LambderInvokeTransportResult,
     LambderInvokeRequestInit,
     LambderInvokeEventInit,
+    LambderInvokeEndpoint,
+    LambderInvokeGroupCalls,
 } from "./invoke/LambderInvokeCaller.js";
 
 // A crash described for a caller allowed to see it (the envelope's `crash` field)
@@ -405,7 +435,6 @@ export type {
     LambderRefusalEnvelopeFields,
     LambderApiRefusalConfig,
     LambderContractEntry,
-    LambderMergeContract,
     LambderGuardNamesIn,
     LambderContractMode,
     LambderContractKeysWithMode,

@@ -1,26 +1,55 @@
 # APIs and refusals
 
-An API is a named endpoint with a Zod input schema and a Zod output schema.
-Lambder validates the input at runtime, infers both types at compile time, and
-accumulates every registration into one contract type the frontend imports.
+An API is an endpoint with a Zod input schema and a Zod output schema, in a
+named group: `companies.getPage` is the action `getPage` of the group
+`companies`, called at `{apiPath}/companies/getPage`. Lambder validates the
+input at runtime, infers both types at compile time, and folds every
+registered group into one contract type the frontend imports.
 
 ## Defining APIs
+
+An endpoint is a value. `defineApi(options, handler)` declares one, typed on
+the instance's own types; `defineApiGroup(name, { action: ... })` gathers a
+group's endpoints; `registerApiGroups(...groups)` registers them all at once.
 
 ```typescript
 import { z } from "zod";
 import { refuse } from "lambder";
 
-lambder
-    .addApi("getCompanyPage", {
+// app.ts: the instance, and its declaration builders handed out
+export const lambderApp = initLambder<SessionData>().create({ apiPath: "/api", session, guards });
+export const { defineApi, defineApiGroup, lazyApiGroup } = lambderApp;
+
+// companies.ts
+export const companyApis = defineApiGroup("companies", {
+    getPage: defineApi({
         input: z.object({ companyName: z.string() }),
         output: z.object({ id: z.string(), name: z.string(), description: z.string() }),
+        guards: "anyone",
     }, async ({ apiPayload }) => {
         // apiPayload is typed and already validated
         const company = await fetchCompany(apiPayload.companyName);
         if (!company) refuse("No such company.");
         return company;   // type-checked against `output`, and parsed through it before it is sent
-    });
+    }),
+});
+
+// index.ts: registration only
+export const lambder = lambderApp.registerApiGroups(companyApis, orderApis);
 ```
+
+A group's name and its actions are identifiers (a letter, then letters,
+digits or underscores), because the endpoint's name is also its path and a
+property of every caller: `caller.companies.getPage(input)`. A group may not
+take a name a caller already answers for (`api`, `apiOutcome`, `request`,
+`then` and the rest of `LAMBDER_RESERVED_GROUP_NAMES`), and an action may not
+take one a function or any object answers for (`then`, `call`, `outcome`,
+`toString`, `valueOf` and the rest of `LAMBDER_RESERVED_ACTION_NAMES`), so a
+group turned into a string calls nothing. Declaring an
+endpoint registers nothing; registration is where its options are checked
+against the instance (an unknown guard or policy, a missing guard under
+`requireApiGuards`, a refusal code outside the vocabulary), and a group
+registered twice is refused, at compile time and at startup.
 
 A handler takes the context and nothing else. It answers the call by
 returning its output, and says no by throwing a refusal with `ctx.refuse()`
@@ -96,49 +125,71 @@ replayed answer included. `false` is for an API whose answer compression
 barely helps, such as one carrying a file's bytes as base64 (see
 [Responses](./responses.md#compression) for what it does and does not save).
 
-## Session-protected APIs
+## Session endpoints: the guard decides
 
-`addSessionApi` fetches and validates the session before the handler runs, and
-types `ctx.session` from the instance's session data type. A missing or expired
-session answers the protocol's `{ sessionExpired: true }` envelope, which
-`LambderCaller` turns into the caller's `sessionExpiredHandler`.
+An endpoint says who may call it once, in its guards, and whether a session
+is needed is part of that answer. A guard declared `session: true` needs one
+(see [API policies](./api-policies.md#guards)), and an endpoint declaring such
+a guard is a session endpoint: the session is fetched and validated before
+the guards run, `ctx.session` is typed present from the instance's session
+data type, and a missing or expired session answers the protocol's
+`{ sessionExpired: true }` envelope, which `LambderCaller` turns into the
+caller's `sessionExpiredHandler`. Every other endpoint is public, and there is
+nowhere else to say it, so the mode cannot disagree with the authorization.
 
 ```typescript
-lambder.addSessionApi("getProfile", {
-    input: z.void(),
-    output: z.object({ userId: z.string(), username: z.string() }),
-}, async (ctx) => ({
-    userId: ctx.session.data.userId,
-    username: ctx.session.data.username,
-}));
+const lambderApp = initLambder<SessionData>().create({
+    apiPath: "/api",
+    session,
+    guards: {
+        // The whole authorization of an endpoint about the signed-in user's own account.
+        signedIn: initLambder<SessionData>().guard({ session: true, handler: async () => {} }),
+    },
+});
+
+export const profileApis = lambderApp.defineApiGroup("profile", {
+    get: lambderApp.defineApi({
+        input: z.object({}),
+        output: z.object({ userId: z.string(), username: z.string() }),
+        guards: "signedIn",
+    }, async (ctx) => ({
+        userId: ctx.session.data.userId,
+        username: ctx.session.data.username,
+    })),
+});
 ```
 
-Registering the same API name twice throws. Dispatch is first-match, so a
-second registration would be silently dead code.
+A per-session rate limit on an endpoint none of whose guards needs a session
+is refused where it is written: a public call carries no session to count
+against. A guard that needs a session on an instance created without the
+`session` option is refused the same way.
 
 ## The inferred contract
 
 ```typescript
-export const lambder = initLambder().create({ ... })
-    .addApi(...)
-    .addSessionApi(...);
+export const lambder = lambderApp.registerApiGroups(companyApis, profileApis);
 
 export type ApiContractType = typeof lambder.ApiContract;
 export const handler = lambder.getHandler();
 ```
 
-`ApiContract` is a type-only property: it holds every registered API as a
-client calls it. A small app's frontend imports `ApiContractType` from here as
-it is. Chaining builds it as an intersection one member deep per endpoint, so
-every generic read of it (a typed caller, a mock registry, a test visitor)
-resolves the member across all of them; in a large app that, and compiling the
-server's schemas to get the type at all, is most of a client's type check. Such
-an app writes the contract out as a generated file instead and has its clients
-import that; see [the contract as a generated file](#the-contract-as-a-generated-file).
+`ApiContract` is a type-only property: it holds every registered endpoint,
+keyed `group.action`, as a client calls it. Each declaration is typed on its
+own, and the contract of one `registerApiGroups()` call is one flat mapped
+type over its groups, so what an endpoint costs the compiler does not grow
+with the endpoints registered before it; register every group in one call
+where you can. Compile-time refusals at registration: a group typed `any` (its
+endpoints would be `any` to every client, which is what a module whose types
+were lost would do) and a group name given twice.
+
+A small app's frontend imports `ApiContractType` from here as it is. Getting
+the type at all compiles the server's schemas, so a large app writes the
+contract out as a generated file instead and has its clients import that; see
+[the contract as a generated file](#the-contract-as-a-generated-file).
 
 Each contract entry carries the API's `input` and `output`, its `guardInputs`
 when a guardInput-mode guard applies, its `guards` option exactly as
-declared (`ApiContractType["getUser"]["guards"]` is the literal
+declared (`ApiContractType["users.get"]["guards"]` is the literal
 `{ readonly orgPermission: "USERS.MANAGE" }`), and its `refusals`: every code
 it can refuse with, its own and its guards', each mapped to `{ data }` (the
 data as it arrives) or `{}`. `refusals` is the one member that is not the
@@ -166,7 +217,7 @@ type PermissionNeededBy<K extends keyof ApiContractType> =
     ApiContractType[K] extends { guards: { orgPermission: infer N } } ? N : never;
 
 const NEEDS = {
-    getUser: "USERS.MANAGE",
+    "users.get": "USERS.MANAGE",
 } as const satisfies { [K in keyof ApiContractType]?: PermissionNeededBy<K> };
 ```
 
@@ -415,45 +466,104 @@ are the ones a client gating on the guard calls, and so names in its own code
 already. A guard the server does not declare fails the write; `check`,
 `header` and `semicolons` work as they do for the options file.
 
-## Modular APIs with `use()`
+## Groups across files, and lazy groups
 
-For larger applications, split APIs into modules. `use()` preserves the
-inferred contract through the chain.
+A module exports its groups, and the entry registers them. A group only
+some requests call can be registered lazily: `lazyApiGroup(name, load)`
+imports it on the first call to one of its endpoints, so a cold start parses
+none of it, nor anything only it imports, until then.
 
 ```typescript
-// user-api.ts
+// users.ts
 import { z } from "zod";
-import type { AppLambder } from "./app";
+import { defineApi, defineApiGroup } from "./app";
 
-export const userApi = (lambder: AppLambder) => lambder
-    .addApi("getUser", {
+export const userApis = defineApiGroup("users", {
+    get: defineApi({
         input: z.object({ id: z.string() }),
         output: z.object({ id: z.string(), name: z.string() }),
-    }, async (ctx) => ({ id: ctx.apiPayload.id, name: "User" }))
-    .addApi("createUser", {
+        guards: "signedIn",
+    }, async (ctx) => ({ id: ctx.apiPayload.id, name: "User" })),
+    create: defineApi({
         input: z.object({ name: z.string(), email: z.string() }),
         output: z.object({ id: z.string() }),
-    }, async () => ({ id: "123" }));
+        guards: "signedIn",
+    }, async () => ({ id: "123" })),
+});
 
 // index.ts
-import { lambderApp } from "./app";
-import { userApi } from "./user-api";
+import { lambderApp, lazyApiGroup } from "./app";
+import { userApis } from "./users";
 
-export const lambder = lambderApp.use(userApi);
+export const lambder = lambderApp.registerApiGroups(
+    userApis,
+    // Loaded, and its registration checked, on the first call to reports.*.
+    lazyApiGroup("reports", () => import("./reports").then((m) => m.reportApis)),
+);
 
 export type ApiContractType = typeof lambder.ApiContract;
 export const handler = lambder.getHandler();
 ```
 
-Derive `AppLambder` from the real instance rather than writing the annotation
-by hand; see
-[Configuration](./configuration.md#sharing-the-instance-type-across-files).
+A group too large for one file is declared in parts, one per file, each a
+plain object of endpoints, and assembled where it is registered or in a file
+of its own. An action two parts declare is refused, at compile time and at
+startup, rather than one silently replacing the other as a spread would:
+
+```typescript
+// orders/read.ts
+export const orderReadApis = {
+    get: defineApi({ /* ... */ }, async (ctx) => { /* ... */ }),
+    search: defineApi({ /* ... */ }, async (ctx) => { /* ... */ }),
+};
+
+// orders/write.ts
+export const orderWriteApis = {
+    place: defineApi({ /* ... */ }, async (ctx) => { /* ... */ }),
+};
+
+// orders/index.ts
+export const orderApis = defineApiGroup("orders", orderReadApis, orderWriteApis);
+```
+
+A lazy group's contract is the loaded group's, read off its type, and the
+group it loads must carry the name it was registered under. Its registration
+runs when it loads, so a build step or a boot check that has to see every
+endpoint calls `await lambder.loadApiGroups()` first; `apiSignatures()`,
+`apiSignatureEntries()` and `apiOptionEntries()` do so themselves.
+
+The groups of one `registerApiGroups()` call take their place in the
+first-match chain where the call stands, as a route does: a route or action
+registered before them sees their calls first, and one registered after them
+never does. A call to an action its group does not have is answered as any
+unmatched API call is, the fallback hooks first. The beforeRender hooks run
+before a lazy group loads, so a hook that refuses a request (a gate on a
+staging host, say) with a response spares it the import. A hook that throws
+a refusal, or charges a per-API budget, loads the group instead, since the
+refusal is checked against the endpoint called and the budget counted
+against it, as for an eager group.
+
+A request under `apiPath` that nothing matched is the API's to answer: a GET
+to a call path, or a path of another depth, is answered as an unknown API
+rather than by the public files, the shell or the route fallback. A root
+`apiPath` (`"/"`) shares every path with the site, so there only `apiPath`
+itself and the calls are.
+
+`use(plugin)` hands the instance to a function that registers routes, hooks
+or actions on it and continues the chain; endpoints are registered as groups,
+never through it.
 
 ## Request flow per API
 
-An API call is a POST to `apiPath` with `Content-Type: application/json`,
-which every Lambder caller sends. A POST of any other type to that path is
-not an API call and reaches the API fallback. JSON is the one type a browser
+An API call is a POST to `{apiPath}/{group}/{action}` with
+`Content-Type: application/json`, which every Lambder caller sends; the body
+carries the envelope (payload, version, signature, CSRF token, guard inputs,
+idempotency key), and the endpoint is the path, so a gateway, a CDN and a log
+can meter, limit and read calls per endpoint without opening the body. A
+POST of any other type is not an API call and reaches the API fallback. A
+JSON POST to `apiPath` itself whose body names an endpoint is how callers
+posted before endpoints had paths: it comes from a page built then, and is
+answered `versionExpired`, which reloads the page. JSON is the one type a browser
 will not send cross-origin without asking first, so this is what puts every
 cross-origin call through the CORS config: a plain HTML form on another site
 could otherwise post a login envelope (`enctype="text/plain"` lays out JSON
@@ -462,7 +572,7 @@ exactly) and plant the attacker's session in a visitor's browser.
 ```
 version floor → signature gate → payload restore
   → rate limits keyed on the request alone (per: "ip")
-  → session (session APIs)
+  → session (endpoints whose guards need one)
   → idempotency replay lookup
   → rate limits keyed per session (per: "session"), and custom keys
     charged before the guards (chargeAt: "beforeGuards")
@@ -710,17 +820,20 @@ const managerOnly = lambderInit.guard({
 
 export const lambderApp = lambderInit.create({ apiPath: "/api", session, guards: { managerOnly } });
 
-lambderApp.addApi("order.pay", {
-    input: z.object({ orderId: z.string(), amount: z.number() }),
-    output: z.object({ paid: z.literal(true) }),
-    refusals: ["order-closed", "wallet-short"],
-}, async (ctx) => {
-    const order = await loadOrder(ctx.apiPayload.orderId);
-    if (order.closed) return ctx.refuse("This order is closed.", { code: "order-closed" });
-    if (order.wallet < ctx.apiPayload.amount) {
-        return ctx.refuse("The wallet holds less than the total.", { code: "wallet-short", data: { available: order.wallet } });
-    }
-    return { paid: true };
+export const orderApis = lambderApp.defineApiGroup("order", {
+    pay: lambderApp.defineApi({
+        input: z.object({ orderId: z.string(), amount: z.number() }),
+        output: z.object({ paid: z.literal(true) }),
+        guards: "managerOnly",
+        refusals: ["order-closed", "wallet-short"],
+    }, async (ctx) => {
+        const order = await loadOrder(ctx.apiPayload.orderId);
+        if (order.closed) return ctx.refuse("This order is closed.", { code: "order-closed" });
+        if (order.wallet < ctx.apiPayload.amount) {
+            return ctx.refuse("The wallet holds less than the total.", { code: "wallet-short", data: { available: order.wallet } });
+        }
+        return { paid: true };
+    }),
 });
 ```
 

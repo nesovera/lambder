@@ -592,20 +592,22 @@ describe('Hooks - Combined Workflow', () => {
             return ctx;
         });
 
-        lambder.addApi('testApi', {
-            input: z.object({ value: z.string() }),
-            output: z.object({ result: z.string() })
-        }, async (ctx) => {
-            executionOrder.push('apiHandler');
-            return { result: ctx.apiPayload.value };
-        });
+        const registered = lambder.registerApiGroups(lambder.defineApiGroup('test', {
+            echo: lambder.defineApi({
+                input: z.object({ value: z.string() }),
+                output: z.object({ result: z.string() })
+            }, async (ctx) => {
+                executionOrder.push('apiHandler');
+                return { result: ctx.apiPayload.value };
+            }),
+        }));
 
         await lambder.addHook('afterRender', async (ctx, res, response) => {
             executionOrder.push('afterRender');
             return response;
         });
 
-        await browse(lambder).api('testApi', { value: 'test' });
+        await browse(registered).api('test.echo', { value: 'test' });
 
         expect(executionOrder).toEqual(['beforeRender', 'apiHandler', 'afterRender']);
     });

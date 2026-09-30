@@ -38,51 +38,55 @@ const managerOnly = lambderInit.guard({
     },
 });
 
-const createStore = () => lambderInit.create({
-    apiPath: '/api',
-    session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
-    guards: { managerOnly },
-})
-    .addApi('order.pay', {
-        input: z.object({ orderId: z.string(), amount: z.number() }),
-        output: z.object({ paid: z.literal(true) }),
-        refusals: ['order-closed', 'wallet-short'],
-    }, async (ctx) => {
-        if(ctx.apiPayload.orderId === 'closed') return ctx.refuse('This order is closed.', { code: 'order-closed' });
-        if(ctx.apiPayload.amount > 100) return ctx.refuse('The wallet holds less than the total.', { code: 'wallet-short', data: { available: 100 } });
-        if(ctx.apiPayload.orderId === 'plain') return ctx.refuse('Not today.');
-        return { paid: true };
-    })
-    .addApi('order.quote', {
-        input: z.object({ mode: z.enum(['changed', 'undeclared', 'bad-data', 'missing-data', 'stray-data', 'own-status', 'own-flag', 'helper']) }),
-        output: z.object({ cents: z.number() }),
-        refusals: 'price-changed',
-    }, async (ctx) => {
-        switch(ctx.apiPayload.mode){
-            // Parsed through the code's schema: the transform runs once, on the way out.
-            case 'changed': return ctx.refuse('The price changed.', { code: 'price-changed', data: { cents: 1250 } });
-            case 'undeclared': return refuse('Closed.', { code: 'order-closed' });
-            case 'bad-data': return refuse('Changed.', { code: 'price-changed', data: { cents: 'many' } });
-            case 'missing-data': return refuse('Changed.', { code: 'price-changed' });
-            case 'stray-data': return refuse('No.', { data: { anything: true } });
-            // The declaration owns a code's status and flag; a raise site that sets one is checked where it is rendered.
-            case 'own-status': return refuse('The price changed.', { code: 'price-changed', data: { cents: 1 }, statusCode: 404 });
-            case 'own-flag': return refuse('The price changed.', { code: 'price-changed', data: { cents: 1 }, notAuthorized: true });
-            // A shared helper with nothing of the request in hand still
-            // raises a declared code, checked where it is rendered.
-            case 'helper': return requirePrice();
-        }
-    })
-    .addSessionApi('order.refund', {
-        input: z.object({ orderId: z.string() }),
-        output: z.object({ refunded: z.literal(true) }),
-        guards: 'managerOnly',
-        refusals: 'order-closed',
-    }, async (ctx) => {
-        if(ctx.apiPayload.orderId === 'closed') return ctx.refuse('This order is closed.', { code: 'order-closed' });
-        return { refunded: true };
-    })
-    .addApi('order.peek', { input: z.object({}), output: z.object({ open: z.boolean() }) }, async (_ctx) => ({ open: true }));
+const createStore = () => {
+    const app = lambderInit.create({
+        apiPath: '/api',
+        session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
+        guards: { managerOnly },
+    });
+    return app.registerApiGroups(app.defineApiGroup('order', {
+        pay: app.defineApi({
+            input: z.object({ orderId: z.string(), amount: z.number() }),
+            output: z.object({ paid: z.literal(true) }),
+            refusals: ['order-closed', 'wallet-short'],
+        }, async (ctx) => {
+            if(ctx.apiPayload.orderId === 'closed') return ctx.refuse('This order is closed.', { code: 'order-closed' });
+            if(ctx.apiPayload.amount > 100) return ctx.refuse('The wallet holds less than the total.', { code: 'wallet-short', data: { available: 100 } });
+            if(ctx.apiPayload.orderId === 'plain') return ctx.refuse('Not today.');
+            return { paid: true };
+        }),
+        quote: app.defineApi({
+            input: z.object({ mode: z.enum(['changed', 'undeclared', 'bad-data', 'missing-data', 'stray-data', 'own-status', 'own-flag', 'helper']) }),
+            output: z.object({ cents: z.number() }),
+            refusals: 'price-changed',
+        }, async (ctx) => {
+            switch(ctx.apiPayload.mode){
+                // Parsed through the code's schema: the transform runs once, on the way out.
+                case 'changed': return ctx.refuse('The price changed.', { code: 'price-changed', data: { cents: 1250 } });
+                case 'undeclared': return refuse('Closed.', { code: 'order-closed' });
+                case 'bad-data': return refuse('Changed.', { code: 'price-changed', data: { cents: 'many' } });
+                case 'missing-data': return refuse('Changed.', { code: 'price-changed' });
+                case 'stray-data': return refuse('No.', { data: { anything: true } });
+                // The declaration owns a code's status and flag; a raise site that sets one is checked where it is rendered.
+                case 'own-status': return refuse('The price changed.', { code: 'price-changed', data: { cents: 1 }, statusCode: 404 });
+                case 'own-flag': return refuse('The price changed.', { code: 'price-changed', data: { cents: 1 }, notAuthorized: true });
+                // A shared helper with nothing of the request in hand still
+                // raises a declared code, checked where it is rendered.
+                case 'helper': return requirePrice();
+            }
+        }),
+        refund: app.defineApi({
+            input: z.object({ orderId: z.string() }),
+            output: z.object({ refunded: z.literal(true) }),
+            guards: 'managerOnly',
+            refusals: 'order-closed',
+        }, async (ctx) => {
+            if(ctx.apiPayload.orderId === 'closed') return ctx.refuse('This order is closed.', { code: 'order-closed' });
+            return { refunded: true };
+        }),
+        peek: app.defineApi({ input: z.object({}), output: z.object({ open: z.boolean() }) }, async (_ctx) => ({ open: true })),
+    }));
+};
 
 const requirePrice = (): never => refuse('The price changed.', { code: 'price-changed', data: { cents: 99 } });
 
@@ -136,32 +140,34 @@ describe('Declared refusals: the contract', () => {
 describe('Declared refusals: raising one', () => {
     it('types ctx.refuse to the endpoint\'s codes, with data required where the code declares it and forbidden where it does not', () => {
         const store = initLambder().declareRefusals({ 'order-closed': {}, 'wallet-short': { data: z.object({ available: z.number() }) } }).create({ apiPath: '/api' });
-        store.addApi('a', { input: z.object({}), output: z.object({}), refusals: ['order-closed', 'wallet-short'] }, async (ctx) => {
-            // @ts-expect-error the code declares data, so it is required
-            ctx.refuse('Short.', { code: 'wallet-short' });
-            // @ts-expect-error the code declares no data
-            ctx.refuse('Closed.', { code: 'order-closed', data: { available: 1 } });
-            // @ts-expect-error the data is the code's own shape
-            ctx.refuse('Short.', { code: 'wallet-short', data: { available: 'many' } });
-            // @ts-expect-error a code of the vocabulary this API does not declare
-            ctx.refuse('Nope.', { code: 'unknown-code' });
-            // @ts-expect-error a declared code's status is its declaration's
-            ctx.refuse('Closed.', { code: 'order-closed', statusCode: 404 });
-            // @ts-expect-error and so is its flag
-            ctx.refuse('Closed.', { code: 'order-closed', notAuthorized: true });
-            // An uncoded refusal still chooses its own.
-            ctx.refuse('Plain.', { statusCode: 404, notAuthorized: true });
-            return ctx.refuse('Plain.');
-        });
-        store.addApi('b', { input: z.object({}), output: z.object({}) }, async (ctx) => {
-            // @ts-expect-error an API with no refusals option raises no code
-            ctx.refuse('Closed.', { code: 'order-closed' });
-            return {};
-        });
+        store.registerApiGroups(store.defineApiGroup('test', {
+            a: store.defineApi({ input: z.object({}), output: z.object({}), refusals: ['order-closed', 'wallet-short'] }, async (ctx) => {
+                // @ts-expect-error the code declares data, so it is required
+                ctx.refuse('Short.', { code: 'wallet-short' });
+                // @ts-expect-error the code declares no data
+                ctx.refuse('Closed.', { code: 'order-closed', data: { available: 1 } });
+                // @ts-expect-error the data is the code's own shape
+                ctx.refuse('Short.', { code: 'wallet-short', data: { available: 'many' } });
+                // @ts-expect-error a code of the vocabulary this API does not declare
+                ctx.refuse('Nope.', { code: 'unknown-code' });
+                // @ts-expect-error a declared code's status is its declaration's
+                ctx.refuse('Closed.', { code: 'order-closed', statusCode: 404 });
+                // @ts-expect-error and so is its flag
+                ctx.refuse('Closed.', { code: 'order-closed', notAuthorized: true });
+                // An uncoded refusal still chooses its own.
+                ctx.refuse('Plain.', { statusCode: 404, notAuthorized: true });
+                return ctx.refuse('Plain.');
+            }),
+            b: store.defineApi({ input: z.object({}), output: z.object({}) }, async (ctx) => {
+                // @ts-expect-error an API with no refusals option raises no code
+                ctx.refuse('Closed.', { code: 'order-closed' });
+                return {};
+            }),
+        }));
         // @ts-expect-error a code the vocabulary does not hold
-        expect(() => store.addApi('c', { input: z.object({}), output: z.object({}), refusals: 'order-lost' }, async () => ({}))).toThrow(/order-lost/);
+        expect(() => store.registerApiGroups(store.defineApiGroup('unknownCode', { c: store.defineApi({ input: z.object({}), output: z.object({}), refusals: 'order-lost' }, async () => ({})) }))).toThrow(/order-lost/);
         // @ts-expect-error an empty list declares nothing
-        expect(() => store.addApi('d', { input: z.object({}), output: z.object({}), refusals: [] }, async () => ({}))).toThrow(/empty refusals option/);
+        expect(() => store.registerApiGroups(store.defineApiGroup('emptyList', { d: store.defineApi({ input: z.object({}), output: z.object({}), refusals: [] }, async () => ({})) }))).toThrow(/empty refusals option/);
         expect(store).toBeDefined();
     });
 
@@ -317,9 +323,10 @@ describe('Declared refusals: creation', () => {
         // @ts-expect-error a guard names codes, and there is no vocabulary to name them from
         expect(() => initLambder().create({ apiPath: '/api', guards: { typo } })).toThrow(/no refusals vocabulary was declared/);
         const store = initLambder().declareRefusals({ 'order-closed': {} }).create({ apiPath: '/api' });
-        expect(() => store.addApi('x', { input: z.object({}), output: z.object({}), refusals: 'order-lost' as never }, async () => ({}))).toThrow(/API "x" declares the refusal "order-lost", which the refusals vocabulary does not hold/);
-        expect(() => store.addApi('y', { input: z.object({}), output: z.object({}), refusals: [] as never }, async () => ({}))).toThrow(/empty refusals option/);
-        expect(() => initLambder().create({ apiPath: '/api' }).addApi('z', { input: z.object({}), output: z.object({}), refusals: 'x' as never }, async () => ({}))).toThrow(/no refusals vocabulary was declared/);
+        expect(() => store.registerApiGroups(store.defineApiGroup('test', { x: store.defineApi({ input: z.object({}), output: z.object({}), refusals: 'order-lost' as never }, async () => ({})) }))).toThrow(/API "test\.x" declares the refusal "order-lost", which the refusals vocabulary does not hold/);
+        expect(() => store.registerApiGroups(store.defineApiGroup('test', { y: store.defineApi({ input: z.object({}), output: z.object({}), refusals: [] as never }, async () => ({})) }))).toThrow(/empty refusals option/);
+        const plain = initLambder().create({ apiPath: '/api' });
+        expect(() => plain.registerApiGroups(plain.defineApiGroup('test', { z: plain.defineApi({ input: z.object({}), output: z.object({}), refusals: 'x' as never }, async () => ({})) }))).toThrow(/no refusals vocabulary was declared/);
         // The vocabulary is declared once, at the init, and create() takes none.
         // @ts-expect-error create() has no refusals option
         expect(() => initLambder().create({ apiPath: '/api', refusals: { 'order-closed': {} } })).not.toThrow();
@@ -372,30 +379,32 @@ describe('Declared refusals: creation', () => {
     it('requires a code on every refusal an API answers with when the vocabulary says so', async () => {
         vi.spyOn(console, 'error').mockImplementation(() => {});
         const init = initLambder().declareRefusals({ 'order-closed': {} }, { requireCodes: true });
-        const store = init.create({ apiPath: '/api' })
-            .addApi('a', { input: z.object({ mode: z.enum(['coded', 'uncoded', 'framework']) }), output: z.object({}), refusals: 'order-closed' }, async (ctx) => {
+        const created = init.create({ apiPath: '/api' });
+        const store = created.registerApiGroups(created.defineApiGroup('test', {
+            a: created.defineApi({ input: z.object({ mode: z.enum(['coded', 'uncoded', 'framework']) }), output: z.object({}), refusals: 'order-closed' }, async (ctx) => {
                 switch(ctx.apiPayload.mode){
                     case 'coded': return ctx.refuse('Closed.', { code: 'order-closed' });
                     // The free refuse() still compiles; the render check is what catches it.
                     case 'uncoded': return refuse('Plain.');
                     case 'framework': return refuse('Reused.', { code: LAMBDER_REFUSAL_CODES.idempotencyKeyReused });
                 }
-            });
-        // ctx.refuse and the init's refuse take no uncoded form.
-        store.addApi('b', { input: z.object({}), output: z.object({}) }, async (ctx) => {
-            // @ts-expect-error a refusal names a code here
-            if(Math.random() > 2) ctx.refuse('Plain.');
-            // @ts-expect-error the options are not optional either
-            if(Math.random() > 2) ctx.refuse('Plain.', {});
-            return {};
-        });
+            }),
+            // ctx.refuse and the init's refuse take no uncoded form.
+            b: created.defineApi({ input: z.object({}), output: z.object({}) }, async (ctx) => {
+                // @ts-expect-error a refusal names a code here
+                if(Math.random() > 2) ctx.refuse('Plain.');
+                // @ts-expect-error the options are not optional either
+                if(Math.random() > 2) ctx.refuse('Plain.', {});
+                return {};
+            }),
+        }));
         // @ts-expect-error the init's refuse names a code too
         expect(() => init.refuse('Plain.')).toThrow();
         const app = lambderTestApp(store);
-        assertApiRefusal(await app.visitor().apiOutcome('a', { mode: 'coded' }), 'order-closed');
-        assertApiFailure(await app.visitor().apiOutcome('a', { mode: 'framework' }), 'refusal', { code: LAMBDER_REFUSAL_CODES.idempotencyKeyReused });
-        assertApiFailure(await app.visitor().apiOutcome('a', { mode: 'uncoded' }), 'server', { status: 500 });
-        expect(app.crashes.at(-1)?.message).toMatch(/API "a" refused without a code, and this app requires every refusal/);
+        assertApiRefusal(await app.visitor().apiOutcome('test.a', { mode: 'coded' }), 'order-closed');
+        assertApiFailure(await app.visitor().apiOutcome('test.a', { mode: 'framework' }), 'refusal', { code: LAMBDER_REFUSAL_CODES.idempotencyKeyReused });
+        assertApiFailure(await app.visitor().apiOutcome('test.a', { mode: 'uncoded' }), 'server', { status: 500 });
+        expect(app.crashes.at(-1)?.message).toMatch(/API "test\.a" refused without a code, and this app requires every refusal/);
         // The switch needs a vocabulary to name codes from.
         expect(() => new Lambder({ apiPath: '/api', requireRefusalCodes: true })).toThrow(/requireRefusalCodes needs a refusals vocabulary/);
     });

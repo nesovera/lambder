@@ -1,3 +1,4 @@
+import { apiCallPath } from '../src/shared/wire/LambderApiNames.js';
 import { LambderLocalFileSource } from '../src/stores/LambderLocalFileSource.js';
 import { gunzipSync, brotliDecompressSync } from 'node:zlib';
 import {
@@ -81,8 +82,11 @@ export const createApiEvent = (
     overrides: Partial<APIGatewayProxyEvent> & { sourceIp?: string } = {},
 ): APIGatewayProxyEvent => {
     const { sourceIp = DEFAULT_GATEWAY_SOURCE_IP, headers, ...eventOverrides } = overrides;
-    return createMockEvent('/api', {
-        body: JSON.stringify(body),
+    // A call goes to its endpoint's path, the way every Lambder caller sends
+    // it (apiCallPath); the envelope in the body carries no name.
+    const { apiName, ...envelope } = body;
+    return createMockEvent(typeof apiName === 'string' ? apiCallPath('/api', apiName) : '/api', {
+        body: JSON.stringify(envelope),
         httpMethod: 'POST',
         // An API call is JSON, the way every Lambder caller sends one; a test
         // that wants another content type names its own.

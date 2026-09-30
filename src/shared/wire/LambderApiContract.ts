@@ -1,7 +1,7 @@
 /**
  * Lambder API Contract System
  *
- * Contracts are built via method chaining and inferred using typeof lambder.ApiContract
+ * Contracts are the endpoint declarations an instance registered, read with typeof lambder.ApiContract
  */
 
 import type { LambderCrashDetail } from "./LambderCrashDetail.js";
@@ -15,7 +15,7 @@ import type {
     LambderRateLimitOptionValue,
 } from "./LambderApiOptionValues.js";
 
-/** Whether an endpoint runs without a session or requires one (addApi versus addSessionApi). */
+/** Whether an endpoint runs without a session or requires one: "session" exactly when one of its guards needs a session. */
 export type LambderApiMode = "public" | "session";
 
 /**
@@ -25,7 +25,7 @@ export type LambderApiMode = "public" | "session";
 export type LambderApiContractShape = Record<string, {
     input: any;
     output: any;
-    /** "public" (addApi) or "session" (addSessionApi). */
+    /** "public", or "session" when one of its guards needs a session. */
     mode?: LambderApiMode;
     /** Present when the API declares guardInput-mode guards: guard name -> value the client must send via options.guardInputs. */
     guardInputs?: any;
@@ -166,7 +166,7 @@ export type LambderJsonOf<T> =
     : never;
 
 /**
- * One contract entry as addApi/addSessionApi record it: the payload types,
+ * One contract entry as defineApi records it: the payload types,
  * the mode, and every declarative option exactly as written. Options that
  * were not written are absent rather than undefined, so `keyof` an entry
  * lists only what the endpoint declared.
@@ -189,19 +189,6 @@ export type LambderContractEntry<In, Out, Mode extends LambderApiMode, GuardInpu
     & ([Guards] extends [never] ? {} : { guards: Guards })
     & ([RateLimit] extends [never] ? {} : { rateLimit: RateLimit })
     & ([Idempotency] extends [never] ? {} : { idempotency: Idempotency });
-
-/**
- * Merges a new entry into the contract during chaining.
- *
- * The contract is therefore an intersection one member deep per endpoint, and
- * every `C[K]` read generically (a typed caller, a mock registry, a test
- * visitor) resolves the property across all of them. That costs nothing
- * worth measuring in a small app and most of a large client's type check,
- * which is what writeApiContract (lambder/build) is for: it writes the
- * contract out as one object type with plain members, for clients to import
- * instead of the server.
- */
-export type LambderMergeContract<Old, Name extends string, Entry> = Old & { [K in Name]: Entry };
 
 // ---------------------------------------------------------------------------
 // Reading a contract without importing it: the helpers a mock registry, a

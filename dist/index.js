@@ -1,6 +1,8 @@
 import Lambder from './core/Lambder.js';
 export default Lambder;
 export { initLambder } from './core/Lambder.js';
+// How an endpoint is named, and where a call to it goes.
+export { apiCallPath, apiNameOfCallPath, splitApiName, isGroupName, isActionName, LAMBDER_API_NAME_SEGMENT, LAMBDER_CALLER_MEMBER_NAMES, LAMBDER_RESERVED_GROUP_NAMES, LAMBDER_RESERVED_ACTION_NAMES, } from './shared/wire/LambderApiNames.js';
 export { default as LambderCaller } from "./client/LambderCaller.js";
 export { createIdempotencyKey, createIdempotencyKeyScope } from "./shared/wire/LambderIdempotencyKeyScope.js";
 // Transports: how a caller reaches a server (fetch in production, a handler in-process for tests, a cookie jar over either)

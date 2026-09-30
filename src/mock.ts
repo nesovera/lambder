@@ -24,14 +24,14 @@ export type {
     LambderMockEntry,
     LambderMockEntryOptions,
     LambderMockEntryInput,
+    LambderMockNotMockedInput,
+    LambderMockSessionGuardsCheck,
     LambderMockSlice,
     LambderMockRestEntry,
     LambderMockRegistryCheck,
     LambderMockMissingNames,
     LambderMockStrayNames,
     LambderMockDuplicateNames,
-    LambderMockPublicNames,
-    LambderMockSessionNames,
     LambderMockLatency,
     LambderMockFailure,
     LambderMockFailureReason,
@@ -64,7 +64,7 @@ export { lambderMockInvokeTransport } from "./mock/lambderMockInvokeTransport.js
 // The event and answer shapes that transport reads and returns, declared
 // structurally so the mock entry's type graph reaches neither aws-lambda nor
 // the Lambda SDK; a caller that names them needs them from here.
-export type { LambderMockInvokeEvent, LambderMockInvokeResult } from "./mock/lambderMockInvokeTransport.js";
+export type { LambderMockInvokeEvent, LambderMockInvokeResult, LambderMockInvokeTransportOptions } from "./mock/lambderMockInvokeTransport.js";
 
 // What a mock setup reaches for beside the app: the stores it runs on, the
 // jar its transport carries, and the refusal a handler says no with.

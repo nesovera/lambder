@@ -34,15 +34,16 @@ const call = (lambder: Lambder<any, any>, apiName: string) =>
 
 describe('Headers written during a call', () => {
     it('survive an afterRender hook that answers with a different response', async () => {
-        const lambder = app()
-            .addApi('login', { input: z.any(), output: z.any() }, async (ctx) => {
+        const lambder = app();
+        lambder.registerApiGroups(lambder.defineApiGroup('account', {
+            login: lambder.defineApi({ input: z.any(), output: z.any() }, async (ctx) => {
                 await lambder.getSessionController(ctx).createSession('user-1', { role: 'user' });
                 ctx.setResponseHeader('X-Handler', 'ran');
                 return { ok: true };
-            })
-            .addHook('afterRender', (ctx, res) => res.json({ replaced: true }));
+            }),
+        })).addHook('afterRender', (ctx, res) => res.json({ replaced: true }));
 
-        const result = await call(lambder, 'login');
+        const result = await call(lambder, 'account.login');
 
         expect(JSON.parse(decodeBody(result))).toEqual({ replaced: true });
         const cookies = result.multiValueHeaders?.['Set-Cookie'] ?? [];
@@ -53,44 +54,47 @@ describe('Headers written during a call', () => {
     });
 
     it('survive an afterRender hook that throws a refusal over the answer', async () => {
-        const lambder = app()
-            .addApi('login', { input: z.any(), output: z.any(), refusals: 'app/nope' }, async (ctx) => {
+        const lambder = app();
+        lambder.registerApiGroups(lambder.defineApiGroup('account', {
+            login: lambder.defineApi({ input: z.any(), output: z.any(), refusals: 'app/nope' }, async (ctx) => {
                 await lambder.getSessionController(ctx).createSession('user-1', { role: 'user' });
                 return { ok: true };
-            })
-            .addHook('afterRender', () => refuse('Nope.', { code: 'app/nope' }));
+            }),
+        })).addHook('afterRender', () => refuse('Nope.', { code: 'app/nope' }));
 
-        const result = await call(lambder, 'login');
+        const result = await call(lambder, 'account.login');
 
         expect(JSON.parse(decodeBody(result)).refusal.code).toBe('app/nope');
         expect((result.multiValueHeaders?.['Set-Cookie'] ?? []).length).toBe(2);
     });
 
     it('are not doubled when the hooks leave the handler\'s own response in place', async () => {
-        const lambder = app()
-            .addApi('thing', { input: z.any(), output: z.any() }, async (ctx) => {
+        const lambder = app();
+        lambder.registerApiGroups(lambder.defineApiGroup('test', {
+            thing: lambder.defineApi({ input: z.any(), output: z.any() }, async (ctx) => {
                 ctx.addResponseHeader('Set-Cookie', 'a=1; Path=/');
                 ctx.addResponseHeader('Set-Cookie', 'b=2; Path=/');
                 ctx.setResponseHeader('X-Once', 'yes');
                 return { ok: true };
-            })
-            .addHook('afterRender', (ctx, res, response) => response);
+            }),
+        })).addHook('afterRender', (ctx, res, response) => response);
 
-        const result = await call(lambder, 'thing');
+        const result = await call(lambder, 'test.thing');
 
         expect(result.multiValueHeaders?.['Set-Cookie']).toEqual(['a=1; Path=/', 'b=2; Path=/']);
         expect(result.multiValueHeaders?.['X-Once']).toEqual(['yes']);
     });
 
     it('let a hook overwrite what the handler set, because the hook wrote it later', async () => {
-        const lambder = app()
-            .addApi('thing', { input: z.any(), output: z.any() }, async (ctx) => {
+        const lambder = app();
+        lambder.registerApiGroups(lambder.defineApiGroup('test', {
+            thing: lambder.defineApi({ input: z.any(), output: z.any() }, async (ctx) => {
                 ctx.setResponseHeader('X-Who', 'handler');
                 return { ok: true };
-            })
-            .addHook('afterRender', (ctx, res, response) => { ctx.setResponseHeader('X-Who', 'hook'); return response; });
+            }),
+        })).addHook('afterRender', (ctx, res, response) => { ctx.setResponseHeader('X-Who', 'hook'); return response; });
 
-        const result = await call(lambder, 'thing');
+        const result = await call(lambder, 'test.thing');
 
         expect(result.multiValueHeaders?.['X-Who']).toEqual(['hook']);
     });
@@ -118,14 +122,17 @@ describe('Headers written during a call', () => {
             apiPath: '/api',
             cors: { origins: ['https://site.example'] },
             session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt', tokenCookieKey: 'sid', csrfCookieKey: 'csid' },
-        }).addApi('login', { input: z.any(), output: z.any() }, async (ctx) => {
-            await lambder.getSessionController(ctx).createSession('user-1', { role: 'user' });
-            ctx.setResponseHeader('X-Handler', 'ran');
-            throw new Error('after the session was written');
         });
+        lambder.registerApiGroups(lambder.defineApiGroup('account', {
+            login: lambder.defineApi({ input: z.any(), output: z.any() }, async (ctx) => {
+                await lambder.getSessionController(ctx).createSession('user-1', { role: 'user' });
+                ctx.setResponseHeader('X-Handler', 'ran');
+                throw new Error('after the session was written');
+            }),
+        }));
 
         const result = await lambder.render(
-            createApiEvent({ apiName: 'login', payload: {} }, { headers: { Origin: 'https://site.example' } }),
+            createApiEvent({ apiName: 'account.login', payload: {} }, { headers: { Origin: 'https://site.example' } }),
             createMockContext(),
         );
 

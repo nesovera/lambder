@@ -1,9 +1,9 @@
 /**
  * What the compiler catches in a mock registry, with the contract still a
- * type-only import: completeness, no strays, the right builder for the
- * endpoint's mode, guards restated wherever the contract declares any and
- * pinned to the server's declaration, typed payloads and outputs, and
- * overlap between slices. `npm run typecheck` is what makes the
+ * type-only import: completeness, no strays, guards restated wherever the
+ * contract declares any (a session endpoint's among them, which carry its
+ * mode) and pinned to the server's declaration, typed payloads and outputs,
+ * and overlap between slices. `npm run typecheck` is what makes the
  * @ts-expect-error lines bite; the runtime assertions pin the builders'
  * runtime shape.
  */
@@ -17,6 +17,8 @@ import { LambderMemoryRateLimiter } from '../../src/stores/LambderMemoryRateLimi
 import { initLambderMock } from '../../src/mock/LambderMockApp.js';
 import { lambderMockMswHandler, type LambderMswModule, type LambderMockMswTarget } from '../../src/mock/lambderMockMswHandler.js';
 import type { LambderSessionRecord } from '../../src/shared/contracts/LambderSessionStore.js';
+import LambderCaller from '../../src/client/LambderCaller.js';
+import { assertApiFailure } from '../../src/shared/wire/LambderOutcomeAssertions.js';
 
 type Permission = 'USERS.MANAGE' | 'USERS.VIEW';
 type SessionData = { userId: string; role: 'admin' | 'member' };
@@ -33,24 +35,42 @@ const serverGuards = {
     open: lambderGuard({ handler: (_ctx, _payload, _reason: string) => {} }),
 };
 
-const _server = initLambder<SessionData>().declareRefusals({ 'user-gone': { data: z.object({ removedAt: z.date() }) }, 'last-admin': {} }).create({
+const serverApp = initLambder<SessionData>().declareRefusals({ 'user-gone': { data: z.object({ removedAt: z.date() }) }, 'last-admin': {} }).create({
     apiPath: '/api',
     session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
     guards: serverGuards,
     rateLimits: { limiter: new LambderMemoryRateLimiter(), policies: { tight: { perMin: 5, per: 'ip' } } },
     idempotency: { store: { peek: async () => null, begin: async () => ({ state: 'new', ownerToken: 'x' }), complete: async () => 'stored', abandon: async () => {} } },
-})
-    .addApi('user.get', { input: z.object({ userId: z.string() }), output: z.object({ id: z.string(), name: z.string() }), guards: { open: 'public profile' } }, async (_ctx) => ({ id: '1', name: 'Ada' }))
-    .addApi('feedback.submit', { input: z.object({ text: z.string() }), output: z.object({ code: z.string() }), guards: 'captcha', idempotency: true }, async (_ctx) => ({ code: 'c' }))
-    .addSessionApi('users.remove', { input: z.object({ userId: z.string() }), output: z.object({ removed: z.boolean() }), guards: { orgPermission: 'USERS.MANAGE' }, refusals: ['user-gone', 'last-admin'] }, async (_ctx) => ({ removed: true }))
-    .addSessionApi('me', { input: z.object({}), output: z.object({ userId: z.string() }), guards: 'sessionOnly' }, async (ctx) => ({ userId: ctx.session.data.userId }))
-    .addApi('admin.exportOrders', { input: z.object({ month: z.string() }), output: z.any(), guards: { open: 'signed' } }, async (_ctx) => null)
+});
+const _server = serverApp.registerApiGroups(
+    serverApp.defineApiGroup('user', {
+        get: serverApp.defineApi({ input: z.object({ userId: z.string() }), output: z.object({ id: z.string(), name: z.string() }), guards: { open: 'public profile' } }, async (_ctx) => ({ id: '1', name: 'Ada' })),
+    }),
+    serverApp.defineApiGroup('feedback', {
+        submit: serverApp.defineApi({ input: z.object({ text: z.string() }), output: z.object({ code: z.string() }), guards: 'captcha', idempotency: true }, async (_ctx) => ({ code: 'c' })),
+    }),
+    serverApp.defineApiGroup('users', {
+        remove: serverApp.defineApi({ input: z.object({ userId: z.string() }), output: z.object({ removed: z.boolean() }), guards: { orgPermission: 'USERS.MANAGE' }, refusals: ['user-gone', 'last-admin'] }, async (_ctx) => ({ removed: true })),
+    }),
+    serverApp.defineApiGroup('account', {
+        me: serverApp.defineApi({ input: z.object({}), output: z.object({ userId: z.string() }), guards: 'sessionOnly' }, async (ctx) => ({ userId: ctx.session.data.userId })),
+    }),
+    serverApp.defineApiGroup('admin', {
+        exportOrders: serverApp.defineApi({ input: z.object({ month: z.string() }), output: z.any(), guards: { open: 'signed' } }, async (_ctx) => null),
+    }),
     // Declares no guards, which is the one shape the bare-handler form is for.
-    .addApi('health', { input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (_ctx) => ({ ok: true }))
+    serverApp.defineApiGroup('status', {
+        health: serverApp.defineApi({ input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (_ctx) => ({ ok: true })),
+    }),
     // No guards, but a declaration each, which the bare-handler form cannot
     // restate.
-    .addApi('ticket.buy', { input: z.object({ seat: z.string() }), output: z.object({ ticketId: z.string() }), idempotency: true }, async (_ctx) => ({ ticketId: 't1' }))
-    .addApi('limited', { input: z.object({}), output: z.object({ n: z.number() }), rateLimit: 'tight' }, async (_ctx) => ({ n: 1 }));
+    serverApp.defineApiGroup('ticket', {
+        buy: serverApp.defineApi({ input: z.object({ seat: z.string() }), output: z.object({ ticketId: z.string() }), idempotency: true }, async (_ctx) => ({ ticketId: 't1' })),
+    }),
+    serverApp.defineApiGroup('tools', {
+        limited: serverApp.defineApi({ input: z.object({}), output: z.object({ n: z.number() }), rateLimit: 'tight' }, async (_ctx) => ({ n: 1 })),
+    }),
+);
 
 type Contract = typeof _server.ApiContract;
 
@@ -77,7 +97,7 @@ const mockApp = mock.create({ sessions: true, idempotency: true, guards: mockGua
 
 describe('Mock registry types - builders', () => {
     it('types the payload from the contract (never optional) and the output as the contract output', () => {
-        const entry = mockApp.publicApi('user.get', {
+        const entry = mockApp.api('user.get', {
             guards: { open: 'public profile' },
             handler: async ({ payload }) => {
                 expectTypeOf(payload).toEqualTypeOf<{ userId: string }>();
@@ -88,32 +108,34 @@ describe('Mock registry types - builders', () => {
         expect(entry.mode).toBe('public');
 
         // @ts-expect-error the output must be the contract's output shape
-        mockApp.publicApi('user.get', { guards: { open: 'public profile' }, handler: async () => ({ id: 'x' }) });
+        mockApp.api('user.get', { guards: { open: 'public profile' }, handler: async () => ({ id: 'x' }) });
     });
 
     it('an endpoint with nothing to answer answers an empty object, and its mock handler does too', () => {
-        const _emptyServer = initLambder().create({ apiPath: '/api' })
-            .addApi('ping', { input: z.object({}), output: z.object({}) }, async (_ctx) => ({}))
-            .addApi('maybe', { input: z.object({}), output: z.object({ note: z.string().optional() }) }, async (_ctx) => ({}));
+        const emptyApp = initLambder().create({ apiPath: '/api' });
+        const _emptyServer = emptyApp.registerApiGroups(emptyApp.defineApiGroup('tools', {
+            ping: emptyApp.defineApi({ input: z.object({}), output: z.object({}) }, async (_ctx) => ({})),
+            maybe: emptyApp.defineApi({ input: z.object({}), output: z.object({ note: z.string().optional() }) }, async (_ctx) => ({})),
+        }));
         type Output<K extends keyof typeof _emptyServer.ApiContract> = (typeof _emptyServer.ApiContract)[K]['output'];
-        expectTypeOf<Output<'ping'>>().toEqualTypeOf<Record<string, never>>();
-        expectTypeOf<Output<'maybe'>>().toEqualTypeOf<{ note?: string }>();
+        expectTypeOf<Output<'tools.ping'>>().toEqualTypeOf<Record<string, never>>();
+        expectTypeOf<Output<'tools.maybe'>>().toEqualTypeOf<{ note?: string }>();
         const emptyMock = initLambderMock<typeof _emptyServer.ApiContract>().create({});
-        emptyMock.publicApi('ping', async () => ({}));
-        emptyMock.publicApi('maybe', async () => ({}));
+        emptyMock.api('tools.ping', async () => ({}));
+        emptyMock.api('tools.maybe', async () => ({}));
         // @ts-expect-error a mock handler answers the output too, never nothing
-        emptyMock.publicApi('ping', async () => undefined);
+        emptyMock.api('tools.ping', async () => undefined);
     });
 
     it('a session endpoint sees a typed session and a public one sees null', () => {
-        mockApp.sessionApi('me', {
+        mockApp.api('account.me', {
             guards: 'sessionOnly',
             handler: async ({ session }) => {
                 expectTypeOf(session).toEqualTypeOf<LambderSessionRecord<SessionData>>();
                 return { userId: session.data.userId };
             },
         });
-        mockApp.publicApi('user.get', {
+        mockApp.api('user.get', {
             guards: { open: 'public profile' },
             handler: async ({ session }) => {
                 expectTypeOf(session).toEqualTypeOf<null>();
@@ -122,49 +144,53 @@ describe('Mock registry types - builders', () => {
         });
     });
 
-    it('the wrong builder for the endpoint mode fails at the name', () => {
-        // @ts-expect-error 'me' is a session endpoint
-        mockApp.publicApi('me', async () => ({ userId: 'x' }));
-        // @ts-expect-error 'user.get' is a public endpoint
-        mockApp.sessionApi('user.get', async () => ({ id: '1', name: 'Ada' }));
+    it('an entry takes the endpoint\'s mode from the guards it restates, as the server takes it from the guards it declares', () => {
+        // One builder for both modes. A session endpoint's guards are
+        // required and pinned to the contract (below), and the mock guard
+        // behind one of them needs a session, which is what makes the entry
+        // a session one.
+        expect(mockApp.api('account.me', { guards: 'sessionOnly', handler: async () => ({ userId: 'x' }) }).mode).toBe('session');
+        expect(mockApp.api('users.remove', { guards: { orgPermission: 'USERS.MANAGE' }, handler: async () => ({ removed: true }) }).mode).toBe('session');
+        expect(mockApp.api('user.get', { guards: { open: 'public profile' }, handler: async () => ({ id: '1', name: 'Ada' }) }).mode).toBe('public');
+        expect(mockApp.api('status.health', async () => ({ ok: true })).mode).toBe('public');
     });
 
     it('a stray name fails at the name', () => {
         // @ts-expect-error no such endpoint
-        mockApp.publicApi('user.gett', async () => ({ id: '1', name: 'Ada' }));
+        mockApp.api('user.gett', async () => ({ id: '1', name: 'Ada' }));
         // @ts-expect-error no such endpoint
-        mockApp.notMocked('nope', 'reason');
+        mockApp.notMocked('user.nope', 'reason');
     });
 
     it('guards are required wherever the contract declares any, and pinned to the server declaration', () => {
         // @ts-expect-error users.remove carries guardInputs: the bare handler form is not allowed
-        mockApp.sessionApi('users.remove', async () => ({ removed: true }));
+        mockApp.api('users.remove', async () => ({ removed: true }));
         // @ts-expect-error the guards field is required here
-        mockApp.sessionApi('users.remove', { handler: async () => ({ removed: true }) });
+        mockApp.api('users.remove', { handler: async () => ({ removed: true }) });
         // @ts-expect-error USERS.VIEW is not what the server declares
-        mockApp.sessionApi('users.remove', { guards: { orgPermission: 'USERS.VIEW' }, handler: async () => ({ removed: true }) });
+        mockApp.api('users.remove', { guards: { orgPermission: 'USERS.VIEW' }, handler: async () => ({ removed: true }) });
 
         // A guard that takes no client input is still a guard the runtime
         // learns about only from this restatement: dropping it would run
         // none, and the mock would answer 200 where the server answers
-        // notAuthorized. Two such shapes: session-only guards ('me' declares
+        // notAuthorized. Two such shapes: session-only guards ('account.me' declares
         // sessionOnly) and param-only ones ('user.get' declares open).
         // @ts-expect-error me declares a guard, so the bare handler form is not allowed
-        mockApp.sessionApi('me', async () => ({ userId: 'x' }));
+        mockApp.api('account.me', async () => ({ userId: 'x' }));
         // @ts-expect-error me declares a guard, so the guards field is required
-        mockApp.sessionApi('me', { handler: async () => ({ userId: 'x' }) });
+        mockApp.api('account.me', { handler: async () => ({ userId: 'x' }) });
         // @ts-expect-error user.get declares a guard, so the bare handler form is not allowed
-        mockApp.publicApi('user.get', async () => ({ id: '1', name: 'Ada' }));
+        mockApp.api('user.get', async () => ({ id: '1', name: 'Ada' }));
         // @ts-expect-error user.get declares a guard, so the guards field is required
-        mockApp.publicApi('user.get', { handler: async () => ({ id: '1', name: 'Ada' }) });
+        mockApp.api('user.get', { handler: async () => ({ id: '1', name: 'Ada' }) });
         // An endpoint the contract declares no guards for keeps both forms,
         // and has no guards field to get wrong.
-        mockApp.publicApi('health', async () => ({ ok: true }));
-        mockApp.publicApi('health', { handler: async () => ({ ok: true }) });
+        mockApp.api('status.health', async () => ({ ok: true }));
+        mockApp.api('status.health', { handler: async () => ({ ok: true }) });
         // @ts-expect-error health declares no guards, so there are none to restate
-        mockApp.publicApi('health', { guards: { open: 'invented' }, handler: async () => ({ ok: true }) });
+        mockApp.api('status.health', { guards: { open: 'invented' }, handler: async () => ({ ok: true }) });
 
-        const entry = mockApp.sessionApi('users.remove', {
+        const entry = mockApp.api('users.remove', {
             guards: { orgPermission: 'USERS.MANAGE' },
             handler: async ({ guardData, guardInputs }) => {
                 expectTypeOf(guardData.orgPermission).toEqualTypeOf<{ organizationId: string; permission: Permission; userId: string }>();
@@ -175,15 +201,15 @@ describe('Mock registry types - builders', () => {
         expect(entry.definition.guards).toEqual({ orgPermission: 'USERS.MANAGE' });
 
         // Pinned to the server's own declaration, guardInputs or not.
-        mockApp.publicApi('user.get', { guards: { open: 'public profile' }, handler: async () => ({ id: '1', name: 'Ada' }) });
+        mockApp.api('user.get', { guards: { open: 'public profile' }, handler: async () => ({ id: '1', name: 'Ada' }) });
         // @ts-expect-error the server's reason is a different literal
-        mockApp.publicApi('user.get', { guards: { open: 'other' }, handler: async () => ({ id: '1', name: 'Ada' }) });
+        mockApp.api('user.get', { guards: { open: 'other' }, handler: async () => ({ id: '1', name: 'Ada' }) });
     });
 
     it('the idempotency and rate-limit declarations are pinned to the contract too', () => {
-        mockApp.publicApi('feedback.submit', { guards: 'captcha', idempotency: true, handler: async () => ({ code: 'c' }) });
+        mockApp.api('feedback.submit', { guards: 'captcha', idempotency: true, handler: async () => ({ code: 'c' }) });
         // @ts-expect-error the server declares idempotency: true, not a TTL object
-        mockApp.publicApi('feedback.submit', { guards: 'captcha', idempotency: { ttlSeconds: 5 }, handler: async () => ({ code: 'c' }) });
+        mockApp.api('feedback.submit', { guards: 'captcha', idempotency: { ttlSeconds: 5 }, handler: async () => ({ code: 'c' }) });
     });
 
     it('requires the idempotency and rate-limit restatements, not just pins them', () => {
@@ -192,11 +218,11 @@ describe('Mock registry types - builders', () => {
         // 200 where the server answers a replay, a 409 or a 429. The same
         // argument the guards field makes, one field over.
         // @ts-expect-error the contract declares idempotency for this endpoint
-        mockApp.publicApi('feedback.submit', { guards: 'captcha', handler: async () => ({ code: 'c' }) });
+        mockApp.api('feedback.submit', { guards: 'captcha', handler: async () => ({ code: 'c' }) });
         // An endpoint that declares neither still takes neither.
-        mockApp.publicApi('health', { handler: async () => ({ ok: true }) });
+        mockApp.api('status.health', { handler: async () => ({ ok: true }) });
         // @ts-expect-error health declares no idempotency, so there is nothing to restate
-        mockApp.publicApi('health', { idempotency: true, handler: async () => ({ ok: true }) });
+        mockApp.api('status.health', { idempotency: true, handler: async () => ({ ok: true }) });
     });
 
     it('the bare handler form is unavailable for an endpoint that declares a rate limit or idempotency, guards or not', () => {
@@ -206,21 +232,21 @@ describe('Mock registry types - builders', () => {
         // the server replays, and a limited endpoint would never answer 429.
         // Both endpoints below declare no guards, the case such a gate misses.
         // @ts-expect-error ticket.buy declares idempotency, so the bare handler form is not allowed
-        mockApp.publicApi('ticket.buy', async () => ({ ticketId: 't1' }));
+        mockApp.api('ticket.buy', async () => ({ ticketId: 't1' }));
         // @ts-expect-error ticket.buy declares idempotency, so the field is required
-        mockApp.publicApi('ticket.buy', { handler: async () => ({ ticketId: 't1' }) });
+        mockApp.api('ticket.buy', { handler: async () => ({ ticketId: 't1' }) });
         // @ts-expect-error limited declares a rate limit, so the bare handler form is not allowed
-        mockApp.publicApi('limited', async () => ({ n: 1 }));
+        mockApp.api('tools.limited', async () => ({ n: 1 }));
         // @ts-expect-error limited declares a rate limit, so the field is required
-        mockApp.publicApi('limited', { handler: async () => ({ n: 1 }) });
+        mockApp.api('tools.limited', { handler: async () => ({ n: 1 }) });
 
         // Restated, both forms of the declaration are the contract's own.
-        const keyed = mockApp.publicApi('ticket.buy', { idempotency: true, handler: async () => ({ ticketId: 't1' }) });
-        const limited = mockApp.publicApi('limited', { rateLimit: 'tight', handler: async () => ({ n: 1 }) });
+        const keyed = mockApp.api('ticket.buy', { idempotency: true, handler: async () => ({ ticketId: 't1' }) });
+        const limited = mockApp.api('tools.limited', { rateLimit: 'tight', handler: async () => ({ n: 1 }) });
         expect(keyed.definition.idempotency).toBe(true);
         expect(limited.definition.rateLimit).toBe('tight');
         // And the endpoint that declares nothing at all keeps the bare form.
-        mockApp.publicApi('health', async () => ({ ok: true }));
+        mockApp.api('status.health', async () => ({ ok: true }));
     });
 
     it("an entry's own input schema is pinned to what the contract says the endpoint takes", () => {
@@ -229,12 +255,12 @@ describe('Mock registry types - builders', () => {
         // still the server's: a restated shape that drifts makes the mock
         // answer 422 to every payload the server accepts, which is the exact
         // failure the schema exists to reproduce.
-        mockApp.publicApi('user.get', {
+        mockApp.api('user.get', {
             guards: { open: 'public profile' },
             input: z.object({ userId: z.string() }),
             handler: async ({ payload }) => ({ id: payload.userId, name: 'Ada' }),
         });
-        mockApp.publicApi('user.get', {
+        mockApp.api('user.get', {
             guards: { open: 'public profile' },
             // @ts-expect-error the contract types userId as a string
             input: z.object({ userId: z.number() }),
@@ -245,29 +271,29 @@ describe('Mock registry types - builders', () => {
 
 describe('Mock registry types - slices and register()', () => {
     const userMocks = mockApp.apiSlice(
-        mockApp.publicApi('user.get', { guards: { open: 'public profile' }, handler: async ({ payload }) => ({ id: payload.userId, name: 'Ada' }) }),
-        mockApp.sessionApi('users.remove', { guards: { orgPermission: 'USERS.MANAGE' }, handler: async () => ({ removed: true }) }),
-        mockApp.sessionApi('me', { guards: 'sessionOnly', handler: async ({ session }) => ({ userId: session.data.userId }) }),
+        mockApp.api('user.get', { guards: { open: 'public profile' }, handler: async ({ payload }) => ({ id: payload.userId, name: 'Ada' }) }),
+        mockApp.api('users.remove', { guards: { orgPermission: 'USERS.MANAGE' }, handler: async () => ({ removed: true }) }),
+        mockApp.api('account.me', { guards: 'sessionOnly', handler: async ({ session }) => ({ userId: session.data.userId }) }),
     );
     const feedbackMocks = mockApp.apiSlice(
-        mockApp.publicApi('feedback.submit', { guards: 'captcha', idempotency: true, handler: async () => ({ code: 'c' }) }),
-        mockApp.publicApi('health', async () => ({ ok: true })),
-        mockApp.publicApi('ticket.buy', { idempotency: true, handler: async () => ({ ticketId: 't1' }) }),
-        mockApp.publicApi('limited', { rateLimit: 'tight', handler: async () => ({ n: 1 }) }),
+        mockApp.api('feedback.submit', { guards: 'captcha', idempotency: true, handler: async () => ({ code: 'c' }) }),
+        mockApp.api('status.health', async () => ({ ok: true })),
+        mockApp.api('ticket.buy', { idempotency: true, handler: async () => ({ ticketId: 't1' }) }),
+        mockApp.api('tools.limited', { rateLimit: 'tight', handler: async () => ({ n: 1 }) }),
     );
     const adminMocks = mockApp.apiSlice(
         mockApp.notMocked('admin.exportOrders', 'operator endpoint, no client calls it'),
     );
 
     it('a slice is keyed by the names of its entries', () => {
-        expectTypeOf<keyof typeof userMocks>().toEqualTypeOf<'user.get' | 'users.remove' | 'me'>();
-        expect(Object.keys(userMocks).sort()).toEqual(['me', 'user.get', 'users.remove']);
+        expectTypeOf<keyof typeof userMocks>().toEqualTypeOf<'user.get' | 'users.remove' | 'account.me'>();
+        expect(Object.keys(userMocks).sort()).toEqual(['account.me', 'user.get', 'users.remove']);
     });
 
     it('register() accepts slices that cover the contract exactly once', () => {
         const app = mock.create({ sessions: true, idempotency: true, guards: mockGuards, rateLimits: { policies: mockPolicies } });
         app.register(userMocks, feedbackMocks, adminMocks);
-        expect(app.registeredNames.sort()).toEqual(['admin.exportOrders', 'feedback.submit', 'health', 'limited', 'me', 'ticket.buy', 'user.get', 'users.remove']);
+        expect(app.registeredNames.sort()).toEqual(['account.me', 'admin.exportOrders', 'feedback.submit', 'status.health', 'ticket.buy', 'tools.limited', 'user.get', 'users.remove']);
     });
 
     it('register() refuses a registry with an endpoint missing', () => {
@@ -278,7 +304,7 @@ describe('Mock registry types - slices and register()', () => {
 
     it('register() refuses an endpoint mocked in two slices, at compile time and at runtime', () => {
         const app = mock.create({ sessions: true, idempotency: true, guards: mockGuards, rateLimits: { policies: mockPolicies } });
-        const again = app.apiSlice(app.publicApi('user.get', { guards: { open: 'public profile' }, handler: async () => ({ id: '2', name: 'Bob' }) }));
+        const again = app.apiSlice(app.api('user.get', { guards: { open: 'public profile' }, handler: async () => ({ id: '2', name: 'Bob' }) }));
         // @ts-expect-error user.get is mocked twice
         expect(() => app.register(userMocks, feedbackMocks, adminMocks, again)).toThrow(/mocked in more than one slice/);
     });
@@ -292,7 +318,7 @@ describe('Mock registry types - slices and register()', () => {
         const app = mock.create({ sessions: true, idempotency: true, guards: mockGuards, rateLimits: { policies: mockPolicies } });
         app.register(userMocks, feedbackMocks, app.restNotMocked('not mocked yet'));
         // The rest entry names no endpoint, so it registers none.
-        expect(app.registeredNames.sort()).toEqual(['feedback.submit', 'health', 'limited', 'me', 'ticket.buy', 'user.get', 'users.remove']);
+        expect(app.registeredNames.sort()).toEqual(['account.me', 'feedback.submit', 'status.health', 'ticket.buy', 'tools.limited', 'user.get', 'users.remove']);
     });
 
     it('a stray name beside a rest entry is still refused', () => {
@@ -308,7 +334,7 @@ describe('Mock registry types - slices and register()', () => {
 
     it('a duplicate beside a rest entry is still refused', () => {
         const app = mock.create({ sessions: true, idempotency: true, guards: mockGuards, rateLimits: { policies: mockPolicies } });
-        const again = app.apiSlice(app.publicApi('user.get', { guards: { open: 'public profile' }, handler: async () => ({ id: '2', name: 'Bob' }) }));
+        const again = app.apiSlice(app.api('user.get', { guards: { open: 'public profile' }, handler: async () => ({ id: '2', name: 'Bob' }) }));
         // @ts-expect-error user.get is mocked twice
         expect(() => app.register(userMocks, again, app.restNotMocked('not mocked yet'))).toThrow(/mocked in more than one slice/);
     });
@@ -349,8 +375,8 @@ describe('Mock registry types - slices and register()', () => {
         // this registers one endpoint out of five and says nothing; the
         // contract is type-only, so no runtime check can catch it either.
         const app = mock.create({ sessions: true, idempotency: true, guards: mockGuards, rateLimits: { policies: mockPolicies } });
-        const loose: Record<string, ReturnType<typeof mockApp.publicApi<'user.get'>>> = {
-            'user.get': mockApp.publicApi('user.get', { guards: { open: 'public profile' }, handler: async ({ payload }) => ({ id: payload.userId, name: 'Ada' }) }),
+        const loose: Record<string, ReturnType<typeof mockApp.api<'user.get'>>> = {
+            'user.get': mockApp.api('user.get', { guards: { open: 'public profile' }, handler: async ({ payload }) => ({ id: payload.userId, name: 'Ada' }) }),
         };
         // @ts-expect-error the slice's endpoints cannot be read from its type
         app.register(loose);
@@ -364,11 +390,11 @@ describe('Mock registry types - slices and register()', () => {
     it('registerPartial() takes any subset', () => {
         const app = mock.create({ sessions: true, idempotency: true, guards: mockGuards, rateLimits: { policies: mockPolicies } });
         app.registerPartial(feedbackMocks);
-        expect(app.registeredNames).toEqual(['feedback.submit', 'health', 'ticket.buy', 'limited']);
+        expect(app.registeredNames).toEqual(['feedback.submit', 'status.health', 'ticket.buy', 'tools.limited']);
     });
 
     it('an entry appearing twice in one slice is a runtime error', () => {
-        const entry = mockApp.publicApi('user.get', { guards: { open: 'public profile' }, handler: async () => ({ id: '1', name: 'Ada' }) });
+        const entry = mockApp.api('user.get', { guards: { open: 'public profile' }, handler: async () => ({ id: '1', name: 'Ada' }) });
         expect(() => mockApp.apiSlice(entry, entry)).toThrow(/appears twice in one slice/);
     });
 });
@@ -441,7 +467,7 @@ describe('Mock app options - what the contract makes required', () => {
     });
 
     it('leaves each optional for a contract that needs none of them', () => {
-        initLambderMock<{ health: { input: {}; output: { ok: boolean }; mode: 'public' } }>().create({});
+        initLambderMock<{ 'status.health': { input: {}; output: { ok: boolean }; mode: 'public' } }>().create({});
     });
 
     it('refuses a session guard or a per-session policy where a public endpoint names it', () => {
@@ -463,12 +489,12 @@ describe('Mock app options - what the contract makes required', () => {
     it('refuses a shared budget for a policy whose windows an endpoint overrides', () => {
         // One counter shared by every referencing endpoint has one set of
         // windows, so the server refuses the override on a perPolicy budget.
-        const overriding = initLambderMock<{ burst: { input: {}; output: { n: number }; mode: 'public'; rateLimit: { tight: { perMin: 1 } } } }>();
+        const overriding = initLambderMock<{ 'tools.burst': { input: {}; output: { n: number }; mode: 'public'; rateLimit: { tight: { perMin: 1 } } } }>();
         overriding.create({ rateLimits: { policies: { tight: { perMin: 5, per: 'ip' } } } });
-        // @ts-expect-error burst overrides tight's windows
+        // @ts-expect-error tools.burst overrides tight's windows
         overriding.create({ rateLimits: { policies: { tight: { perMin: 5, per: 'ip', budget: 'perPolicy' } } } });
         // An refusal alone is overridable on either budget.
-        initLambderMock<{ burst: { input: {}; output: { n: number }; mode: 'public'; rateLimit: { tight: { refusal: { type: 'warning'; content: 'Slow down.' } } } } }>()
+        initLambderMock<{ 'tools.burst': { input: {}; output: { n: number }; mode: 'public'; rateLimit: { tight: { refusal: { type: 'warning'; content: 'Slow down.' } } } } }>()
             .create({ rateLimits: { policies: { tight: { perMin: 5, per: 'ip', budget: 'perPolicy' } } } });
     });
 });
@@ -557,7 +583,7 @@ describe("A mock entry's input schema is pinned in both directions", () => {
     const guards = { open: 'public profile' } as const;
 
     it('takes the schema that parses to exactly the contract input', () => {
-        mockApp.publicApi('user.get', {
+        mockApp.api('user.get', {
             guards,
             input: z.object({ userId: z.string() }),
             handler: async ({ payload }) => ({ id: payload.userId, name: 'Ada' }),
@@ -565,7 +591,7 @@ describe("A mock entry's input schema is pinned in both directions", () => {
     });
 
     it('refuses a schema that parses to something else', () => {
-        mockApp.publicApi('user.get', {
+        mockApp.api('user.get', {
             guards,
             // @ts-expect-error the contract types userId as a string
             input: z.object({ userId: z.number() }),
@@ -579,13 +605,13 @@ describe("A mock entry's input schema is pinned in both directions", () => {
         // or a literal where the contract says string. Such a schema refuses
         // payloads the server accepts, the exact failure the schema exists to
         // reproduce.
-        mockApp.publicApi('user.get', {
+        mockApp.api('user.get', {
             guards,
             // @ts-expect-error the schema demands a field the endpoint does not take
             input: z.object({ userId: z.string(), tenantId: z.string() }),
             handler: async () => ({ id: '1', name: 'Ada' }),
         });
-        mockApp.publicApi('user.get', {
+        mockApp.api('user.get', {
             guards,
             // @ts-expect-error the schema narrows userId to one literal
             input: z.object({ userId: z.literal('u1') }),
@@ -594,13 +620,13 @@ describe("A mock entry's input schema is pinned in both directions", () => {
     });
 
     it('refuses a LOOSER schema, which would let the mock accept what the server rejects', () => {
-        mockApp.publicApi('user.get', {
+        mockApp.api('user.get', {
             guards,
             // @ts-expect-error the schema parses to a payload wider than the contract's
             input: z.object({ userId: z.union([z.string(), z.number()]) }),
             handler: async () => ({ id: '1', name: 'Ada' }),
         });
-        mockApp.publicApi('user.get', {
+        mockApp.api('user.get', {
             guards,
             // @ts-expect-error a schema that parses to anything is not this endpoint's
             input: z.unknown(),
@@ -611,12 +637,14 @@ describe("A mock entry's input schema is pinned in both directions", () => {
     });
 
     it('takes the server\'s own schema restated, a default included, and refuses a transform the handler is not typed for', () => {
-        const _server = initLambder().create({ apiPath: '/api' })
-            .addApi('search', { input: z.object({ q: z.string(), page: z.number().default(1) }), output: z.object({ hits: z.number() }) }, async (_ctx) => ({ hits: 0 }))
-            .addApi('lookup', { input: z.object({ id: z.string().transform(Number) }), output: z.object({ hits: z.number() }) }, async (_ctx) => ({ hits: 0 }));
+        const searchApp = initLambder().create({ apiPath: '/api' });
+        const _server = searchApp.registerApiGroups(searchApp.defineApiGroup('catalog', {
+            search: searchApp.defineApi({ input: z.object({ q: z.string(), page: z.number().default(1) }), output: z.object({ hits: z.number() }) }, async (_ctx) => ({ hits: 0 })),
+            lookup: searchApp.defineApi({ input: z.object({ id: z.string().transform(Number) }), output: z.object({ hits: z.number() }) }, async (_ctx) => ({ hits: 0 })),
+        }));
         const app = initLambderMock<typeof _server.ApiContract>().create({});
-        app.publicApi('search', { input: z.object({ q: z.string(), page: z.number().default(1) }), handler: async () => ({ hits: 1 }) });
-        app.publicApi('lookup', {
+        app.api('catalog.search', { input: z.object({ q: z.string(), page: z.number().default(1) }), handler: async () => ({ hits: 1 }) });
+        app.api('catalog.lookup', {
             // @ts-expect-error the handler reads id as the posted string, and the schema would hand it a number
             input: z.object({ id: z.string().transform(Number) }),
             handler: async () => ({ hits: 1 }),
@@ -661,7 +689,7 @@ describe('The mock guards map is checked for surplus keys', () => {
 
 describe('Mock registry types - declared refusals', () => {
     it('types a handler\'s ctx.refuse and an injected refusal to the endpoint\'s codes, the data in the form it arrives in', () => {
-        mockApp.sessionApi('users.remove', {
+        mockApp.api('users.remove', {
             guards: { orgPermission: 'USERS.MANAGE' },
             handler: async (ctx) => {
                 if(ctx.payload.userId === 'last') return ctx.refuse('The last admin stays.', { code: 'last-admin' });
@@ -672,7 +700,7 @@ describe('Mock registry types - declared refusals', () => {
                 return ctx.refuse('Gone.', { code: 'user-gone', data: { removedAt: '2026-01-01T00:00:00.000Z' } });
             },
         });
-        mockApp.publicApi('health', async (ctx) => {
+        mockApp.api('status.health', async (ctx) => {
             // @ts-expect-error health declares no refusals
             ctx.refuse('No.', { code: 'last-admin' });
             return { ok: true };
@@ -683,8 +711,56 @@ describe('Mock registry types - declared refusals', () => {
         // @ts-expect-error a code the endpoint does not declare cannot be injected either
         mockApp.failNext('users.remove', { reason: 'refusal', message: { type: 'warning', code: 'not-a-code', content: 'No.' } });
         // @ts-expect-error a rate limit's message carries no code
-        mockApp.failNext('limited', { reason: 'rateLimited', message: { type: 'warning', code: 'app/slow', content: 'Slow.' } });
+        mockApp.failNext('tools.limited', { reason: 'rateLimited', message: { type: 'warning', code: 'app/slow', content: 'Slow.' } });
         mockApp.reset();
         expect(mockApp).toBeDefined();
+    });
+});
+
+describe('Mock registry types - a session endpoint with several guards', () => {
+    // The server's endpoint is a session one through signedIn alone; the
+    // contract says only "session" and names both guards. Without the
+    // apiOptions table the mock reads the mode off the guards an entry
+    // restates, so one of them has to need a session on the mock too.
+    const server = initLambder<SessionData>().create({
+        apiPath: '/api',
+        session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
+        guards: {
+            signedIn: lambderGuard({ session: true, handler: () => {} }),
+            ownsReport: lambderGuard({ handler: () => {} }),
+        },
+    });
+    const _reports = server.registerApiGroups(server.defineApiGroup('reports', {
+        get: server.defineApi({ input: z.object({}), output: z.object({ userId: z.string() }), guards: ['signedIn', 'ownsReport'] },
+            async (ctx) => ({ userId: ctx.session.data.userId })),
+    }));
+    const reportsMock = initLambderMock<typeof _reports.ApiContract, SessionData>();
+
+    it('refuses a guard map in which none of its guards needs a session, and runs it as a session endpoint once one does', async () => {
+        reportsMock.create({
+            sessions: true,
+            // @ts-expect-error reports.get names no mock guard declared session: true, so the mock would run it as public
+            guards: { signedIn: reportsMock.guard({ handler: () => {} }), ownsReport: reportsMock.guard({ handler: () => {} }) },
+        });
+
+        const mockApp = reportsMock.create({
+            sessions: true,
+            guards: { signedIn: reportsMock.guard({ session: true, handler: () => {} }), ownsReport: reportsMock.guard({ handler: () => {} }) },
+        });
+        const entry = mockApp.api('reports.get', { guards: ['signedIn', 'ownsReport'], handler: async (ctx) => ({ userId: ctx.session.data.userId }) });
+        expect(entry.mode).toBe('session');
+        mockApp.register(mockApp.apiSlice(entry));
+        const caller = new LambderCaller<typeof _reports.ApiContract>({ apiPath: '/api', transport: mockApp.transport() });
+        assertApiFailure(await caller.reports.get.outcome({}), 'sessionExpired');
+    });
+
+    it('takes the guards of a session endpoint left unmocked, where no apiOptions table says its mode', () => {
+        const mockApp = reportsMock.create({
+            sessions: true,
+            guards: { signedIn: reportsMock.guard({ session: true, handler: () => {} }), ownsReport: reportsMock.guard({ handler: () => {} }) },
+        });
+        // @ts-expect-error a session endpoint restates its guards, which are what say its mode
+        mockApp.notMocked('reports.get', 'not yet');
+        expect(mockApp.notMocked('reports.get', { reason: 'not yet', guards: ['signedIn', 'ownsReport'] }).mode).toBe('session');
     });
 });

@@ -13,6 +13,11 @@
  * memory, under a path inside tests/ so that it resolves this package's
  * source and dependencies; nothing is written to disk. Each case builds a
  * program over the package's source, so these take seconds.
+ *
+ * And what registering endpoints costs as an app grows: every endpoint is
+ * typed on its own and the contract is one mapped type over the groups, so
+ * eight hundred endpoints must cost what four times two hundred do, not the
+ * square.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -28,11 +33,11 @@ const KEYED_DECLARATIONS = 10;
 const API_COUNT = 40;
 
 /**
- * An app with ten guards, ten policies and forty session APIs, each API's
- * input carrying every field a keyed guard or policy reads. Every other API
+ * An app with ten guards, ten policies and forty APIs, each API's input
+ * carrying every field a keyed guard or policy reads. Every other API
  * declares one guard and one policy; the rest declare neither, since the cost
- * this guards against fell on those too. The APIs are registered one
- * statement each, so the count is the options' cost and not a chain's.
+ * this guards against fell on those too. The APIs are declared one statement
+ * each and registered as one group, so the count is the options' cost.
  */
 const fixtureSource = (keyed: boolean): string => {
     const indices = Array.from({ length: KEYED_DECLARATIONS }, (_, index) => index);
@@ -44,8 +49,8 @@ const fixtureSource = (keyed: boolean): string => {
         : `            p${index}: { perMin: 5, per: "ip" },`);
     const fields = indices.map((index) => `f${index}: z.string()`).join(', ');
     const apis = Array.from({ length: API_COUNT }, (_, index) => index % 2 === 0
-        ? `app.addSessionApi("api.${index}", { input, output, guards: "g${index % KEYED_DECLARATIONS}", rateLimit: "p${(index + 1) % KEYED_DECLARATIONS}" }, async () => ({ ok: true }));`
-        : `app.addSessionApi("api.${index}", { input, output }, async () => ({ ok: true }));`);
+        ? `const api${index} = app.defineApi({ input, output, guards: "g${index % KEYED_DECLARATIONS}", rateLimit: "p${(index + 1) % KEYED_DECLARATIONS}" }, async () => ({ ok: true }));`
+        : `const api${index} = app.defineApi({ input, output }, async () => ({ ok: true }));`);
     return [
         `import { z } from "zod";`,
         `import { initLambder, lambderGuard, lambderRateLimitKey, LambderMemoryRateLimiter, LambderMemorySessionStore } from "../../../src/index.js";`,
@@ -69,7 +74,49 @@ const fixtureSource = (keyed: boolean): string => {
         ``,
         ...apis,
         ``,
+        `export const lambder = app.registerApiGroups(app.defineApiGroup("t", { ${Array.from({ length: API_COUNT }, (_, index) => `api${index}`).join(', ')} }));`,
+        ``,
     ].join('\n');
+};
+
+/**
+ * An app of `endpoints` endpoints in groups of twenty-five, registered in one
+ * registerApiGroups() call, with what an app's endpoints declare: an input
+ * and an output of their own, a guard that needs a session or one that does
+ * not, a rate limit, a handler reading its payload and its session. The
+ * client reads the contract, as a typed caller does.
+ */
+const registrationSource = (endpoints: number): string => {
+    const groups = Math.ceil(endpoints / 25);
+    const endpoint = (index: number) => index % 2 === 0
+        ? `        e${index}: app.defineApi({ input: z.object({ id: z.string(), n${index}: z.number() }), output: z.object({ ok: z.boolean(), v${index}: z.string() }), guards: "signedIn", rateLimit: "perSession" }, async (ctx) => ({ ok: ctx.apiPayload.n${index} > 0, v${index}: ctx.session.data.userId })),`
+        : `        e${index}: app.defineApi({ input: z.object({ id: z.string(), n${index}: z.number() }), output: z.object({ ok: z.boolean(), v${index}: z.string() }), guards: "anyone", rateLimit: "perIp" }, async (ctx) => ({ ok: ctx.apiPayload.n${index} > 0, v${index}: ctx.apiPayload.id })),`;
+    const lines = [
+        `import { z } from "zod";`,
+        `import { initLambder, lambderGuard, LambderMemoryRateLimiter, LambderMemorySessionStore } from "../../../src/index.js";`,
+        ``,
+        `const app = initLambder<{ userId: string }>().create({`,
+        `    apiPath: "/api",`,
+        `    session: { store: new LambderMemorySessionStore(), sessionSalt: "salt" },`,
+        `    guards: {`,
+        `        signedIn: lambderGuard({ session: true, handler: async () => {} }),`,
+        `        anyone: lambderGuard({ handler: async () => {} }),`,
+        `    },`,
+        `    rateLimits: { limiter: new LambderMemoryRateLimiter(), policies: { perIp: { perMin: 5, per: "ip" }, perSession: { perMin: 5, per: "session" } } },`,
+        `});`,
+        ``,
+    ];
+    for(let group = 0; group < groups; group += 1){
+        const indices = Array.from({ length: 25 }, (_, offset) => group * 25 + offset).filter((index) => index < endpoints);
+        lines.push(`const group${group} = app.defineApiGroup("g${group}", {`, ...indices.map(endpoint), `});`);
+    }
+    lines.push(
+        `export const lambder = app.registerApiGroups(${Array.from({ length: groups }, (_, group) => `group${group}`).join(', ')});`,
+        `type Contract = typeof lambder.ApiContract;`,
+        `export const read: Contract["g0.e0"]["input"] = { id: "a", n0: 1 };`,
+        ``,
+    );
+    return lines.join('\n');
 };
 
 /** The fixture checked under the package's own compiler options: its diagnostics, and the type instantiations checking it took. */
@@ -93,6 +140,20 @@ const checkFixture = (source: string): { instantiations: number; diagnostics: st
         .map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n'));
     return { instantiations: program.getInstantiationCount(), diagnostics };
 };
+
+describe('What registering endpoints costs grows with the endpoints, no faster', () => {
+    it('checks eight hundred endpoints for less than four times what two hundred cost', () => {
+        // Linear, 800 costs four times 200's endpoints on top of what the app
+        // costs before any endpoint, so under four times the whole. An
+        // endpoint whose cost grew with the endpoints registered before it
+        // would cost many times that.
+        const small = checkFixture(registrationSource(200));
+        const large = checkFixture(registrationSource(800));
+        expect(small.diagnostics).toEqual([]);
+        expect(large.diagnostics).toEqual([]);
+        expect(large.instantiations).toBeLessThan(small.instantiations * 4);
+    }, COMPILER_TIMEOUT_MS);
+});
 
 describe('The guards and rateLimit options cost the same whether the instance\'s declarations read an API\'s input or not', () => {
     it('keeps an app\'s APIs as cheap to check with ten keyed guards and ten keyed policies as with plain ones', () => {

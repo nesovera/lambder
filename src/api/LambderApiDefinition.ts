@@ -9,7 +9,7 @@ import type {
 
 /**
  * One endpoint's declaration as the pipeline runs it: what the server's
- * addApi/addSessionApi options carry, minus the handler, in a shape the mock
+ * defineApi options carry, minus the handler, in a shape the mock
  * runtime can restate from a type-only contract. The schemas are optional
  * because the mock has none; when input is present, validation runs and the
  * handler sees the parsed payload. Output is part of the endpoint's

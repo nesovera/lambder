@@ -11,7 +11,7 @@ import { mockClient } from 'aws-sdk-client-mock';
 import { DynamoDBDocumentClient, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEventV2 } from 'aws-lambda';
 import { z } from 'zod';
-import Lambder from '../../src/core/Lambder.js';
+import Lambder, { initLambder } from '../../src/core/Lambder.js';
 import { createContext } from '../../src/core/LambderContext.js';
 import { serializeCookie, serializeClearCookie, resolveCookieDomain } from '../../src/shared/wire/LambderCookie.js';
 import { LambderMemorySessionStore } from '../../src/stores/LambderMemorySessionStore.js';
@@ -20,6 +20,7 @@ import LambderSessionController from '../../src/session/LambderSessionController
 import type { LambderSessionStore } from '../../src/shared/contracts/LambderSessionStore.js';
 import { LambderDdbSessionStore } from '../../src/stores/LambderDdbSessionStore.js';
 import { LambderAnswerHeaders } from '../../src/shared/wire/LambderAnswerHeaders.js';
+import { lambderGuard } from '../../src/core/LambderPolicyBuilders.js';
 import { decodeBody, createMockEvent, createMockContext, testPublicFiles } from '../helpers.js';
 
 const hashTok = (value: string) => nodeCrypto.createHash('sha256').update(value).digest('hex');
@@ -560,7 +561,7 @@ describe('Session cookies at several scopes', () => {
 
     it('end-to-end: a shadowed session API call succeeds and the response evicts the host-only copy beside the replacement', async () => {
         vi.spyOn(console, 'warn').mockImplementation(() => {});
-        const lambder = new Lambder({
+        const app = initLambder().create({
             files: testPublicFiles(),
             apiPath: '/api',
             session: {
@@ -569,12 +570,16 @@ describe('Session cookies at several scopes', () => {
                 tokenCookieKey: 'sid', csrfCookieKey: 'csid',
                 cookie: { domain: '.example.com' },
             },
-        }).addSessionApi('whoami', { input: z.any(), output: z.any() }, async (ctx) => ({ key: ctx.session.sessionKey }));
+            guards: { signedIn: lambderGuard({ session: true, handler: async () => {} }) },
+        });
+        const lambder = app.registerApiGroups(app.defineApiGroup('account', {
+            whoami: app.defineApi({ input: z.any(), output: z.any(), guards: 'signedIn' }, async (ctx) => ({ key: ctx.session.sessionKey })),
+        }));
 
-        const result = await lambder.render(createMockEvent('/api', {
+        const result = await lambder.render(createMockEvent('/api/account/whoami', {
             httpMethod: 'POST',
             headers: { Host: 'app.example.com', 'Content-Type': 'application/json', Cookie: `sid=${STALE_TOKEN}; sid=${LIVE_TOKEN}` },
-            body: JSON.stringify({ apiName: 'whoami', payload: {}, token: 'csrf-token' }),
+            body: JSON.stringify({ payload: {}, token: 'csrf-token' }),
         }), createMockContext());
 
         expect(JSON.parse(decodeBody(result)).payload).toEqual({ key: 'user-123' });

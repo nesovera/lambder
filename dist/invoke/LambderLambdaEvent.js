@@ -158,7 +158,6 @@ export const buildEnvelopeJson = (fields) => {
     // The field set is buildEnvelopeFields', so a field added to the envelope
     // reaches this sender too; only the payload is this one's own business.
     const withoutPayload = JSON.stringify(buildEnvelopeFields({
-        apiName: fields.apiName,
         version: fields.version,
         signature: fields.signature,
         token: fields.csrf ?? "",

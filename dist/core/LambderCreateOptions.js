@@ -53,8 +53,7 @@ export const assertCreateOptions = (options) => {
     if (options.requireRefusalCodes && !vocabulary) {
         throw new Error("Lambder: requireRefusalCodes needs a refusals vocabulary to name codes from; declare one with initLambder().declareRefusals().");
     }
-    if ((options.requireSessionApiGuards || options.requirePublicApiGuards) && !options.guards) {
-        const requireFlag = options.requireSessionApiGuards ? "requireSessionApiGuards" : "requirePublicApiGuards";
-        throw new Error(`Lambder: ${requireFlag} needs a guards map at creation for APIs to declare from.`);
+    if (options.requireApiGuards && !options.guards) {
+        throw new Error("Lambder: requireApiGuards needs a guards map at creation for APIs to declare from.");
     }
 };

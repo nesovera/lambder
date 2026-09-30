@@ -23,7 +23,7 @@ const createApiEvent = (apiName: string, payload?: any): APIGatewayProxyEvent =>
     createEnvelopeEvent({ apiName, payload });
 
 const createRouteEvent = (path: string): APIGatewayProxyEvent => ({
-    ...createApiEvent('unused'),
+    ...createApiEvent('test.unused'),
     body: null,
     httpMethod: 'GET',
     path,
@@ -37,16 +37,18 @@ const testSchema = {
 describe('LambderApiRefusal - envelope mapping on API calls', () => {
     it('maps a thrown refusal to the structured envelope and skips the global error handler', async () => {
         let globalHandlerCalled = false;
-        const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
+        const app = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
             .setGlobalErrorHandler((err, ctx, res) => {
                 globalHandlerCalled = true;
                 return res.raw({ statusCode: 500, body: 'crash' });
-            })
-            .addApi('refuse', testSchema, async () => {
-                throw new LambderApiRefusal('You are not a member of an organization.');
             });
+        const lambder = app.registerApiGroups(app.defineApiGroup('test', {
+            refuse: app.defineApi(testSchema, async () => {
+                throw new LambderApiRefusal('You are not a member of an organization.');
+            }),
+        }));
 
-        const result = await lambder.render(createApiEvent('refuse', { value: 'x' }), createMockContext());
+        const result = await lambder.render(createApiEvent('test.refuse', { value: 'x' }), createMockContext());
 
         expect(globalHandlerCalled).toBe(false);
         expect(result.statusCode).toBe(200);
@@ -59,13 +61,15 @@ describe('LambderApiRefusal - envelope mapping on API calls', () => {
         const requireAdmin = (role: string) => {
             if(role !== 'admin') throw new LambderApiRefusal('Permission denied.', { notAuthorized: true });
         };
-        const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
-            .addApi('guarded', testSchema, async (ctx) => {
+        const app = new Lambder({ files: testPublicFiles(), apiPath: '/api' });
+        const lambder = app.registerApiGroups(app.defineApiGroup('test', {
+            guarded: app.defineApi(testSchema, async (ctx) => {
                 requireAdmin('member');
                 return { result: 'never' };
-            });
+            }),
+        }));
 
-        const result = await lambder.render(createApiEvent('guarded', { value: 'x' }), createMockContext());
+        const result = await lambder.render(createApiEvent('test.guarded', { value: 'x' }), createMockContext());
 
         expect(result.statusCode).toBe(200);
         const body = JSON.parse(decodeBody(result));
@@ -74,36 +78,42 @@ describe('LambderApiRefusal - envelope mapping on API calls', () => {
     });
 
     it('carries structured refusal objects verbatim', async () => {
-        const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
-            .addApi('refuse', testSchema, async () => {
+        const app = new Lambder({ files: testPublicFiles(), apiPath: '/api' });
+        const lambder = app.registerApiGroups(app.defineApiGroup('test', {
+            refuse: app.defineApi(testSchema, async () => {
                 throw new LambderApiRefusal('Quota exceeded', {
                     refusal: { type: 'warning', content: 'Daily quota exceeded.' },
                 });
-            });
+            }),
+        }));
 
-        const result = await lambder.render(createApiEvent('refuse', { value: 'x' }), createMockContext());
+        const result = await lambder.render(createApiEvent('test.refuse', { value: 'x' }), createMockContext());
         const body = JSON.parse(decodeBody(result));
         expect(body.refusal).toEqual({ type: 'warning', content: 'Daily quota exceeded.' });
     });
 
     it('sets the sessionExpired flag when requested', async () => {
-        const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
-            .addApi('refuse', testSchema, async () => {
+        const app = new Lambder({ files: testPublicFiles(), apiPath: '/api' });
+        const lambder = app.registerApiGroups(app.defineApiGroup('test', {
+            refuse: app.defineApi(testSchema, async () => {
                 throw new LambderApiRefusal('Session gone', { sessionExpired: true });
-            });
+            }),
+        }));
 
-        const result = await lambder.render(createApiEvent('refuse', { value: 'x' }), createMockContext());
+        const result = await lambder.render(createApiEvent('test.refuse', { value: 'x' }), createMockContext());
         const body = JSON.parse(decodeBody(result));
         expect(body.sessionExpired).toBe(true);
     });
 
     it('honors a statusCode override', async () => {
-        const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
-            .addApi('refuse', testSchema, async () => {
+        const app = new Lambder({ files: testPublicFiles(), apiPath: '/api' });
+        const lambder = app.registerApiGroups(app.defineApiGroup('test', {
+            refuse: app.defineApi(testSchema, async () => {
                 throw new LambderApiRefusal('Forbidden', { statusCode: 403 });
-            });
+            }),
+        }));
 
-        const result = await lambder.render(createApiEvent('refuse', { value: 'x' }), createMockContext());
+        const result = await lambder.render(createApiEvent('test.refuse', { value: 'x' }), createMockContext());
         expect(result.statusCode).toBe(403);
         const body = JSON.parse(decodeBody(result));
         expect(body.refusal).toEqual({ type: 'error', content: 'Forbidden' });
@@ -111,17 +121,19 @@ describe('LambderApiRefusal - envelope mapping on API calls', () => {
 
     it('maps refusals thrown from beforeRender hooks on API calls', async () => {
         let handlerRan = false;
-        const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' });
-        lambder.addHook('beforeRender', (ctx) => {
-            if(ctx.apiName === 'guarded') throw new LambderApiRefusal('Blocked by hook');
+        const app = new Lambder({ files: testPublicFiles(), apiPath: '/api' });
+        app.addHook('beforeRender', (ctx) => {
+            if(ctx.apiName === 'test.guarded') throw new LambderApiRefusal('Blocked by hook');
             return ctx;
         });
-        lambder.addApi('guarded', testSchema, async (ctx) => {
-            handlerRan = true;
-            return { result: 'never' };
-        });
+        const lambder = app.registerApiGroups(app.defineApiGroup('test', {
+            guarded: app.defineApi(testSchema, async (ctx) => {
+                handlerRan = true;
+                return { result: 'never' };
+            }),
+        }));
 
-        const result = await lambder.render(createApiEvent('guarded', { value: 'x' }), createMockContext());
+        const result = await lambder.render(createApiEvent('test.guarded', { value: 'x' }), createMockContext());
 
         expect(handlerRan).toBe(false);
         expect(result.statusCode).toBe(200);
@@ -129,13 +141,15 @@ describe('LambderApiRefusal - envelope mapping on API calls', () => {
     });
 
     it('maps refusals thrown from afterRender hooks on API calls', async () => {
-        const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
-            .addApi('ok', testSchema, async (ctx) => ({ result: 'fine' }));
+        const app = new Lambder({ files: testPublicFiles(), apiPath: '/api' });
+        const lambder = app.registerApiGroups(app.defineApiGroup('test', {
+            ok: app.defineApi(testSchema, async (ctx) => ({ result: 'fine' })),
+        }));
         lambder.addHook('afterRender', () => {
             throw new LambderApiRefusal('Rejected after render');
         });
 
-        const result = await lambder.render(createApiEvent('ok', { value: 'x' }), createMockContext());
+        const result = await lambder.render(createApiEvent('test.ok', { value: 'x' }), createMockContext());
         expect(JSON.parse(decodeBody(result)).refusal).toEqual({ type: 'error', content: 'Rejected after render' });
     });
 
@@ -146,10 +160,12 @@ describe('LambderApiRefusal - envelope mapping on API calls', () => {
             refusal: 'Foreign refusal',
             notAuthorized: true,
         });
-        const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
-            .addApi('refuse', testSchema, async () => { throw foreign; });
+        const app = new Lambder({ files: testPublicFiles(), apiPath: '/api' });
+        const lambder = app.registerApiGroups(app.defineApiGroup('test', {
+            refuse: app.defineApi(testSchema, async () => { throw foreign; }),
+        }));
 
-        const result = await lambder.render(createApiEvent('refuse', { value: 'x' }), createMockContext());
+        const result = await lambder.render(createApiEvent('test.refuse', { value: 'x' }), createMockContext());
         expect(result.statusCode).toBe(200);
         const body = JSON.parse(decodeBody(result));
         expect(body.notAuthorized).toBe(true);
@@ -160,23 +176,27 @@ describe('LambderApiRefusal - envelope mapping on API calls', () => {
 describe('refuse() - the standard refusal shape', () => {
     it('is the shape of the framework\'s own refusals too (unknown API)', async () => {
         const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' });
-        const result = await lambder.render(createApiEvent('missing', {}), createMockContext());
+        const result = await lambder.render(createApiEvent('test.missing', {}), createMockContext());
         expect(JSON.parse(decodeBody(result)).refusal).toEqual({ type: 'warning', code: LAMBDER_REFUSAL_CODES.apiNotFound, content: 'API not found.' });
     });
 
     it('carries a machine-readable code for clients to branch and translate on', async () => {
-        const lambder = initLambder().declareRefusals({ ALREADY_REPORTED: {} }).create({ files: testPublicFiles(), apiPath: '/api' })
-            .addApi('dup', { ...testSchema, refusals: 'ALREADY_REPORTED' }, async () => refuse('Already reported.', { code: 'ALREADY_REPORTED' }));
+        const app = initLambder().declareRefusals({ ALREADY_REPORTED: {} }).create({ files: testPublicFiles(), apiPath: '/api' });
+        const lambder = app.registerApiGroups(app.defineApiGroup('test', {
+            dup: app.defineApi({ ...testSchema, refusals: 'ALREADY_REPORTED' }, async () => refuse('Already reported.', { code: 'ALREADY_REPORTED' })),
+        }));
 
-        const result = await lambder.render(createApiEvent('dup', { value: 'x' }), createMockContext());
+        const result = await lambder.render(createApiEvent('test.dup', { value: 'x' }), createMockContext());
         expect(JSON.parse(decodeBody(result)).refusal).toEqual({ type: 'warning', code: 'ALREADY_REPORTED', content: 'Already reported.' });
     });
 
     it('carries extra headers onto the refusal response', async () => {
-        const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
-            .addApi('later', testSchema, async () => refuse('Come back later.', { statusCode: 429, headers: { 'Retry-After': '30' } }));
+        const app = new Lambder({ files: testPublicFiles(), apiPath: '/api' });
+        const lambder = app.registerApiGroups(app.defineApiGroup('test', {
+            later: app.defineApi(testSchema, async () => refuse('Come back later.', { statusCode: 429, headers: { 'Retry-After': '30' } })),
+        }));
 
-        const result = await lambder.render(createApiEvent('later', { value: 'x' }), createMockContext());
+        const result = await lambder.render(createApiEvent('test.later', { value: 'x' }), createMockContext());
         expect(result.statusCode).toBe(429);
         expect(result.multiValueHeaders?.['Retry-After']).toEqual(['30']);
     });
@@ -184,10 +204,12 @@ describe('refuse() - the standard refusal shape', () => {
     it('replaces the envelope\'s own header when a refusal names it under another casing', async () => {
         // Two Content-Type headers on one response is not a thing; the
         // refusal's is the one the app asked for.
-        const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
-            .addApi('plain', testSchema, async () => refuse('No.', { headers: { 'content-type': 'text/plain' } }));
+        const app = new Lambder({ files: testPublicFiles(), apiPath: '/api' });
+        const lambder = app.registerApiGroups(app.defineApiGroup('test', {
+            plain: app.defineApi(testSchema, async () => refuse('No.', { headers: { 'content-type': 'text/plain' } })),
+        }));
 
-        const result = await lambder.render(createApiEvent('plain', { value: 'x' }), createMockContext());
+        const result = await lambder.render(createApiEvent('test.plain', { value: 'x' }), createMockContext());
 
         const contentTypes = Object.entries(result.multiValueHeaders ?? {})
             .filter(([key]) => key.toLowerCase() === 'content-type')
@@ -196,10 +218,12 @@ describe('refuse() - the standard refusal shape', () => {
     });
 
     it('maps to a warning envelope by default', async () => {
-        const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
-            .addApi('nope', testSchema, async () => refuse('Record not found.'));
+        const app = new Lambder({ files: testPublicFiles(), apiPath: '/api' });
+        const lambder = app.registerApiGroups(app.defineApiGroup('test', {
+            nope: app.defineApi(testSchema, async () => refuse('Record not found.')),
+        }));
 
-        const result = await lambder.render(createApiEvent('nope', { value: 'x' }), createMockContext());
+        const result = await lambder.render(createApiEvent('test.nope', { value: 'x' }), createMockContext());
         expect(result.statusCode).toBe(200);
         const body = JSON.parse(decodeBody(result));
         expect(body.payload).toBe(null);
@@ -207,12 +231,14 @@ describe('refuse() - the standard refusal shape', () => {
     });
 
     it('carries type, title, flags and statusCode through its options', async () => {
-        const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
-            .addApi('denied', testSchema, async () => refuse('Admins only.', {
+        const app = new Lambder({ files: testPublicFiles(), apiPath: '/api' });
+        const lambder = app.registerApiGroups(app.defineApiGroup('test', {
+            denied: app.defineApi(testSchema, async () => refuse('Admins only.', {
                 type: 'error', title: 'Not Allowed', notAuthorized: true, statusCode: 403,
-            }));
+            })),
+        }));
 
-        const result = await lambder.render(createApiEvent('denied', { value: 'x' }), createMockContext());
+        const result = await lambder.render(createApiEvent('test.denied', { value: 'x' }), createMockContext());
         expect(result.statusCode).toBe(403);
         const body = JSON.parse(decodeBody(result));
         expect(body.notAuthorized).toBe(true);
@@ -222,17 +248,19 @@ describe('refuse() - the standard refusal shape', () => {
     it('works from nested helpers and skips the global error handler', async () => {
         let globalHandlerCalled = false;
         const assertPositive = (n: number) => { if (n <= 0) refuse('Value must be positive.'); };
-        const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
+        const app = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
             .setGlobalErrorHandler((err, ctx, res) => {
                 globalHandlerCalled = true;
                 return res.raw({ statusCode: 500, body: 'crash' });
-            })
-            .addApi('guarded', testSchema, async (ctx) => {
+            });
+        const lambder = app.registerApiGroups(app.defineApiGroup('test', {
+            guarded: app.defineApi(testSchema, async (ctx) => {
                 assertPositive(-1);
                 return { result: 'never' };
-            });
+            }),
+        }));
 
-        const result = await lambder.render(createApiEvent('guarded', { value: 'x' }), createMockContext());
+        const result = await lambder.render(createApiEvent('test.guarded', { value: 'x' }), createMockContext());
         expect(globalHandlerCalled).toBe(false);
         expect(JSON.parse(decodeBody(result)).refusal.content).toBe('Value must be positive.');
     });
@@ -258,12 +286,14 @@ describe('LambderApiRefusal - outside API calls', () => {
 
 describe('Last-resort 500 shape', () => {
     it('answers API calls with a JSON envelope when no global error handler exists', async () => {
-        const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api', apiVersion: '1.2.3' })
-            .addApi('crash', testSchema, async () => {
+        const app = new Lambder({ files: testPublicFiles(), apiPath: '/api', apiVersion: '1.2.3' });
+        const lambder = app.registerApiGroups(app.defineApiGroup('test', {
+            crash: app.defineApi(testSchema, async () => {
                 throw new Error('boom');
-            });
+            }),
+        }));
 
-        const result = await lambder.render(createApiEvent('crash', { value: 'x' }), createMockContext());
+        const result = await lambder.render(createApiEvent('test.crash', { value: 'x' }), createMockContext());
 
         expect(result.statusCode).toBe(500);
         expect(result.multiValueHeaders?.['Content-Type']).toEqual(['application/json; charset=utf-8']);

@@ -16,7 +16,8 @@ export class LambderTransportFailure extends Error {
 export const isLambderTransportFailure = (err) => err instanceof Error && err.isLambderTransportFailure === true;
 /**
  * The fields of the request envelope, in wire order: the one statement of
- * what a call sends, for every sender.
+ * what a call sends, for every sender. The endpoint is not among them: it is
+ * the path the envelope is posted to (apiCallPath).
  *
  * Two senders write it. A transport hands the payload over as a value
  * (buildTransportEnvelope, below); LambderInvokeCaller has already serialized
@@ -27,7 +28,6 @@ export const isLambderTransportFailure = (err) => err instanceof Error && err.is
  * the wire would catch.
  */
 export const buildEnvelopeFields = (fields) => ({
-    apiName: fields.apiName,
     version: fields.version,
     ...(fields.signature !== undefined ? { signature: fields.signature } : {}),
     token: fields.token,
@@ -42,7 +42,6 @@ export const buildEnvelopeFields = (fields) => ({
  * runtime read one shape.
  */
 export const buildTransportEnvelope = (request) => buildEnvelopeFields({
-    apiName: request.apiName,
     version: request.version,
     signature: request.signature,
     token: request.token,

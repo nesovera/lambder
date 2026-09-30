@@ -42,7 +42,13 @@ export type {
     LambderGuardInputsProvider,
     LambderProvidedGuardInputs,
     LambderLogListHandler,
+    LambderCallerEndpoint,
+    LambderCallerGroupCalls,
+    LambderCallerMembers,
 } from "./client/LambderCaller.js";
+// How an endpoint is named, and where a call to it goes.
+export { apiCallPath, splitApiName, LAMBDER_RESERVED_GROUP_NAMES, LAMBDER_RESERVED_ACTION_NAMES } from "./shared/wire/LambderApiNames.js";
+export type { LambderContractGroupsOf, LambderContractNamesInGroup, LambderContractActionOf } from "./shared/wire/LambderApiGroupCalls.js";
 export { createIdempotencyKey, createIdempotencyKeyScope } from "./shared/wire/LambderIdempotencyKeyScope.js";
 export type { LambderIdempotencyKeyScope } from "./shared/wire/LambderIdempotencyKeyScope.js";
 

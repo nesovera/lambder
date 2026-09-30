@@ -27,10 +27,10 @@ the size guard are applied there, not per call site.
 | `cookieList` | Every value per cookie name, in header order (a name held at several scopes arrives several times) | `{ rememberMe: ["true"] }` |
 | `event` | Raw Lambda event (`APIGatewayProxyEvent` or `APIGatewayProxyEventV2`) | |
 | `lambdaContext` | AWS Lambda Context | |
-| `apiName` | API name (API calls) | `"getUser"` |
+| `apiName` | The endpoint called, `group.action`, read off the call's path (API calls) | `"users.get"` |
 | `apiPayload` | Validated input (API calls) | `{ userId: "123" }` |
 | `guardData` | Values returned by the API's guards, keyed by guard name | `{ orgPermission: { organizationId } }` |
-| `session` | The session record, or `null` where none was read or created. Non-null on `addSessionApi` and `addSessionRoute` | |
+| `session` | The session record, or `null` where none was read or created. Non-null on a session endpoint (one whose guards need a session) and on `addSessionRoute` | |
 | `api` | The parsed API request on an API call, `null` on a route | |
 | `eventFormat` | Which payload format the event arrived in | `"v1"`, `"v2"` |
 | `responseHeaders` | Headers written during the call (the response tools below, session cookies), applied onto the response at the end | |
@@ -137,12 +137,14 @@ carries (a `Content-Type`, say), and an added one is appended to it, exactly
 as if written on the response directly.
 
 ```typescript
-lambder.addSessionApi("orders.export", { input, output, guards }, async (ctx) => {
-    const orders = await listOrders(ctx.session.data.storeId);
-    ctx.setResponseHeader("Cache-Control", "private, max-age=60");
-    ctx.setCookie("lastExport", new Date().toISOString(), { maxAge: 30 * 24 * 3600 });
-    ctx.logList.push({ exported: orders.length });
-    return { orders };
+export const orderApis = defineApiGroup("orders", {
+    export: defineApi({ input, output, guards: "signedIn" }, async (ctx) => {
+        const orders = await listOrders(ctx.session.data.storeId);
+        ctx.setResponseHeader("Cache-Control", "private, max-age=60");
+        ctx.setCookie("lastExport", new Date().toISOString(), { maxAge: 30 * 24 * 3600 });
+        ctx.logList.push({ exported: orders.length });
+        return { orders };
+    }),
 });
 ```
 
@@ -228,12 +230,14 @@ An API's answers compress by these rules on their own, and an API that needs
 otherwise says so where it is declared, with `compress` beside its schemas:
 
 ```typescript
-lambder.addApi("invoices.download", {
-    input: z.object({ invoiceId: z.uuid() }),
-    output: z.object({ fileName: z.string(), pdfBase64: z.string() }),
-    // A base64 body gains little from compression: see below.
-    compress: false,
-}, async ({ apiPayload }) => await loadInvoicePdf(apiPayload.invoiceId));
+export const invoiceApis = defineApiGroup("invoices", {
+    download: defineApi({
+        input: z.object({ invoiceId: z.uuid() }),
+        output: z.object({ fileName: z.string(), pdfBase64: z.string() }),
+        // A base64 body gains little from compression: see below.
+        compress: false,
+    }, async ({ apiPayload }) => await loadInvoicePdf(apiPayload.invoiceId)),
+});
 ```
 
 `"auto"`, the default, is the behavior above. `false` never compresses the

@@ -77,15 +77,17 @@ describe('HTTP API v2 events', () => {
 
     it('parses POST bodies and dispatches APIs on v2 events', async () => {
         const { z } = await import('zod');
-        const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
-            .addApi('echo.name', {
+        const app = new Lambder({ files: testPublicFiles(), apiPath: '/api' });
+        const lambder = app.registerApiGroups(app.defineApiGroup('echo', {
+            greet: app.defineApi({
                 input: z.object({ name: z.string() }),
                 output: z.object({ hello: z.string() }),
-            }, async (ctx) => ({ hello: ctx.apiPayload.name }));
+            }, async (ctx) => ({ hello: ctx.apiPayload.name })),
+        }));
 
-        const event = createMockEventV2('/api', {
+        const event = createMockEventV2('/api/echo/greet', {
             headers: { host: 'localhost', 'content-type': 'application/json' },
-            body: JSON.stringify({ apiName: 'echo.name', payload: { name: 'v2' } }),
+            body: JSON.stringify({ payload: { name: 'v2' } }),
         });
         event.requestContext.http.method = 'POST';
 

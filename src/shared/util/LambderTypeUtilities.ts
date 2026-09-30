@@ -41,7 +41,7 @@ export type LambderReadonlyDeep<T, TDepth extends unknown[] = []> =
  * name, of "this one required and the rest optional".
  *
  * An all-optional map is inhabited by `{}`, which would let `guards: {}`
- * satisfy requireSessionApiGuards / requirePublicApiGuards at the type level
+ * satisfy requireApiGuards at the type level
  * while declaring no guard: the option is present, so the required-field
  * check passes, and it normalizes to zero entries, so nothing runs. Requiring
  * the chosen key also rejects `{ theGuard: undefined }`, which an optional

@@ -132,11 +132,13 @@ describe('Compression (Brotli / gzip)', () => {
     });
 
     it('an API declared with compress: true is gzipped even below the size threshold', async () => {
-        const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
-            .addApi('tiny', { input: z.object({}), output: z.object({ ok: z.boolean() }), compress: true }, async (_ctx) => ({ ok: true }));
+        const app = new Lambder({ files: testPublicFiles(), apiPath: '/api' });
+        const lambder = app.registerApiGroups(app.defineApiGroup('test', {
+            tiny: app.defineApi({ input: z.object({}), output: z.object({ ok: z.boolean() }), compress: true }, async (_ctx) => ({ ok: true })),
+        }));
 
         const result = await lambder.render(
-            createApiEvent({ apiName: 'tiny', payload: {} }, { headers: { 'Accept-Encoding': 'gzip' } }),
+            createApiEvent({ apiName: 'test.tiny', payload: {} }, { headers: { 'Accept-Encoding': 'gzip' } }),
             createMockContext(),
         );
 

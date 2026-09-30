@@ -26,6 +26,8 @@ import { DEFAULT_SESSION_TOKEN_COOKIE_KEY, DEFAULT_SESSION_CSRF_COOKIE_KEY } fro
 import { readApiSignature, type LambderApiSignatureMap } from '../shared/wire/LambderApiSignatureMap.js';
 import { LambderReloadLoopBreaker, RELOAD_LOOP_WINDOW_MS } from './LambderReloadLoopBreaker.js';
 import { lambderFetchTransport } from './lambderFetchTransport.js';
+import { withApiGroupCalls, type LambderContractActionOf, type LambderContractGroupsOf, type LambderContractNamesInGroup } from '../shared/wire/LambderApiGroupCalls.js';
+import { splitApiName } from '../shared/wire/LambderApiNames.js';
 
 // The outcome vocabulary and the contract-driven option typing live in
 // src/shared/ (LambderInvokeCaller uses them too); re-exported so the client
@@ -150,42 +152,52 @@ const pageReloadLoopBreaker = new LambderReloadLoopBreaker();
 export type LambderCallerOptions<TContract, TProvided extends string = never> =
     LambderCallerBaseOptions<LambderContractAnyRefusalMessage<TContract>> & LambderGuardInputsProviderOption<TContract, TProvided>;
 
+/** The caller's two calls by name, untyped: what a group's action forwards to, the contract having typed the call where it was written. */
+type LambderCallerByName = {
+    api(apiName: string, ...args: unknown[]): Promise<unknown>;
+    apiOutcome(apiName: string, ...args: unknown[]): Promise<unknown>;
+};
+
 /**
+ * The caller itself, before the groups: what LambderCaller is, less the
+ * endpoints it reaches by group (LambderCallerGroupCalls), which the
+ * constructor adds.
+ *
  * @typeParam TContract - The API contract, for typed names, payloads and guard inputs.
  * @typeParam TProvidedGuards - Guard names guardInputsProvider covers; those APIs' options argument becomes optional.
  */
-export default class LambderCaller<TContract extends LambderApiContractShape = any, TProvidedGuards extends string = never> {
-    private apiPath: string;
-    private apiVersion?: string;
-    private apiSignatures?: LambderApiSignatureMap;
-    private timeoutMs?: number;
+class LambderCallerCore<TContract extends LambderApiContractShape = any, TProvidedGuards extends string = never> {
+    #apiPath: string;
+    #apiVersion?: string;
+    #apiSignatures?: LambderApiSignatureMap;
+    #timeoutMs?: number;
 
     /** The calls currently in flight, in the order they started. */
     fetchTrackerList: FetchTracker[] = [];
     /** Whether any call is in flight. Derived from the list, so the two cannot drift apart. */
     get isLoading(): boolean { return this.fetchTrackerList.length > 0; }
 
-    private versionExpiredHandler?: NotifyHandler;
-    private sessionExpiredHandler?: NotifyHandler;
+    #versionExpiredHandler?: NotifyHandler;
+    #sessionExpiredHandler?: NotifyHandler;
 
     // Hears every endpoint's refusals, so held at the widest message: the
     // constructor option types it to the contract's codes, and dispatch,
     // generic over one endpoint's message, hands it one of those.
-    private refusalHandler?: RefusalHandler<LambderUncheckedRefusalMessage>;
-    private notAuthorizedHandler?: NotifyHandler;
-    private errorHandler?: ErrorHandler;
-    private apiInputValidationErrorHandler?: ValidationErrorHandler;
-    private logListHandler?: LambderLogListHandler;
+    #refusalHandler?: RefusalHandler<LambderUncheckedRefusalMessage>;
+    #notAuthorizedHandler?: NotifyHandler;
+    #errorHandler?: ErrorHandler;
+    #apiInputValidationErrorHandler?: ValidationErrorHandler;
+    #logListHandler?: LambderLogListHandler;
 
-    private fetchStartedHandler?: FetchStartEventHandler;
-    private fetchEndedHandler?: FetchEndEventHandler;
-    private guardInputsProvider?: (apiName: string) => unknown;
+    #fetchStartedHandler?: FetchStartEventHandler;
+    #fetchEndedHandler?: FetchEndEventHandler;
+    #guardInputsProvider?: (apiName: string) => unknown;
 
-    private sessionTokenCookieKey = DEFAULT_SESSION_TOKEN_COOKIE_KEY;
-    private sessionCsrfCookieKey = DEFAULT_SESSION_CSRF_COOKIE_KEY;
-    private sessionCookieDomain?: string | ((hostname: string) => string | undefined | null);
-    private requestCompression: LambderRequestCompressionSettings | null;
-    private transport: LambderApiTransport;
+    #sessionTokenCookieKey = DEFAULT_SESSION_TOKEN_COOKIE_KEY;
+    #sessionCsrfCookieKey = DEFAULT_SESSION_CSRF_COOKIE_KEY;
+    #sessionCookieDomain?: string | ((hostname: string) => string | undefined | null);
+    #requestCompression: LambderRequestCompressionSettings | null;
+    #transport: LambderApiTransport;
 
     constructor(options: LambderCallerOptions<TContract, TProvidedGuards>){
         // The conditional provider option is resolved per instantiation;
@@ -204,45 +216,53 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
             guardInputsProvider,
             transport,
         } = options as LambderCallerBaseOptions<LambderUncheckedRefusalMessage> & { guardInputsProvider?: (apiName: string) => unknown };
-        this.apiPath = apiPath;
-        this.apiVersion = apiVersion;
-        this.apiSignatures = apiSignatures;
-        this.timeoutMs = timeoutMs;
-        this.sessionCookieDomain = sessionCookieDomain;
+        this.#apiPath = apiPath;
+        this.#apiVersion = apiVersion;
+        this.#apiSignatures = apiSignatures;
+        this.#timeoutMs = timeoutMs;
+        this.#sessionCookieDomain = sessionCookieDomain;
         // `?? false`: unlike the at-rest stores, this one is off unless asked for.
-        this.requestCompression = resolveCompressionOption(requestCompression ?? false, DEFAULT_REQUEST_COMPRESSION_SETTINGS);
-        this.transport = transport ?? lambderFetchTransport({ cors: isCorsEnabled });
+        this.#requestCompression = resolveCompressionOption(requestCompression ?? false, DEFAULT_REQUEST_COMPRESSION_SETTINGS);
+        this.#transport = transport ?? lambderFetchTransport({ cors: isCorsEnabled });
 
-        this.versionExpiredHandler = versionExpiredHandler;
-        this.sessionExpiredHandler = sessionExpiredHandler;
+        this.#versionExpiredHandler = versionExpiredHandler;
+        this.#sessionExpiredHandler = sessionExpiredHandler;
 
-        this.refusalHandler = refusalHandler;
-        this.notAuthorizedHandler = notAuthorizedHandler;
-        this.errorHandler = errorHandler;
-        this.apiInputValidationErrorHandler = apiInputValidationErrorHandler;
-        this.logListHandler = logListHandler;
+        this.#refusalHandler = refusalHandler;
+        this.#notAuthorizedHandler = notAuthorizedHandler;
+        this.#errorHandler = errorHandler;
+        this.#apiInputValidationErrorHandler = apiInputValidationErrorHandler;
+        this.#logListHandler = logListHandler;
 
-        this.fetchStartedHandler = fetchStartedHandler;
-        this.fetchEndedHandler = fetchEndedHandler;
-        this.guardInputsProvider = guardInputsProvider;
+        this.#fetchStartedHandler = fetchStartedHandler;
+        this.#fetchEndedHandler = fetchEndedHandler;
+        this.#guardInputsProvider = guardInputsProvider;
+        // Each group of the contract, as a property: caller.orders.place(input)
+        // is caller.api("orders.place", input), and .outcome the apiOutcome.
+        const byName = this as unknown as LambderCallerByName;
+        return withApiGroupCalls(
+            this,
+            (apiName, args) => byName.api(apiName, ...args),
+            (apiName, args) => byName.apiOutcome(apiName, ...args),
+        );
     };
 
     setSessionCookieKey(sessionTokenCookieKey: string, sessionCsrfCookieKey: string){
-        this.sessionTokenCookieKey = sessionTokenCookieKey;
-        this.sessionCsrfCookieKey = sessionCsrfCookieKey;
+        this.#sessionTokenCookieKey = sessionTokenCookieKey;
+        this.#sessionCsrfCookieKey = sessionCsrfCookieKey;
     }
 
     /** Replaces how calls reach the server: a mock runtime, an in-process handler, a decorated transport. */
     setTransport(transport: LambderApiTransport): this {
-        this.transport = transport;
+        this.#transport = transport;
         return this;
     }
 
-    private clearSessionCookies(){
-        const domainOption = this.sessionCookieDomain;
+    #clearSessionCookies(){
+        const domainOption = this.#sessionCookieDomain;
         const hostname = globalThis.location?.hostname ?? "";
         const resolvedDomain = typeof domainOption === "function" ? domainOption(hostname) : domainOption;
-        for(const key of [this.sessionTokenCookieKey, this.sessionCsrfCookieKey]){
+        for(const key of [this.#sessionTokenCookieKey, this.#sessionCsrfCookieKey]){
             // Host-only and domain-scoped cookies are distinct entries; clear both.
             // Only the CSRF cookie is reachable from here: the token cookie is
             // HttpOnly, so its removal is the server's (a Set-Cookie on the
@@ -253,21 +273,21 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
     }
 
     /** One call, one outcome. Never throws; every failure path resolves to { ok: false }. */
-    private async dispatch<TOutput, TMessage extends LambderUncheckedRefusalMessage>(
+    async #dispatch<TOutput, TMessage extends LambderUncheckedRefusalMessage>(
         apiName: string,
         payload?: any,
         options?: LambderCallOptions<TMessage>,
     ): Promise<LambderApiOutcome<TOutput, TMessage>>{
         // Per-call overrides win over the constructor handlers.
-        const versionExpiredHandler = options?.versionExpiredHandler ?? this.versionExpiredHandler;
-        const sessionExpiredHandler = options?.sessionExpiredHandler ?? this.sessionExpiredHandler;
-        const refusalHandler = options?.refusalHandler ?? this.refusalHandler;
-        const notAuthorizedHandler = options?.notAuthorizedHandler ?? this.notAuthorizedHandler;
-        const errorHandler = options?.errorHandler ?? this.errorHandler;
-        const apiInputValidationErrorHandler = options?.apiInputValidationErrorHandler ?? this.apiInputValidationErrorHandler;
-        const logListHandler = options?.logListHandler ?? this.logListHandler;
-        const fetchStartedHandler = options?.fetchStartedHandler ?? this.fetchStartedHandler;
-        const fetchEndedHandler = options?.fetchEndedHandler ?? this.fetchEndedHandler;
+        const versionExpiredHandler = options?.versionExpiredHandler ?? this.#versionExpiredHandler;
+        const sessionExpiredHandler = options?.sessionExpiredHandler ?? this.#sessionExpiredHandler;
+        const refusalHandler = options?.refusalHandler ?? this.#refusalHandler;
+        const notAuthorizedHandler = options?.notAuthorizedHandler ?? this.#notAuthorizedHandler;
+        const errorHandler = options?.errorHandler ?? this.#errorHandler;
+        const apiInputValidationErrorHandler = options?.apiInputValidationErrorHandler ?? this.#apiInputValidationErrorHandler;
+        const logListHandler = options?.logListHandler ?? this.#logListHandler;
+        const fetchStartedHandler = options?.fetchStartedHandler ?? this.#fetchStartedHandler;
+        const fetchEndedHandler = options?.fetchEndedHandler ?? this.#fetchEndedHandler;
 
         const headers = options?.headers;
         const fetchTracker: FetchTracker = { apiName };
@@ -309,7 +329,7 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
 
         // Timeout and abort wiring, shared with LambderInvokeCaller so the two
         // cannot drift on what a late or abandoned call means.
-        const abort = createCallAbort({ timeoutMs: options?.timeoutMs ?? this.timeoutMs, signal: options?.signal });
+        const abort = createCallAbort({ timeoutMs: options?.timeoutMs ?? this.#timeoutMs, signal: options?.signal });
         const signal = abort.signal;
 
         /** Reports a call that was given up on, or null while it still stands. */
@@ -324,20 +344,29 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
         };
 
         try {
+            // A name that is not group.action names no endpoint and no path:
+            // a caller's mistake, reported as one before anything is sent,
+            // rather than as the network failure its transport would throw.
+            if(!splitApiName(apiName)){
+                idempotentAttempt.settle(IDEMPOTENT_ATTEMPT_NOT_SENT);
+                const error = new Error(`Lambder: "${apiName}" is not an endpoint name. An endpoint is named group.action, both identifiers.`);
+                await reportError(error);
+                return { ok: false, reason: 'unknown', error };
+            }
             this.fetchTrackerList.push(fetchTracker);
             if(fetchStartedHandler) await fetchStartedHandler({
                 fetchParams: { apiName, payload, headers, },
                 activeFetchList: [...this.fetchTrackerList],
             });
-            const version = this.apiVersion;
+            const version = this.#apiVersion;
             // The server's signature for this endpoint, when this build
             // carries the map. A name the map lacks fails the call here, as a
             // provider that threw would: the map predates the endpoint.
-            const signature = this.apiSignatures ? await readApiSignature(this.apiSignatures, apiName) : undefined;
+            const signature = this.#apiSignatures ? await readApiSignature(this.#apiSignatures, apiName) : undefined;
             const siteHost = globalThis.location?.hostname ?? "";
             // Provider values underneath, per-call values on top.
-            const providedGuardInputs = this.guardInputsProvider
-                ? await this.guardInputsProvider(apiName) as Record<string, unknown> | undefined
+            const providedGuardInputs = this.#guardInputsProvider
+                ? await this.#guardInputsProvider(apiName) as Record<string, unknown> | undefined
                 : undefined;
             const guardInputs = mergeGuardInputs(providedGuardInputs, options?.guardInputs);
 
@@ -346,7 +375,7 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
             // without CompressionStream always sends the payload plainly.
             // Nothing here runs (the extra stringify included) unless
             // compression is actually a possibility for this call.
-            const compressionMinBytes = resolveRequestCompressionMinBytes(options?.compressRequest, this.requestCompression);
+            const compressionMinBytes = resolveRequestCompressionMinBytes(options?.compressRequest, this.#requestCompression);
             const compressedPayload = compressionMinBytes !== null && payload !== undefined && isRequestCompressionAvailable()
                 ? await compressPayloadGzip(JSON.stringify(payload), compressionMinBytes)
                 : null;
@@ -363,15 +392,15 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
             // cookie with the old token. js-cookie reads nothing without a
             // document: the token is "" then, and a transport that carries a
             // cookie jar fills it in from there.
-            const token = Cookies.get(this.sessionCsrfCookieKey) || "";
+            const token = Cookies.get(this.#sessionCsrfCookieKey) || "";
             let answer: LambderApiHttpAnswer;
             try {
                 sent = true;
-                answer = await this.transport({
-                    apiPath: this.apiPath,
+                answer = await this.#transport({
+                    apiPath: this.#apiPath,
                     apiName, version, token, siteHost,
                     ...(signature !== undefined ? { signature } : {}),
-                    csrfCookieKey: this.sessionCsrfCookieKey,
+                    csrfCookieKey: this.#sessionCsrfCookieKey,
                     ...(compressedPayload ? { compressed: compressedPayload } : { payload }),
                     ...(guardInputs !== undefined ? { guardInputs } : {}),
                     ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
@@ -466,9 +495,9 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
                 // token it posted and the one it holds, since the page's
                 // cookie is not where that session lives.
                 const postedToken = answer.csrfTokens?.posted ?? token;
-                const heldToken = answer.csrfTokens ? answer.csrfTokens.held() : Cookies.get(this.sessionCsrfCookieKey) || "";
+                const heldToken = answer.csrfTokens ? answer.csrfTokens.held() : Cookies.get(this.#sessionCsrfCookieKey) || "";
                 if(heldToken !== "" && heldToken !== postedToken) return outcome;
-                this.clearSessionCookies();
+                this.#clearSessionCookies();
                 if(sessionExpiredHandler){ await sessionExpiredHandler(); }
                 else{ await reportError(new Error("Session Expired; Please log in again;")); }
                 return outcome;
@@ -520,7 +549,7 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
         // elements read as unknown from inside; the contract shaped them on
         // the way in, which is where the guarantee belongs.
         const [payload, options] = rest as [unknown, LambderCallOptions<LambderContractRefusalMessage<TContract, TApiName>> | undefined];
-        return await this.dispatch(apiName, payload, options);
+        return await this.#dispatch(apiName, payload, options);
     };
 
     /**
@@ -535,8 +564,46 @@ export default class LambderCaller<TContract extends LambderApiContractShape = a
         ...rest: LambderCallArgs<TContract, TApiName, TProvidedGuards, LambderCallOptions<LambderContractRefusalMessage<TContract, TApiName>>>
     ): Promise<LambderContractOutputOf<TContract, TApiName> | undefined> {
         const [payload, options] = rest as [unknown, LambderCallOptions<LambderContractRefusalMessage<TContract, TApiName>> | undefined];
-        const outcome = await this.dispatch<LambderContractOutputOf<TContract, TApiName>, LambderContractRefusalMessage<TContract, TApiName>>(apiName, payload, options);
+        const outcome = await this.#dispatch<LambderContractOutputOf<TContract, TApiName>, LambderContractRefusalMessage<TContract, TApiName>>(apiName, payload, options);
         return outcome.ok ? outcome.payload : undefined;
     }
 
 }
+
+/**
+ * One endpoint as a caller hands it out on its group: called, it is `api`
+ * for that endpoint (the output, or undefined on a failure); `.outcome` is
+ * `apiOutcome` (the full outcome, never throwing).
+ */
+export type LambderCallerEndpoint<TContract, TName extends keyof TContract & string, TProvidedGuards extends string> = {
+    (...args: LambderCallArgs<TContract, TName, TProvidedGuards, LambderCallOptions<LambderContractRefusalMessage<TContract, TName>>>): Promise<LambderContractOutputOf<TContract, TName> | undefined>;
+    outcome(...args: LambderCallArgs<TContract, TName, TProvidedGuards, LambderCallOptions<LambderContractRefusalMessage<TContract, TName>>>): Promise<LambderApiOutcome<LambderContractOutputOf<TContract, TName>, LambderContractRefusalMessage<TContract, TName>>>;
+};
+
+/** Every endpoint of a contract, by group: `caller.orders.place(input)`. */
+export type LambderCallerGroupCalls<TContract, TProvidedGuards extends string> = {
+    readonly [TGroup in LambderContractGroupsOf<TContract>]: {
+        readonly [TName in LambderContractNamesInGroup<TContract, TGroup> as LambderContractActionOf<TName>]: LambderCallerEndpoint<TContract, TName, TProvidedGuards>;
+    };
+};
+
+/**
+ * A typed client of a Lambder app: `caller.orders.place(input)` for the
+ * endpoint `orders.place`, `caller.orders.place.outcome(input)` for its full
+ * outcome, and `caller.api("orders.place", input)` for code that has the
+ * name as a value.
+ */
+type LambderCaller<TContract extends LambderApiContractShape = any, TProvidedGuards extends string = never> =
+    LambderCallerCore<TContract, TProvidedGuards> & LambderCallerGroupCalls<TContract, TProvidedGuards>;
+
+/** The caller's own members, without the groups: what a wrapper of a caller (the test visitor) types its `api` and `apiOutcome` by. */
+export type LambderCallerMembers<TContract extends LambderApiContractShape = any, TProvidedGuards extends string = never> = LambderCallerCore<TContract, TProvidedGuards>;
+
+const LambderCaller = LambderCallerCore as unknown as {
+    new <TContract extends LambderApiContractShape = any, TProvidedGuards extends string = never>(
+        options: LambderCallerOptions<TContract, TProvidedGuards>,
+    ): LambderCaller<TContract, TProvidedGuards>;
+    readonly prototype: LambderCallerCore<any, any>;
+};
+
+export default LambderCaller;

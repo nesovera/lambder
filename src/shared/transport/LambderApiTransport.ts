@@ -9,6 +9,7 @@ import type { LambderCompressedGzipPayload, LambderCompressedBrotliPayload } fro
  */
 export type LambderApiTransportRequest = {
     apiPath: string;
+    /** The endpoint called, `group.action`: the call goes to `{apiPath}/{group}/{action}` (apiCallPath). */
     apiName: string;
     version?: string;
     /** The caller's signature for this endpoint, out of its LambderApiSignatureMap; absent when it carries no map. */
@@ -100,7 +101,8 @@ export type LambderApiTransport = (request: LambderApiTransportRequest) => Promi
 
 /**
  * The fields of the request envelope, in wire order: the one statement of
- * what a call sends, for every sender.
+ * what a call sends, for every sender. The endpoint is not among them: it is
+ * the path the envelope is posted to (apiCallPath).
  *
  * Two senders write it. A transport hands the payload over as a value
  * (buildTransportEnvelope, below); LambderInvokeCaller has already serialized
@@ -111,7 +113,6 @@ export type LambderApiTransport = (request: LambderApiTransportRequest) => Promi
  * the wire would catch.
  */
 export const buildEnvelopeFields = (fields: {
-    apiName: string;
     version?: string;
     signature?: string;
     /** The CSRF token, as the envelope names it. */
@@ -127,7 +128,6 @@ export const buildEnvelopeFields = (fields: {
     guardInputs?: Record<string, unknown>;
     idempotencyKey?: string;
 }): Record<string, unknown> => ({
-    apiName: fields.apiName,
     version: fields.version,
     ...(fields.signature !== undefined ? { signature: fields.signature } : {}),
     token: fields.token,
@@ -143,7 +143,6 @@ export const buildEnvelopeFields = (fields: {
  * runtime read one shape.
  */
 export const buildTransportEnvelope = (request: LambderApiTransportRequest): Record<string, unknown> => buildEnvelopeFields({
-    apiName: request.apiName,
     version: request.version,
     signature: request.signature,
     token: request.token,

@@ -12,16 +12,24 @@ import { type LambderApiRequest } from "../api/LambderApiRequest.js";
  * returned function still fits LambderInvokeTransport.
  */
 export type LambderMockInvokeEvent = {
+    /** The path the call was made to, `{apiPath}/{group}/{action}`. */
+    rawPath?: string | undefined;
     body?: string | undefined;
     isBase64Encoded?: boolean | undefined;
     headers?: Record<string, string | undefined> | undefined;
     cookies?: string[] | undefined;
     requestContext?: {
         http?: {
+            method?: string;
             sourceIp?: string;
         } | undefined;
         domainName?: string;
     } | undefined;
+};
+/** The options of lambderMockInvokeTransport. */
+export type LambderMockInvokeTransportOptions = {
+    /** The apiPath the mocked function serves its calls under, as its LambderInvokeCaller names it. Default: "/api", as there. */
+    apiPath?: string;
 };
 /** What the callee answers with: the Lambda response object LambderInvokeCaller decodes. */
 export type LambderMockInvokeResult = {
@@ -43,6 +51,6 @@ export type LambderMockInvokeResult = {
  */
 export declare const lambderMockInvokeTransport: (mockApp: {
     handleRequest(request: LambderApiRequest): Promise<LambderApiAnswer>;
-}) => ((event: LambderMockInvokeEvent, options: {
+}, options?: LambderMockInvokeTransportOptions) => ((event: LambderMockInvokeEvent, options: {
     signal?: AbortSignal;
 }) => Promise<LambderMockInvokeResult>);

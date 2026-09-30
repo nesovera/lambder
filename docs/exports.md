@@ -70,6 +70,35 @@ Types: `LambderHttpResponse`, `LambderRawResponseInit`,
 
 See [Responses](./responses.md).
 
+## Endpoints: declarations, groups and names
+
+An instance declares its endpoints as values: `defineApi(options, handler)`,
+gathered by `defineApiGroup(name, { action: declaration })` (or loaded on
+first call with `lazyApiGroup(name, load)`), registered by
+`registerApiGroups(...groups)`. These are instance members; the exports
+below are the names, paths and types they use.
+
+| Export | Client | Description |
+| --- | --- | --- |
+| `apiCallPath` | yes | Where a call to an endpoint goes: `apiCallPath("/api", "orders.place")` is `/api/orders/place` |
+| `apiNameOfCallPath` | | The endpoint a request path calls, or null for a path that is not `{apiPath}/{group}/{action}` |
+| `splitApiName` | yes | An endpoint name as its group and action, or null for a name that is not two identifiers |
+| `isGroupName`, `isActionName` | | Whether a name can be a group (an identifier no caller member has) or an action (an identifier no function member has) |
+| `LAMBDER_API_NAME_SEGMENT` | | The pattern a group's and an action's name match: a letter, then letters, digits or underscores |
+| `LAMBDER_CALLER_MEMBER_NAMES` | | Every public member of LambderCaller, LambderInvokeCaller and the test visitor, which no group may shadow (their state is `#private`, which no group can reach) |
+| `LAMBDER_RESERVED_GROUP_NAMES`, `LAMBDER_RESERVED_ACTION_NAMES` | yes | The names no group and no action may take |
+
+Types: `LambderAppTypes` (what `create()` configured, the instance's one
+type parameter), `LambderPlainAppTypes`, `LambderApiDeclaration`,
+`LambderApiDeclarations`, `LambderApiGroup`, `LambderLazyApiGroup`,
+`LambderRegistrableApiGroup`, `LambderApiModeOf` (an endpoint's mode from
+its guards), `LambderEntryOf`, `LambderContractOfGroups`,
+`LambderReservedGroupName`, `LambderReservedActionName`, and the readers of a
+contract's groups `LambderContractGroupsOf`, `LambderContractNamesInGroup`,
+`LambderContractActionOf`.
+
+See [APIs and refusals](./apis.md).
+
 ## APIs, the contract and refusals
 
 | Export | Client | Description |
@@ -320,7 +349,7 @@ See [Responses](./responses.md#compression) and
 
 | Export | Client | Description |
 | --- | --- | --- |
-| `LambderCaller` | yes | The typed API caller |
+| `LambderCaller` | yes | The typed API caller: `caller.orders.place(input)`, `.outcome(input)`, and `caller.api(name, input)` |
 | `createIdempotencyKey`, `createIdempotencyKeyScope` | yes | An unguessable key for one logical operation, and a key scope that moves to a new one once an answer settles the operation; for `LambderCaller` and `LambderInvokeCaller` alike |
 | `resolveApiOutcome` | yes | The one mapping from an HTTP answer to an outcome, shared by every caller |
 | `apiNameKeyOf`, `lookupApiSignature`, `readApiSignature`, `API_SIGNATURE_HEX_LENGTH` | yes | The generated signature map's keys, and how a caller reads its entry for an endpoint |
@@ -328,7 +357,7 @@ See [Responses](./responses.md#compression) and
 | `LambderApiSignatureEntry` | no | One endpoint as `lambder.apiSignatureEntries()` reports it: name, key, signature |
 | `RELOAD_LOOP_WINDOW_MS` | yes | How long a stale-signature refusal repeated after a reload (the same endpoint, signature and version) counts as a reload loop |
 | `compareDottedVersions`, `isDottedVersion` | yes | Dotted version strings compared as numbers, the way the server's version floor reads a caller's version |
-| `lambderFetchTransport` | yes | The default transport: one POST over fetch |
+| `lambderFetchTransport` | yes | The default transport: one POST over fetch, to the endpoint's path |
 | `lambderCookieJarTransport` | yes | Any transport carrying a `LambderCookieJar` the way a browser carries cookies |
 | `LambderCookieJar`, `parseSetCookie` | yes | A browser's cookie storage for transports that have no browser, and the reader for one `Set-Cookie` header |
 | `buildTransportEnvelope` | yes | The envelope object every transport posts |
@@ -336,6 +365,8 @@ See [Responses](./responses.md#compression) and
 | `LambderTransportFailure`, `isLambderTransportFailure` | yes | How a transport names why it could not deliver, instead of leaving the caller to assume the network |
 
 Types: `LambderCallerOptions`, `LambderCallOptions`, `LambderLogListHandler`, `LambderApiOutcome`, `LambderValidationError`,
+`LambderCallerEndpoint` (one endpoint on its group), `LambderCallerGroupCalls` (every group of a contract),
+`LambderCallerMembers` (the caller without its groups),
 `LambderApiFailureReason`, `LambderGuardInputsProvider`,
 `LambderProvidedGuardInputs`, `LambderIdempotencyKeyScope`,
 `LambderApiTransport`, `LambderApiTransportRequest`, `LambderTransportFailureReason`, `LambderApiHttpAnswer`,
@@ -373,9 +404,8 @@ Types: `LambderApiRequest`, `LambderApiRequestInfo`, `LambderCompressedPayloadFi
 `LambderApiSessionsConfig`, `LambderApiInputRefusal`, `LambderApiRunResult`,
 `LambderApiExec`, `LambderValidationAnswerBody`, `LambderApiAllowedRefusal`, `LambderApiAllowedRefusals`,
 `LambderEndpointRefusals` (what one endpoint's refusals are checked against),
-`LambderSynthesizedRequest`, `LambderLambdaHttpResult`, and the two contract
-builders the root alone exports, `LambderContractEntry` and
-`LambderMergeContract`;
+`LambderSynthesizedRequest`, `LambderLambdaHttpResult`, and the contract
+builder the root alone exports, `LambderContractEntry`;
 and the contract helpers (client too): `LambderApiMode`,
 `LambderGuardNamesIn`, `LambderContractMode`, `LambderContractKeysWithMode`,
 `LambderContractKeysWithGuard`, `LambderJsonOf` (a type after JSON: what an
@@ -409,9 +439,10 @@ Types: `LambderInvokeCallerOptions`, `LambderInvokeCallOptions`,
 `LambderInvokeValidationFailure`, `LambderInvokeCrashFailure`,
 `LambderInvokePayloadTooLargeFailure`, `LambderInvokeEnvelopeFailure`,
 `LambderInvokeDeliveryFailure`, `LambderInvokeFailureReason`,
-`LambderInvokeFunctionError`, `LambderInvokeFailureHandler`, `LambderInvokeLogListHandler`, `LambderInvokeSession`, `LambderInvokeTransport`,
+`LambderInvokeFunctionError`, `LambderInvokeFailureHandler`, `LambderInvokeCallCheck`, `LambderInvokeLogListHandler`, `LambderInvokeSession`, `LambderInvokeTransport`,
 `LambderInvokeTransportResult`, `LambderLambdaHttpResult`,
-`LambderInvokeRequestInit`, `LambderInvokeEventInit`.
+`LambderInvokeRequestInit`, `LambderInvokeEventInit`, `LambderInvokeEndpoint`,
+`LambderInvokeGroupCalls`.
 
 See [Calling a Lambder app from another lambda](./invoke.md).
 
@@ -448,10 +479,13 @@ Types: `LambderMockAppOptions`, `LambderMockSessionsOptions`,
 `LambderMockTransportOptions`, `LambderMockCallContext`,
 `LambderMockSessionCallContext`, `LambderMockContext`, `LambderMockRefusalsOf` (the codes a mock handler may
 raise for an endpoint, data in the vocabulary's input form or the contract's wire form), `LambderMockGuards`,
-`LambderMockHandler`, `LambderMockEntry`, `LambderMockEntryOptions`,
-`LambderMockEntryInput`, `LambderMockSlice`, `LambderMockRestEntry`,
+`LambderMockSessionGuardsCheck` (every session endpoint names a mock guard
+declared `session: true`), `LambderMockHandler`, `LambderMockEntry`, `LambderMockEntryOptions`,
+`LambderMockEntryInput`, `LambderMockNotMockedInput` (what `notMocked` takes:
+the reason, and a session endpoint's guards without the `apiOptions` table),
+`LambderMockSlice`, `LambderMockRestEntry`,
 `LambderMockRegistryCheck`, `LambderMockMissingNames`, `LambderMockStrayNames`,
-`LambderMockDuplicateNames`, `LambderMockPublicNames`, `LambderMockSessionNames`,
+`LambderMockDuplicateNames`,
 `LambderMockLatency`, `LambderMockFailure`, `LambderMockFailureReason`,
 `LambderMockOutcome`, `LambderMockCallEvent`, `LambderMockRequestEvent`,
 `LambderMockResponseEvent`, `LambderMockCallRecord`, `LambderMockListener`,
@@ -463,7 +497,8 @@ standing in for a declared server guard has to look like, from the generated
 `LambderMemoryUploadBucketOptions`, `LambderMemoryUploadObject`,
 and the event and answer shapes the invoke transport reads and returns,
 `LambderMockInvokeEvent` and `LambderMockInvokeResult`, declared here so the
-entry's type graph reaches neither `aws-lambda` nor the Lambda SDK; and
+entry's type graph reaches neither `aws-lambda` nor the Lambda SDK, with its
+options, `LambderMockInvokeTransportOptions`; and
 `LambderHttpStatusCode`, the status union a failure injection or a refusal names, and `LambderRefusalStatusCode`, the statuses a declared code may leave with.
 
 The entry also re-exports the types a mock setup names around those values:

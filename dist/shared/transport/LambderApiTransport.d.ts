@@ -8,6 +8,7 @@ import type { LambderCompressedGzipPayload, LambderCompressedBrotliPayload } fro
  */
 export type LambderApiTransportRequest = {
     apiPath: string;
+    /** The endpoint called, `group.action`: the call goes to `{apiPath}/{group}/{action}` (apiCallPath). */
     apiName: string;
     version?: string;
     /** The caller's signature for this endpoint, out of its LambderApiSignatureMap; absent when it carries no map. */
@@ -90,7 +91,8 @@ export declare const isLambderTransportFailure: (err: unknown) => err is Lambder
 export type LambderApiTransport = (request: LambderApiTransportRequest) => Promise<LambderApiHttpAnswer>;
 /**
  * The fields of the request envelope, in wire order: the one statement of
- * what a call sends, for every sender.
+ * what a call sends, for every sender. The endpoint is not among them: it is
+ * the path the envelope is posted to (apiCallPath).
  *
  * Two senders write it. A transport hands the payload over as a value
  * (buildTransportEnvelope, below); LambderInvokeCaller has already serialized
@@ -101,7 +103,6 @@ export type LambderApiTransport = (request: LambderApiTransportRequest) => Promi
  * the wire would catch.
  */
 export declare const buildEnvelopeFields: (fields: {
-    apiName: string;
     version?: string;
     signature?: string;
     /** The CSRF token, as the envelope names it. */

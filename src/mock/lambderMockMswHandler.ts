@@ -1,4 +1,5 @@
 import { LambderMockTransportError } from "./LambderMockFailureInjector.js";
+import { apiNameOfCallPath } from "../shared/wire/LambderApiNames.js";
 import { readApiEnvelope, cookieValuesByName, isApiCallContentType, lowercaseHeaderNames, type LambderApiRequest } from "../api/LambderApiRequest.js";
 import type { LambderApiAnswer } from "../api/LambderApiAnswer.js";
 import { getAnswerHeader } from "../shared/wire/LambderAnswerHeaders.js";
@@ -129,7 +130,9 @@ export const lambderMockMswHandler = <M extends LambderMswModule>(
     // adapter's is, so one address is one counter under a `per: "ip"` limit
     // however it was spelled.
     const clientIp = normalizeClientIp(options.clientIp ?? mockApp.defaultClientIp);
-    const handler = msw.http.post(apiPath, async ({ request }) => {
+    // Every call goes to `{apiPath}/{group}/{action}`; the endpoint is read
+    // off the path as the server reads it (apiNameOfCallPath).
+    const handler = msw.http.post(`${apiPath.replace(/\/+$/, "")}/:group/:action`, async ({ request }) => {
         let post: unknown;
         try { post = await request.clone().json(); }
         catch { return undefined; }
@@ -164,10 +167,11 @@ export const lambderMockMswHandler = <M extends LambderMswModule>(
                 if(!cookies[name]?.includes(value)) (cookies[name] ??= []).push(value);
             }
         }
+        const apiName = apiNameOfCallPath(new URL(apiPath, url).pathname, url.pathname);
+        if(apiName === null) return undefined;
         const parsed = readApiEnvelope(post as Record<string, unknown>, {
             headers, cookies, ip: clientIp, host: url.host, signal: request.signal,
-        });
-        if(!parsed) return undefined;
+        }, apiName);
         // Returning undefined hands the request back to MSW, which tries its
         // other handlers and then the network. Noted on the runtime first:
         // a passthrough that leaves no event and no call-log row is a
