@@ -9,6 +9,23 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [11.1.1] - 2026-09-30
+
+A minor for an app whose shell files sit behind a shared cache: a file whose
+name does not change when its bytes do is revalidated rather than kept.
+
+### Changed
+
+- **`servePublicFiles` answers a file its immutable rule does not match with
+  `Cache-Control: no-cache`**, where it answered `public, max-age=3600`. A
+  service worker, a web manifest or a favicon keeps its name across a deploy,
+  so a CDN or proxy honouring the hour served the old copy to everyone for up
+  to an hour afterwards, and an app behind one had to purge it on every
+  deploy. Every GET or HEAD 200 already carries an ETag, so a revalidation of
+  an unchanged file is a 304 with no body. Content-hashed build output keeps
+  `immutableCacheControl`, and an app that wants the old behaviour passes
+  `cacheControl: "public, max-age=3600"`.
+
 ## [11.0.1] - 2026-09-29
 
 A major for an app with many APIs: what one API costs the type checker no

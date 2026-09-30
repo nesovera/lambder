@@ -172,7 +172,7 @@ visitor's Set-Cookie and hand it to everyone. See
 | --- | --- | --- |
 | `methods` | `["GET", "HEAD"]` | Methods that reach the slot, the same gate `serveIndexHtml` has. A write method against an asset path falls through to the route fallback instead |
 | `path` | the file path | `(ctx, filePath) => string`: map the request to a file path (app-owned logic, per-tenant roots). `filePath` is the file `ctx.path` names, its kept `%25` read as `%`; a path with an encoded slash names no file and never reaches the mapper. Return null or undefined to skip |
-| `cacheControl` | `"public, max-age=3600"` | A string, or `(ctx, relativePath) => string` |
+| `cacheControl` | `"no-cache"` | For files the immutable rule does not match: a string, or `(ctx, relativePath) => string`. A file whose name stays when its bytes change (a service worker, a manifest, a favicon) is revalidated rather than kept, so a shared cache never serves the old copy after a deploy; with the automatic ETag, a revalidation is a 304 |
 | `immutablePattern` | bundler output rule | Relative paths matching this get `immutableCacheControl`. `false` disables it |
 | `immutableCacheControl` | `"public, max-age=31536000, immutable"` | Applied to matching filenames |
 | `compress` | `"auto"` | `true`, `false`, `"auto"`, or `(ctx) => boolean \| "auto"`, e.g. `(ctx) => /\.(css\|js\|svg)$/.test(ctx.path)` |

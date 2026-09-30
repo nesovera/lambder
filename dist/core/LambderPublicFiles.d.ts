@@ -13,7 +13,14 @@ export type LambderPublicFilesOptions = {
      * mapper. Return null/undefined to skip. Default: the file path as it is.
      */
     path?: (ctx: LambderRenderContext, filePath: string) => string | null | undefined;
-    /** Cache-Control for served files; the function receives the relative file path. Default: "public, max-age=3600". */
+    /**
+     * Cache-Control for served files that do not match immutablePattern; the
+     * function receives the relative file path. Default: "no-cache". Such a
+     * file keeps its name when its bytes change (a service worker, a web
+     * manifest, a favicon), so a shared cache holding it for a while serves
+     * the old copy after a deploy; revalidating instead costs a 304, since
+     * every GET or HEAD 200 carries an ETag.
+     */
     cacheControl?: string | ((ctx: LambderRenderContext, relativePath: string) => string);
     /** Relative paths matching this get immutableCacheControl. Default: content-hashed names in a bundler's output folder (assets/, static/, _next/static/). Set false to disable. */
     immutablePattern?: RegExp | false;

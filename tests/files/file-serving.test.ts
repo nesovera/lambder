@@ -358,7 +358,7 @@ describe('Public file sources', () => {
             // A last word of exactly 8 characters: PascalCase, or lowercase around a version.
             'assets/Inter-SemiBold.woff2', 'assets/icon-Settings.svg', 'assets/og-image-v2-final.png',
         ]) {
-            expect(await cacheControlOf(handNamed)).toBe('public, max-age=3600');
+            expect(await cacheControlOf(handNamed)).toBe('no-cache');
         }
     });
 
