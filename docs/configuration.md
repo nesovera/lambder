@@ -33,6 +33,8 @@ policy types; the curried creator is the canonical entry.
 | `cors` | off | `true` allows any origin, or a `LambderCorsConfig` (below) |
 | `trustedClientIpHeaders` | none | Headers that may name the caller's own address, in order of preference. Empty means `ctx.ip` is the address the gateway observed (below) |
 | `trustedHostHeaders` | none | Headers that may name the host the viewer asked for, in order of preference. Empty means `ctx.host` is the Host the gateway received (below) |
+| `originProof` | none | `{ header, secrets }`: the trusted headers above are read only from a request carrying the secret the proxy in front of the app sets (below) |
+| `callSummary` | one JSON line per API call on stdout | What each API call's summary goes to: a function, or `false` for none (below) |
 | `session` | none | Sessions over a store of your choosing; a guard that needs a session (`session: true`) and `addSessionRoute` are compile errors without it. See [Sessions](./sessions.md) |
 | `rateLimits` | none | A limiter (`LambderRateLimiter`: DynamoDB, memory, or your own) plus named policies APIs reference by name, in one map or a list of maps (below). See [API policies](./api-policies.md#rate-limits) |
 | `guards` | none | Named guards APIs reference by name; build each with `initLambder<SessionData>().guard()` (typed to the app's session) or `lambderGuard()`. One map or a list of maps (below). See [API policies](./api-policies.md#guards) |
@@ -41,11 +43,11 @@ policy types; the curried creator is the canonical entry.
 | `crashes` | none | `{ report, reportTimeoutMs, reveal }`: a reporter told every crash on every path (API, route, event, startup) and waited for up to `reportTimeoutMs` (default 3000, a positive integer), and who may read a crash in the framework's 500. Without a reporter, a crash nothing answered is logged to the console. See [Routing](./routing.md#crashes) |
 
 The app's refusal vocabulary is not a `create()` option. It is declared on the
-init, `initLambder<SessionData>().declareRefusals(vocabulary, { requireCodes? })`,
-before any guard is built, so the init's `guard()` and `refuse` are typed to
-it and its `create()` hands it to the instance; `declareRefusals()` checks
-each code of the vocabulary the way the table below is checked. See
-[Declared refusals](./apis.md#declared-refusals).
+init, `initLambder<SessionData>().declareRefusals(vocabulary, { requireCodes? })`
+(one map of codes, or a list of maps), before any guard is built, so the
+init's `guard()` and `refuse` are typed to it and its `create()` hands it to
+the instance; `declareRefusals()` checks each code of the vocabulary the way
+the table below is checked. See [Declared refusals](./apis.md#declared-refusals).
 
 A key the options type does not have is a compile error, one level down as
 well: `session` (and `session.cookie`), `idempotency`, `crashes`, `rateLimits` and each
@@ -188,6 +190,83 @@ refuses every request the distribution did not send.
 As with addresses, an [invoke](./invoke.md) reads none of these headers:
 `ctx.host` there is the invoker's `host`.
 
+## `originProof`
+
+The two options above trust a header because a proxy in front of the app
+writes it. That holds only for requests that came through the proxy: an API
+Gateway answers on its own `execute-api` address and a Function URL on its
+`lambda-url` one, and a request sent there directly carries whatever
+`cf-connecting-ip` its sender wrote, a fresh `per: "ip"` budget per request.
+`originProof` names a header the proxy sets to a secret on every request it
+forwards, and the trusted headers are read only from a request that carries
+it:
+
+```typescript
+trustedClientIpHeaders: ["cf-connecting-ip"],
+originProof: { header: "x-origin-proof", secrets: [process.env.ORIGIN_PROOF!] },
+```
+
+- Set the header at the proxy, overwriting whatever the viewer sent: a
+  Cloudflare request header transform rule, a CloudFront origin custom
+  header.
+- A request without it, or with another value, is answered as usual, with
+  `ctx.ip` and `ctx.host` the ones the gateway observed: counted by the
+  address it really came from.
+- The header is taken off `ctx.headers` and `ctx.header()`, so no handler,
+  hook or header log meets the secret; the raw `ctx.event` keeps it.
+- `secrets` takes the previous secret beside the current one while the
+  proxy's rule changes over, so a rotation drops no request. Each is at
+  least 32 characters: a proof a sender could guess proves nothing.
+- It needs trusted headers to guard, and its header may not be one of them;
+  both are refused at creation.
+
+## `callSummary`
+
+Every API call is summarized in one line when it is answered, written to
+stdout as JSON by default. A Lambda function's log group keeps it, and
+CloudWatch Logs Insights reads its fields without a parse step:
+
+```json
+{"kind":"lambder.call","api":"order.place","outcome":"refusal","code":"order-closed","status":409,"durationMs":41.2,"handlerMs":12.8,"replayed":false,"coldStart":false,"requestId":"8c1f...","parentRequestId":null}
+```
+
+| Field | What it holds |
+| --- | --- |
+| `api` | The endpoint the call's path named, registered or not |
+| `outcome` | `success`, `refusal`, `notAuthorized`, `sessionExpired`, `versionExpired`, `validation` (a 422), `crash`, or `other` for an answer a hook wrote that is not an API answer |
+| `code` | The refusal's code, a framework code (`lambder/rate-limited`) or the app's; null when there is none |
+| `status` | The HTTP status the call was answered with |
+| `durationMs`, `handlerMs` | From the invocation's start to the answer, and the handler's own time (null when it did not run: refused before it, or replayed) |
+| `replayed` | A stored idempotent answer was replayed |
+| `coldStart` | The process's first invocation, whose duration includes loading the app |
+| `requestId`, `parentRequestId` | The invocation's request id, the one Lambda's own lines for it carry, and that of the invocation that called it over a [direct invoke](./invoke.md), which the invoke carries |
+
+Nothing from the call's input, its session, its cookies or its caller's
+address is in it, so the lines can be kept as long as the app keeps logs.
+Pages, files and non-HTTP events write none. A call the app could not start
+for (a `created` hook that failed) is summarized as a crash like any other,
+so a count of crashes by endpoint shows the outage rather than calls
+stopping.
+
+```typescript
+callSummary: (summary) => metrics.record(summary),   // somewhere else
+callSummary: false,                                  // none
+```
+
+A writer that throws costs that call its line and nothing else; the failure
+is logged. A [test app](./testing.md) collects the summaries in
+`app.callSummaries` instead of writing them.
+
+A query over the lines gives per-endpoint views without a metric per
+endpoint, whose count, and cost, grows with the API:
+
+```text
+fields api, outcome, code, durationMs
+| filter kind = "lambder.call"
+| stats count(*) as calls, pct(durationMs, 99) as p99 by api, outcome
+| sort calls desc
+```
+
 ## `session`
 
 | Field | Default | Description |
@@ -200,6 +279,7 @@ As with addresses, an [invoke](./invoke.md) reads none of these headers:
 | `tokenCookieKey` | `"LMDRSESSIONTKID"` | Session token cookie name. Prefix it `__Host-` unless you need cross-subdomain sessions |
 | `csrfCookieKey` | `"LMDRSESSIONCSTK"` | CSRF token cookie name. Prefix it `__Host-` too |
 | `crypto` | WebCrypto | Hashing and randomness for the session tokens |
+| `dataSchema` | none; required beside `dataRefresh` | The zod schema of session data, checked on every read. See [Sessions](./sessions.md#the-shape-of-session-data) |
 | `dataRefresh` | none | Give session data a shelf life. See [Sessions](./sessions.md#keeping-session-data-fresh) |
 
 A `__Host-` prefix is the browser's own rule that only this exact host, over
@@ -230,7 +310,8 @@ idempotency: {
 ### An app made of parts
 
 An app whose parts each declare their own guards or rate-limit policies,
-beside the APIs that use them, hands `create()` a list of maps instead of one.
+beside the APIs that use them, hands `create()` a list of maps instead of one
+(and its refusal codes, a list of maps to `declareRefusals()`).
 The instance declares every name in the list, so an API names a guard from
 any part as it would a guard from the only map. A name two maps declare is a
 compile error on the list and a throw at creation, rather than one quietly
@@ -245,7 +326,8 @@ The maps have to exist before the instance does, because the instance's type
 is built from them, so a part keeps them in a file of their own that imports
 none of its API files; the part's API files import the instance's declaration
 builders, and the entry registers the groups they build after creation. The
-mock runtime's `create()` takes one map of each.
+mock runtime's `create()` takes one map of each; its `declareRefusals()` takes
+the list the server's does.
 
 ## Declaring endpoints across files
 

@@ -33,20 +33,26 @@ if (exceeded) {
 ## How it works
 
 Each window is a single item counted with a conditional `ADD`, so the increment
-and the limit check happen atomically in one request. Windows are evaluated
-from smallest to largest and evaluation stops at the first exceeded window,
-which keeps blocked requests cheap and spares the larger counters.
+and the limit check happen atomically in one request.
 
-**One round trip per window.** A `{ perMin, perHour, perDay }` policy is three
-conditional `UpdateItem` calls on the request's critical path, run in sequence
-and stopped at the first exceeded window: that is what lets a blocked request
-skip the counters behind it, and it is the per-request cost to size latency
-against.
+**One round trip for every window.** A `{ perMin, perHour, perDay }` policy is
+three conditional `UpdateItem` calls, sent at once, so a call waits for one
+round trip on its critical path however many windows the policy caps. The
+refusal names the smallest window that refused.
 
-**Attempts count, not successes.** A counter checked before the refusing one
-keeps its increment; there is no compensating decrement, which would give up
-the conditional-ADD atomicity. This matters when stacking policies: order them
-so the counter you want charged on a refusal is checked first.
+**Attempts count, not successes.** A window under its limit counts an attempt
+another window refuses; there is no compensating decrement, which would give up
+the conditional-ADD atomicity.
+
+**A refused window is remembered until it resets.** A count only rises within
+its window, so a window the table refused an attempt in stays at its limit
+until the window ends. Each process remembers it until then and refuses the
+key's next attempts from memory, without touching the table: a flood costs a
+process one round of writes per window it fills, and once refused it stops
+raising the counters of its other windows. Another process asks the table
+once and then remembers too. The memory holds up to 10,000 refused windows, the
+ones closest to their reset going first; a key forgotten early is asked of the
+table again, which answers the same.
 
 Items carry an `expiresAt` attribute for DynamoDB TTL, so expired counters
 clean themselves up.
@@ -67,9 +73,9 @@ retries before it gives up, so a throttle whose reason is the key's range
 partition holding the counter is flooded. A partition holds a range of keys,
 though, not one: a flood on one address, or a session or cache spike on a
 shared table, throttles every counter on the same partition. So the limiter
-reads the key's own counts: the throttled window's, and every capped window's
-after it, the ones this attempt has not been counted against yet (the ones
-before it counted the attempt and let it through). Each is a strongly
+reads the key's own counts: those of the windows whose write was throttled,
+the ones this attempt has not been counted against (the others counted the
+attempt and let it through). Each is a strongly
 consistent `GetItem`, sent in parallel; reads have their own throughput,
 which the throttled writes leave alone.
 

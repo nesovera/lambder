@@ -1,10 +1,15 @@
 import { type LambderRateLimiter, type LambderRateLimitPolicy, type LambderRateLimitResult, type LambderRateLimitWindow } from "../shared/contracts/LambderRateLimiter.js";
 /**
  * Fixed-window rate limiter held in memory: the same windows, the same
- * attempts-count semantics and the same evaluation order as
- * LambderDdbRateLimiter, with a Map in place of the table. For tests and
- * for the mock runtime; a single-process server could use it too, with the
- * caveat that its counters are per process and vanish with it.
+ * attempts-count semantics and the same refusals as LambderDdbRateLimiter,
+ * with a Map in place of the table. For tests and for the mock runtime; a
+ * single-process server could use it too, with the caveat that its counters
+ * are per process and vanish with it.
+ *
+ * Every counter is in hand, so an attempt a window refuses is counted in no
+ * window: what the DynamoDB limiter reaches once it remembers the refusing
+ * window, which the first refused attempt in each of its processes still
+ * counts in the others.
  *
  * `now` is injectable so a test can move time forward and watch a window
  * reset without waiting for it.

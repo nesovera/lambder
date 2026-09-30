@@ -977,7 +977,7 @@ describe('Session Endpoint Protection', () => {
         const makeRefreshingLambder = (refresh: (session: LambderSessionRecord<UserSessionData>) => Promise<UserSessionData | null>) => {
             const created = initLambder<UserSessionData>().create({
                 files: new LambderLocalFileSource({ root: '/public' }), apiPath: '/api',
-                session: { store, sessionSalt: 'test-salt', dataRefresh: { ttlSeconds: 600, refresh } },
+                session: { store, sessionSalt: 'test-salt', dataSchema: z.custom<UserSessionData>(), dataRefresh: { ttlSeconds: 600, refresh } },
                 guards: { signedIn: lambderGuard({ session: true, handler: () => {} }) },
             });
             return created.registerApiGroups(created.defineApiGroup('user', {
@@ -1011,7 +1011,7 @@ describe('LambderSessionManager dataRefresh', () => {
 
     const makePlainManager = () => new LambderSessionManager({ store, sessionSalt: SALT });
     const makeManager = (refresh: (session: LambderSessionRecord) => Promise<any>) =>
-        new LambderSessionManager({ store, sessionSalt: SALT, enableSlidingExpiration: true, dataRefresh: { ttlSeconds: 600, refresh } });
+        new LambderSessionManager({ store, sessionSalt: SALT, enableSlidingExpiration: true, dataSchema: z.any(), dataRefresh: { ttlSeconds: 600, refresh } });
 
     it('createSession stamps dataExpiresAt only when configured', async () => {
         const { session } = await makeManager(async (s) => s.data).createSession('user-123', {}, 3600);
@@ -1309,6 +1309,110 @@ describe('LambderSessionManager dataRefresh', () => {
         await manager.deleteSessionAllByKey('user-123');
         expect(store.list().map((record) => record.sessionKey)).toEqual(['user-999']);
     });
+
+// ── dataSchema: session.data checked on read ─────────────────────────────────
+
+describe('LambderSessionManager dataSchema', () => {
+    let store: LambderMemorySessionStore;
+    beforeEach(() => { store = new LambderMemorySessionStore(); });
+
+    const roleData = z.object({ role: z.enum(['user', 'admin']), teamId: z.string() });
+
+    it('hands a read the data as the schema reads it, keys it does not declare stripped', async () => {
+        const manager = new LambderSessionManager({ store, sessionSalt: SALT, dataSchema: roleData });
+        const { token } = await plantRecord(store, { data: { role: 'user', teamId: 't1', legacyFlag: true } });
+        expect((await readSession(manager, token))?.data).toEqual({ role: 'user', teamId: 't1' });
+    });
+
+    it('refreshes data that does not match at once, whatever its deadline', async () => {
+        // A record written before a deploy changed the data's shape would
+        // otherwise be served in its old shape until its refresh came due.
+        const refresh = vi.fn(async () => ({ role: 'user' as const, teamId: 't9' }));
+        const manager = new LambderSessionManager({ store, sessionSalt: SALT, dataSchema: roleData, dataRefresh: { ttlSeconds: 600, refresh } });
+        const { token } = await plantRecord(store, { data: { role: 'user' }, dataExpiresAt: nowSec() + 600 });
+
+        expect((await readSession(manager, token))?.data).toEqual({ role: 'user', teamId: 't9' });
+        expect(refresh).toHaveBeenCalledOnce();
+        expect(store.list()[0]!.data).toEqual({ role: 'user', teamId: 't9' });
+    });
+
+    it('ends a session whose data does not match when nothing can rebuild it', async () => {
+        const manager = new LambderSessionManager({ store, sessionSalt: SALT, dataSchema: roleData });
+        const { token } = await plantRecord(store, { data: { role: 'owner', teamId: 't1' } });
+        expect(await readSession(manager, token)).toBeNull();
+        expect(store.size).toBe(0);
+    });
+
+    it('fails the read when a refresh returns data its own schema refuses, naming the path and never the value', async () => {
+        const manager = new LambderSessionManager({
+            store, sessionSalt: SALT, dataSchema: roleData,
+            dataRefresh: { ttlSeconds: 600, refresh: async () => ({ role: 'superuser-secret-value', teamId: 't1' }) as never },
+        });
+        const { token } = await plantRecord(store, { data: { role: 'user', teamId: 't1' }, dataExpiresAt: nowSec() - 10 });
+
+        const failure = await readSession(manager, token).then(() => null, (error: unknown) => error as Error);
+        expect(failure).toBeInstanceOf(LambderSessionDataRefreshError);
+        expect(failure?.message).toMatch(/does not match session\.dataSchema \(role: /);
+        expect(failure?.message).not.toContain('superuser-secret-value');
+        // Nothing was written: the record keeps its last good data.
+        expect(store.list()[0]!.data).toEqual({ role: 'user', teamId: 't1' });
+    });
+
+    it('holds a forced refresh to the schema too', async () => {
+        const manager = new LambderSessionManager({
+            store, sessionSalt: SALT, dataSchema: roleData,
+            dataRefresh: { ttlSeconds: 600, refresh: async () => ({ role: 'user' }) as never },
+        });
+        const { record } = await plantRecord(store, { data: { role: 'user', teamId: 't1' } });
+        await expect(manager.refreshSessionData(record)).rejects.toBeInstanceOf(LambderSessionDataRefreshError);
+    });
+
+    it('refuses to create or update a session with data the schema refuses, naming the path and never the value', async () => {
+        // Stored, such data would end the session on its next read: a
+        // sign-out right after the sign-in, far from the code that wrote it.
+        const manager = new LambderSessionManager({ store, sessionSalt: SALT, dataSchema: roleData });
+        const failure = await manager.createSession('user-1', { role: 'owner-secret-value', teamId: 't1' } as never)
+            .then(() => null, (error: unknown) => error as Error);
+        expect(failure?.message).toMatch(/createSession was given data that does not match session\.dataSchema \(role: /);
+        expect(failure?.message).not.toContain('owner-secret-value');
+        expect(store.size).toBe(0);
+
+        const { session } = await manager.createSession('user-1', { role: 'user', teamId: 't1' });
+        await expect(manager.updateSessionData(session, { role: 'user' } as never))
+            .rejects.toThrow(/updateSessionData was given data that does not match session\.dataSchema \(teamId: /);
+        expect(store.list()[0]!.data).toEqual({ role: 'user', teamId: 't1' });
+    });
+
+    it('stores data as given and serves the schema\'s output, so every read parses what the write was checked with', async () => {
+        // A schema whose output is not its input: stored as its output, the
+        // record would fail its next read and refresh on every one.
+        const renamed = z.object({ name: z.string() }).transform(({ name }) => ({ displayName: name }));
+        const refresh = vi.fn(async () => ({ name: 'Ada' }) as never);
+        const manager = new LambderSessionManager({ store, sessionSalt: SALT, dataSchema: renamed, dataRefresh: { ttlSeconds: 600, refresh } });
+        const { token } = await plantRecord(store, { data: { name: 'Grace' }, dataExpiresAt: nowSec() - 10 });
+
+        expect((await readSession(manager, token))?.data).toEqual({ displayName: 'Ada' });
+        expect(store.list()[0]!.data).toEqual({ name: 'Ada' });
+        expect((await readSession(manager, token))?.data).toEqual({ displayName: 'Ada' });
+        expect(refresh).toHaveBeenCalledOnce();
+
+        const { session } = await manager.createSession('user-2', { name: 'Linus' } as never);
+        expect(session.data).toEqual({ displayName: 'Linus' });
+        expect(store.list().find((record) => record.sessionKey === 'user-2')!.data).toEqual({ name: 'Linus' });
+    });
+
+    it('refuses dataRefresh without a schema, at compile time and at construction', () => {
+        // @ts-expect-error dataRefresh needs dataSchema
+        expect(() => new LambderSessionManager({ store, sessionSalt: SALT, dataRefresh: { ttlSeconds: 600, refresh: async (s) => s.data } }))
+            .toThrow(/session\.dataRefresh needs session\.dataSchema/);
+        expect(() => initLambder().create({
+            apiPath: '/api',
+            // @ts-expect-error dataRefresh needs dataSchema
+            session: { store, sessionSalt: SALT, dataRefresh: { ttlSeconds: 600, refresh: async (s) => s.data } },
+        })).toThrow(/session\.dataRefresh needs session\.dataSchema/);
+        expect(() => new LambderSessionManager({ store, sessionSalt: SALT, dataSchema: 'role' as never })).toThrow(/not a zod schema/);
+    });
+});
 });
 
 describe('LambderSessionController dataRefresh', () => {
@@ -1316,7 +1420,7 @@ describe('LambderSessionController dataRefresh', () => {
     beforeEach(() => { store = new LambderMemorySessionStore(); });
 
     const makeController = (refresh: (session: LambderSessionRecord) => Promise<any>, token: string) => {
-        const manager = new LambderSessionManager({ store, sessionSalt: SALT, dataRefresh: { ttlSeconds: 600, refresh } });
+        const manager = new LambderSessionManager({ store, sessionSalt: SALT, dataSchema: z.any(), dataRefresh: { ttlSeconds: 600, refresh } });
         const ctx = createApiCallContext();
         const controller = new LambderSessionController({
             manager, tokenCookieKey: 'sessionToken', csrfCookieKey: 'csrfToken', ctx,
@@ -1363,7 +1467,7 @@ describe('LambderSessionController dataRefresh', () => {
     });
 
     it('deleteSessionAllByKey and expireSessionDataAllByKey work without a fetched session', async () => {
-        const manager = new LambderSessionManager({ store, sessionSalt: SALT, dataRefresh: { ttlSeconds: 600, refresh: async (s) => s.data } });
+        const manager = new LambderSessionManager({ store, sessionSalt: SALT, dataSchema: z.any(), dataRefresh: { ttlSeconds: 600, refresh: async (s) => s.data } });
         await manager.createSession('user-123', {});
         const { controller } = makeController(async (s) => s.data, 'f00d:0ff');
         await controller.expireSessionDataAllByKey('user-123');
@@ -1378,7 +1482,7 @@ describe('LambderSessionController dataRefresh', () => {
 describe('LambderSessionManager expireSessionDataAllByKey', () => {
     let store: LambderMemorySessionStore;
     beforeEach(() => { store = new LambderMemorySessionStore(); });
-    const makeManager = () => new LambderSessionManager({ store, sessionSalt: SALT, dataRefresh: { ttlSeconds: 600, refresh: async (session) => session.data } });
+    const makeManager = () => new LambderSessionManager({ store, sessionSalt: SALT, dataSchema: z.any(), dataRefresh: { ttlSeconds: 600, refresh: async (session) => session.data } });
 
     it('stamps dataExpiresAt to now on every session of the key and no other', async () => {
         const manager = makeManager();
@@ -1413,7 +1517,7 @@ describe('LambderSessionManager expireSessionDataAllByKey', () => {
 
     it('a stamped session renews its data on the next read', async () => {
         const refresh = vi.fn(async () => ({ role: 'admin' }));
-        const manager = new LambderSessionManager({ store, sessionSalt: SALT, dataRefresh: { ttlSeconds: 600, refresh } });
+        const manager = new LambderSessionManager({ store, sessionSalt: SALT, dataSchema: z.any(), dataRefresh: { ttlSeconds: 600, refresh } });
         const { sessionToken } = await manager.createSession('user-123', { role: 'user' });
         await manager.expireSessionDataAllByKey('user-123');
 

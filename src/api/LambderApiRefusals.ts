@@ -4,6 +4,7 @@ import type { LambderRefusalStatusCode } from "../shared/wire/LambderHttpStatus.
 import type { LambderNoExtraKeys } from "../shared/util/LambderTypeUtilities.js";
 import { LambderApiRefusal, isLambderRefusalCode } from "../shared/wire/LambderApiRefusal.js";
 import { describePayloadKind, isObjectPayload } from "../shared/wire/LambderObjectPayload.js";
+import { mergeNamedMaps, type LambderMergedNamedMaps, type LambderNamedMapsOption, type LambderNoRepeatedNames } from "../shared/util/LambderNamedMaps.js";
 
 /**
  * One code of an app's refusal vocabulary: the schema of the data it carries,
@@ -73,6 +74,35 @@ export type LambderRefusalVocabularyChecks<TVocabulary> = {
         TCode extends `lambder/${string}`
             ? { readonly "lambder: a refusal code may not start with lambder/, the prefix of the framework's own codes": never }
             : LambderNoExtraKeys<TVocabulary[TCode], LambderRefusalDeclaration> & LambderRefusalDataCheck<TVocabulary[TCode]>;
+};
+
+/**
+ * The vocabulary as declareRefusals() takes it: one map of codes, or a list of
+ * them, so each part of an app declares its own codes beside its APIs. A
+ * code two maps declare is refused.
+ */
+export type LambderRefusalVocabularyOption = LambderNamedMapsOption<LambderRefusalVocabulary>;
+
+/** The one vocabulary a declareRefusals() option declares: a list's maps merged, a lone map as it is. */
+export type LambderMergedRefusalVocabulary<TOption> =
+    LambderMergedNamedMaps<TOption> extends infer TMerged extends LambderRefusalVocabulary ? TMerged : never;
+
+/** A declareRefusals() option checked code by code, in each map of a list, and a list declaring no code twice. */
+export type LambderRefusalVocabularyOptionChecks<TOption> = TOption extends readonly unknown[]
+    ? { [TIndex in keyof TOption]: LambderRefusalVocabularyChecks<TOption[TIndex]> } & LambderNoRepeatedNames<TOption>
+    : LambderRefusalVocabularyChecks<TOption>;
+
+/**
+ * A declareRefusals() option as the one vocabulary it declares, checked
+ * (see readRefusalVocabulary) and keyed. `declarer` names the init in the
+ * errors.
+ */
+export const declaredRefusalVocabulary = (option: LambderRefusalVocabularyOption, declarer: string): { refusals: LambderRefusalVocabulary; vocabulary: Map<string, LambderRefusalDeclaration> } => {
+    if(option === null || typeof option !== "object"){
+        throw new Error(`${declarer}: declareRefusals() takes the vocabulary, an object of codes or a list of them.`);
+    }
+    const refusals = mergeNamedMaps(option, "refusal code", "declareRefusals()");
+    return { refusals, vocabulary: readRefusalVocabulary(refusals)! };
 };
 
 /** One code's declaration as checkedRefusal reads it: how a refusal with the code leaves, and its schema. */

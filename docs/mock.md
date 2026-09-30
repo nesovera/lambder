@@ -69,7 +69,7 @@ when the registry loads.
 | `minApiVersion` | none | The version floor, as on the server: a call naming a lower `version` answers `versionExpired` whatever its signature says |
 | `apiSignatures` | none | The generated signature map, as the server's option is: a call whose signature is not the map's entry for its endpoint answers `versionExpired`; without it every signature passes |
 | `latency` | `0` | Milliseconds, a `{ min, max }` range, or `(apiName) => number` |
-| `sessions` | off | Required when the contract has a session endpoint. `true`, or `{ store?, sessionSalt?, ttlSeconds?, crypto?, dataRefresh?, enableSlidingExpiration?, slidingWriteIntervalSeconds?, tokenCookieKey?, csrfCookieKey?, cookieOptions? }` |
+| `sessions` | off | Required when the contract has a session endpoint. `true`, or `{ store?, sessionSalt?, ttlSeconds?, crypto?, dataSchema?, dataRefresh?, enableSlidingExpiration?, slidingWriteIntervalSeconds?, tokenCookieKey?, csrfCookieKey?, cookieOptions? }` |
 | `rateLimits` | off | Required when an endpoint references a policy. `{ policies, limiter?, failOpen? }`: the same policies the server declares, over `LambderMemoryRateLimiter` unless a limiter is given, checked against the contract (below). `failOpen: false` refuses a call whose limiter threw instead of letting it through |
 | `idempotency` | off | Required when an endpoint declares idempotency. `true`, or `{ defaultTtlSeconds?, defaultPendingTtlSeconds?, failOpen?, store?, callerIdentity? }`: the server's own options, `callerIdentity` bound to the mock call context without its session, since it runs on public endpoints alone |
 | `guards` | none | The mock guard map; required whenever the contract declares a guard name, and checked against the contract (below) |

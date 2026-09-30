@@ -1,3 +1,4 @@
+import type { z } from "zod";
 import type { LambderSessionCrypto } from "./LambderSessionCrypto.js";
 import { LambderWebCrypto } from "./LambderSessionCrypto.js";
 import type { LambderSessionChanges, LambderSessionRecord, LambderSessionStore } from "../shared/contracts/LambderSessionStore.js";
@@ -76,6 +77,42 @@ export class LambderSessionReadError extends Error {
     }
 }
 
+/**
+ * The shape session.data has, and how it is kept fresh: `dataSchema` alone,
+ * or with `dataRefresh`, which then requires it.
+ *
+ * A record outlives the code that wrote it, so a read checks its data
+ * against the schema, and hands the request the schema's output (keys it
+ * does not declare stripped). Data that does not match (a record written
+ * before a deploy changed the data's shape) is refreshed on that read when
+ * dataRefresh is configured, whatever its deadline; without dataRefresh
+ * nothing can rebuild it, and the session ends. A refresh's own output is
+ * held to the schema too, and one that does not match fails the read as a
+ * LambderSessionDataRefreshError.
+ *
+ * Data is held to the schema where it is written as well: createSession and
+ * updateSessionData throw on data it refuses, rather than store a session
+ * whose next read would end it. What is stored is the data as given, and
+ * what a request is served is the schema's output, so every read of a
+ * record parses exactly what its write was checked with.
+ *
+ * Data a refresh derives from the app's state changes shape as the app
+ * does, which is why dataRefresh needs the schema: without it, a record
+ * written before the change is served in its old shape until its refresh
+ * comes due.
+ */
+export type LambderSessionDataOptions<SessionData = any> =
+    | {
+        /** The schema of session.data, checked on every read. */
+        dataSchema?: z.ZodType<SessionData>;
+        dataRefresh?: undefined;
+    }
+    | {
+        /** The schema of session.data, checked on every read and on every refresh's output. Required beside dataRefresh. */
+        dataSchema: z.ZodType<SessionData>;
+        dataRefresh: LambderSessionDataRefreshConfig<SessionData>;
+    };
+
 export type LambderSessionManagerOptions<SessionData = any> = {
     /** Where sessions rest: LambderDdbSessionStore, LambderMemorySessionStore, or your own. */
     store: LambderSessionStore<SessionData>;
@@ -84,10 +121,18 @@ export type LambderSessionManagerOptions<SessionData = any> = {
     enableSlidingExpiration?: boolean;
     /** Min seconds between sliding-expiration writes. Default: max(60, 5% of TTL). */
     slidingWriteIntervalSeconds?: number;
-    dataRefresh?: LambderSessionDataRefreshConfig<SessionData>;
     /** Hashing and randomness. Default: WebCrypto. */
     crypto?: LambderSessionCrypto;
-};
+} & LambderSessionDataOptions<SessionData>;
+
+/** A schema's issues as a message may show them: each path and what was expected there, never the value found. */
+const describeSchemaIssues = (error: z.ZodError): string =>
+    error.issues.slice(0, 5).map((issue) => `${issue.path.length ? issue.path.join(".") : "(the data)"}: ${issue.message}`).join("; ")
+    + (error.issues.length > 5 ? `; and ${error.issues.length - 5} more` : "");
+
+/** A refresh's output the schema refuses, as the read fails with it. */
+const refreshRefused = (issues: string): Error =>
+    new LambderSessionDataRefreshError(new Error(`the refreshed data does not match session.dataSchema (${issues})`));
 
 /**
  * The longest either half of a session token may be. A minted token is two
@@ -160,6 +205,7 @@ export default class LambderSessionManager<SessionData = any> {
     private readonly enableSlidingExpiration: boolean;
     private readonly slidingWriteIntervalSeconds: number | null;
     private readonly dataRefresh: LambderSessionDataRefreshConfig<SessionData> | null;
+    private readonly dataSchema: z.ZodType<SessionData> | null;
     private readonly crypto: LambderSessionCrypto;
 
     constructor({
@@ -167,6 +213,7 @@ export default class LambderSessionManager<SessionData = any> {
         enableSlidingExpiration = true,
         slidingWriteIntervalSeconds,
         dataRefresh,
+        dataSchema,
         crypto,
     }: LambderSessionManagerOptions<SessionData>){
         this.store = store;
@@ -176,7 +223,18 @@ export default class LambderSessionManager<SessionData = any> {
             ? null
             : assertPositiveInteger(slidingWriteIntervalSeconds, "session.slidingWriteIntervalSeconds");
         if(dataRefresh) assertPositiveInteger(dataRefresh.ttlSeconds, "session.dataRefresh.ttlSeconds");
+        if(dataRefresh && !dataSchema){
+            throw new Error(
+                "Lambder: session.dataRefresh needs session.dataSchema, the schema session.data has. Data a refresh derives " +
+                "changes shape as the app does, and without the schema a record written before the change is served in its " +
+                "old shape until its refresh comes due; with it, such a record refreshes on its next read."
+            );
+        }
+        if(dataSchema !== undefined && typeof (dataSchema as { safeParse?: unknown } | null)?.safeParse !== "function"){
+            throw new Error("Lambder: session.dataSchema is not a zod schema.");
+        }
         this.dataRefresh = dataRefresh ?? null;
+        this.dataSchema = dataSchema ?? null;
         this.crypto = crypto ?? new LambderWebCrypto();
         this.assertCryptoFitsStore(store);
         if(typeof sessionSalt !== "string" || sessionSalt.length === 0){
@@ -252,6 +310,10 @@ export default class LambderSessionManager<SessionData = any> {
         // nobody can use, and every later request would read as a silent
         // logout.
         if(!sessionKey) throw new Error("Lambder: createSession sessionKey is empty. It names the subject the session belongs to and partitions the store, so an empty one writes a record no read accepts.");
+        // Refused for the same reason: data the schema refuses would end the
+        // session on its first read, a sign-out right after the sign-in.
+        const served = this.servedDataOf(data, (issues) =>
+            new Error(`Lambder: createSession was given data that does not match session.dataSchema (${issues}).`));
         const sessionKeyHash = await this.sessionKeyHashOf(sessionKey);
         // The sort-key SECRET goes to the client; only its hash becomes the
         // store's range key, so the store never contains a usable token.
@@ -272,7 +334,7 @@ export default class LambderSessionManager<SessionData = any> {
             dataVersion: 0,
         };
         await this.store.create(session);
-        return { session, sessionToken, csrfToken };
+        return { session: { ...session, data: served }, sessionToken, csrfToken };
     }
 
     /**
@@ -306,13 +368,17 @@ export default class LambderSessionManager<SessionData = any> {
         newData: SessionData,
     ): Promise<LambderSessionRecord<SessionData> | null> {
         if(!session) throw new Error("Invalid session");
+        // Data the schema refuses would end the session on its next read
+        // (see createSession), so the write that brings it fails instead.
+        const served = this.servedDataOf(newData, (issues) =>
+            new Error(`Lambder: updateSessionData was given data that does not match session.dataSchema (${issues}).`));
         const { sessionKeyHash, secretHash } = session;
         if(!this.dataRefresh){
             const result = await this.store.update(sessionKeyHash, secretHash, { data: newData });
-            return result === "missing" ? null : { ...session, data: newData };
+            return result === "missing" ? null : { ...session, data: served };
         }
         const result = await this.store.update(sessionKeyHash, secretHash, { data: newData }, { dataVersion: session.dataVersion });
-        if(result === "updated") return { ...session, data: newData, dataVersion: session.dataVersion + 1 };
+        if(result === "updated") return { ...session, data: served, dataVersion: session.dataVersion + 1 };
         if(result === "missing") return null;
         // The data or its deadline was written in between: a revocation was
         // marked, or another request refreshed the data, possibly applying
@@ -321,7 +387,7 @@ export default class LambderSessionManager<SessionData = any> {
         // serving what this request derived before the change.
         const now = Math.floor(Date.now()/1000);
         if(await this.store.update(sessionKeyHash, secretHash, { data: newData, dataExpiresAt: now }) === "missing") return null;
-        return { ...session, data: newData, dataExpiresAt: now };
+        return { ...session, data: served, dataExpiresAt: now };
     }
 
     /**
@@ -384,10 +450,23 @@ export default class LambderSessionManager<SessionData = any> {
         const refreshed: LambderSessionChanges<SessionData> = {};
         const slid: LambderSessionChanges<SessionData> = {};
 
+        // The record's data checked against the schema (see
+        // LambderSessionDataOptions). Without dataRefresh nothing can rebuild
+        // data that does not match, so the session ends.
+        const read = this.dataSchema ? this.dataSchema.safeParse(session.data) : null;
+        if(read && !read.success && !this.dataRefresh){
+            await this.deleteSession(session);
+            return null;
+        }
+        // What the request is served: the data as the schema reads it, or,
+        // once a refresh ran, the refresh's.
+        let served = read?.success ? read.data : session.data;
+
         // Renew session.data once its shelf life has passed (opt-in
-        // dataRefresh). A record created while dataRefresh was off has no
-        // dataExpiresAt, so it renews on its first read.
-        if(this.dataRefresh && (session.dataExpiresAt ?? 0) <= now){
+        // dataRefresh), or at once when it does not match the schema. A
+        // record created while dataRefresh was off has no dataExpiresAt, so
+        // it renews on its first read.
+        if(this.dataRefresh && (read?.success === false || (session.dataExpiresAt ?? 0) <= now)){
             let newData: SessionData | null;
             try{
                 newData = await this.dataRefresh.refresh(session);
@@ -400,6 +479,7 @@ export default class LambderSessionManager<SessionData = any> {
                 await this.deleteSession(session);
                 return null;
             }
+            served = this.servedDataOf(newData, refreshRefused);
             refreshed.data = newData;
             refreshed.dataExpiresAt = now + this.dataRefresh.ttlSeconds;
         }
@@ -416,7 +496,7 @@ export default class LambderSessionManager<SessionData = any> {
             }
         }
 
-        const renewed = { ...session, ...refreshed, ...slid };
+        const renewed = { ...session, ...refreshed, ...slid, data: served };
         if(refreshed.data === undefined && slid.expiresAt === undefined) return renewed;
 
         // Awaited, so it persists before Lambda freezes. A failing write is
@@ -439,10 +519,25 @@ export default class LambderSessionManager<SessionData = any> {
             if(slid.expiresAt !== undefined && await this.store.update(session.sessionKeyHash, session.secretHash, slid) === "missing") return null;
         }catch(err){
             console.error(`Lambder session: the renewal write failed, so this session keeps its stored expiry. ${coerceToError(err).message}`);
-            return { ...session, ...refreshed };
+            return { ...session, ...refreshed, data: served };
         }
         return renewed;
     };
+
+    /**
+     * Data about to be stored, held to the schema: what a read of it will
+     * serve, or the error `refused` builds from where it does not match.
+     * Data the schema refuses is the app breaking its own declaration, and
+     * storing it would only move the failure to the next read, far from the
+     * code that wrote it. The data is stored as given, not as the schema's
+     * output, so every later read parses exactly what this check accepted.
+     */
+    private servedDataOf(data: SessionData, refused: (issues: string) => Error): SessionData {
+        if(!this.dataSchema) return data;
+        const checked = this.dataSchema.safeParse(data);
+        if(checked.success) return checked.data;
+        throw refused(describeSchemaIssues(checked.error));
+    }
 
     /**
      * Runs the dataRefresh callback immediately, regardless of
@@ -465,12 +560,13 @@ export default class LambderSessionManager<SessionData = any> {
             await this.deleteSession(session);
             return null;
         }
+        const served = this.servedDataOf(newData, refreshRefused);
         const changes = { data: newData, dataExpiresAt: Math.floor(Date.now()/1000) + this.dataRefresh.ttlSeconds };
         const result = await this.store.update(session.sessionKeyHash, session.secretHash, changes, { dataVersion: session.dataVersion });
         if(result === "missing") return null;
         // "stale": served, not written, and the record keeps the version it
         // was read with (see updateSessionData).
-        return { ...session, ...changes, ...(result === "updated" ? { dataVersion: session.dataVersion + 1 } : {}) };
+        return { ...session, ...changes, data: served, ...(result === "updated" ? { dataVersion: session.dataVersion + 1 } : {}) };
     };
 
     /**

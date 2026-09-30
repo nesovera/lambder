@@ -12,6 +12,7 @@ import type { LambderSessionStore } from "../shared/contracts/LambderSessionStor
 import { LAMBDER_BACKEND_SWAP, LAMBDER_CRASH_WATCH } from "../shared/util/LambderTestingDoors.js";
 import { getAnswerHeader } from "../shared/wire/LambderAnswerHeaders.js";
 import type { LambderApiContractShape } from "../shared/wire/LambderApiContract.js";
+import type { LambderCallSummary } from "../core/LambderCallSummary.js";
 import { LambderMemoryIdempotencyStore } from "../stores/LambderMemoryIdempotencyStore.js";
 import { LambderMemoryRateLimiter } from "../stores/LambderMemoryRateLimiter.js";
 import { LambderMemorySessionStore } from "../stores/LambderMemorySessionStore.js";
@@ -101,6 +102,8 @@ export class LambderTestApp<TContract extends LambderApiContractShape = any, TSe
     private visitorCount = 0;
     private resetCount = 0;
     private readonly crashList: Error[] = [];
+    /** Every call summary the app wrote since the last reset; see callSummaries. */
+    private readonly callSummaryList: LambderCallSummary[] = [];
     /**
      * The call a crash happened under. The app's 500 says nothing about the
      * crash, so the error travels beside the answer, and with concurrent
@@ -119,7 +122,12 @@ export class LambderTestApp<TContract extends LambderApiContractShape = any, TSe
         const sessionStore = options.session?.store ?? own(new LambderMemorySessionStore<TSessionData>());
         const rateLimiter = options.rateLimits?.limiter ?? own(new LambderMemoryRateLimiter());
         const idempotencyStore = options.idempotency?.store ?? own(new LambderMemoryIdempotencyStore());
-        const swap = lambder[LAMBDER_BACKEND_SWAP]({ sessionStore, rateLimiter, idempotencyStore, fileSource: options.files });
+        // The summaries are collected rather than written, so a suite's
+        // output stays its own and a test can read what a call recorded.
+        const swap = lambder[LAMBDER_BACKEND_SWAP]({
+            sessionStore, rateLimiter, idempotencyStore, fileSource: options.files,
+            callSummary: (summary) => { this.callSummaryList.push(summary); },
+        });
         if(options.files && !swap.files){
             throw new Error("lambderTestApp: the files option was given, but the app was created without one, so nothing reads files to put a source under.");
         }
@@ -170,6 +178,15 @@ export class LambderTestApp<TContract extends LambderApiContractShape = any, TSe
      */
     get crashes(): readonly Error[] {
         return this.crashList;
+    }
+
+    /**
+     * The summary of every API call the app answered since the last reset,
+     * in order (see LambderCallSummary): what its callSummary option would
+     * have been handed, collected here instead of written to stdout.
+     */
+    get callSummaries(): readonly LambderCallSummary[] {
+        return this.callSummaryList;
     }
 
     /** The session manager, for tests that inspect or manipulate sessions directly. Throws when the app has no sessions. */
@@ -246,14 +263,15 @@ export class LambderTestApp<TContract extends LambderApiContractShape = any, TSe
 
     /**
      * Rewinds what accumulated: sessions, rate-limit counters and replay
-     * records in the stores this test app made, the crashes it recorded, and
-     * the cookies of every visitor it created (each empties its jar the next
-     * time it is used). For a beforeEach. The app's own data (its database)
-     * is the app's to rewind.
+     * records in the stores this test app made, the crashes and call
+     * summaries it recorded, and the cookies of every visitor it created
+     * (each empties its jar the next time it is used). For a beforeEach. The
+     * app's own data (its database) is the app's to rewind.
      */
     reset(): void {
         for(const store of this.ownStores) store.reset();
         this.crashList.length = 0;
+        this.callSummaryList.length = 0;
         this.resetCount += 1;
     }
 }

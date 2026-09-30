@@ -9,16 +9,16 @@ order the first time.
 | Page | Covers |
 | --- | --- |
 | [Getting started](./getting-started.md) | Define an API, export the contract, call it from a typed frontend |
-| [Configuration](./configuration.md) | Every option `initLambder().create({...})` accepts, in one reference |
+| [Configuration](./configuration.md) | Every option `initLambder().create({...})` accepts, in one reference, the origin proof and the call summary line included |
 
 ## Building a backend
 
 | Page | Covers |
 | --- | --- |
 | [Routing and actions](./routing.md) | `addRoute`, matchers, path params, hooks, fallback and error handlers, crash reporting (`crashes`), gateway differences, and `addAction` for non-HTTP invocations |
-| [APIs and refusals](./apis.md) | `defineApi`, `defineApiGroup`, `lazyApiGroup` and `registerApiGroups`, the mode the guards decide, the call path, the inferred contract, `refuse()` and `LambderApiRefusal`, the signature file (`writeApiSignatures` from `lambder/build`), the contract as a generated file for a client (`writeApiContract`), the declared options as a generated file of plain data (`writeApiOptions`), and one guard's parameters for a browser (`writeApiGuardParams`) |
+| [APIs and refusals](./apis.md) | `defineApi`, `defineApiGroup`, `lazyApiGroup` and `registerApiGroups`, the mode the guards decide, the call path, the inferred contract, `refuse()` and `LambderApiRefusal`, the signature file (`writeApiSignatures` from `lambder/build`), the contract as a generated file for a client (`writeApiContract`), the declared options as a generated file of plain data (`writeApiOptions`), one guard's parameters for a browser (`writeApiGuardParams`), and every one of them in one call (`generateApiFiles`) |
 | [Responses](./responses.md) | The render context and its response tools (headers, cookies, log entries), the resolver methods routes and hooks use, `die`, compression (per API too), ETag, and Lambda's size caps |
-| [Sessions](./sessions.md) | Sessions over a store (DynamoDB, memory, your own), cookie scope and migrations, secrets at rest, `dataRefresh`, the session controller |
+| [Sessions](./sessions.md) | Sessions over a store (DynamoDB, memory, your own), cookie scope and migrations, secrets at rest, `dataSchema` and `dataRefresh`, the session controller |
 | [API policies](./api-policies.md) | Declarative rate limits, guards and idempotency, and making an authorization declaration mandatory |
 | [Secrets and retries](./secrets.md) | `LambderSignedClaims`: signed tokens that are their own record; `keyedDigest` and `randomSecret` for the secrets an app stores; `LambderOneShotSecrets`: codes and tokens handed out once and taken back once, over a store that settles their races; `LambderBackoffTimer`: waiting longer after each failure, once |
 | [Calling another lambda](./invoke.md) | `LambderInvokeCaller`: invoking a Lambder app in another function directly, with its contract, crash detail and logs |

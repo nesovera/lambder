@@ -5,7 +5,8 @@ import type { Context, APIGatewayProxyHandler, APIGatewayProxyHandlerV2 } from "
 import type LambderResolver from "./LambderResolver.js";
 import type LambderResponseBuilder from "./LambderResponseBuilder.js";
 import type { LambderResponse, LambderHttpResponse, LambderResponseCompressionOption, LambderResponseCompressionSettings } from "./LambderResponse.js";
-import type { LambderRenderContext, LambderSessionRenderContext, LambderHttpEvent } from "./LambderContext.js";
+import type { LambderRenderContext, LambderSessionRenderContext, LambderHttpEvent, LambderOriginProof } from "./LambderContext.js";
+import type { LambderCallSummaryOption } from "./LambderCallSummary.js";
 import type { LambderFilesOption } from "./LambderFiles.js";
 import type { LambderCorsConfig } from "./LambderCors.js";
 import type { LambderSessionDataRefreshConfig } from "../session/LambderSessionManager.js";
@@ -147,49 +148,11 @@ type _AssertHandlerV2 = AssertAssignable<LambderHandler extends APIGatewayProxyH
 // Named maps: the guards and the rate-limit policies, each declared in one
 // map or in a list of maps (one per part of an app), merged in order.
 // ---------------------------------------------------------------------------
-/**
- * One map of named declarations, or a list of them. An app made of parts,
- * each declaring its own guards or rate-limit policies beside its APIs, hands
- * create() the list, and the instance declares every name in it. A name two
- * maps declare is refused rather than one quietly replacing the other.
- */
-export type LambderNamedMapsOption<TMap> = TMap | readonly TMap[];
-
-/** The one map a named-maps option declares: a list's members intersected, a lone map as it is. */
-export type LambderMergedNamedMaps<T> =
-    T extends readonly [] ? {}
-    : T extends readonly [infer TFirst, ...infer TRest] ? TFirst & LambderMergedNamedMaps<TRest>
-    : T extends readonly (infer TMember)[] ? TMember
-    : T;
-
-/** The names a list declares in more than one of its maps: never for a lone map, or for a list whose members are not known one by one. */
-type LambderRepeatedNames<T, TSeen extends PropertyKey = never> =
-    T extends readonly [infer TFirst, ...infer TRest]
-        ? (keyof TFirst & TSeen) | LambderRepeatedNames<TRest, TSeen | keyof TFirst>
-        : never;
-
-/** Intersected onto a list: a name declared in two of its maps is a compile error, and the property name is the message. */
-type LambderNoRepeatedNames<T> = [LambderRepeatedNames<T>] extends [never]
-    ? unknown
-    : { readonly "lambder: a name is declared in more than one of these maps. Declare each guard and each rate-limit policy once.": LambderRepeatedNames<T> };
-
-/**
- * A named-maps option as one map: a lone map as it is, a list merged in
- * order. A name declared in two maps of the list is refused.
- */
-export const mergeNamedMaps = <TMap extends Record<string, unknown>>(option: LambderNamedMapsOption<TMap>, what: "guard" | "rate-limit policy"): TMap => {
-    if(!Array.isArray(option)) return option as TMap;
-    const merged: Record<string, unknown> = {};
-    for(const map of option as readonly TMap[]){
-        for(const [name, declaration] of Object.entries(map)){
-            if(Object.prototype.hasOwnProperty.call(merged, name)){
-                throw new Error(`Lambder: the ${what} "${name}" is declared in two of the maps given to create(). Declare each name once.`);
-            }
-            merged[name] = declaration;
-        }
-    }
-    return merged as TMap;
-};
+// The named-maps option (one map, or a list of them) lives with the shared
+// utilities, since the refusal vocabulary takes it too; re-exported here,
+// where its users import it.
+export { mergeNamedMaps, type LambderMergedNamedMaps, type LambderNamedMapsOption } from "../shared/util/LambderNamedMaps.js";
+import type { LambderNamedMapsOption, LambderNoRepeatedNames } from "../shared/util/LambderNamedMaps.js";
 
 /** Session configuration (the `session` option of create/new): where sessions rest, and how their cookies are scoped. */
 export type LambderSessionOptions<TSessionData = any> = {
@@ -214,18 +177,28 @@ export type LambderSessionOptions<TSessionData = any> = {
     /** Session cookie names. Defaults: LMDRSESSIONTKID / LMDRSESSIONCSTK. */
     tokenCookieKey?: string;
     csrfCookieKey?: string;
-    /**
-     * Opt-in freshness for session.data derived from external state (roles,
-     * permissions, feature flags...). Every session read renews data past
-     * its ttlSeconds via your refresh callback, persisting in place on the
-     * same record: same tokens, same cookies. Return null from refresh to
-     * end the session. See LambderSessionDataRefreshConfig for the exact
-     * semantics.
-     */
-    dataRefresh?: LambderSessionDataRefreshConfig<TSessionData>;
     /** Hashing and randomness for the session tokens. Default: WebCrypto. */
     crypto?: LambderSessionCrypto;
-};
+} & (
+    | {
+        /** The schema of session.data, checked on every read; data that does not match ends the session. See LambderSessionDataOptions. */
+        dataSchema?: z.ZodType<TSessionData>;
+        dataRefresh?: undefined;
+    }
+    | {
+        /** The schema of session.data, checked on every read and on every refresh's output; data that does not match refreshes at once. Required beside dataRefresh. See LambderSessionDataOptions. */
+        dataSchema: z.ZodType<TSessionData>;
+        /**
+         * Opt-in freshness for session.data derived from external state (roles,
+         * permissions, feature flags...). Every session read renews data past
+         * its ttlSeconds via your refresh callback, persisting in place on the
+         * same record: same tokens, same cookies. Return null from refresh to
+         * end the session. See LambderSessionDataRefreshConfig for the exact
+         * semantics.
+         */
+        dataRefresh: LambderSessionDataRefreshConfig<TSessionData>;
+    }
+);
 
 /** One map of the server's guards, each pinned to the render contexts of the app's session type. */
 export type LambderGuardsMap<TSessionData = any> =
@@ -339,6 +312,38 @@ export type LambderCreateOptions<TSessionData = any> = {
      * invoker's `host`.
      */
     trustedHostHeaders?: readonly string[];
+    /**
+     * Proof that a request came through the proxy the trusted headers are
+     * trusted for: `{ header, secrets }`, a header the proxy sets on every
+     * request it forwards (a Cloudflare transform rule, a CloudFront origin
+     * custom header) and the secret it carries, with the previous one beside
+     * it during a rotation. The trusted client address and host headers are
+     * read only from a request that carries it. One sent to the origin
+     * directly (an API Gateway's own execute-api URL, a Function URL) has
+     * its address and host from the gateway, whatever headers it wrote, so
+     * a `per: "ip"` limit counts it by the address it really came from. The
+     * header is taken off `ctx.headers` and `ctx.header()`, so no handler or
+     * hook meets the secret. Default: none, so the trusted headers are read
+     * on every request, which is right only for an origin nothing but the
+     * proxy can reach.
+     */
+    originProof?: LambderOriginProof;
+    /**
+     * One summary per API call, written when the call is answered: the
+     * endpoint, how it ended (success, a refusal and its code, a flag, a
+     * validation refusal, a crash), the status, the duration and the
+     * handler's own time, whether an idempotent answer was replayed, whether
+     * the invocation was the process's first, and its request id with the
+     * id of the invocation that called it over invoke. Nothing from the
+     * input, the session, the cookies or the caller's address. See
+     * LambderCallSummary.
+     *
+     * Default: each summary as one JSON line on stdout, which a Lambda
+     * function's log group keeps and CloudWatch Logs Insights reads field by
+     * field. A function receives each summary instead (another logger, a
+     * metrics client); false writes none.
+     */
+    callSummary?: LambderCallSummaryOption;
     /** CORS: true allows any origin; or pass a LambderCorsConfig. Default: off. */
     cors?: boolean | LambderCorsConfig;
     /** Sessions over a store of your choosing; required for a guard that needs a session, and for addSessionRoute. */
@@ -579,6 +584,7 @@ export type LambderNestedOptionChecks<TSessionData, TOptions extends LambderCrea
     };
     idempotency?: LambderNoExtraKeys<NonNullable<TOptions["idempotency"]>, LambderOptionShape<TSessionData, "idempotency">>;
     crashes?: LambderNoExtraKeys<NonNullable<TOptions["crashes"]>, LambderOptionShape<TSessionData, "crashes">>;
+    originProof?: LambderNoExtraKeys<NonNullable<TOptions["originProof"]>, LambderOptionShape<TSessionData, "originProof">>;
     rateLimits?: LambderNoExtraKeys<NonNullable<TOptions["rateLimits"]>, LambderOptionShape<TSessionData, "rateLimits">> & {
         policies?: LambderRateLimitPolicyChecks<NonNullable<TOptions["rateLimits"]>["policies"]>;
     };
@@ -639,5 +645,37 @@ export const assertCreateOptions = (options: LambderMergedCreateOptions<any>): v
 
     if(options.requireApiGuards && !options.guards){
         throw new Error("Lambder: requireApiGuards needs a guards map at creation for APIs to declare from.");
+    }
+
+    if(options.originProof !== undefined) assertOriginProof(options);
+
+    if(options.callSummary !== undefined && options.callSummary !== false && typeof options.callSummary !== "function"){
+        throw new Error("Lambder: callSummary is false, or a function that receives each call's summary.");
+    }
+};
+
+/** Shortest secret an origin proof takes: one a sender could guess is no proof. 32 characters of hex or base64 is 128 bits or more. */
+export const MIN_ORIGIN_PROOF_SECRET_LENGTH = 32;
+
+/** An origin proof that proves something: a header name, secrets long enough not to guess, and trusted headers for it to guard. */
+const assertOriginProof = (options: LambderMergedCreateOptions<any>): void => {
+    const proof = options.originProof!;
+    if(typeof proof?.header !== "string" || !/^[A-Za-z0-9-]+$/.test(proof.header)){
+        throw new Error("Lambder: originProof.header must be a header name, such as \"x-origin-proof\".");
+    }
+    if(!Array.isArray(proof.secrets) || proof.secrets.length === 0){
+        throw new Error("Lambder: originProof.secrets must list the secret the proxy sets, with the previous one beside it during a rotation.");
+    }
+    for(const secret of proof.secrets){
+        if(typeof secret !== "string" || secret.length < MIN_ORIGIN_PROOF_SECRET_LENGTH){
+            throw new Error(`Lambder: every originProof secret must be a string of at least ${MIN_ORIGIN_PROOF_SECRET_LENGTH} characters; a shorter one could be guessed, and a guessed proof proves nothing.`);
+        }
+    }
+    const trusted = [...(options.trustedClientIpHeaders ?? []), ...(options.trustedHostHeaders ?? [])];
+    if(trusted.length === 0){
+        throw new Error("Lambder: originProof guards the trustedClientIpHeaders and trustedHostHeaders, and this instance trusts none, so it would prove nothing.");
+    }
+    if(trusted.some((name) => name.toLowerCase() === proof.header.toLowerCase())){
+        throw new Error(`Lambder: originProof.header "${proof.header}" is also a trusted header; the proof is its own header, which the app never reads.`);
     }
 };

@@ -8,6 +8,7 @@ import type { LambderRenderContext, LambderHttpEventFormat } from "./LambderCont
 import type { LambderApiAnswer } from "../api/LambderApiAnswer.js";
 import { getAnswerHeader, setAnswerHeader, addAnswerHeader } from "../shared/wire/LambderAnswerHeaders.js";
 import type { LambderHttpStatusCode } from "../shared/wire/LambderHttpStatus.js";
+import type { LambderCallOutcomeHint } from "../shared/wire/LambderCallOutcome.js";
 
 
 export type LambderHeadersInput = Record<string, string | string[]>;
@@ -48,6 +49,8 @@ type LambderResponseInit = {
     compress?: boolean | "auto";
     /** "auto": ETag on GET/HEAD 200 when globally enabled. true: force. false: never. */
     etag?: boolean | "auto";
+    /** What the response answers an API call with, when it was written as an API answer; see LambderResponse.callOutcome. */
+    callOutcome?: LambderCallOutcomeHint | null;
 };
 
 /**
@@ -68,6 +71,14 @@ export class LambderResponse {
     public isBodyBase64: boolean;
     public compress: boolean | "auto";
     public etag: boolean | "auto";
+    /**
+     * What this response answers an API call with (a success, a refusal and
+     * its code, a flag), when it was written as an API answer: the envelope
+     * builders and res.apiRefusal() set it, and the call's summary line reads
+     * it, so the line does not parse the body back. Null on any other
+     * response, which the line names `other`.
+     */
+    public callOutcome: LambderCallOutcomeHint | null;
 
     constructor(init: LambderResponseInit){
         this.statusCode = init.statusCode;
@@ -76,6 +87,7 @@ export class LambderResponse {
         this.isBodyBase64 = init.isBodyBase64 ?? false;
         this.compress = init.compress ?? "auto";
         this.etag = init.etag ?? "auto";
+        this.callOutcome = init.callOutcome ?? null;
     }
 
     /**
@@ -93,6 +105,7 @@ export class LambderResponse {
             isBodyBase64: this.isBodyBase64,
             compress: this.compress,
             etag: this.etag,
+            callOutcome: this.callOutcome,
         });
     }
 
@@ -130,6 +143,7 @@ export const answerFromResponse = (response: LambderResponse): LambderApiAnswer 
         isBodyBase64: response.isBodyBase64 || binary,
         compress: response.compress,
         etag: response.etag,
+        ...(response.callOutcome ? { outcome: response.callOutcome } : {}),
     };
 };
 
@@ -153,6 +167,7 @@ export const responseFromAnswer = (answer: LambderApiAnswer): LambderResponse =>
     isBodyBase64: answer.isBodyBase64 ?? false,
     compress: answer.compress ?? "auto",
     etag: answer.etag ?? "auto",
+    callOutcome: answer.outcome ?? null,
 });
 
 const mimeOf = (contentType: string | undefined): string =>

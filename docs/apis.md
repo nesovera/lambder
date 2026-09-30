@@ -466,6 +466,51 @@ are the ones a client gating on the guard calls, and so names in its own code
 already. A guard the server does not declare fails the write; `check`,
 `header` and `semicolons` work as they do for the options file.
 
+### Generating every file at once
+
+Each writer above is a function a generator script calls. A script that
+writes several of them, for several instances (a server and a function it
+invokes, say), calls `generateApiFiles` once with every file it owns:
+
+```typescript
+import { generateApiFiles } from "lambder/build";
+
+const result = await generateApiFiles({
+    apps: {
+        server: {
+            module: "backend/index.ts",
+            exportName: "lambder",
+            tsconfig: "backend/tsconfig.json",
+            contract: { file: "shared/generated/apiContract.generated.ts" },
+            signatures: { file: "shared/generated/apiSignatures.generated.ts" },
+            options: { file: "shared/generated/apiOptions.generated.ts" },
+            guardParams: [{ guard: "store", file: "web/src/generated/storeGuardParams.generated.ts" }],
+        },
+        imaging: {
+            module: "imaging/index.ts",
+            exportName: "lambder",
+            contract: { file: "backend/generated/imagingApiContract.generated.ts", typeName: "ImagingApiContract" },
+        },
+    },
+}, { check: process.argv.includes("--check") });
+console.log(result.lines.join("\n"));
+process.exit(result.ok ? 0 : 1);
+```
+
+- Each app gives its module once, for every file it is written to; each
+  file takes the options its writer takes (`header`, `quotes`,
+  `semicolons`, `typeName`, `guard`). Paths are relative to the working
+  directory, as each writer takes them.
+- The contracts are read first, through the compiler alone; then each
+  module is imported once, and its signatures, options and guard parameters
+  are written from that one instance.
+- A writer that fails does not stop the others: one call names every stale
+  or broken file, and `ok` is false when any is. A config naming no apps, an
+  app written to no file, or a key the call does not read throws.
+- The script runs as each writer's does, under whatever loader the app's
+  modules need, whose flags reach the fresh process the signatures are
+  verified in.
+
 ## Groups across files, and lazy groups
 
 A module exports its groups, and the entry registers them. A group only
@@ -845,7 +890,11 @@ export const orderApis = lambderApp.defineApiGroup("order", {
   outside the framework's `lambder/` prefix; its data, when it declares any,
   is an object or an array, as an output is. A misspelled declaration key, a
   `lambder/` code, a 422 or 5xx status and a `notAuthorized` other than
-  `true` are compile errors and errors at the call.
+  `true` are compile errors and errors at the call. An app made of parts
+  declares one map of codes per part and hands `declareRefusals` the list,
+  `declareRefusals([orderRefusals, walletRefusals])`, as it hands `create()`
+  its guards and policies; a code two maps declare is a compile error and a
+  throw at the call.
 - **An API's `refusals` option** names one code or a non-empty list. A code
   the vocabulary does not hold is a compile error and a registration error.
   `create()` itself takes no vocabulary: the init carries it.

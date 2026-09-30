@@ -16,7 +16,7 @@ import {
 } from "./LambderResponse.js";
 import { compileRouteMatcher, type CompiledMatcher, type LambderRouteCondition, type LambderRouteConditionFn, type LambderRouteMatcher, type LambderPathParamsOf, type LambderRoutePath } from "./LambderRouting.js";
 import { allowedCorsOriginOf, applyCorsHeaders, type LambderCorsConfig } from "./LambderCors.js";
-import LambderSessionManager from "../session/LambderSessionManager.js";
+import LambderSessionManager, { type LambderSessionDataOptions } from "../session/LambderSessionManager.js";
 import { resolveCompressionOption } from "../shared/wire/LambderCompressionOption.js";
 import { DEFAULT_API_PATH } from "../shared/wire/LambderDefaultApiPath.js";
 import type LambderSessionController from "../session/LambderSessionController.js";
@@ -31,6 +31,7 @@ import { LAMBDER_BACKEND_SWAP, LAMBDER_CRASH_WATCH } from "../shared/util/Lambde
 import type { LambderApiDefinition } from "../api/LambderApiDefinition.js";
 import {
     checkedRefusal,
+    declaredRefusalVocabulary,
     readRefusalVocabulary,
     resolveAllowedRefusals,
     toRefusalCodes,
@@ -41,7 +42,9 @@ import {
     type LambderRefusalNamesIn,
     type LambderRefusalsOption,
     type LambderRefusalVocabulary,
-    type LambderRefusalVocabularyChecks,
+    type LambderRefusalVocabularyOption,
+    type LambderRefusalVocabularyOptionChecks,
+    type LambderMergedRefusalVocabulary,
     type LambderDeclaredVocabulary,
 } from "../api/LambderApiRefusals.js";
 import { refuse, type LambderDeclaredRefuse } from "../shared/wire/LambderApiRefusal.js";
@@ -107,8 +110,10 @@ import {
     bindContextTools,
     createContext,
     isV2HttpEvent,
+    type LambderContextOptions,
     type LambderContextTools,
     type LambderHttpEvent,
+    type LambderOriginProof,
     type LambderRenderContext,
     type LambderSessionRenderContext,
 } from "./LambderContext.js";
@@ -116,6 +121,10 @@ import { COMPRESSED_PAYLOAD_GZ_FIELD, COMPRESSED_PAYLOAD_BR_FIELD, COMPRESSED_PA
 import type { LambderReadonlyDeep, MaybePromise } from "../shared/util/LambderTypeUtilities.js";
 import { coerceToError } from "../shared/wire/LambderCrashDetail.js";
 import { LambderCrashHandling } from "./LambderCrashHandling.js";
+import { currentInvocation, runInvocation, type LambderInvocationRecord } from "./LambderInvocationScope.js";
+import { roundedMilliseconds, writeCallSummaryLine, type LambderCallSummary } from "./LambderCallSummary.js";
+import { outcomeOfAnswerText } from "../shared/wire/LambderCallOutcome.js";
+import { LAMBDER_INVOKE_API_ID, LAMBDER_PARENT_REQUEST_HEADER } from "../shared/wire/LambderInvokeApiId.js";
 import { policyBuildersFor } from "./LambderPolicyBuilders.js";
 import {
     assertCreateOptions,
@@ -149,7 +158,11 @@ import {
 } from "./LambderCreateOptions.js";
 
 /** Everything `lambder/testing` may put under a built instance: the pipeline's stores, and the source its files are read from. */
-export type LambderInstanceBackends = LambderPipelineBackends & { fileSource?: LambderFileSource };
+export type LambderInstanceBackends = LambderPipelineBackends & {
+    fileSource?: LambderFileSource;
+    /** Where call summaries go instead of the app's own callSummary; null writes none. */
+    callSummary?: ((summary: LambderCallSummary) => void) | null;
+};
 /** What the instance had a place for; see LambderPipelineBackendSwap. `files` is false on an instance created without the files option. */
 export type LambderInstanceBackendSwap = LambderPipelineBackendSwap & { files: boolean };
 
@@ -188,6 +201,27 @@ type LambderPreparedApi = {
 
 /** The refusals of a name no API is registered under: no code, and none required. */
 const NO_DECLARED_REFUSALS: LambderEndpointRefusals = { codes: new Map(), codeRequired: false };
+
+/** Longest endpoint name a call summary carries: a page built before paths posts the name in its body, and a line is no place for a long one. */
+const MAX_SUMMARY_API_NAME_CHARS = 200;
+
+/** A request id as the parent header may carry one: what Lambda's own ids look like, and no longer than any of them. */
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9-]{1,128}$/;
+
+/**
+ * The request id of the invocation that invoked this one, from an invoke's
+ * event alone: over HTTP the header is whatever a client wrote, and an
+ * invoke's apiId is one no gateway lets a client set.
+ */
+const parentRequestIdOf = (event: LambderHttpEvent): string | null => {
+    if(event.requestContext?.apiId !== LAMBDER_INVOKE_API_ID) return null;
+    const value = Object.entries(event.headers ?? {}).find(([name]) => name.toLowerCase() === LAMBDER_PARENT_REQUEST_HEADER)?.[1];
+    return typeof value === "string" && REQUEST_ID_PATTERN.test(value) ? value : null;
+};
+
+/** The API call a request is, as its invocation records it; null for a request that is no API call. */
+const apiCallOf = (ctx: LambderRenderContext, event: LambderHttpEvent): LambderInvocationRecord["call"] =>
+    ctx.api ? { api: ctx.api.apiName, parentRequestId: parentRequestIdOf(event) } : null;
 
 // The two shapes the class keeps for its own handler lists: a compiled route
 // matcher beside the action it dispatches to, and the non-HTTP twin.
@@ -303,6 +337,9 @@ export default class Lambder<
     private readonly contextTools: LambderContextTools;
     private readonly trustedClientIpHeaders: readonly string[];
     private readonly trustedHostHeaders: readonly string[];
+    private readonly originProof: LambderOriginProof | null;
+    /** Where each API call's summary goes (the callSummary option); null writes none. Replaceable through the backend swap alone. */
+    private callSummaryWriter: ((summary: LambderCallSummary) => void) | null;
 
     constructor(given: LambderCreateOptions<TApp["session"]> = {}){
         // The guards and the rate-limit policies as one map each, whether
@@ -350,7 +387,9 @@ export default class Lambder<
                         sessionSalt: session.sessionSalt,
                         enableSlidingExpiration: session.enableSlidingExpiration,
                         slidingWriteIntervalSeconds: session.slidingWriteIntervalSeconds,
-                        dataRefresh: session.dataRefresh,
+                        // As given: the manager refuses dataRefresh without
+                        // the schema, which an untyped caller can still pass.
+                        ...{ dataRefresh: session.dataRefresh, dataSchema: session.dataSchema } as LambderSessionDataOptions<TApp["session"]>,
                         crypto: session.crypto,
                     }),
                     tokenCookieKey: session.tokenCookieKey,
@@ -365,6 +404,8 @@ export default class Lambder<
 
         this.trustedClientIpHeaders = options.trustedClientIpHeaders ?? [];
         this.trustedHostHeaders = options.trustedHostHeaders ?? [];
+        this.originProof = options.originProof ?? null;
+        this.callSummaryWriter = options.callSummary === false ? null : options.callSummary ?? writeCallSummaryLine;
         this.requireApiGuards = options.requireApiGuards ?? false;
         this.requireRefusalCodes = options.requireRefusalCodes ?? false;
         this.crashHandling = new LambderCrashHandling(options.crashes ?? {}, this.apiVersion);
@@ -882,6 +923,7 @@ export default class Lambder<
      */
     [LAMBDER_BACKEND_SWAP](backends: LambderInstanceBackends): LambderInstanceBackendSwap {
         if(this.files && backends.fileSource) this.files[LAMBDER_BACKEND_SWAP](backends.fileSource);
+        if(backends.callSummary !== undefined) this.callSummaryWriter = backends.callSummary;
         return { ...this.pipeline[LAMBDER_BACKEND_SWAP](backends), files: this.files !== null };
     }
 
@@ -1180,9 +1222,26 @@ export default class Lambder<
         return await matched.action.actionFn(beforeRenderResult, resolver);
     }
 
+    /**
+     * One HTTP invocation, from the event to the finalized response, under
+     * an invocation record of its own (see LambderInvocationScope): what an
+     * API call's summary line is written from once the response is final.
+     */
     async render(
         event: LambderHttpEvent,
         lambdaContext: Context
+    ): Promise<LambderHttpResponse> {
+        return await runInvocation(lambdaContext, async (invocation) => {
+            const response = await this.renderRequest(event, lambdaContext, invocation);
+            this.writeCallSummary(invocation, response.statusCode);
+            return response;
+        });
+    }
+
+    private async renderRequest(
+        event: LambderHttpEvent,
+        lambdaContext: Context,
+        invocation: LambderInvocationRecord,
     ): Promise<LambderHttpResponse> {
         let ctx: LambderRenderContext | null = null;
         let started = false;
@@ -1193,11 +1252,8 @@ export default class Lambder<
         try {
             await this.ensureInitialized();
             started = true;
-            ctx = bindContextTools(createContext(event, lambdaContext, {
-                apiPath: this.apiPath,
-                trustedClientIpHeaders: this.trustedClientIpHeaders,
-                trustedHostHeaders: this.trustedHostHeaders,
-            }), this.contextTools);
+            ctx = bindContextTools(createContext(event, lambdaContext, this.contextOptions()), this.contextTools);
+            invocation.call = apiCallOf(ctx, event);
             if(this.corsConfig) allowedOrigin = allowedCorsOriginOf(this.corsConfig, ctx);
             const resolver = this.getResolver(ctx);
 
@@ -1248,10 +1304,29 @@ export default class Lambder<
 
             this.applyCors(allowedOrigin, response, this.isCorsPreflight(ctx));
 
+            invocation.outcome = response.callOutcome ?? { outcome: "other", code: null };
             return await finalizeResponse(ctx, response, this.finalizeOptions, ctx.eventFormat);
         }catch(err){
+            // A crash before the context existed (a created hook that failed)
+            // still answers an API call, and its summary line is the one a
+            // dashboard counts the crash by. The context is read from the
+            // event and the instance's options alone, so it can be read here;
+            // an event it cannot be read from has no call to name.
+            if(!ctx){
+                try { invocation.call = apiCallOf(createContext(event, lambdaContext, this.contextOptions()), event); } catch { /* no call to name */ }
+            }
             return await this.answerCrash(err, ctx, allowedOrigin, started, event, lambdaContext);
         }
+    }
+
+    /** What createContext reads this instance's requests with. */
+    private contextOptions(): LambderContextOptions {
+        return {
+            apiPath: this.apiPath,
+            trustedClientIpHeaders: this.trustedClientIpHeaders,
+            trustedHostHeaders: this.trustedHostHeaders,
+            originProof: this.originProof,
+        };
     }
 
     /**
@@ -1297,6 +1372,9 @@ export default class Lambder<
         // invocation would reject with a 502 no client can parse.
         const error = coerceToError(thrown, "an unstringifiable thrown value");
         this.crashWatcher?.(error);
+        // A crash, whatever the global error handler then answers with.
+        const invocation = currentInvocation();
+        if(invocation) invocation.outcome = { outcome: "crash", code: null };
         const site: LambderCrashSite = !started ? { kind: "startup", lambdaContext }
             : ctx?.api ? { kind: "api", ctx, lambdaContext }
             : { kind: "route", ctx, lambdaContext };
@@ -1333,6 +1411,36 @@ export default class Lambder<
             typeof crashResponse.body === "string" ? crashResponse.body : "",
             false,
         );
+    }
+
+    /**
+     * The summary line of an API call, once its response is final: nothing
+     * for an invocation that served no API call. A writer that throws costs
+     * the call its line and nothing else.
+     */
+    private writeCallSummary(invocation: LambderInvocationRecord, status: number): void {
+        const { call } = invocation;
+        if(!call || !this.callSummaryWriter) return;
+        const summary: LambderCallSummary = {
+            kind: "lambder.call",
+            // The path form is two identifiers; a page built before paths
+            // posts the name in its body, which is whatever it sent.
+            api: call.api.slice(0, MAX_SUMMARY_API_NAME_CHARS),
+            outcome: invocation.outcome?.outcome ?? "other",
+            code: invocation.outcome?.code ?? null,
+            status,
+            durationMs: roundedMilliseconds(performance.now() - invocation.startedAt),
+            handlerMs: invocation.handlerMs === null ? null : roundedMilliseconds(invocation.handlerMs),
+            replayed: invocation.replayed,
+            coldStart: invocation.coldStart,
+            requestId: invocation.requestId,
+            parentRequestId: call.parentRequestId,
+        };
+        try {
+            this.callSummaryWriter(summary);
+        } catch(err) {
+            console.error(`Lambder: the callSummary writer threw, so the summary of "${summary.api}" was not written. ${coerceToError(err).message}`);
+        }
     }
 
     /**
@@ -1388,6 +1496,12 @@ export default class Lambder<
      * so Lambda's retries and dead-letter queues still see the failure.
      */
     async renderEvent(event: unknown, lambdaContext: Context): Promise<unknown> {
+        // Under an invocation record, like an HTTP invocation, so the calls an
+        // action makes over invoke carry its request id.
+        return await runInvocation(lambdaContext, () => this.renderEventAction(event, lambdaContext));
+    }
+
+    private async renderEventAction(event: unknown, lambdaContext: Context): Promise<unknown> {
         let started = false;
         try {
             await this.ensureInitialized();
@@ -1422,7 +1536,8 @@ export default class Lambder<
      */
     private async inputValidationRefusal(ctx: LambderRenderContext, zodError: z.ZodError): Promise<LambderApiAnswer | null> {
         if(this.apiInputValidationErrorHandler){
-            return answerFromResponse(await this.apiInputValidationErrorHandler(ctx, this.getResolver(ctx), zodError));
+            // A validation refusal, however the app words it.
+            return { ...answerFromResponse(await this.apiInputValidationErrorHandler(ctx, this.getResolver(ctx), zodError)), outcome: { outcome: "validation", code: null } };
         }
         // null asks the pipeline for the standard 422, so that answer is
         // written once, in the core, rather than here as well.
@@ -1467,9 +1582,16 @@ export default class Lambder<
     ): Promise<LambderResponse> {
         const request = ctx.api;
         if(!request) throw new Error(`Lambder: API "${definition.name}" was matched by a request that is not an API call.`);
-        const { answer } = await this.pipeline.run(request, ctx, definition, async () => {
+        const invocation = currentInvocation();
+        const { answer, replayed } = await this.pipeline.run(request, ctx, definition, async () => {
             ctx.apiPayload = request.payload;
-            const returned = await handler(ctx as never);
+            const handlerStarted = performance.now();
+            let returned: unknown;
+            try {
+                returned = await handler(ctx as never);
+            } finally {
+                if(invocation) invocation.handlerMs = performance.now() - handlerStarted;
+            }
             let parsed: z.ZodSafeParseResult<unknown>;
             try {
                 parsed = output.safeParse(returned);
@@ -1481,8 +1603,10 @@ export default class Lambder<
             return envelopeAnswer(successEnvelope(this.apiVersion, parsed.data, ctx.logList));
         });
         // The API's compress option, on whatever answer the call ended with:
-        // a replayed one comes back from its store without the hint.
-        return responseFromAnswer({ ...answer, compress });
+        // a replayed one comes back from its store without the hints, and
+        // its outcome is read back from its text, which only a replay costs.
+        if(invocation) invocation.replayed = replayed;
+        return responseFromAnswer({ ...answer, compress, outcome: answer.outcome ?? outcomeOfAnswerText(answer.statusCode, answer.body) });
     }
 
     /**
@@ -1588,7 +1712,10 @@ export const initLambder = <TSessionData = any>() => ({
      * Declares the app's refusal vocabulary: every code once, with the schema
      * of its data (`{ data: schema }`) or none (`{}`), the status every
      * refusal with it leaves with (`status`, 200 by default) and whether it
-     * sets the notAuthorized flag (`notAuthorized: true`). Returns the init
+     * sets the notAuthorized flag (`notAuthorized: true`). One map of codes,
+     * or a list of them, as guards and rate-limit policies are declared, so
+     * each part of an app declares its own codes; a code two maps declare is
+     * refused, at compile time and at the call. Returns the init
      * bound to it: its guard() types ctx.refuse to a guard's refusals and
      * refuses a guard naming a code outside the vocabulary, its refuse is
      * typed to the whole vocabulary, and its create() hands the vocabulary to
@@ -1596,12 +1723,15 @@ export const initLambder = <TSessionData = any>() => ({
      * handler, a guard or a helper is a crash rather than an answer, so every
      * "no" a client reads names a code.
      */
-    declareRefusals<const TRefusals extends LambderRefusalVocabulary, const TRequireCodes extends boolean = false>(
-        refusals: TRefusals & LambderRefusalVocabularyChecks<TRefusals>,
+    declareRefusals<const TRefusals extends LambderRefusalVocabularyOption, const TRequireCodes extends boolean = false>(
+        refusals: TRefusals & LambderRefusalVocabularyOptionChecks<TRefusals>,
         options: { requireCodes?: TRequireCodes } = {},
     ){
-        const vocabulary = readRefusalVocabulary(refusals);
-        if(!vocabulary) throw new Error("Lambder: declareRefusals() takes the vocabulary, an object of codes.");
-        return lambderInitOf<TSessionData, TRefusals, TRequireCodes>({ refusals, vocabulary, requireCodes: (options.requireCodes ?? false) as TRequireCodes });
+        const declared = declaredRefusalVocabulary(refusals, "Lambder");
+        return lambderInitOf<TSessionData, LambderMergedRefusalVocabulary<TRefusals>, TRequireCodes>({
+            refusals: declared.refusals as LambderMergedRefusalVocabulary<TRefusals>,
+            vocabulary: declared.vocabulary,
+            requireCodes: (options.requireCodes ?? false) as TRequireCodes,
+        });
     },
 });

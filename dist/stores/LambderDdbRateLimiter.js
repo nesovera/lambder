@@ -6,12 +6,14 @@ import { RATE_LIMIT_WINDOWS, } from "../shared/contracts/LambderRateLimiter.js";
 /** How long a key refused during a throttle is told to wait: long enough to let the partition recover, short enough for a legitimate caller. */
 const THROTTLED_RETRY_SECONDS = 5;
 /**
- * Most (tracker key, window) pairs the limiter remembers from throttles at
- * once. Only a key seen during a key-range throttle is remembered, for
- * THROTTLED_RETRY_SECONDS, so this is reached only by a flood spread over
- * that many keys at once, where the ones closest to expiring go first.
+ * Most (tracker key, window) pairs the limiter remembers at once. Only a
+ * window found at its limit is remembered (until it resets, or for
+ * THROTTLED_RETRY_SECONDS when a throttle's read found it there), so this is
+ * reached only by refusals spread over that many keys at once, where the
+ * ones closest to expiring go first; a key forgotten early is asked of the
+ * table again, which answers the same.
  */
-const THROTTLED_WINDOW_MEMORY_ENTRIES = 10_000;
+const REMEMBERED_WINDOW_ENTRIES = 10_000;
 /** The table key of one window's counter. */
 const counterKeyOf = (partitionKey, window) => ({
     pk: { S: partitionKey },
@@ -23,12 +25,21 @@ const rememberedWindowKeyOf = (partitionKey, window) => joinKeyFields(partitionK
  * Fixed-window rate limiter backed by DynamoDB.
  *
  * Each window is one item counted with a conditional `ADD`, so the increment
- * and the limit check are one atomic request. Windows are evaluated smallest
- * first and evaluation stops at the first exceeded one, which keeps blocked
- * requests cheap and spares the larger counters. Attempts count, not
- * successes: a counter checked before the refusing one keeps its increment,
- * since a compensating decrement would give up the conditional-ADD
- * atomicity. Items carry an `expiresAt` attribute for DynamoDB TTL.
+ * and the limit check are one atomic request, and every window's request is
+ * sent at once: a policy capping three windows costs one round trip on the
+ * request's critical path, not three. Attempts count, not successes: a window
+ * under its limit counts an attempt another window refuses, since a
+ * compensating decrement would give up the conditional-ADD atomicity. The
+ * refusal names the smallest window that refused. Items carry an `expiresAt`
+ * attribute for DynamoDB TTL.
+ *
+ * A window the table refused an attempt in stays at its limit until it
+ * resets, since a count only rises within its window. So the process
+ * remembers it until then, and refuses the key's next attempts from memory
+ * without touching the table: a flood costs each process one round of
+ * writes per window it fills, and the counters of its other windows stop
+ * rising once it is refused. Another process asks the table once and then
+ * remembers too.
  *
  * The tracker key is caller data (an address, a session key, whatever a
  * policy handler returned), so a key whose partition key would pass
@@ -50,9 +61,9 @@ const rememberedWindowKeyOf = (partitionKey, window) => joinKeyFields(partitionK
  * means the partition holding this counter is flooded. A partition holds a
  * range of keys, though, not one: a flood on one address, or a session or
  * cache spike on a shared table, throttles every counter on the same
- * partition. The key's own counts tell the flood from its neighbours: the
- * throttled window's and every capped window's after it, the ones this
- * attempt has not been counted against yet, each read with a consistent
+ * partition. The key's own counts tell the flood from its neighbours: those
+ * of the windows whose write was throttled, the ones this attempt has not
+ * been counted against, each read with a consistent
  * GetItem, in parallel (reads have their own throughput, which the throttled
  * writes leave alone). A key at or over the limit of any of them is the
  * flood: it is refused, since passed on as a failure `failOpen` would wave
@@ -90,8 +101,8 @@ export class LambderDdbRateLimiter {
     ready;
     ttlWindowMultiplier;
     now;
-    /** The windows seen during key-range throttles, by (partition key, window, window start); see the class doc. */
-    throttledWindows;
+    /** The windows found at their limit, and those whose read a throttle refused, by (partition key, window, window start); see the class doc. */
+    rememberedWindows;
     constructor(options) {
         if (!options.tableName.trim())
             throw new Error("tableName is required");
@@ -99,7 +110,7 @@ export class LambderDdbRateLimiter {
         this.keyPrefix = options.keyPrefix ?? "RL";
         this.ttlWindowMultiplier = assertNumberAtLeast(options.ttlWindowMultiplier ?? 2, 1, "ttlWindowMultiplier");
         this.now = options.now ?? (() => Date.now());
-        this.throttledWindows = new LambderExpiringMap({ now: this.now, maxEntries: THROTTLED_WINDOW_MEMORY_ENTRIES });
+        this.rememberedWindows = new LambderExpiringMap({ now: this.now, maxEntries: REMEMBERED_WINDOW_ENTRIES });
         this.ready = createDynamoClientLoader({ user: "LambderDdbRateLimiter", region: options.region, client: options.client });
     }
     /** The clock the windows are computed against, for the engine's Retry-After. */
@@ -121,27 +132,36 @@ export class LambderDdbRateLimiter {
         const windows = RATE_LIMIT_WINDOWS
             .filter(({ key }) => policy[key])
             .map(({ key, seconds }) => ({ key, seconds, limit: policy[key], start: Math.floor(nowSeconds / seconds) * seconds }));
-        // A window this process read at its limit during a throttle refuses
-        // without touching the table (see the class doc).
-        const rememberedAtLimit = windows.find((window) => {
-            const remembered = this.throttledWindows.get(rememberedWindowKeyOf(partitionKey, window));
-            return remembered !== undefined && "count" in remembered && remembered.count >= window.limit;
-        });
-        if (rememberedAtLimit)
-            return { window: rememberedAtLimit.key, limit: rememberedAtLimit.limit, resetAt: nowSeconds + THROTTLED_RETRY_SECONDS };
-        for (const [index, window] of windows.entries()) {
-            try {
-                if (await this.incrementWindow(partitionKey, window, nowSeconds))
-                    return { window: window.key, limit: window.limit, resetAt: window.start + window.seconds };
+        // A window this process has found at its limit refuses without
+        // touching the table (see the class doc).
+        for (const window of windows) {
+            const remembered = this.rememberedWindows.get(rememberedWindowKeyOf(partitionKey, window));
+            if (remembered !== undefined && "count" in remembered && remembered.count >= window.limit) {
+                return { window: window.key, limit: window.limit, resetAt: remembered.resetAt ?? nowSeconds + THROTTLED_RETRY_SECONDS };
             }
-            catch (error) {
-                // A key-range throttle may be the limiter's own answer (see
-                // the class doc); anything else is the table failing, which
-                // only the caller can decide what to do about.
-                if (!isKeyRangeThrottle(error))
-                    throw error;
-                return await this.answerKeyRangeThrottle(partitionKey, windows.slice(index), nowSeconds, error);
-            }
+        }
+        const attempts = await Promise.allSettled(windows.map((window) => this.incrementWindow(partitionKey, window, nowSeconds)));
+        // A refusal is the answer whatever the other windows did: a window at
+        // its limit refuses the attempt whether the others counted it, failed
+        // or were throttled.
+        const refusedAt = attempts.findIndex((attempt) => attempt.status === "fulfilled" && attempt.value);
+        if (refusedAt !== -1) {
+            const refusing = windows[refusedAt];
+            const resetAt = refusing.start + refusing.seconds;
+            this.rememberedWindows.set(rememberedWindowKeyOf(partitionKey, refusing), { count: refusing.limit, resetAt }, resetAt);
+            return { window: refusing.key, limit: refusing.limit, resetAt };
+        }
+        // A failure that is not the key's range being throttled is the table
+        // failing, which only the caller can decide what to do about.
+        const failure = attempts.find((attempt) => attempt.status === "rejected" && !isKeyRangeThrottle(attempt.reason));
+        if (failure)
+            throw failure.reason;
+        // A key-range throttle may be the limiter's own answer (see the class
+        // doc), read from the windows the throttle kept the attempt from.
+        const throttled = windows.filter((_, index) => attempts[index].status === "rejected");
+        if (throttled.length) {
+            const throttle = attempts.find((attempt) => attempt.status === "rejected").reason;
+            return await this.answerKeyRangeThrottle(partitionKey, throttled, nowSeconds, throttle);
         }
         return false;
     }
@@ -185,11 +205,10 @@ export class LambderDdbRateLimiter {
         }
     }
     /**
-     * The answer to a key-range throttle on the first of `uncounted`: that
-     * window and every capped one after it, the windows this attempt has not
-     * been counted against. The windows before it counted this attempt and
-     * allowed it, so reading them could only turn the attempt that filled
-     * one into a refusal.
+     * The answer to a key-range throttle on `uncounted`, the windows whose
+     * write the throttle refused and which have not counted this attempt.
+     * The others counted it and allowed it, so reading them could only turn
+     * the attempt that filled one into a refusal.
      *
      * Each count is read strongly consistent: the count that decides is the
      * one the throttled writes were racing to raise, and a replica lagging
@@ -201,7 +220,7 @@ export class LambderDdbRateLimiter {
      */
     async answerKeyRangeThrottle(partitionKey, uncounted, nowSeconds, throttle) {
         const throttledWindowKey = rememberedWindowKeyOf(partitionKey, uncounted[0]);
-        const remembered = this.throttledWindows.get(throttledWindowKey);
+        const remembered = this.rememberedWindows.get(throttledWindowKey);
         if (remembered !== undefined && "unreadable" in remembered)
             throw remembered.unreadable;
         const { client, sdk } = await this.ready();
@@ -214,14 +233,14 @@ export class LambderDdbRateLimiter {
         for (const [index, read] of reads.entries()) {
             const window = uncounted[index];
             if (read.status === "fulfilled" && read.value >= window.limit) {
-                this.throttledWindows.set(rememberedWindowKeyOf(partitionKey, window), { count: read.value }, rememberUntil);
+                this.rememberedWindows.set(rememberedWindowKeyOf(partitionKey, window), { count: read.value }, rememberUntil);
                 refusing ??= window;
             }
         }
         if (refusing)
             return { window: refusing.key, limit: refusing.limit, resetAt: rememberUntil };
         if (reads.some((read) => read.status === "rejected" && isKeyRangeThrottle(read.reason))) {
-            this.throttledWindows.set(throttledWindowKey, { unreadable: throttle }, rememberUntil);
+            this.rememberedWindows.set(throttledWindowKey, { unreadable: throttle }, rememberUntil);
         }
         throw throttle;
     }

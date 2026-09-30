@@ -291,6 +291,40 @@ describe('Declared refusals: the caller', () => {
 });
 
 describe('Declared refusals: creation', () => {
+    it('takes one map of codes per part of an app, as guards and policies are declared, and sends each part\'s codes', async () => {
+        const orderRefusals = { 'order-closed': { status: 409 } } as const;
+        const walletRefusals = { 'wallet-short': { data: z.object({ available: z.number() }) } } as const;
+        const app = initLambder().declareRefusals([orderRefusals, walletRefusals]).create({ apiPath: '/api' });
+        const store = app.registerApiGroups(app.defineApiGroup('order', {
+            pay: app.defineApi({
+                input: z.object({ closed: z.boolean() }),
+                output: z.object({ paid: z.literal(true) }),
+                refusals: ['order-closed', 'wallet-short'],
+            }, async (ctx) => ctx.apiPayload.closed
+                ? ctx.refuse('Closed.', { code: 'order-closed' })
+                : ctx.refuse('Short.', { code: 'wallet-short', data: { available: 3 } })),
+        }));
+        expectTypeOf<typeof store.ApiContract['order.pay']['refusals']>().toEqualTypeOf<{ 'order-closed': {}; 'wallet-short': { data: { available: number } } }>();
+
+        const visitor = lambderTestApp(store).visitor();
+        const closed = await visitor.apiOutcome('order.pay', { closed: true });
+        assertApiRefusal(closed, 'order-closed');
+        expect(closed.status).toBe(409);
+        const short = await visitor.apiOutcome('order.pay', { closed: false });
+        assertApiRefusal(short, 'wallet-short');
+        expect(short.refusal.data).toEqual({ available: 3 });
+    });
+
+    it('refuses a code two maps of the list declare, at the type level and at the call', () => {
+        const orderRefusals = { 'order-closed': {} } as const;
+        const shippingRefusals = { 'order-closed': { status: 409 }, 'address-invalid': {} } as const;
+        // @ts-expect-error "order-closed" is declared in two of the maps
+        expect(() => initLambder().declareRefusals([orderRefusals, shippingRefusals])).toThrow(/the refusal code "order-closed" is declared in two of the maps given to declareRefusals\(\)/);
+        // Each map is held to the vocabulary's rules on its own.
+        // @ts-expect-error a code under the framework's prefix, in the second map
+        expect(() => initLambder().declareRefusals([orderRefusals, { 'lambder/mine': {} }])).toThrow(/under the "lambder\/" prefix/);
+    });
+
     it('refuses a vocabulary it cannot use, at the type level and at creation', () => {
         // @ts-expect-error a code under the framework's prefix
         expect(() => initLambder().declareRefusals({ 'lambder/mine': {} }).create({ apiPath: '/api' })).toThrow(/under the "lambder\/" prefix/);

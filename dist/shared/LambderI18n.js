@@ -112,6 +112,38 @@ const interpolate = (text, params) => {
         return text;
     return text.replace(/\{([^{}]+)\}/g, (token, name) => Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : token);
 };
+/** The `{name}` tokens a text carries, as interpolate reads them. */
+const placeholdersOf = (text) => new Set([...text.matchAll(/\{([^{}]+)\}/g)].map((match) => match[1]));
+/** A set of placeholders as a message shows it: `{count}, {name}`, or "none". */
+const describePlaceholders = (placeholders) => placeholders.size ? [...placeholders].sort().map((name) => `{${name}}`).join(", ") : "none";
+/** How many mismatched translations an error lists before it only counts the rest. */
+const PLACEHOLDER_MISMATCH_LIMIT = 20;
+/**
+ * Refuses translations that do not carry the placeholders of the text they
+ * translate. The default language's text is the contract the translator's
+ * type takes its parameters from, so a translation that drops one loses the
+ * value a caller passed, and one that adds one shows its `{token}` as it
+ * is. `lookupDefault` answers the default language's text for a key, and a
+ * key it has none for is left to the other checks.
+ */
+const assertPlaceholdersKept = (lookupDefault, lang, dict, label) => {
+    const mismatches = [];
+    for (const [key, text] of Object.entries(dict)) {
+        const original = lookupDefault(key);
+        if (original === undefined || typeof text !== "string")
+            continue;
+        const expected = placeholdersOf(original);
+        const found = placeholdersOf(text);
+        if (expected.size === found.size && [...expected].every((name) => found.has(name)))
+            continue;
+        mismatches.push(`"${key}" has ${describePlaceholders(found)} where the default language has ${describePlaceholders(expected)}`);
+    }
+    if (mismatches.length === 0)
+        return;
+    const listed = mismatches.slice(0, PLACEHOLDER_MISMATCH_LIMIT).map((line) => `  ${line}`);
+    const more = mismatches.length > PLACEHOLDER_MISMATCH_LIMIT ? [`  ... and ${mismatches.length - PLACEHOLDER_MISMATCH_LIMIT} more`] : [];
+    throw new Error([`LambderI18n: in ${label}, these "${lang}" translations carry other placeholders than the default language's text:`, ...listed, ...more].join("\n"));
+};
 const layerLookup = (layer, lang, key) => {
     for (let node = layer; node; node = node.parent) {
         const value = node.dicts[lang]?.[key];
@@ -133,13 +165,22 @@ const assertInlineDefaultBlock = (dict, defaultLanguage, label) => {
         throw new Error(`LambderI18n: ${label} must give the default language "${defaultLanguage}" inline, not as a loader.`);
     }
 };
-const createLayer = (core, sources, parent) => {
+/**
+ * A layer over its parent, from a dictionary set as configured. The inline
+ * blocks' placeholders are checked here, against the default language's
+ * texts the layer reaches; a loader's are checked when it has run.
+ */
+const createLayer = (core, sources, parent, label) => {
     const layer = { dicts: {}, loaders: new Map(), inFlight: new Map(), parent };
     for (const [lang, source] of Object.entries(sources)) {
         if (typeof source === "function")
             layer.loaders.set(lang, source);
         else if (source)
             layer.dicts[lang] = source;
+    }
+    for (const [lang, dict] of Object.entries(layer.dicts)) {
+        if (lang !== core.defaultLanguage && dict)
+            assertPlaceholdersKept((key) => layerLookup(layer, core.defaultLanguage, key), lang, dict, label);
     }
     if (layer.loaders.size > 0)
         core.lazyLayers.add(layer);
@@ -172,6 +213,7 @@ const startLayerLoad = (core, layer, lang, loader) => {
         const dict = dictionaryFromLoaded(loaded, lang);
         if (layer.parent)
             assertNoRedeclaredKeys(layer.parent, core.defaultLanguage, dict, `the "${lang}" loader`);
+        assertPlaceholdersKept((key) => layerLookup(layer, core.defaultLanguage, key), lang, dict, `the "${lang}" loader`);
         // Translations registered while the loader ran override what it brought.
         layer.dicts[lang] = { ...dict, ...layer.dicts[lang] };
     })
@@ -254,11 +296,11 @@ const buildInstance = (core, layer) => {
         },
         extend(dict) {
             validateExtension(dict, core.languageList, "extend() dictionary");
-            return buildInstance(core, createLayer(core, dict, layer));
+            return buildInstance(core, createLayer(core, dict, layer, "extend() dictionary"));
         },
         extendPartial(dict) {
             validateExtension(dict, core.enforced, "extendPartial() dictionary");
-            return buildInstance(core, createLayer(core, dict, layer));
+            return buildInstance(core, createLayer(core, dict, layer, "extendPartial() dictionary"));
         },
         loadLanguage(code) {
             const lang = code ?? core.state.resolve();
@@ -269,6 +311,9 @@ const buildInstance = (core, layer) => {
         registerDictionary(code, dict) {
             if (!core.isCode(code))
                 throw new Error(`LambderI18n: unsupported language code "${code}".`);
+            if (code !== core.defaultLanguage) {
+                assertPlaceholdersKept((key) => layerLookup(layer, core.defaultLanguage, key), code, dict, `registerDictionary("${code}")`);
+            }
             layer.dicts[code] = { ...layer.dicts[code], ...dict };
             core.state.emitChange();
         },
@@ -350,5 +395,5 @@ export const createLambderI18n = (config) => {
         isCode,
         lazyLayers: new Set(),
     };
-    return buildInstance(core, createLayer(core, config.base, null));
+    return buildInstance(core, createLayer(core, config.base, null, "base dictionary"));
 };

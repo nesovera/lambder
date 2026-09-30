@@ -1,6 +1,7 @@
 import { readApiEnvelope, cookieValuesByName, isApiCallContentType, lowercaseHeaderNames } from "../api/LambderApiRequest.js";
 import { apiNameOfCallPath } from "../shared/wire/LambderApiNames.js";
 import { resolveClientIp } from "../shared/util/LambderClientIp.js";
+import { constantTimeEquals } from "../shared/util/LambderTextDigest.js";
 import { base64ToText } from "../shared/util/LambderBase64.js";
 import { LambderAnswerHeaders } from "../shared/wire/LambderAnswerHeaders.js";
 import { DEFAULT_API_PATH } from "../shared/wire/LambderDefaultApiPath.js";
@@ -69,7 +70,7 @@ const withoutStagePrefix = (path, stage) => stage && stage !== "$default" && (pa
     ? path.slice(stage.length + 1) || "/"
     : path;
 /** The render context for one request: everything a route handler, an API handler, a hook or a guard reads about it, built once from the Lambda event. */
-export const createContext = (event, lambdaContext, { apiPath = DEFAULT_API_PATH, trustedClientIpHeaders = [], trustedHostHeaders = [] } = {}) => {
+export const createContext = (event, lambdaContext, { apiPath = DEFAULT_API_PATH, trustedClientIpHeaders = [], trustedHostHeaders = [], originProof = null } = {}) => {
     // Normalize the two API Gateway payload formats into one shape.
     const eventFormat = isV2HttpEvent(event) ? "v2" : "v1";
     let host;
@@ -82,7 +83,7 @@ export const createContext = (event, lambdaContext, { apiPath = DEFAULT_API_PATH
     let get;
     let cookiePairs;
     let sourceIp;
-    const headers = event.headers ?? {};
+    let headers = event.headers ?? {};
     if (isV2HttpEvent(event)) {
         host = headers.host || event.requestContext.domainName || "";
         const apiId = event.requestContext.apiId;
@@ -127,6 +128,19 @@ export const createContext = (event, lambdaContext, { apiPath = DEFAULT_API_PATH
     for (const [name, values] of Object.entries(cookieList))
         cookie[name] = values[0];
     const lowercasedHeaders = lowercaseHeaderNames(headers);
+    // The origin proof is read, then taken off the headers the app reads
+    // (ctx.headers, ctx.header()), so no handler, hook or log of them meets
+    // the secret; the raw event keeps it. A request that does not carry it
+    // came to the origin some other way than through the proxy, and the
+    // proxy's headers on it are whatever its sender wrote.
+    let proven = true;
+    if (originProof) {
+        const proofHeader = originProof.header.toLowerCase();
+        const presented = lowercasedHeaders[proofHeader] ?? "";
+        proven = originProof.secrets.some((secret) => constantTimeEquals(presented, secret));
+        delete lowercasedHeaders[proofHeader];
+        headers = Object.fromEntries(Object.entries(headers).filter(([name]) => name.toLowerCase() !== proofHeader));
+    }
     const header = (name) => lowercasedHeaders[name.toLowerCase()];
     // A trusted forwarding header is trusted because a proxy in front of this
     // function writes it. A direct invoke has no such proxy: its headers are
@@ -135,19 +149,20 @@ export const createContext = (event, lambdaContext, { apiPath = DEFAULT_API_PATH
     // address and the host are the ones the invoker named (clientIp and host,
     // delivered as sourceIp and Host), and no header is read for either.
     const invokedDirectly = event.requestContext?.apiId === LAMBDER_INVOKE_API_ID;
+    const readsForwarding = proven && !invokedDirectly;
     // The first trusted header carrying a well-formed host, leftmost entry,
     // else the host the gateway saw. Behind CloudFront a Function URL sees
     // its own lambda-url domain, since CloudFront sends an origin its own
     // Host, so cookie domains and host routing need the viewer's host from a
     // header the distribution writes.
-    for (const name of invokedDirectly ? [] : trustedHostHeaders) {
+    for (const name of readsForwarding ? trustedHostHeaders : []) {
         const forwarded = (lowercasedHeaders[name.toLowerCase()] ?? "").split(",")[0].trim();
         if (HOST_VALUE_PATTERN.test(forwarded)) {
             host = forwarded;
             break;
         }
     }
-    const ip = resolveClientIp(lowercasedHeaders, sourceIp, invokedDirectly ? [] : trustedClientIpHeaders);
+    const ip = resolveClientIp(lowercasedHeaders, sourceIp, readsForwarding ? trustedClientIpHeaders : []);
     // Decode body: keep the raw string, then parse as JSON with urlencoded fallback.
     const rawBody = event.isBase64Encoded
         ? (event.body ? base64ToText(event.body) : "")

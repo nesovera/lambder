@@ -15,8 +15,9 @@ import type { APIGatewayProxyEvent, APIGatewayProxyEventV2, Context } from "aws-
 import type { LambderHttpEventFormat } from "../core/LambderContext.js";
 import { restoreBytes } from "../shared/wire/LambderCompressionCodec.js";
 import { bytesToBase64 } from "../shared/util/LambderBase64.js";
-import { LAMBDER_INVOKE_API_ID, LAMBDER_LOCAL_API_ID } from "../shared/wire/LambderInvokeApiId.js";
+import { LAMBDER_INVOKE_API_ID, LAMBDER_LOCAL_API_ID, LAMBDER_PARENT_REQUEST_HEADER } from "../shared/wire/LambderInvokeApiId.js";
 import { buildEnvelopeFields } from "../shared/transport/LambderApiTransport.js";
+import { currentRequestId } from "../shared/util/LambderInvocationScope.js";
 import type { LambderCompressedBrotliPayload, LambderCompressedGzipPayload } from "../shared/wire/LambderRequestPayload.js";
 
 /**
@@ -28,6 +29,7 @@ import type { LambderCompressedBrotliPayload, LambderCompressedGzipPayload } fro
 export const LAMBDER_INVOKE_HEADER = "x-lambder-invoke";
 /** The invoking function's name, when the caller runs in Lambda; for the callee's logs. */
 export const LAMBDER_INVOKED_BY_HEADER = "x-lambder-invoked-by";
+export { LAMBDER_PARENT_REQUEST_HEADER };
 /** The value of the marker header; a future incompatible event shape would bump it. */
 export const LAMBDER_INVOKE_PROTOCOL = "1";
 /**
@@ -103,9 +105,10 @@ export function synthesizeLambdaHttpEvent(request: LambderSynthesizedRequest, op
     // what this event is. Forwarding a browser's headers wholesale is an
     // ordinary gateway-lambda pattern, and without these deletes it would let
     // a browser-shaped request claim to be an invoke, or an invoke name an
-    // invoking function that did not send it.
+    // invoking function or invocation that did not send it.
     delete headers[LAMBDER_INVOKE_HEADER];
     delete headers[LAMBDER_INVOKED_BY_HEADER];
+    delete headers[LAMBDER_PARENT_REQUEST_HEADER];
     if(options.invoke) delete headers[FORWARDED_FOR_HEADER];
     headers.host = request.host;
     headers["accept-encoding"] = "br, gzip";
@@ -113,6 +116,8 @@ export function synthesizeLambdaHttpEvent(request: LambderSynthesizedRequest, op
         headers[LAMBDER_INVOKE_HEADER] = LAMBDER_INVOKE_PROTOCOL;
         const invokedBy = typeof process !== "undefined" ? process.env?.AWS_LAMBDA_FUNCTION_NAME : undefined;
         if(invokedBy) headers[LAMBDER_INVOKED_BY_HEADER] = invokedBy;
+        const parentRequestId = currentRequestId();
+        if(parentRequestId) headers[LAMBDER_PARENT_REQUEST_HEADER] = parentRequestId;
     }
     const isBinary = Buffer.isBuffer(request.body);
     if(request.contentType) headers["content-type"] = request.contentType;

@@ -7,7 +7,7 @@ import { envelopeAnswer, crashAnswer, plainRefusalEnvelope, refusalEnvelope, suc
 import { LambderApiOutputValidationError } from "../api/LambderApiOutputValidationError.js";
 import { describePayloadKind, isObjectPayload } from "../shared/wire/LambderObjectPayload.js";
 import { LambderApiRefusal, LAMBDER_REFUSAL_CODES, refuse as refuseApiCall } from "../shared/wire/LambderApiRefusal.js";
-import { allowedRefusalOf, readRefusalVocabulary, toRefusalCodes, } from "../api/LambderApiRefusals.js";
+import { allowedRefusalOf, declaredRefusalVocabulary, toRefusalCodes, } from "../api/LambderApiRefusals.js";
 import { coerceToError } from "../shared/wire/LambderCrashDetail.js";
 import { buildTransportEnvelope } from "../shared/transport/LambderApiTransport.js";
 import { lambderCookieJarTransport } from "../shared/transport/lambderCookieJarTransport.js";
@@ -163,7 +163,9 @@ export class LambderMockApp {
                         sessionSalt: sessionOptions.sessionSalt ?? "lambder-mock",
                         enableSlidingExpiration: sessionOptions.enableSlidingExpiration,
                         slidingWriteIntervalSeconds: sessionOptions.slidingWriteIntervalSeconds,
-                        dataRefresh: sessionOptions.dataRefresh,
+                        // As given: the manager refuses dataRefresh without
+                        // the schema, which an untyped caller can still pass.
+                        ...{ dataRefresh: sessionOptions.dataRefresh, dataSchema: sessionOptions.dataSchema },
                         // A plain-http page (device testing on a LAN) has no
                         // crypto.subtle, and a memory-only store is nothing
                         // anyone can leak, so hashing there protects nothing.
@@ -957,19 +959,21 @@ const lambderMockInitOf = (declared) => ({
 export const initLambderMock = () => ({
     ...lambderMockInitOf(null),
     /**
-     * Declares the server's refusal vocabulary on the mock: the same object,
-     * and the same `requireCodes`, the server's init declares, imported from
-     * shared code (codes, zod schemas, statuses and flags hold nothing
-     * secret). Given, every refusal an entry answers with is checked and sent
+     * Declares the server's refusal vocabulary on the mock: the same map, or
+     * list of maps, and the same `requireCodes`, the server's init declares,
+     * imported from shared code (codes, zod schemas, statuses and flags hold
+     * nothing secret). Given, every refusal an entry answers with is checked and sent
      * as the server would send it: the code among the codes the tables give
      * the entry, its data parsed through the code's schema from the input
      * form, and the declaration's status and flag. An entry whose tables name
      * a code needs it.
      */
     declareRefusals(refusals, options = {}) {
-        const vocabulary = readRefusalVocabulary(refusals);
-        if (!vocabulary)
-            throw new Error("LambderMockApp: declareRefusals() takes the vocabulary, an object of codes.");
-        return lambderMockInitOf({ refusals, vocabulary, requireCodes: (options.requireCodes ?? false) });
+        const declared = declaredRefusalVocabulary(refusals, "LambderMockApp");
+        return lambderMockInitOf({
+            refusals: declared.refusals,
+            vocabulary: declared.vocabulary,
+            requireCodes: (options.requireCodes ?? false),
+        });
     },
 });

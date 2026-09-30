@@ -1,5 +1,18 @@
 import { LambderApiRefusal, isLambderRefusalCode } from "../shared/wire/LambderApiRefusal.js";
 import { describePayloadKind, isObjectPayload } from "../shared/wire/LambderObjectPayload.js";
+import { mergeNamedMaps } from "../shared/util/LambderNamedMaps.js";
+/**
+ * A declareRefusals() option as the one vocabulary it declares, checked
+ * (see readRefusalVocabulary) and keyed. `declarer` names the init in the
+ * errors.
+ */
+export const declaredRefusalVocabulary = (option, declarer) => {
+    if (option === null || typeof option !== "object") {
+        throw new Error(`${declarer}: declareRefusals() takes the vocabulary, an object of codes or a list of them.`);
+    }
+    const refusals = mergeNamedMaps(option, "refusal code", "declareRefusals()");
+    return { refusals, vocabulary: readRefusalVocabulary(refusals) };
+};
 /** One code's declaration as checkedRefusal reads it: how a refusal with the code leaves, and its schema. */
 export const allowedRefusalOf = (declaration) => {
     const leaves = {

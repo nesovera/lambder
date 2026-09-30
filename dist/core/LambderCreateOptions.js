@@ -1,23 +1,13 @@
 import { assertRefusalCodesDeclared, readRefusalVocabulary } from "../api/LambderApiRefusals.js";
 import { assertPositiveInteger } from "../shared/util/LambderOptionChecks.js";
-/**
- * A named-maps option as one map: a lone map as it is, a list merged in
- * order. A name declared in two maps of the list is refused.
- */
-export const mergeNamedMaps = (option, what) => {
-    if (!Array.isArray(option))
-        return option;
-    const merged = {};
-    for (const map of option) {
-        for (const [name, declaration] of Object.entries(map)) {
-            if (Object.prototype.hasOwnProperty.call(merged, name)) {
-                throw new Error(`Lambder: the ${what} "${name}" is declared in two of the maps given to create(). Declare each name once.`);
-            }
-            merged[name] = declaration;
-        }
-    }
-    return merged;
-};
+// ---------------------------------------------------------------------------
+// Named maps: the guards and the rate-limit policies, each declared in one
+// map or in a list of maps (one per part of an app), merged in order.
+// ---------------------------------------------------------------------------
+// The named-maps option (one map, or a list of them) lives with the shared
+// utilities, since the refusal vocabulary takes it too; re-exported here,
+// where its users import it.
+export { mergeNamedMaps } from "../shared/util/LambderNamedMaps.js";
 /**
  * Everything create() refuses before an instance exists, in one place: a
  * value that cannot work is a startup error naming the option, not a 404 on
@@ -55,5 +45,34 @@ export const assertCreateOptions = (options) => {
     }
     if (options.requireApiGuards && !options.guards) {
         throw new Error("Lambder: requireApiGuards needs a guards map at creation for APIs to declare from.");
+    }
+    if (options.originProof !== undefined)
+        assertOriginProof(options);
+    if (options.callSummary !== undefined && options.callSummary !== false && typeof options.callSummary !== "function") {
+        throw new Error("Lambder: callSummary is false, or a function that receives each call's summary.");
+    }
+};
+/** Shortest secret an origin proof takes: one a sender could guess is no proof. 32 characters of hex or base64 is 128 bits or more. */
+export const MIN_ORIGIN_PROOF_SECRET_LENGTH = 32;
+/** An origin proof that proves something: a header name, secrets long enough not to guess, and trusted headers for it to guard. */
+const assertOriginProof = (options) => {
+    const proof = options.originProof;
+    if (typeof proof?.header !== "string" || !/^[A-Za-z0-9-]+$/.test(proof.header)) {
+        throw new Error("Lambder: originProof.header must be a header name, such as \"x-origin-proof\".");
+    }
+    if (!Array.isArray(proof.secrets) || proof.secrets.length === 0) {
+        throw new Error("Lambder: originProof.secrets must list the secret the proxy sets, with the previous one beside it during a rotation.");
+    }
+    for (const secret of proof.secrets) {
+        if (typeof secret !== "string" || secret.length < MIN_ORIGIN_PROOF_SECRET_LENGTH) {
+            throw new Error(`Lambder: every originProof secret must be a string of at least ${MIN_ORIGIN_PROOF_SECRET_LENGTH} characters; a shorter one could be guessed, and a guessed proof proves nothing.`);
+        }
+    }
+    const trusted = [...(options.trustedClientIpHeaders ?? []), ...(options.trustedHostHeaders ?? [])];
+    if (trusted.length === 0) {
+        throw new Error("Lambder: originProof guards the trustedClientIpHeaders and trustedHostHeaders, and this instance trusts none, so it would prove nothing.");
+    }
+    if (trusted.some((name) => name.toLowerCase() === proof.header.toLowerCase())) {
+        throw new Error(`Lambder: originProof.header "${proof.header}" is also a trusted header; the proof is its own header, which the app never reads.`);
     }
 };

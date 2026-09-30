@@ -134,6 +134,7 @@ builds an ordinary API context:
 | `ip` | The per-call `clientIp`, which becomes the event's `requestContext.http.sourceIp`; empty when the call did not supply one. The callee's `trustedClientIpHeaders` are not read on an invoke |
 | `header("x-lambder-invoke")` | `"1"` |
 | `header("x-lambder-invoked-by")` | The calling function's name, when the caller runs in Lambda (`AWS_LAMBDA_FUNCTION_NAME`) |
+| `header("x-lambder-parent-request-id")` | The request id of the invocation that made the call, when it runs under a Lambder handler; the callee's [call summary](./configuration.md#callsummary) records it as `parentRequestId`, so a query over both functions' logs joins a call to the calls it made |
 | `cookie` | Empty, unless the call carries a session |
 | `headers` | The above plus any per-call `headers` |
 | `event`, `lambdaContext` | The synthesized event and the callee's own real context |
@@ -178,9 +179,9 @@ it an address the browser chose. Any other forwarding header
 of this version.
 
 The constants are exported for guards and hooks that want to read them by name:
-`LAMBDER_INVOKE_HEADER`, `LAMBDER_INVOKED_BY_HEADER` and
-`LAMBDER_INVOKE_PROTOCOL` (the `"1"`, which a future incompatible event shape
-would bump).
+`LAMBDER_INVOKE_HEADER`, `LAMBDER_INVOKED_BY_HEADER`,
+`LAMBDER_PARENT_REQUEST_HEADER` and `LAMBDER_INVOKE_PROTOCOL` (the `"1"`,
+which a future incompatible event shape would bump).
 
 ## Constructor options
 

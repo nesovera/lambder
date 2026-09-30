@@ -25,3 +25,13 @@ export declare const LAMBDER_INVOKE_API_ID = "lambder-invoke";
  * it.
  */
 export declare const LAMBDER_LOCAL_API_ID = "lambder-local";
+/**
+ * The request id of the invocation that made an invoke, when it runs under a
+ * Lambder handler: the invoke event builder writes it, and the callee's call
+ * summary records it as its parentRequestId, so a query over both functions'
+ * logs joins a call to the calls it made. The server reads it only from an
+ * invoke (LAMBDER_INVOKE_API_ID), whose event no gateway lets a client write.
+ * Declared here, beside the ids, because the builder writes it and the
+ * server reads it.
+ */
+export declare const LAMBDER_PARENT_REQUEST_HEADER = "x-lambder-parent-request-id";

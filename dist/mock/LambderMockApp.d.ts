@@ -3,7 +3,7 @@ import type { LambderApiContractShape } from "../shared/wire/LambderApiContract.
 import { type LambderApiRequest } from "../api/LambderApiRequest.js";
 import { type LambderApiAnswer } from "../api/LambderApiAnswer.js";
 import { type LambderDeclaredRefuse, type LambderRefusalMessage } from "../shared/wire/LambderApiRefusal.js";
-import { type LambderDeclaredVocabulary, type LambderHandlerRefusalsOf, type LambderRefusalVocabulary, type LambderRefusalVocabularyChecks } from "../api/LambderApiRefusals.js";
+import { type LambderDeclaredVocabulary, type LambderHandlerRefusalsOf, type LambderRefusalVocabulary, type LambderRefusalVocabularyOption, type LambderRefusalVocabularyOptionChecks, type LambderMergedRefusalVocabulary } from "../api/LambderApiRefusals.js";
 import { type LambderApiTransport, type LambderApiTransportRequest } from "../shared/transport/LambderApiTransport.js";
 import { LambderCookieJar } from "../shared/transport/LambderCookieJar.js";
 import { type LambderApiGuard, type LambderGuardBuilder } from "../api/LambderApiGuards.js";
@@ -349,16 +349,16 @@ export declare class LambderMockApp<C extends LambderApiContractShape, S = any, 
  */
 export declare const initLambderMock: <C extends LambderApiContractShape, S = any>() => {
     /**
-     * Declares the server's refusal vocabulary on the mock: the same object,
-     * and the same `requireCodes`, the server's init declares, imported from
-     * shared code (codes, zod schemas, statuses and flags hold nothing
-     * secret). Given, every refusal an entry answers with is checked and sent
+     * Declares the server's refusal vocabulary on the mock: the same map, or
+     * list of maps, and the same `requireCodes`, the server's init declares,
+     * imported from shared code (codes, zod schemas, statuses and flags hold
+     * nothing secret). Given, every refusal an entry answers with is checked and sent
      * as the server would send it: the code among the codes the tables give
      * the entry, its data parsed through the code's schema from the input
      * form, and the declaration's status and flag. An entry whose tables name
      * a code needs it.
      */
-    declareRefusals<const TVocabulary extends LambderRefusalVocabulary, const TRequireCodes extends boolean = false>(refusals: TVocabulary & LambderRefusalVocabularyChecks<TVocabulary>, options?: {
+    declareRefusals<const TVocabulary extends LambderRefusalVocabularyOption, const TRequireCodes extends boolean = false>(refusals: TVocabulary & LambderRefusalVocabularyOptionChecks<TVocabulary>, options?: {
         requireCodes?: TRequireCodes;
     }): {
         /** Builds a mock guard: the server guard's shape, the handler seeing the mock's contexts. */
@@ -376,7 +376,7 @@ export declare const initLambderMock: <C extends LambderApiContractShape, S = an
          * codes and `data` the schema's input form, parsed as the server parses
          * it. The free refuse() where the mock declared none.
          */
-        refuse: [TVocabulary] extends [never] ? (content: string, options?: import("../shared/wire/LambderApiRefusal.js").LambderRefuseOptions) => never : LambderDeclaredRefuse<LambderHandlerRefusalsOf<TVocabulary, keyof TVocabulary & string>, TRequireCodes>;
+        refuse: [LambderMergedRefusalVocabulary<TVocabulary>] extends [never] ? (content: string, options?: import("../shared/wire/LambderApiRefusal.js").LambderRefuseOptions) => never : LambderDeclaredRefuse<LambderHandlerRefusalsOf<LambderMergedRefusalVocabulary<TVocabulary>, keyof LambderMergedRefusalVocabulary<TVocabulary> & string>, TRequireCodes>;
         /**
          * The mock app, with the guard map and the rate-limit policies inferred
          * from the options.
@@ -388,7 +388,7 @@ export declare const initLambderMock: <C extends LambderApiContractShape, S = an
          * dropped. `I` exists for the same reason `P` does, and
          * LambderMockSurplusKeys puts the error back on the key.
          */
-        create<const G extends Record<string, LambderApiGuard<any, any, any, LambderMockCallContext<S>, LambderMockSessionCallContext<S>>> = {}, const P extends LambderMockRateLimitPolicies<S> = {}, I extends boolean | LambderMockIdempotencyOptions<S> = boolean | LambderMockIdempotencyOptions<S>, const D extends Record<string, LambderGuardDeclarationEntry> = {}, const A extends Record<string, LambderApiOptionEntry> | undefined = undefined>(options: LambderMockAppOptions<C, S, G, P, I, D, A>): LambderMockApp<C, S, G, [A] extends [undefined] ? false : true, TVocabulary, TRequireCodes>;
+        create<const G extends Record<string, LambderApiGuard<any, any, any, LambderMockCallContext<S>, LambderMockSessionCallContext<S>>> = {}, const P extends LambderMockRateLimitPolicies<S> = {}, I extends boolean | LambderMockIdempotencyOptions<S> = boolean | LambderMockIdempotencyOptions<S>, const D extends Record<string, LambderGuardDeclarationEntry> = {}, const A extends Record<string, LambderApiOptionEntry> | undefined = undefined>(options: LambderMockAppOptions<C, S, G, P, I, D, A>): LambderMockApp<C, S, G, [A] extends [undefined] ? false : true, LambderMergedRefusalVocabulary<TVocabulary>, TRequireCodes>;
     };
     /** Builds a mock guard: the server guard's shape, the handler seeing the mock's contexts. */
     guard: LambderGuardBuilder<LambderMockCallContext<S>, LambderMockSessionCallContext<S>>;

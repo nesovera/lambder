@@ -10,8 +10,8 @@
  */
 
 /**
- * The fixed windows a policy may cap, smallest first (the evaluation order),
- * with their length. The policy type derives from this table, so the two can
+ * The fixed windows a policy may cap, smallest first (the order a refusal
+ * names the smallest window by), with their length. The policy type derives from this table, so the two can
  * never drift.
  */
 export const RATE_LIMIT_WINDOWS = [

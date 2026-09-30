@@ -23,17 +23,21 @@ marks the two names it exports that the root entry does not.
 
 | Export | Client | Description |
 | --- | --- | --- |
-| `initLambder` | | Curried creator: fix the session data type, then `create(options)`, `guard(...)`, `rateLimitKey(...)` and `refuse(...)` typed to it; `declareRefusals(vocabulary, options?)` first binds the app's refusal vocabulary, so `guard`'s `ctx.refuse` and the init's `refuse` are typed to it and `create()` hands it to the instance. The canonical entry. See [Configuration](./configuration.md) |
+| `initLambder` | | Curried creator: fix the session data type, then `create(options)`, `guard(...)`, `rateLimitKey(...)` and `refuse(...)` typed to it; `declareRefusals(vocabulary, options?)` first binds the app's refusal vocabulary (one map of codes, or a list of maps), so `guard`'s `ctx.refuse` and the init's `refuse` are typed to it and `create()` hands it to the instance. The canonical entry. See [Configuration](./configuration.md) |
 | `Lambder` (default) | | The class itself. Use `initLambder` instead; a direct `new` widens the inferred policy types |
 | `LambderResolver` | | The `res` object routes, hooks and fallback handlers receive: the response builder plus `res.die.*`, which throws what it builds |
 | `LambderResponseBuilder` | | The response builder a resolver extends and a global error handler receives; reachable via `lambder.getResponseBuilder(ctx?)` |
-| `createContext` | | Build a render context from a raw Lambda event, given `{ apiPath?, trustedClientIpHeaders?, trustedHostHeaders? }` (`LambderContextOptions`, optional; `apiPath` defaults to `"/api"` as at `create()`) |
+| `createContext` | | Build a render context from a raw Lambda event, given `{ apiPath?, trustedClientIpHeaders?, trustedHostHeaders?, originProof? }` (`LambderContextOptions`, optional; `apiPath` defaults to `"/api"` as at `create()`) |
 | `isV2HttpEvent` | | Whether an event uses payload format v2 |
 
 Types: `LambderCreateOptions`, `LambderHandler`, `LambderRenderContext`, `LambderContextOptions`,
 `LambderSessionRenderContext`, `LambderHttpEvent`, `LambderHttpEventFormat`,
-`LambderActionTools`, `LambderCorsConfig`, and the `crashes` option's
-`LambderCrashOptions`, `LambderCrashReporter`, `LambderCrashSite`.
+`LambderActionTools`, `LambderCorsConfig`, `LambderOriginProof` (the
+`originProof` option), the `crashes` option's `LambderCrashOptions`,
+`LambderCrashReporter`, `LambderCrashSite`, and the `callSummary` option's
+`LambderCallSummary` (one call's line), `LambderCallSummaryOption`,
+`LambderCallOutcome` (how a call ended) and `LambderCallOutcomeHint` (an
+outcome with its refusal code).
 
 Types of the handlers an app writes, so a hook or a route handler can be
 declared apart from its registration: `LambderRoutePath`,
@@ -139,7 +143,7 @@ See [APIs and refusals](./apis.md).
 
 | Export | Client | Description |
 | --- | --- | --- |
-| `LambderSessionManager` | | The session model: tokens, expiry, sliding writes, `dataRefresh`, regeneration, over a store |
+| `LambderSessionManager` | | The session model: tokens, expiry, sliding writes, `dataSchema` and `dataRefresh`, regeneration, over a store |
 | `LambderSessionController` | | The per-request API: `ctx.sessionController` on every context, server and mock, and `lambder.getSessionController(ctx)` |
 | `LambderDdbSessionStore` | | Sessions at rest in DynamoDB, `session.data` Brotli-compressed |
 | `LambderMemorySessionStore` | | Sessions in a `Map`, for tests and the mock runtime |
@@ -147,7 +151,7 @@ See [APIs and refusals](./apis.md).
 | `LambderPlainSessionCrypto` | | The stand-in for a runtime without WebCrypto and a store that holds nothing worth hashing |
 | `isWebCryptoAvailable` | | Whether this runtime offers `crypto.subtle` |
 | `DEFAULT_SESSION_TOKEN_COOKIE_KEY`, `DEFAULT_SESSION_CSRF_COOKIE_KEY` | yes | The cookie names an app uses unless it configures its own |
-| `LambderSessionDataRefreshError` | | The `dataRefresh` callback threw |
+| `LambderSessionDataRefreshError` | | The `dataRefresh` callback threw, or returned data `dataSchema` refuses |
 | `LambderSessionReadError` | | Reading a session record failed at the store level |
 | `LambderSessionNotFoundError` | | No session for this request: the cookies named none, the one they named did not pair with the posted CSRF token, or the session was ended while the request held it (`updateSessionData`, `refreshSessionData`, `regenerateSession`) |
 | `LambderSessionAmbiguousError` | | The cookies cannot be resolved to one session, so none is used and every scope this host can write is cleared; a subclass of `LambderSessionNotFoundError`, so a route, a hook or an API call answers it as a missing session |
@@ -156,7 +160,7 @@ Types: `LambderSessionOptions`, `LambderSessionStore`, `LambderSessionRecord`
 (both generic over the session data), `LambderSessionChanges` and
 `LambderSessionUpdateResult` (what a store's `update` takes and answers),
 `LambderCreatedSession`,
-`LambderSessionDataRefreshConfig`, `LambderSessionCookieOptions`,
+`LambderSessionDataRefreshConfig`, `LambderSessionDataOptions` (`dataSchema` and `dataRefresh`), `LambderSessionCookieOptions`,
 `LambderSessionManagerOptions`, `LambderSessionControllerOptions`,
 `LambderSessionRequestInfo`, `LambderSessionCrypto`,
 `LambderDdbSessionStoreOptions`.
@@ -204,7 +208,10 @@ fields an input does not carry), `LambderParamlessGuardNames`, `LambderGuardData
 `LambderGuardRefusals` (a guard's `refusals` option), `LambderGuardRefusalNamesOf`
 (the codes an API's guards add to its own);
 declared refusals, `LambderRefusalDeclaration` (one code of the vocabulary) and
-`LambderRefusalVocabulary` (all of them, as declareRefusals() takes them),
+`LambderRefusalVocabulary` (all of them in one map),
+`LambderRefusalVocabularyOption` (one map or a list of maps, as
+declareRefusals() takes them), `LambderMergedRefusalVocabulary` (the one map a
+list declares),
 `LambderRefusalsOption` and `LambderRefusalsOptionValue` (an API's `refusals`
 option, typed and at runtime), `LambderRefusalNamesIn` (the codes a refusals
 option names), `LambderHandlerRefusalsOf` (the codes as
@@ -430,6 +437,7 @@ See [The API core](./api-core.md).
 | `isLambderInvokeError` | | Brand-based detection, safe across duplicate copies of the package |
 | `LAMBDER_INVOKE_HEADER` | | The marker header name (`x-lambder-invoke`) |
 | `LAMBDER_INVOKED_BY_HEADER` | | The header naming the calling function (`x-lambder-invoked-by`) |
+| `LAMBDER_PARENT_REQUEST_HEADER` | | The header carrying the calling invocation's request id (`x-lambder-parent-request-id`), which the callee's call summary records as its `parentRequestId` |
 | `LAMBDER_INVOKE_PROTOCOL` | | The marker's value (`"1"`) |
 | `LAMBDER_INVOKE_MAX_EVENT_BYTES` | | `5_500_000`, the guard applied to the event before it is sent |
 | `DEFAULT_INVOKE_REQUEST_COMPRESSION_SETTINGS` | | `{ minBytes: 4096, quality: 5 }` |
@@ -463,7 +471,7 @@ See [Translations](./i18n.md).
 
 | Export | Description |
 | --- | --- |
-| `initLambderMock` | Fix the contract and session types, then `guard`, `rateLimitKey`, `refuse` and `create(options)`; `declareRefusals(vocabulary, options?)` first binds the server's refusal vocabulary, the same object the server's init declares, so every handler's `ctx.refuse` takes a code's data in its input form and the mock parses it as the server does |
+| `initLambderMock` | Fix the contract and session types, then `guard`, `rateLimitKey`, `refuse` and `create(options)`; `declareRefusals(vocabulary, options?)` first binds the server's refusal vocabulary, the same map or list of maps the server's init declares, so every handler's `ctx.refuse` takes a code's data in its input form and the mock parses it as the server does |
 | `LambderMockApp` | The runtime: registry, transports, sessions, failure injection, subscription, call log |
 | `lambderMockPoliciesFrom` | The server's rate-limit policies as the mock restates them, from the generated `rateLimitPolicies` table plus the key handlers the table cannot hold, required for exactly the custom-keyed policies |
 | `lambderMockConsoleLogger` | A ready-made subscriber |
@@ -547,6 +555,7 @@ See [Testing](./testing.md).
 | `writeApiContract` | Writes the server's contract type as plain types in a module that imports nothing, for a client to compile instead of the server, or checks the one on disk, naming the APIs that moved; a write is verified against the contract, entry by entry, before the file is touched |
 | `writeApiOptions` | Writes the declared options of every API, every rate-limit policy less its key handler and every guard's input mode and refusal codes as three `as const` tables of plain data (`apiOptions`, `rateLimitPolicies`, `guardDeclarations`), from the instance a module exports, or checks the one on disk, naming what moved per table. See [the options as a generated file](./apis.md#the-options-as-a-generated-file) |
 | `writeApiGuardParams` | Writes one guard's parameters as an `as const` table (`guardParams`) of the APIs that declare it and what each gives it, and nothing else about any API: the least a browser gating on the guard needs. See [one guard's parameters, for a browser](./apis.md#one-guards-parameters-for-a-browser) |
+| `generateApiFiles` | Writes, or with `check` verifies, every file a script names for each of its apps (the contract, the signatures, the options, the guard parameters), in one call that names everything stale or broken. See [Generating every file at once](./apis.md#generating-every-file-at-once) |
 
 Types: `LambderApiSignatureSource` (what it reads: anything with
 `apiSignatureEntries()`), `LambderApiSignatureFileOptions`,
@@ -555,7 +564,9 @@ Types: `LambderApiSignatureSource` (what it reads: anything with
 module that exports the instance),
 `LambderApiOptionsSource`, `LambderApiOptionsFileOptions`,
 `LambderApiOptionsFileResult`, `LambderApiGuardParamsFileOptions`,
-`LambderApiGuardParamsFileResult`, `LambderNameChanges`.
+`LambderApiGuardParamsFileResult`, `LambderNameChanges`, and what
+`generateApiFiles` takes and answers: `LambderApiFilesConfig`,
+`LambderApiFilesApp` (one app's module and files), `LambderApiFilesResult`.
 
 See [APIs](./apis.md#signatures-when-a-client-must-update) and
 [the contract as a generated file](./apis.md#the-contract-as-a-generated-file).

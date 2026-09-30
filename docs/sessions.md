@@ -31,6 +31,7 @@ const lambder = initLambder<SessionData>().create({
 | `slidingWriteIntervalSeconds` | `max(60, 5% of TTL)` | Minimum gap between sliding writes |
 | `cookie` | none | Cookie scope: `domain`, `path`, `sameSite`, `secure` (below) |
 | `tokenCookieKey`, `csrfCookieKey` | `LMDRSESSIONTKID`, `LMDRSESSIONCSTK` | Cookie names. Prefix both with `__Host-` unless you need cross-subdomain sessions: it is the only thing that stops a sibling host planting a session cookie, and it is one line ([below](#more-than-one-session-cookie-on-one-request)) |
+| `dataSchema` | none; required beside `dataRefresh` | The zod schema of `session.data`, checked on every read ([below](#the-shape-of-session-data)) |
 | `dataRefresh` | none | Opt-in freshness for `session.data` (below) |
 | `crypto` | WebCrypto | Hashing and randomness for the tokens; `LambderPlainSessionCrypto` where a runtime has no `crypto.subtle` and the store holds nothing worth hashing |
 
@@ -320,11 +321,11 @@ without the `session` option, touching `ctx.sessionController` throws and says s
 
 | Method | Description |
 | --- | --- |
-| `createSession(sessionKey, data?, ttlInSeconds?)` | Start a new session, persist it, and write its cookies |
+| `createSession(sessionKey, data?, ttlInSeconds?)` | Start a new session, persist it, and write its cookies. Throws when `dataSchema` refuses the data ([below](#the-shape-of-session-data)) |
 | `issueSession(sessionKey, data?, ttlInSeconds?)` | The same, handing back the raw tokens beside the session (tests, the mock runtime) |
 | `fetchSession()` | Fetch and validate the existing session. Throws `LambderSessionNotFoundError` when there is none, which a route, a hook or an API answers as a missing session |
 | `fetchSessionIfExists()` | The session, or null |
-| `updateSessionData(newData)` | Write new session data. Throws `LambderSessionNotFoundError` when the session was ended while the request held it, which an API call answers as sessionExpired |
+| `updateSessionData(newData)` | Write new session data. Throws when `dataSchema` refuses it, and `LambderSessionNotFoundError` when the session was ended while the request held it, which an API call answers as sessionExpired |
 | `refreshSessionData()` | Run the `dataRefresh` callback now, regardless of TTL. Throws `LambderSessionNotFoundError` when the session is over (the callback ended it, or it was ended while the request held it) |
 | `endSession()` | End this session and delete it |
 | `endSessionAll()` | End every session for this sessionKey (all devices), this request's own included: to leave the caller signed in, create the replacement after it rather than before |
@@ -467,6 +468,41 @@ to be a long random string rather than a memorable one. What the salt buys is
 unlinkability against someone who sees KEYS without items: a key-only index, a
 log or a metric carrying partition keys, a query that projects no attributes.
 
+## The shape of session data
+
+A session record outlives the code that wrote it: a deploy that renames a
+field of `SessionData` still meets records written before it, whose data the
+new code's types describe wrongly. Give `dataSchema`, the zod schema of
+`session.data`, and every read checks the record's data against it:
+
+- Data that matches reaches the request as the schema reads it, so keys the
+  schema does not declare are stripped and its defaults filled.
+- Data that does not match is refreshed on that read when `dataRefresh` is
+  configured (below), whatever its deadline, so a deploy that changes the
+  data's shape applies to every live session on its next request. Without
+  `dataRefresh` nothing can rebuild it, and the session ends: the record is
+  deleted and the request answered as session-expired.
+- A refresh's output is held to the schema too. Output it refuses fails the
+  read as a `LambderSessionDataRefreshError` naming the paths and what each
+  expected, never the values, and nothing is written.
+- So is the data the app writes: `createSession()` and `updateSessionData()`
+  throw on data the schema refuses, naming the paths the same way, and write
+  nothing. Stored, that data would end the session on its next read, a
+  sign-out right after the sign-in.
+- The record keeps the data as it was written or refreshed, and the request
+  is served the schema's output, so every read parses exactly what its write
+  was checked with, a schema that transforms included.
+
+`dataRefresh` requires `dataSchema`, at compile time and at creation: data a
+refresh derives from the app's state changes shape as the app does, and
+without the schema a record written before the change is served in its old
+shape until its refresh comes due.
+
+```typescript
+export const sessionDataSchema = z.object({ userId: z.string(), roles: z.array(z.string()) });
+export type SessionData = z.infer<typeof sessionDataSchema>;
+```
+
 ## Keeping session data fresh
 
 Session data often caches values derived from external state: roles,
@@ -482,6 +518,7 @@ const lambder = initLambder<SessionData>().create({
     session: {
         store: new LambderDdbSessionStore({ tableName: "website-session", region: "us-east-1" }),
         sessionSalt: process.env.SESSION_SALT!,
+        dataSchema: sessionDataSchema,   // required beside dataRefresh (above)
         dataRefresh: {
             ttlSeconds: 600,   // data is renewed at most every 10 minutes
             refresh: async (session) => {
@@ -579,7 +616,7 @@ refreshing.
 | --- | --- |
 | `LambderSessionNotFoundError` | No session for this request: the cookies named none, or the one they named did not pair with the posted CSRF token. Also thrown by `updateSessionData()`, `refreshSessionData()` and `regenerateSession()` when the session was ended while the request held it (a logout or a password change elsewhere, or the `dataRefresh` callback). `fetchSessionIfExists()` answers null for it |
 | `LambderSessionAmbiguousError` | The request's session cookies cannot be resolved to one session. A subclass of `LambderSessionNotFoundError`, so it is answered as a missing session wherever that one is and `fetchSessionIfExists()` answers null for it; the response carries the clearing cookies |
-| `LambderSessionDataRefreshError` | The `dataRefresh` callback threw. The session is untouched |
+| `LambderSessionDataRefreshError` | The `dataRefresh` callback threw, or returned data `dataSchema` refuses. The session is untouched |
 | `LambderSessionReadError` | Reading the session record failed at the store level. Deliberately not reported as "no session" |
 
 `fetchSessionIfExists()` swallows the first two and nothing else. Anything else
