@@ -4,17 +4,19 @@ import { moduleUrlOf, type LambderModuleLocation } from "./moduleLocation.js";
 import { writeFileAtomically } from "./writeFileAtomically.js";
 
 /*
- * What the two generators of option tables share (writeApiOptions, the whole
- * declarations; writeApiGuardParams, one guard's parameters): loading the
- * instance that reports the options, reading a table back out of a file
- * already written, saying which names of a table moved, and the end of a run,
- * checking or writing the file.
+ * What the two generators of option files share (writeApiOptions, the whole
+ * declarations as tables; writeApiGuardParams, one guard's parameters as one
+ * export per API): loading the instance that reports the options, the
+ * header, saying which names moved, and the end of a run, checking or
+ * writing the file. Each reads its own statements back.
  *
- * A table is written as `export const <name> = <JSON> as const ...`, so it
- * is read back as the JSON between its `=` and its `as const`: re-indentation
- * and line endings change nothing, and a formatter that swaps the quotes
- * makes the file unreadable here, and so stale, which the `// prettier-ignore`
- * line above each table exists to prevent.
+ * writeApiOptions writes a table as `export const <name> = <JSON> as const
+ * ...` (tableStatementLines) and reads it back as the JSON between its `=`
+ * and its `as const` (readGeneratedTable): re-indentation and line endings
+ * change nothing, and a formatter that swaps the quotes makes the file
+ * unreadable here, and so stale, which the `// prettier-ignore` line above
+ * each table exists to prevent. writeApiGuardParams reads its exports back
+ * line by line, each behind the same `// prettier-ignore`.
  */
 
 /** What the generators read the options from: a Lambder instance, or anything else that reports them the same way. */
@@ -108,7 +110,7 @@ export const settleGeneratedFile = (run: {
     previousText: string | null;
     /** Whether that text held the tables as written; false for a file rewritten by hand. */
     readBack: boolean;
-    /** Each table the file holds, under its exported name: how many entries it has now, and which of them moved. */
+    /** Each table the file holds, under the name its lines print (a table's exported name): how many entries it has now, and which of them moved. */
     tables: readonly { name: string; count: number; changes: LambderNameChanges }[];
     /** What the tables hold, for the lines: "6 APIs, 4 policies, 5 guards". */
     held: string;

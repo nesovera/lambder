@@ -9,6 +9,45 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [14.0.1] - 2026-09-30
+
+A major: `writeApiGuardParams` writes one export per API in place of one
+table, so a browser carries only the guard parameters its screens import,
+and none of the API names behind them.
+
+### Changed (breaking)
+
+- **`writeApiGuardParams` writes one export per API** that declares the
+  guard, in place of the `guardParams` table: `orders.list` exports
+  `ordersListGuardParam`, holding the parameter as declared (`true` for the
+  guard named without one) and typed
+  `LambderApiGuardParam<"orders.list", "store", literal>`. A bundler keeps
+  only the exports a client imports, and none of them carries its API's name,
+  which sits in the export's type and doc comment alone, so a page no longer
+  ships the name of every API behind the guard and what each asks. The
+  module imports the tag type from `lambder/client`, as a type. Two APIs
+  whose names would export under one identifier fail the write, and so does
+  a `null` parameter, which the tag cannot carry; a guard no API declares
+  writes an empty module. A file still in the table form reads as one to
+  regenerate, on a check and on a write.
+  - To move: regenerate the file, and import the exports a screen gates on
+    in place of reading `guardParams[name]`. A function that takes any of a
+    guard's parameters reads their union off the module with a type-only
+    import (`(typeof params)[keyof typeof params]`, over
+    `import type * as params`). Code that needs every API's name, a test
+    walking them all, reads it from the `writeApiOptions` file.
+
+### Added
+
+- **`LambderApiGuardParam`** (`lambder/client`, `lambder`): the type of each
+  export `writeApiGuardParams` writes, a guard's parameter tagged in types
+  alone with the API's name and the guard's, so a function typed to a
+  guard's parameters refuses a hand-written literal.
+- **`apiGuardParamExportName`** (`lambder/client`, `lambder`): the identifier
+  `writeApiGuardParams` exports an API's parameter under, for code that reads
+  a generated module by API name, such as a test comparing it with the
+  server.
+
 ## [13.0.1] - 2026-09-30
 
 A major: session data is checked against a schema on every read, and

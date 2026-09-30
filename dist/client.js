@@ -28,7 +28,7 @@ export { LambderApiRefusal, isLambderApiRefusal, isLambderRefusalCode, refuse, r
 export { isObjectPayload } from "./shared/wire/LambderObjectPayload.js";
 // The server's declared options as plain data (the generated options module's
 // entry types) and the readers a client derives its own facts from.
-export { apiGuardParam } from "./shared/wire/LambderApiOptionEntries.js";
+export { apiGuardParam, apiGuardParamExportName } from "./shared/wire/LambderApiOptionEntries.js";
 // A crash described for a caller allowed to see it (the envelope's `crash` field; pure, no Node built-ins).
 export { describeCrash, errorFromCrashDetail } from "./shared/wire/LambderCrashDetail.js";
 // Request payload compression (browser-safe: gzip via CompressionStream, no Node built-ins).

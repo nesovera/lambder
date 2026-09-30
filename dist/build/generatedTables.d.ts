@@ -52,7 +52,7 @@ export declare const settleGeneratedFile: (run: {
     previousText: string | null;
     /** Whether that text held the tables as written; false for a file rewritten by hand. */
     readBack: boolean;
-    /** Each table the file holds, under its exported name: how many entries it has now, and which of them moved. */
+    /** Each table the file holds, under the name its lines print (a table's exported name): how many entries it has now, and which of them moved. */
     tables: readonly {
         name: string;
         count: number;

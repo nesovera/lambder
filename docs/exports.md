@@ -118,6 +118,7 @@ See [APIs and refusals](./apis.md).
 | `describeCrash` | yes | Describe a thrown error for the envelope's `crash` field: name, message, stack, cause chain, where it happened |
 | `errorFromCrashDetail` | yes | Rebuild an Error (with its cause chain) from a crash detail |
 | `apiGuardParam` | yes | The parameter an API's guards option gives a guard, read off the generated `apiOptions` table with the literal the table pins: the value in the map form, `true` for a guard named without one, `undefined` when the API does not declare it |
+| `apiGuardParamExportName` | yes | The identifier `writeApiGuardParams` exports an API's parameter under (`orders.list` exports `ordersListGuardParam`), for code that reads a generated module by API name |
 
 Types: `LambderApiContractShape`; the envelope, `LambderApiEnvelopeBody` (a
 `LambderApiSuccessEnvelope` or a `LambderApiRefusalEnvelope`),
@@ -135,7 +136,9 @@ types `LambderApiOptionEntry`, `LambderRateLimitPolicyEntry` and
 `LambderGuardDeclarationEntry`, and the readers over a generated table
 `LambderApisWithGuard` (the APIs naming a guard), `LambderApisGuardedBy` (the
 APIs whose guards option is exactly this), `LambderApisWithMode` and
-`LambderGuardParamOf`.
+`LambderGuardParamOf`; and `LambderApiGuardParam`, the type of each export
+`writeApiGuardParams` writes: the parameter an API gives a guard, tagged in
+types alone with the API's name and the guard's.
 
 See [APIs and refusals](./apis.md).
 
@@ -554,7 +557,7 @@ See [Testing](./testing.md).
 | `writeApiSignatures` | Writes the signature module both sides ship from the instance a module exports, or checks the one on disk, naming the endpoints that moved, and verifies it against the module loaded in a fresh process |
 | `writeApiContract` | Writes the server's contract type as plain types in a module that imports nothing, for a client to compile instead of the server, or checks the one on disk, naming the APIs that moved; a write is verified against the contract, entry by entry, before the file is touched |
 | `writeApiOptions` | Writes the declared options of every API, every rate-limit policy less its key handler and every guard's input mode and refusal codes as three `as const` tables of plain data (`apiOptions`, `rateLimitPolicies`, `guardDeclarations`), from the instance a module exports, or checks the one on disk, naming what moved per table. See [the options as a generated file](./apis.md#the-options-as-a-generated-file) |
-| `writeApiGuardParams` | Writes one guard's parameters as an `as const` table (`guardParams`) of the APIs that declare it and what each gives it, and nothing else about any API: the least a browser gating on the guard needs. See [one guard's parameters, for a browser](./apis.md#one-guards-parameters-for-a-browser) |
+| `writeApiGuardParams` | Writes one guard's parameters as one export per API that declares it (`orders.list` exports `ordersListGuardParam`), each typed `LambderApiGuardParam`, and nothing else about any API: a browser gating on the guard imports the ones its screens use, and its bundle carries those alone. See [one guard's parameters, for a browser](./apis.md#one-guards-parameters-for-a-browser) |
 | `generateApiFiles` | Writes, or with `check` verifies, every file a script names for each of its apps (the contract, the signatures, the options, the guard parameters), in one call that names everything stale or broken. See [Generating every file at once](./apis.md#generating-every-file-at-once) |
 
 Types: `LambderApiSignatureSource` (what it reads: anything with
