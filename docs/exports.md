@@ -170,7 +170,8 @@ See [Secrets and retries](./secrets.md).
 
 Types: guards, `LambderApiGuard`, `LambderGuardBuilder`, `LambderGuardMeta`, `LambderGuardMetaMap`, `LambderGuardRunAt`,
 `LambderGuardsOption`, `LambderGuardsOptionValue`, `LambderAllowedGuardNames`,
-`LambderParamlessGuardNames`, `LambderGuardDataOf`, `LambderGuardInputsOf`,
+`LambderGuardNamesInputLacks` (the apiInput guards among some names whose
+fields an input does not carry), `LambderParamlessGuardNames`, `LambderGuardDataOf`, `LambderGuardInputsOf`,
 `LambderGuardRefusals` (a guard's `refusals` option), `LambderGuardRefusalNamesOf`
 (the codes an API's guards add to its own);
 declared refusals, `LambderRefusalDeclaration` (one code of the vocabulary) and
@@ -185,7 +186,9 @@ rate limits, `LambderApiRateLimitsConfig`, `LambderApiRateLimitPolicyConfig`,
 `LambderRateLimitBudget`, `LambderRateLimitChargeAt`,
 `LambderRateLimitOption`, `LambderRateLimitOptionValue`,
 `LambderRateLimitOverride`, `LambderRateLimitMessage` (a rate-limit refusal's
-words, under the framework's code), `LambderAllowedPolicyNames`, and for charging a
+words, under the framework's code), `LambderAllowedPolicyNames`,
+`LambderPolicyNamesInputLacks` (the apiInput-keyed policies among some names
+whose key fields an input does not carry), and for charging a
 policy from code, `LambderContextRateLimit`, `LambderContextRateLimitCheck`,
 `LambderRateLimitCheckResult`, `LambderChargeablePolicyNames`,
 `LambderChargeKeyArgs`; idempotency,

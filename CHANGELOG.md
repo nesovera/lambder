@@ -9,6 +9,58 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [11.0.1] - 2026-09-29
+
+A major for an app with many APIs: what one API costs the type checker no
+longer grows with the app's keyed guards and rate-limit policies. The same
+declarations compile and the same ones fail, and nothing changes at runtime.
+It is a major because the exported option types no longer take the API's
+input.
+
+### Changed (breaking)
+
+- **`LambderGuardsOption`, `LambderRateLimitOption`, `LambderAllowedGuardNames`,
+  `LambderParamlessGuardNames` and `LambderAllowedPolicyNames` no longer take
+  a payload.** They name what an instance lets one kind of API declare
+  (session guards and session-keyed policies only on session APIs) and depend
+  on the instance alone. Whether an API's input carries the fields an apiInput
+  guard or an apiInput-keyed policy reads is asked separately, of the names
+  the API declared, by `LambderGuardNamesInputLacks` and
+  `LambderPolicyNamesInputLacks`.
+  - To move: drop the payload argument (`LambderGuardsOption<Guards, true>`
+    for `LambderGuardsOption<Guards, Payload, true>`), and where you relied on
+    the payload filter, ask the new types of the names you declared.
+
+### Changed
+
+- **An API's `guards` and `rateLimit` options are held to its input once the
+  input is known.** Their constraints used to read the API's own input type,
+  so for every API the compiler rebuilt the names it may declare, over every
+  guard and policy the instance holds, while that input was still being
+  inferred. The work grew with an app's APIs times its apiInput guards and
+  apiInput-keyed policies, exponentially in the worst case: 25 APIs
+  registered in one chain, each declaring one of 10 apiInput guards, took
+  12.6 million type instantiations. The constraints now depend on the
+  instance alone, and `LambderPayloadSliceCheck`, intersected onto the
+  options, refuses an apiInput guard or policy whose fields the input does
+  not carry. The same 25 APIs now take 45 thousand, about what they cost on
+  guards that read no input.
+- **Where the error shows.** A guard or policy the input cannot carry is
+  refused on the `guards` or `rateLimit` value rather than on the name inside
+  it, and the message names the guards or policies at fault ("lambder: these
+  guards read fields this API's input does not carry"). Completion inside
+  those options offers every declared name.
+
+### Added
+
+- **`LambderGuardNamesInputLacks` and `LambderPolicyNamesInputLacks`**: the
+  apiInput guards, and the apiInput-keyed policies, among some names whose
+  fields an input does not carry. The input is compared whole, so a union
+  input carries a slice only when every member does.
+- **A type-cost test** (`tests/api/api-policy-type-cost.test.ts`): forty APIs
+  compiled on an instance whose ten guards and ten policies read the input,
+  and on one whose same-named ones do not, must cost about the same.
+
 ## [10.2.1] - 2026-09-29
 
 A minor for an app that keeps its cache in its own storage. It writes a few

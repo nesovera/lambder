@@ -310,6 +310,7 @@ export type {
     LambderGuardMetaMap,
     LambderGuardRunAt,
     LambderAllowedGuardNames,
+    LambderGuardNamesInputLacks,
     LambderParamlessGuardNames,
     LambderGuardsOption,
     LambderGuardDataOf,
@@ -348,6 +349,7 @@ export type {
     LambderApiRateLimitPolicyConfig,
     LambderApiRateLimitsConfig,
     LambderAllowedPolicyNames,
+    LambderPolicyNamesInputLacks,
     LambderRateLimitOption,
 } from "./api/LambderApiRateLimits.js";
 

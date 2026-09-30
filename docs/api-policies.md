@@ -384,9 +384,19 @@ guards: { orgPermission: "ORDERS.CREATE" },   // a non-empty { name: param } map
 
 Guard results are typed end to end: the handler's `ctx.guardData` carries
 exactly the declared guards that return a value, a session guard on a public
-API is a compile error (and a startup assert), an apiInput guard is declarable
-only where the API's schema carries its fields, and a parameterized guard's
+API is a compile error (and a startup assert), and a parameterized guard's
 param is typechecked in the declaration.
+
+An apiInput guard, or a rate limit keyed by an apiInput slice, on an API whose
+input does not carry its fields is a compile error on the `guards` or
+`rateLimit` value that names it, and the message names the guards or policies
+at fault. The options accept every name the instance declares (so completion
+offers them all), and the input is asked about once it is known. Filtering the
+names by each API's input while that input is still being inferred would be
+rebuilt for every API over every declared guard and policy, and an app's type
+check would grow with its APIs times its keyed declarations; asked afterwards,
+of the names an API used, it costs each API the same however many keyed
+guards and policies the app holds.
 
 An empty declaration (`guards: {}` or `guards: []`) is a compile error and a
 registration error: it normalizes to zero guards while looking like a
