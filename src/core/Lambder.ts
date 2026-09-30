@@ -118,6 +118,7 @@ import {
     type LambderNestedOptionChecks,
     type LambderNoExtraKeys,
     type LambderObjectOutputCheck,
+    type LambderPayloadSliceCheck,
     type LambderRequirableGuardsField,
     type LambderSessionEnabledInstance,
     type LambderSessionRouteHandler,
@@ -449,8 +450,8 @@ export default class Lambder<
         TInput extends z.ZodType,
         TOutput extends z.ZodType,
         const TAnswer extends LambderReadonlyDeep<z.input<TOutput>>,
-        const TRateOpt extends LambderRateLimitOption<_TRateLimitPolicies, z.input<TInput>, false> = never,
-        const TGuardsOpt extends LambderGuardsOption<_TGuards, z.input<TInput>, false> = never,
+        const TRateOpt extends LambderRateLimitOption<_TRateLimitPolicies, false> = never,
+        const TGuardsOpt extends LambderGuardsOption<_TGuards, false> = never,
         const TIdempotencyOpt extends LambderApiIdempotencyOption = never,
         const TRefusalsOpt extends LambderRefusalsOption<_TRefusals> = never,
     >(
@@ -474,7 +475,8 @@ export default class Lambder<
              * both ends. A transport setting of this server's, not part of the API's contract.
              */
             compress?: boolean | "auto";
-        } & LambderRequirableGuardsField<_TPublicGuardsRequired, TGuardsOpt> & LambderObjectOutputCheck<TOutput>,
+        } & LambderRequirableGuardsField<_TPublicGuardsRequired, TGuardsOpt> & LambderObjectOutputCheck<TOutput>
+            & LambderPayloadSliceCheck<_TGuards, _TRateLimitPolicies, TGuardsOpt, TRateOpt, z.input<TInput>>,
         /** Answers the call by returning its output (parsed through `output` before it is sent), or refuses it with ctx.refuse() or refuse(). */
         handler: (
             ctx: LambderRenderContext<z.infer<TInput>, Record<string, string>, LambderGuardDataOf<_TGuards, TGuardsOpt>, TSessionData, _TRateLimitPolicies>
@@ -499,8 +501,8 @@ export default class Lambder<
         TInput extends z.ZodType,
         TOutput extends z.ZodType,
         const TAnswer extends LambderReadonlyDeep<z.input<TOutput>>,
-        const TRateOpt extends LambderRateLimitOption<_TRateLimitPolicies, z.input<TInput>, true> = never,
-        const TGuardsOpt extends LambderGuardsOption<_TGuards, z.input<TInput>, true> = never,
+        const TRateOpt extends LambderRateLimitOption<_TRateLimitPolicies, true> = never,
+        const TGuardsOpt extends LambderGuardsOption<_TGuards, true> = never,
         const TIdempotencyOpt extends LambderApiIdempotencyOption = never,
         const TRefusalsOpt extends LambderRefusalsOption<_TRefusals> = never,
     >(
@@ -524,7 +526,8 @@ export default class Lambder<
              * both ends. A transport setting of this server's, not part of the API's contract.
              */
             compress?: boolean | "auto";
-        } & LambderRequirableGuardsField<_TSessionGuardsRequired, TGuardsOpt> & LambderSessionEnabledInstance<_TSessionsEnabled> & LambderObjectOutputCheck<TOutput>,
+        } & LambderRequirableGuardsField<_TSessionGuardsRequired, TGuardsOpt> & LambderSessionEnabledInstance<_TSessionsEnabled> & LambderObjectOutputCheck<TOutput>
+            & LambderPayloadSliceCheck<_TGuards, _TRateLimitPolicies, TGuardsOpt, TRateOpt, z.input<TInput>>,
         /** Answers the call by returning its output (parsed through `output` before it is sent), or refuses it with ctx.refuse() or refuse(). */
         handler: (
             ctx: LambderSessionRenderContext<z.infer<TInput>, TSessionData, Record<string, string>, LambderGuardDataOf<_TGuards, TGuardsOpt>, _TRateLimitPolicies>

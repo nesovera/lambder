@@ -185,22 +185,34 @@ type LambderPolicyPerOf<TPolicy> = "per" extends keyof TPolicy ? TPolicy["per" &
 
 /**
  * Policy names an API may reference: session-keyed policies only on session
- * APIs, apiInput-keyed policies only when the API's payload carries the
- * key's fields, and never a policy without `per`, whose key only the code
- * that charges it knows. A policy whose type does not settle its `per` is
- * allowed here and checked at registration.
- *
- * The payload is compared whole, as the guards' check does it: a union input
- * one of whose members lacks the key's fields does not carry them, and every
- * request of that member would be refused by the key slice's parse.
+ * APIs, and never a policy without `per`, whose key only the code that
+ * charges it knows. A policy whose type does not settle its `per` is allowed
+ * here and checked at registration. Whether the API's input carries the
+ * fields an apiInput-keyed policy reads is asked of the names it declared,
+ * once that input is known, by LambderPolicyNamesInputLacks.
  */
-export type LambderAllowedPolicyNames<TPolicies, TPayload, TIncludeSession extends boolean> = {
+export type LambderAllowedPolicyNames<TPolicies, TIncludeSession extends boolean> = {
     [K in keyof TPolicies]:
         [LambderPolicyPerOf<TPolicies[K]>] extends [undefined] ? never
         : [LambderPolicyPerOf<TPolicies[K]>] extends ["session"] ? (TIncludeSession extends true ? K : never)
-        : [LambderPolicyPerOf<TPolicies[K]>] extends [{ apiInput: infer S extends z.ZodType }] ? ([TPayload] extends [z.input<S>] ? K : never)
         : K
 }[keyof TPolicies] & string;
+
+/**
+ * The apiInput-keyed policies among `TNames` whose key fields the API's
+ * payload does not carry. addApi and addSessionApi ask this once the API's
+ * input is known, of the names its rateLimit option holds; see
+ * LambderPayloadSliceCheck.
+ *
+ * The payload is compared whole, as LambderGuardNamesInputLacks compares it:
+ * a union input one of whose members lacks the key's fields does not carry
+ * them, and every request of that member would be refused by the key
+ * slice's parse.
+ */
+export type LambderPolicyNamesInputLacks<TPolicies, TNames, TPayload> = {
+    [K in TNames & keyof TPolicies]:
+        [LambderPolicyPerOf<TPolicies[K]>] extends [{ apiInput: infer S extends z.ZodType }] ? ([TPayload] extends [z.input<S>] ? never : K) : never
+}[TNames & keyof TPolicies] & string;
 
 /**
  * Policy names a handler may charge itself: every policy except one keyed by
@@ -274,8 +286,8 @@ type LambderRateLimitOverrideFor<TPolicy> =
     TPolicy extends { budget: "perPolicy" } ? Pick<LambderRateLimitOverride, "refusal"> : LambderRateLimitOverride;
 
 /** The map form's full shape: every referable policy name, each carrying its own override. */
-type LambderRateLimitMap<TPolicies, TPayload, TIncludeSession extends boolean> = {
-    readonly [K in LambderAllowedPolicyNames<TPolicies, TPayload, TIncludeSession> & keyof TPolicies]?:
+type LambderRateLimitMap<TPolicies, TIncludeSession extends boolean> = {
+    readonly [K in LambderAllowedPolicyNames<TPolicies, TIncludeSession> & keyof TPolicies]?:
         true | LambderRateLimitOverrideFor<TPolicies[K]> };
 
 /**
@@ -287,12 +299,15 @@ type LambderRateLimitMap<TPolicies, TPayload, TIncludeSession extends boolean> =
  * Every form is non-empty by construction (LambderNonEmptyOptionMap, as the
  * guards option uses), since `rateLimit: {}`, `rateLimit: []` and
  * `rateLimit: { policy: undefined }` would announce a limit and enforce none.
+ *
+ * It depends on the instance alone, never on the API's input, as
+ * LambderGuardsOption does; see LambderPayloadSliceCheck.
  */
-export type LambderRateLimitOption<TPolicies, TPayload, TIncludeSession extends boolean> =
-    | LambderAllowedPolicyNames<TPolicies, TPayload, TIncludeSession>
-    | readonly [LambderAllowedPolicyNames<TPolicies, TPayload, TIncludeSession>,
-        ...LambderAllowedPolicyNames<TPolicies, TPayload, TIncludeSession>[]]
-    | LambderNonEmptyOptionMap<LambderRateLimitMap<TPolicies, TPayload, TIncludeSession>>;
+export type LambderRateLimitOption<TPolicies, TIncludeSession extends boolean> =
+    | LambderAllowedPolicyNames<TPolicies, TIncludeSession>
+    | readonly [LambderAllowedPolicyNames<TPolicies, TIncludeSession>,
+        ...LambderAllowedPolicyNames<TPolicies, TIncludeSession>[]]
+    | LambderNonEmptyOptionMap<LambderRateLimitMap<TPolicies, TIncludeSession>>;
 
 type LambderRateLimitEntry = { name: string, override?: LambderRateLimitOverride };
 

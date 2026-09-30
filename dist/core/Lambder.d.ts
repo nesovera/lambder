@@ -24,7 +24,7 @@ import type { LambderApiIdempotencyConfig } from "../api/LambderApiIdempotency.j
 import type { LambderContractEntry, LambderJsonOf, LambderMergeContract } from "../shared/wire/LambderApiContract.js";
 import { type LambderHttpEvent, type LambderRenderContext, type LambderSessionRenderContext } from "./LambderContext.js";
 import type { LambderReadonlyDeep, MaybePromise } from "../shared/util/LambderTypeUtilities.js";
-import { type LambderMergedNamedMaps, type LambderNamedMapsOption, type LambderRouteHandler, type LambderInputValidationHandler, type LambderFallbackHandler, type LambderGlobalErrorHandler, type LambderAfterRenderHook, type LambderBeforeRenderHook, type LambderFallbackHook, type LambderActionTools, type LambderCreateOptions, type LambderGivenOption, type LambderHandler, type LambderNestedOptionChecks, type LambderObjectOutputCheck, type LambderRequirableGuardsField, type LambderSessionEnabledInstance, type LambderSessionRouteHandler } from "./LambderCreateOptions.js";
+import { type LambderMergedNamedMaps, type LambderNamedMapsOption, type LambderRouteHandler, type LambderInputValidationHandler, type LambderFallbackHandler, type LambderGlobalErrorHandler, type LambderAfterRenderHook, type LambderBeforeRenderHook, type LambderFallbackHook, type LambderActionTools, type LambderCreateOptions, type LambderGivenOption, type LambderHandler, type LambderNestedOptionChecks, type LambderObjectOutputCheck, type LambderPayloadSliceCheck, type LambderRequirableGuardsField, type LambderSessionEnabledInstance, type LambderSessionRouteHandler } from "./LambderCreateOptions.js";
 /** Everything `lambder/testing` may put under a built instance: the pipeline's stores, and the source its files are read from. */
 export type LambderInstanceBackends = LambderPipelineBackends & {
     fileSource?: LambderFileSource;
@@ -167,7 +167,7 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
     addRoute(condition: RegExp | LambderRouteConditionFn | LambderRouteMatcher, actionFn: LambderRouteHandler): this;
     addSessionRoute<TPath extends LambderRoutePath>(condition: TPath, actionFn: ((ctx: LambderSessionRenderContext<any, TSessionData, LambderPathParamsOf<TPath>, {}, _TRateLimitPolicies>, resolver: LambderResolver) => MaybePromise<LambderResponse>) & LambderSessionEnabledInstance<_TSessionsEnabled>): this;
     addSessionRoute(condition: RegExp | LambderRouteConditionFn | LambderRouteMatcher, actionFn: LambderSessionRouteHandler<TSessionData> & LambderSessionEnabledInstance<_TSessionsEnabled>): this;
-    addApi<TName extends string, TInput extends z.ZodType, TOutput extends z.ZodType, const TAnswer extends LambderReadonlyDeep<z.input<TOutput>>, const TRateOpt extends LambderRateLimitOption<_TRateLimitPolicies, z.input<TInput>, false> = never, const TGuardsOpt extends LambderGuardsOption<_TGuards, z.input<TInput>, false> = never, const TIdempotencyOpt extends LambderApiIdempotencyOption = never, const TRefusalsOpt extends LambderRefusalsOption<_TRefusals> = never>(name: TName, schema: {
+    addApi<TName extends string, TInput extends z.ZodType, TOutput extends z.ZodType, const TAnswer extends LambderReadonlyDeep<z.input<TOutput>>, const TRateOpt extends LambderRateLimitOption<_TRateLimitPolicies, false> = never, const TGuardsOpt extends LambderGuardsOption<_TGuards, false> = never, const TIdempotencyOpt extends LambderApiIdempotencyOption = never, const TRefusalsOpt extends LambderRefusalsOption<_TRefusals> = never>(name: TName, schema: {
         input: TInput;
         output: TOutput;
     } & {
@@ -189,12 +189,12 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
          * both ends. A transport setting of this server's, not part of the API's contract.
          */
         compress?: boolean | "auto";
-    } & LambderRequirableGuardsField<_TPublicGuardsRequired, TGuardsOpt> & LambderObjectOutputCheck<TOutput>, 
+    } & LambderRequirableGuardsField<_TPublicGuardsRequired, TGuardsOpt> & LambderObjectOutputCheck<TOutput> & LambderPayloadSliceCheck<_TGuards, _TRateLimitPolicies, TGuardsOpt, TRateOpt, z.input<TInput>>, 
     /** Answers the call by returning its output (parsed through `output` before it is sent), or refuses it with ctx.refuse() or refuse(). */
     handler: (ctx: LambderRenderContext<z.infer<TInput>, Record<string, string>, LambderGuardDataOf<_TGuards, TGuardsOpt>, TSessionData, _TRateLimitPolicies> & {
         refuse: LambderDeclaredRefuse<LambderHandlerRefusalsOf<_TRefusals, LambderApiRefusalCodes<_TRefusals, _TGuards, TRefusalsOpt, TGuardsOpt>>, _TRefusalCodesRequired>;
     }) => MaybePromise<TAnswer>): Lambder<TSessionData, LambderMergeContract<_TContract, TName, LambderContractEntry<z.input<TInput>, LambderJsonOf<z.output<TOutput>>, "public", LambderGuardInputsOf<_TGuards, TGuardsOpt>, TGuardsOpt, TRateOpt, TIdempotencyOpt, LambderWireRefusalsOf<_TRefusals, LambderApiRefusalCodes<_TRefusals, _TGuards, TRefusalsOpt, TGuardsOpt>>>>, _TRateLimitPolicies, _TGuards, _TIdempotencyEnabled, _TSessionGuardsRequired, _TPublicGuardsRequired, _TSessionsEnabled, _TRefusals, _TRefusalCodesRequired>;
-    addSessionApi<TName extends string, TInput extends z.ZodType, TOutput extends z.ZodType, const TAnswer extends LambderReadonlyDeep<z.input<TOutput>>, const TRateOpt extends LambderRateLimitOption<_TRateLimitPolicies, z.input<TInput>, true> = never, const TGuardsOpt extends LambderGuardsOption<_TGuards, z.input<TInput>, true> = never, const TIdempotencyOpt extends LambderApiIdempotencyOption = never, const TRefusalsOpt extends LambderRefusalsOption<_TRefusals> = never>(name: TName, schema: {
+    addSessionApi<TName extends string, TInput extends z.ZodType, TOutput extends z.ZodType, const TAnswer extends LambderReadonlyDeep<z.input<TOutput>>, const TRateOpt extends LambderRateLimitOption<_TRateLimitPolicies, true> = never, const TGuardsOpt extends LambderGuardsOption<_TGuards, true> = never, const TIdempotencyOpt extends LambderApiIdempotencyOption = never, const TRefusalsOpt extends LambderRefusalsOption<_TRefusals> = never>(name: TName, schema: {
         input: TInput;
         output: TOutput;
     } & {
@@ -216,7 +216,7 @@ export default class Lambder<TSessionData = any, _TContract extends Record<strin
          * both ends. A transport setting of this server's, not part of the API's contract.
          */
         compress?: boolean | "auto";
-    } & LambderRequirableGuardsField<_TSessionGuardsRequired, TGuardsOpt> & LambderSessionEnabledInstance<_TSessionsEnabled> & LambderObjectOutputCheck<TOutput>, 
+    } & LambderRequirableGuardsField<_TSessionGuardsRequired, TGuardsOpt> & LambderSessionEnabledInstance<_TSessionsEnabled> & LambderObjectOutputCheck<TOutput> & LambderPayloadSliceCheck<_TGuards, _TRateLimitPolicies, TGuardsOpt, TRateOpt, z.input<TInput>>, 
     /** Answers the call by returning its output (parsed through `output` before it is sent), or refuses it with ctx.refuse() or refuse(). */
     handler: (ctx: LambderSessionRenderContext<z.infer<TInput>, TSessionData, Record<string, string>, LambderGuardDataOf<_TGuards, TGuardsOpt>, _TRateLimitPolicies> & {
         refuse: LambderDeclaredRefuse<LambderHandlerRefusalsOf<_TRefusals, LambderApiRefusalCodes<_TRefusals, _TGuards, TRefusalsOpt, TGuardsOpt>>, _TRefusalCodesRequired>;

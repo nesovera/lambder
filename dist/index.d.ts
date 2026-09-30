@@ -128,12 +128,12 @@ export type { LambderDdbIdempotencyStoreOptions } from "./stores/LambderDdbIdemp
 export { LambderMemoryIdempotencyStore } from "./stores/LambderMemoryIdempotencyStore.js";
 export { lambderGuard, lambderRateLimitKey } from "./core/LambderPolicyBuilders.js";
 export { lambderGuardBuilder } from "./api/LambderApiGuards.js";
-export type { LambderGuardBuilder, LambderApiGuard, LambderGuardMeta, LambderGuardMetaMap, LambderGuardRunAt, LambderAllowedGuardNames, LambderParamlessGuardNames, LambderGuardsOption, LambderGuardDataOf, LambderGuardInputsOf, LambderGuardRefusals, LambderGuardRefusalNamesOf, } from "./api/LambderApiGuards.js";
+export type { LambderGuardBuilder, LambderApiGuard, LambderGuardMeta, LambderGuardMetaMap, LambderGuardRunAt, LambderAllowedGuardNames, LambderGuardNamesInputLacks, LambderParamlessGuardNames, LambderGuardsOption, LambderGuardDataOf, LambderGuardInputsOf, LambderGuardRefusals, LambderGuardRefusalNamesOf, } from "./api/LambderApiGuards.js";
 export { LambderApiRefusalValidationError } from "./api/LambderApiRefusals.js";
 export type { LambderRefusalDeclaration, LambderRefusalVocabulary, LambderApiAllowedRefusal, LambderApiAllowedRefusals, LambderEndpointRefusals, LambderRefusalsOption, LambderRefusalNamesIn, LambderHandlerRefusalsOf, LambderWireRefusalsOf, } from "./api/LambderApiRefusals.js";
 export { lambderRateLimitKeyBuilder, rateLimitRefusal, DEFAULT_RATE_LIMIT_REFUSAL } from "./api/LambderApiRateLimits.js";
 export type { LambderRateLimitKeyBuilder } from "./api/LambderApiRateLimits.js";
-export type { LambderContextRateLimit, LambderContextRateLimitCheck, LambderRateLimitCheckResult, LambderChargeablePolicyNames, LambderChargeKeyArgs, LambderRateLimitKeyFn, LambderRateLimitPer, LambderRateLimitBudget, LambderRateLimitChargeAt, LambderApiRateLimitPolicyConfig, LambderApiRateLimitsConfig, LambderAllowedPolicyNames, LambderRateLimitOption, } from "./api/LambderApiRateLimits.js";
+export type { LambderContextRateLimit, LambderContextRateLimitCheck, LambderRateLimitCheckResult, LambderChargeablePolicyNames, LambderChargeKeyArgs, LambderRateLimitKeyFn, LambderRateLimitPer, LambderRateLimitBudget, LambderRateLimitChargeAt, LambderApiRateLimitPolicyConfig, LambderApiRateLimitsConfig, LambderAllowedPolicyNames, LambderPolicyNamesInputLacks, LambderRateLimitOption, } from "./api/LambderApiRateLimits.js";
 export type { LambderApiIdempotencyConfig } from "./api/LambderApiIdempotency.js";
 export type { LambderGuardsOptionValue, LambderRateLimitMessage, LambderRateLimitOverride, LambderRateLimitOptionValue, LambderRefusalsOptionValue, LambderApiIdempotencyOption, } from "./shared/wire/LambderApiOptionValues.js";
 export { apiGuardParam } from "./shared/wire/LambderApiOptionEntries.js";

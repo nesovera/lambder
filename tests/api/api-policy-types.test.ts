@@ -18,8 +18,11 @@ import { lambderGuardBuilder } from '../../src/api/LambderApiGuards.js';
 import { initLambderMock } from '../../src/mock/LambderMockApp.js';
 import type {
     LambderApiRateLimitPolicyConfig,
+    LambderPolicyNamesInputLacks,
     LambderRateLimitPer,
 } from '../../src/api/LambderApiRateLimits.js';
+import type { LambderGuardNamesInputLacks } from '../../src/api/LambderApiGuards.js';
+import { LambderMemorySessionStore } from '../../src/stores/LambderMemorySessionStore.js';
 import type { LambderApiCallContext } from '../../src/api/LambderApiCallContext.js';
 import type { LambderSessionRecord } from '../../src/shared/contracts/LambderSessionStore.js';
 import type { LambderRenderContext } from '../../src/core/LambderContext.js';
@@ -95,6 +98,84 @@ describe('A payload slice is held to a union input whole, not member by member',
         expect(() => createSliceApp()
             .addApi('union', { input: everyKind, output: z.object({}), guards: 'emailOwner', rateLimit: 'perEmail' }, async (_ctx) => ({}))
             .addApi('plain', { input: z.object({ email: z.string(), name: z.string() }), output: z.object({}), guards: 'emailOwner', rateLimit: 'perEmail' }, async (_ctx) => ({})))
+            .not.toThrow();
+    });
+});
+
+describe('A declared guard or rate limit is held to the fields the API\'s input carries, in every form of the option', () => {
+    // The options' constraints admit every declared name, and the input is
+    // checked once it is known (LambderPayloadSliceCheck), so what an API
+    // costs the compiler does not grow with the app's keyed declarations
+    // (api-policy-type-cost.test.ts). These pin that the check still refuses
+    // what the constraint used to, on the option that names the fault.
+    const createKeyedApp = () => initLambder<{ userId: string }>().create({
+        files: testPublicFiles(),
+        apiPath: '/api',
+        session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
+        guards: {
+            emailOwner: lambderGuard({ apiInput: z.object({ email: z.string() }), handler: async () => {} }),
+            sessionOnly: lambderGuard({ session: true, handler: async () => {} }),
+        },
+        rateLimits: {
+            limiter: new LambderMemoryRateLimiter(),
+            policies: {
+                perEmail: { perMin: 5, per: lambderRateLimitKey({ apiInput: z.object({ email: z.string() }), handler: (_ctx, { email }) => email }) },
+                perSession: { perMin: 5, per: 'session' },
+            },
+        },
+    });
+    const noEmail = { input: z.object({ name: z.string() }), output: z.object({}) };
+    const withEmail = { input: z.object({ name: z.string(), email: z.string() }), output: z.object({}) };
+
+    it('refuses an apiInput guard the input does not carry, as a name, a list or a map', () => {
+        const app = createKeyedApp();
+        // @ts-expect-error the input carries no email for the guard's slice
+        app.addSessionApi('byName', { ...noEmail, guards: 'emailOwner' }, async () => ({}));
+        // @ts-expect-error the same, in the list form
+        app.addSessionApi('byList', { ...noEmail, guards: ['emailOwner'] }, async () => ({}));
+        // @ts-expect-error the same, in the map form
+        app.addSessionApi('byMap', { ...noEmail, guards: { emailOwner: true } }, async () => ({}));
+        // @ts-expect-error and on a public API
+        app.addApi('public', { ...noEmail, guards: 'emailOwner' }, async () => ({}));
+    });
+
+    it('refuses an apiInput-keyed rate limit the input does not carry, as a name, a list or a map', () => {
+        const app = createKeyedApp();
+        // @ts-expect-error the input carries no email for the key's slice
+        app.addSessionApi('byName', { ...noEmail, rateLimit: 'perEmail' }, async () => ({}));
+        // @ts-expect-error the same, in the list form
+        app.addSessionApi('byList', { ...noEmail, rateLimit: ['perEmail'] }, async () => ({}));
+        // @ts-expect-error the same, in the map form
+        app.addSessionApi('byMap', { ...noEmail, rateLimit: { perEmail: true } }, async () => ({}));
+        // @ts-expect-error and on a public API
+        app.addApi('public', { ...noEmail, rateLimit: 'perEmail' }, async () => ({}));
+    });
+
+    it('still keeps a session guard and a session-keyed policy off public APIs, at compile time and at registration', () => {
+        const app = createKeyedApp();
+        // @ts-expect-error a public API reads no session for the guard
+        expect(() => app.addApi('guarded', { ...withEmail, guards: 'sessionOnly' }, async () => ({})))
+            .toThrow(/uses guard "sessionOnly" \(session: true\), which requires addSessionApi/);
+        // @ts-expect-error a public API has no session to key the limit by
+        expect(() => app.addApi('limited', { ...withEmail, rateLimit: 'perSession' }, async () => ({})))
+            .toThrow(/uses rate-limit policy "perSession" \(per "session"\), which requires addSessionApi/);
+    });
+
+    it('names the guards and policies at fault, and none when the input carries their fields', () => {
+        type Guards = { emailOwner: { apiInput: { email: string } }; sessionOnly: { session: true } };
+        type Policies = { perEmail: { per: { apiInput: z.ZodObject<{ email: z.ZodString }> } }; perIp: { per: 'ip' } };
+        expectTypeOf<LambderGuardNamesInputLacks<Guards, 'emailOwner' | 'sessionOnly', { name: string }>>().toEqualTypeOf<'emailOwner'>();
+        expectTypeOf<LambderGuardNamesInputLacks<Guards, 'emailOwner', { name: string; email: string }>>().toBeNever();
+        expectTypeOf<LambderPolicyNamesInputLacks<Policies, 'perEmail' | 'perIp', { name: string }>>().toEqualTypeOf<'perEmail'>();
+        expectTypeOf<LambderPolicyNamesInputLacks<Policies, 'perEmail', { email: string }>>().toBeNever();
+    });
+
+    it('accepts every form when the input carries the fields', () => {
+        expect(() => createKeyedApp()
+            .addSessionApi('byName', { ...withEmail, guards: 'emailOwner', rateLimit: 'perEmail' }, async () => ({}))
+            .addSessionApi('byList', { ...withEmail, guards: ['emailOwner', 'sessionOnly'], rateLimit: ['perEmail', 'perSession'] }, async () => ({}))
+            .addSessionApi('byMap', { ...withEmail, guards: { emailOwner: true }, rateLimit: { perEmail: true } }, async () => ({}))
+            .addApi('public', { ...withEmail, guards: 'emailOwner', rateLimit: 'perEmail' }, async () => ({})))
             .not.toThrow();
     });
 });

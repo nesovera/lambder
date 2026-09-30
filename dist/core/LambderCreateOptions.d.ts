@@ -11,12 +11,12 @@ import type { LambderSessionDataRefreshConfig } from "../session/LambderSessionM
 import type { LambderSessionStore } from "../shared/contracts/LambderSessionStore.js";
 import type { LambderSessionCookieOptions } from "../session/LambderSessionController.js";
 import type { LambderSessionCrypto } from "../session/LambderSessionCrypto.js";
-import type { LambderApiGuard } from "../api/LambderApiGuards.js";
-import type { LambderApiRateLimitPolicyConfig, LambderApiRateLimitsConfig } from "../api/LambderApiRateLimits.js";
+import type { LambderApiGuard, LambderGuardNamesInputLacks } from "../api/LambderApiGuards.js";
+import type { LambderApiRateLimitPolicyConfig, LambderApiRateLimitsConfig, LambderPolicyNamesInputLacks } from "../api/LambderApiRateLimits.js";
 import type { LambderApiIdempotencyConfig } from "../api/LambderApiIdempotency.js";
 import { type LambderRefusalVocabulary } from "../api/LambderApiRefusals.js";
 import type { LambderNoExtraKeys } from "../shared/util/LambderTypeUtilities.js";
-import type { LambderJsonOf } from "../shared/wire/LambderApiContract.js";
+import type { LambderGuardNamesIn, LambderJsonOf } from "../shared/wire/LambderApiContract.js";
 import type { LambderRateLimitMessage } from "../shared/wire/LambderApiOptionValues.js";
 import type { MaybePromise } from "../shared/util/LambderTypeUtilities.js";
 export type LambderRouteHandler = (ctx: LambderRenderContext, resolver: LambderResolver) => MaybePromise<LambderResponse>;
@@ -383,6 +383,31 @@ export type LambderObjectOutputCheck<TOutput extends z.ZodType> = 0 extends 1 & 
 type LambderObjectOutputRefusal = {
     output: {
         readonly "lambder: an API answers with an object or an array. One with nothing to answer declares output: z.object({}) and returns {}.": never;
+    };
+};
+/**
+ * An API's guards and rate limits held to its input once the input is known.
+ * Intersected onto an API's options: a guard or a policy that reads fields
+ * the input does not carry is refused on the option that names it, the
+ * property name is the message and its value the names at fault.
+ *
+ * The options' own constraints admit every name the instance declares, and
+ * the input is asked about here instead, on purpose. A constraint that reads
+ * the API's input is rebuilt for every API while that input is still being
+ * inferred, over every name the instance declares, so the compiler's work
+ * grows with an app's APIs times its keyed guards and policies, exponentially
+ * in the worst case. Here the question is asked once per API, of the names
+ * that API declared.
+ */
+export type LambderPayloadSliceCheck<TGuards, TPolicies, TGuardsOpt, TRateOpt, TPayload> = LambderGuardsSliceCheck<LambderGuardNamesInputLacks<TGuards, LambderGuardNamesIn<TGuardsOpt>, TPayload>> & LambderRateLimitSliceCheck<LambderPolicyNamesInputLacks<TPolicies, LambderGuardNamesIn<TRateOpt>, TPayload>>;
+type LambderGuardsSliceCheck<TLacking> = [TLacking] extends [never] ? unknown : {
+    guards: {
+        readonly "lambder: these guards read fields this API's input does not carry": TLacking;
+    };
+};
+type LambderRateLimitSliceCheck<TLacking> = [TLacking] extends [never] ? unknown : {
+    rateLimit: {
+        readonly "lambder: these rate limits are keyed by fields this API's input does not carry": TLacking;
     };
 };
 /**
