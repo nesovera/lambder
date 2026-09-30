@@ -1,3 +1,4 @@
+import { outcomeOfEnvelope } from "../shared/wire/LambderCallOutcome.js";
 import type { LambderRenderContext } from "./LambderContext.js";
 import type { LambderFiles } from "./LambderFiles.js";
 import { LambderResponse, type LambderHeadersInput } from "./LambderResponse.js";
@@ -193,7 +194,10 @@ export default class LambderResponseBuilder {
      * request accumulated unless the config names its own.
      */
     apiRefusal(config: LambderApiRefusalConfig, options?: LambderResponseOptions): LambderResponse {
-        return this.json(plainRefusalEnvelope(this.apiVersion, config, "res.apiRefusal()", this.ctx?.logList) as Record<string, any>, options);
+        const envelope = plainRefusalEnvelope(this.apiVersion, config, "res.apiRefusal()", this.ctx?.logList);
+        const response = this.json(envelope as Record<string, any>, options);
+        response.callOutcome = outcomeOfEnvelope(envelope, response.statusCode);
+        return response;
     };
 
 };

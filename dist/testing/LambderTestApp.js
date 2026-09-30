@@ -49,6 +49,8 @@ export class LambderTestApp {
     visitorCount = 0;
     resetCount = 0;
     crashList = [];
+    /** Every call summary the app wrote since the last reset; see callSummaries. */
+    callSummaryList = [];
     /**
      * The call a crash happened under. The app's 500 says nothing about the
      * crash, so the error travels beside the answer, and with concurrent
@@ -66,7 +68,12 @@ export class LambderTestApp {
         const sessionStore = options.session?.store ?? own(new LambderMemorySessionStore());
         const rateLimiter = options.rateLimits?.limiter ?? own(new LambderMemoryRateLimiter());
         const idempotencyStore = options.idempotency?.store ?? own(new LambderMemoryIdempotencyStore());
-        const swap = lambder[LAMBDER_BACKEND_SWAP]({ sessionStore, rateLimiter, idempotencyStore, fileSource: options.files });
+        // The summaries are collected rather than written, so a suite's
+        // output stays its own and a test can read what a call recorded.
+        const swap = lambder[LAMBDER_BACKEND_SWAP]({
+            sessionStore, rateLimiter, idempotencyStore, fileSource: options.files,
+            callSummary: (summary) => { this.callSummaryList.push(summary); },
+        });
         if (options.files && !swap.files) {
             throw new Error("lambderTestApp: the files option was given, but the app was created without one, so nothing reads files to put a source under.");
         }
@@ -115,6 +122,14 @@ export class LambderTestApp {
      */
     get crashes() {
         return this.crashList;
+    }
+    /**
+     * The summary of every API call the app answered since the last reset,
+     * in order (see LambderCallSummary): what its callSummary option would
+     * have been handed, collected here instead of written to stdout.
+     */
+    get callSummaries() {
+        return this.callSummaryList;
     }
     /** The session manager, for tests that inspect or manipulate sessions directly. Throws when the app has no sessions. */
     get sessionManager() {
@@ -178,15 +193,16 @@ export class LambderTestApp {
     }
     /**
      * Rewinds what accumulated: sessions, rate-limit counters and replay
-     * records in the stores this test app made, the crashes it recorded, and
-     * the cookies of every visitor it created (each empties its jar the next
-     * time it is used). For a beforeEach. The app's own data (its database)
-     * is the app's to rewind.
+     * records in the stores this test app made, the crashes and call
+     * summaries it recorded, and the cookies of every visitor it created
+     * (each empties its jar the next time it is used). For a beforeEach. The
+     * app's own data (its database) is the app's to rewind.
      */
     reset() {
         for (const store of this.ownStores)
             store.reset();
         this.crashList.length = 0;
+        this.callSummaryList.length = 0;
         this.resetCount += 1;
     }
 }

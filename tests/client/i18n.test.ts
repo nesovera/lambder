@@ -549,6 +549,58 @@ describe("LambderI18n: loaders", () => {
     });
 });
 
+describe("LambderI18n: placeholders kept", () => {
+    const languages = { en: { name: "English" }, tr: { name: "Türkçe" } };
+
+    it("refuses a translation that drops or adds a placeholder, naming each key", () => {
+        // Dropped, the value a caller passes is lost; added, the token shows
+        // as it is. Every mismatch of the block is listed at once.
+        const creating = () => createLambderI18n({
+            languages, defaultLanguage: "en", enforced: ["en"],
+            base: {
+                en: { items: "{count} items", greet: "Hello {name}", save: "Save" },
+                tr: { items: "Öğeler", greet: "Merhaba {name} {org}", save: "Kaydet" },
+            },
+        });
+        expect(creating).toThrow(/base dictionary, these "tr" translations/);
+        expect(creating).toThrow(/"items" has none where the default language has \{count\}/);
+        expect(creating).toThrow(/"greet" has \{name\}, \{org\} where the default language has \{name\}/);
+    });
+
+    it("takes the placeholders in any order, and repeated", () => {
+        const i18n = createLambderI18n({
+            languages, defaultLanguage: "en", enforced: ["en"],
+            base: {
+                en: { move: "Move {from} to {to}" },
+                tr: { move: "{to} yerine {from}, {from}" },
+            },
+        });
+        expect(i18n.forLanguage("tr")("move", { from: "A", to: "B" })).toBe("B yerine A, A");
+    });
+
+    it("checks an extension against its own default block", () => {
+        const base = createLambderI18n({ languages, defaultLanguage: "en", enforced: ["en"], base: { en: { save: "Save" }, tr: { save: "Kaydet" } } });
+        expect(() => base.extendPartial({ en: { hi: "Hi {name}" }, tr: { hi: "Selam" } })).toThrow(/extendPartial\(\) dictionary, these "tr" translations/);
+    });
+
+    it("refuses a loaded language that breaks one, leaving it on the default language", async () => {
+        // A loader that fails to load is a case every app handles already:
+        // the language falls back to the default one.
+        const i18n = createLambderI18n({
+            languages, defaultLanguage: "en", enforced: ["en"],
+            base: { en: { greet: "Hello {name}" }, tr: async () => ({ greet: "Merhaba {isim}" }) },
+        });
+        await expect(i18n.loadLanguage("tr")).rejects.toThrow(/the "tr" loader, these "tr" translations[\s\S]*"greet" has \{isim\} where the default language has \{name\}/);
+        expect(i18n.forLanguage("tr")("greet", { name: "Ada" })).toBe("Hello Ada");
+    });
+
+    it("checks translations registered at runtime", () => {
+        const i18n = createLambderI18n({ languages, defaultLanguage: "en", enforced: ["en"], base: { en: { greet: "Hello {name}" }, tr: { greet: "Merhaba {name}" } } });
+        expect(() => i18n.registerDictionary("tr", { greet: "Merhaba" })).toThrow(/registerDictionary\("tr"\)/);
+        expect(i18n.forLanguage("tr")("greet", { name: "Ada" })).toBe("Merhaba Ada");
+    });
+});
+
 describe("LambderI18n: config validation", () => {
     it("throws when defaultLanguage is not enforced", () => {
         expect(() => createLambderI18n({

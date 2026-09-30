@@ -1,3 +1,4 @@
+import type { z } from "zod";
 import type { LambderSessionCrypto } from "./LambderSessionCrypto.js";
 import type { LambderSessionRecord, LambderSessionStore } from "../shared/contracts/LambderSessionStore.js";
 import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
@@ -60,6 +61,39 @@ export declare class LambderSessionDataRefreshError extends Error {
 export declare class LambderSessionReadError extends Error {
     constructor(cause: unknown);
 }
+/**
+ * The shape session.data has, and how it is kept fresh: `dataSchema` alone,
+ * or with `dataRefresh`, which then requires it.
+ *
+ * A record outlives the code that wrote it, so a read checks its data
+ * against the schema, and hands the request the schema's output (keys it
+ * does not declare stripped). Data that does not match (a record written
+ * before a deploy changed the data's shape) is refreshed on that read when
+ * dataRefresh is configured, whatever its deadline; without dataRefresh
+ * nothing can rebuild it, and the session ends. A refresh's own output is
+ * held to the schema too, and one that does not match fails the read as a
+ * LambderSessionDataRefreshError.
+ *
+ * Data is held to the schema where it is written as well: createSession and
+ * updateSessionData throw on data it refuses, rather than store a session
+ * whose next read would end it. What is stored is the data as given, and
+ * what a request is served is the schema's output, so every read of a
+ * record parses exactly what its write was checked with.
+ *
+ * Data a refresh derives from the app's state changes shape as the app
+ * does, which is why dataRefresh needs the schema: without it, a record
+ * written before the change is served in its old shape until its refresh
+ * comes due.
+ */
+export type LambderSessionDataOptions<SessionData = any> = {
+    /** The schema of session.data, checked on every read. */
+    dataSchema?: z.ZodType<SessionData>;
+    dataRefresh?: undefined;
+} | {
+    /** The schema of session.data, checked on every read and on every refresh's output. Required beside dataRefresh. */
+    dataSchema: z.ZodType<SessionData>;
+    dataRefresh: LambderSessionDataRefreshConfig<SessionData>;
+};
 export type LambderSessionManagerOptions<SessionData = any> = {
     /** Where sessions rest: LambderDdbSessionStore, LambderMemorySessionStore, or your own. */
     store: LambderSessionStore<SessionData>;
@@ -68,10 +102,9 @@ export type LambderSessionManagerOptions<SessionData = any> = {
     enableSlidingExpiration?: boolean;
     /** Min seconds between sliding-expiration writes. Default: max(60, 5% of TTL). */
     slidingWriteIntervalSeconds?: number;
-    dataRefresh?: LambderSessionDataRefreshConfig<SessionData>;
     /** Hashing and randomness. Default: WebCrypto. */
     crypto?: LambderSessionCrypto;
-};
+} & LambderSessionDataOptions<SessionData>;
 /**
  * Whether a string has the shape a minted session token has:
  * `sessionKeyHash:secret`, both hex, neither longer than 1024 characters.
@@ -105,8 +138,9 @@ export default class LambderSessionManager<SessionData = any> {
     private readonly enableSlidingExpiration;
     private readonly slidingWriteIntervalSeconds;
     private readonly dataRefresh;
+    private readonly dataSchema;
     private readonly crypto;
-    constructor({ store, sessionSalt, enableSlidingExpiration, slidingWriteIntervalSeconds, dataRefresh, crypto, }: LambderSessionManagerOptions<SessionData>);
+    constructor({ store, sessionSalt, enableSlidingExpiration, slidingWriteIntervalSeconds, dataRefresh, dataSchema, crypto, }: LambderSessionManagerOptions<SessionData>);
     /** A store this manager's crypto may sit in front of. Asked of every store it is given, the one at creation and a swapped one alike. */
     private assertCryptoFitsStore;
     /**
@@ -184,6 +218,15 @@ export default class LambderSessionManager<SessionData = any> {
      * logout, a password change), which a renewal must not undo.
      */
     renewSession(session: LambderSessionRecord<SessionData>): Promise<LambderSessionRecord<SessionData> | null>;
+    /**
+     * Data about to be stored, held to the schema: what a read of it will
+     * serve, or the error `refused` builds from where it does not match.
+     * Data the schema refuses is the app breaking its own declaration, and
+     * storing it would only move the failure to the next read, far from the
+     * code that wrote it. The data is stored as given, not as the schema's
+     * output, so every later read parses exactly what this check accepted.
+     */
+    private servedDataOf;
     /**
      * Runs the dataRefresh callback immediately, regardless of
      * dataExpiresAt, and persists the result onto the same record, over the

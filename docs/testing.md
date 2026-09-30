@@ -88,8 +88,9 @@ only the part a test replaces.
 | `signOut(sessionKey)` | Ends every session of the subject ("log out everywhere"). A visitor signed in as them keeps its cookies, as a browser would, so its next call is answered `sessionExpired` |
 | `expireSessionData(sessionKey)` | Marks the subject's session data stale, so the next read renews it through your `dataRefresh` |
 | `event(event, context?)` | Hands the handler an event that is not an HTTP request (a schedule, SNS, SQS), which is how an `addAction` handler runs. Resolves to what the action returned; `context` overrides fields of the Lambda context |
-| `reset()` | Rewinds sessions, rate-limit counters and replay records in the stores the test app made, the recorded crashes, and every visitor's cookies. For a `beforeEach`. A store you passed in is yours and is left alone |
+| `reset()` | Rewinds sessions, rate-limit counters and replay records in the stores the test app made, the recorded crashes and call summaries, and every visitor's cookies. For a `beforeEach`. A store you passed in is yours and is left alone |
 | `crashes` | Every error the app threw while answering a request since the last reset; see [When the app crashes](#when-the-app-crashes) |
+| `callSummaries` | The summary of every API call answered since the last reset, in order: what the app's [`callSummary`](./configuration.md#callsummary) would have written, collected here instead of on stdout |
 | `sessionStore`, `rateLimiter`, `idempotencyStore` | The stores now under the instance, for assertions; `null` for a subsystem the app never configured |
 | `sessionManager` | The app's session manager, to inspect or manipulate sessions directly |
 | `handler`, `host` | The instance's handler, and the default host |

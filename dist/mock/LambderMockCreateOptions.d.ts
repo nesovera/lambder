@@ -13,7 +13,7 @@ import type { LambderCookieJar } from "../shared/transport/LambderCookieJar.js";
 import type { LambderIdempotencyStore } from "../shared/contracts/LambderIdempotencyStore.js";
 import type { LambderRateLimiter, LambderRateLimitWindow } from "../shared/contracts/LambderRateLimiter.js";
 import type { LambderSessionStore } from "../shared/contracts/LambderSessionStore.js";
-import type { LambderSessionDataRefreshConfig } from "../session/LambderSessionManager.js";
+import type { LambderSessionDataOptions } from "../session/LambderSessionManager.js";
 import type { LambderSessionCookieOptions } from "../session/LambderSessionController.js";
 import type { LambderSessionCrypto } from "../session/LambderSessionCrypto.js";
 import type { LambderMockCallContext, LambderMockGuards, LambderMockLatency, LambderMockRateLimitPolicies, LambderMockSessionCallContext, LambderMockSessionGuardsCheck, LambderMockSurplusKeys } from "./LambderMockTypes.js";
@@ -26,13 +26,12 @@ export type LambderMockSessionsOptions<S> = {
     ttlSeconds?: number;
     /** Hashing and randomness. Default: WebCrypto where the runtime offers it, the plain stand-in over a memory-only store otherwise. */
     crypto?: LambderSessionCrypto;
-    dataRefresh?: LambderSessionDataRefreshConfig<S>;
     enableSlidingExpiration?: boolean;
     slidingWriteIntervalSeconds?: number;
     tokenCookieKey?: string;
     csrfCookieKey?: string;
     cookieOptions?: LambderSessionCookieOptions;
-};
+} & LambderSessionDataOptions<S>;
 /**
  * Idempotency in the mock: the same engine the server runs, over a memory
  * store unless one is given, and carrying every knob the server's own option

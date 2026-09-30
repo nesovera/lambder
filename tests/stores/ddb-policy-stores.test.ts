@@ -224,6 +224,100 @@ describe('LambderDdbRateLimiter, tracker keys DynamoDB will not take', () => {
     });
 });
 
+describe('LambderDdbRateLimiter, one round trip for every window', () => {
+    /** A table that records each command and holds every write until `release()`, so a test sees which writes were in flight together. */
+    const heldTable = () => {
+        const table = new MemoryDdb();
+        const sent: { name: string; input: any }[] = [];
+        let open = () => {};
+        const gate = new Promise<void>((resolve) => { open = resolve; });
+        const client = {
+            send: async (command: any) => {
+                sent.push({ name: command?.constructor?.name, input: command.input });
+                await gate;
+                return await table.send(command);
+            },
+        };
+        return { table, sent, release: open, client: client as never };
+    };
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+    it('sends every window\'s write before any of them answers', async () => {
+        // In sequence, a policy capping three windows would put three round
+        // trips on every call's critical path.
+        const { client, sent, release } = heldTable();
+        const limiter = new LambderDdbRateLimiter({ tableName: 'test-table', client, now: testClock });
+
+        const verdict = limiter.isRateLimited('ip:1.2.3.4', { perMin: 5, perHour: 50, perDay: 500 });
+        await settle();
+        expect(sent.map((command) => command.input.Key.sk.S.split('#')[0])).toEqual(['perMin', 'perHour', 'perDay']);
+
+        release();
+        expect(await verdict).toBe(false);
+    });
+
+    it('names the smallest window that refused, and counts the attempt in the windows under their limits', async () => {
+        // Attempts count, not successes: a window counts an attempt another
+        // refuses, since taking it back would give up the conditional ADD.
+        const client = new MemoryDdb();
+        const limiter = new LambderDdbRateLimiter({ tableName: 'test-table', client, now: testClock });
+        const minuteStart = Math.floor(START / 1000 / 60) * 60;
+        const hourStart = Math.floor(START / 1000 / 3600) * 3600;
+
+        expect(await limiter.isRateLimited('ip:1.2.3.4', { perMin: 1, perHour: 10 })).toBe(false);
+        expect(await limiter.isRateLimited('ip:1.2.3.4', { perMin: 1, perHour: 10 }))
+            .toEqual({ window: 'perMin', limit: 1, resetAt: minuteStart + 60 });
+        expect(client.items.get(`RL#ip:1.2.3.4|perHour#${hourStart}`)?.count?.N).toBe('2');
+    });
+
+    it('refuses a key\'s repeats from memory until the refusing window resets, without touching the table', async () => {
+        // A count only rises within its window, so the table would refuse
+        // the same. A flood then costs one round of writes per process, and
+        // stops raising the counters of its larger windows.
+        let now = START;
+        const table = new MemoryDdb();
+        const sent: string[] = [];
+        const client = { send: async (command: any) => { sent.push(command?.constructor?.name); return await table.send(command); } } as never;
+        const limiter = new LambderDdbRateLimiter({ tableName: 'test-table', client, now: () => now });
+        const minuteStart = Math.floor(START / 1000 / 60) * 60;
+
+        await limiter.isRateLimited('ip:1.2.3.4', { perMin: 1, perDay: 100 });
+        expect(await limiter.isRateLimited('ip:1.2.3.4', { perMin: 1, perDay: 100 })).toMatchObject({ window: 'perMin' });
+
+        sent.length = 0;
+        now = minuteStart * 1000 + 59_000;
+        expect(await limiter.isRateLimited('ip:1.2.3.4', { perMin: 1, perDay: 100 })).toEqual({ window: 'perMin', limit: 1, resetAt: minuteStart + 60 });
+        expect(sent).toEqual([]);
+        // Another key on the same table is asked of the table as ever.
+        expect(await limiter.isRateLimited('ip:5.6.7.8', { perMin: 1, perDay: 100 })).toBe(false);
+        expect(sent).toEqual(['UpdateItemCommand', 'UpdateItemCommand']);
+
+        // Once the window resets, the table is asked again, and counts.
+        sent.length = 0;
+        now = (minuteStart + 60) * 1000;
+        expect(await limiter.isRateLimited('ip:1.2.3.4', { perMin: 1, perDay: 100 })).toBe(false);
+        expect(sent).toEqual(['UpdateItemCommand', 'UpdateItemCommand']);
+    });
+
+    it('answers a refusal even when another window\'s write failed', async () => {
+        // The refusing window decides the attempt whatever the others did; a
+        // failure is only the answer when nothing refused.
+        const table = new MemoryDdb();
+        const client = {
+            send: async (command: any) => {
+                if(command.input.Key.sk.S.startsWith('perDay#')) throw new Error('ddb down');
+                return await table.send(command);
+            },
+        } as never;
+        const limiter = new LambderDdbRateLimiter({ tableName: 'test-table', client, now: testClock });
+        const minuteStart = Math.floor(START / 1000 / 60) * 60;
+        table.items.set(`RL#ip:1.2.3.4|perMin#${minuteStart}`, { pk: { S: 'RL#ip:1.2.3.4' }, sk: { S: `perMin#${minuteStart}` }, count: { N: '5' } });
+
+        expect(await limiter.isRateLimited('ip:1.2.3.4', { perMin: 5, perDay: 100 })).toMatchObject({ window: 'perMin' });
+        await expect(limiter.isRateLimited('ip:5.6.7.8', { perMin: 5, perDay: 100 })).rejects.toThrow('ddb down');
+    });
+});
+
 describe('LambderDdbRateLimiter, a table it cannot reach', () => {
     it('lets the failure reach the caller instead of deciding for it', async () => {
         // Whether an unanswerable limit lets the request through is the

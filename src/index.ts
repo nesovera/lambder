@@ -59,6 +59,7 @@ export {
     localLambdaContext,
     LAMBDER_INVOKE_HEADER,
     LAMBDER_INVOKED_BY_HEADER,
+    LAMBDER_PARENT_REQUEST_HEADER,
     LAMBDER_INVOKE_PROTOCOL,
 } from "./invoke/LambderLambdaEvent.js";
 export type { LambderSynthesizedRequest, LambderLambdaHttpResult, LambderInvokeSession } from "./invoke/LambderLambdaEvent.js";
@@ -244,7 +245,7 @@ export type { LambderUploadRunnerOptions, LambderUploadProgress, LambderUploadPh
 
 // Session types
 export type { LambderSessionCookieOptions } from "./session/LambderSessionController.js";
-export type { LambderCreatedSession, LambderSessionDataRefreshConfig } from "./session/LambderSessionManager.js";
+export type { LambderCreatedSession, LambderSessionDataOptions, LambderSessionDataRefreshConfig } from "./session/LambderSessionManager.js";
 // Compression: the option every site shares, and the one codec behind them all.
 export { resolveCompressionOption, LAMBDER_ENCODINGS } from "./shared/wire/LambderCompressionOption.js";
 export type {
@@ -354,6 +355,8 @@ export { LambderApiRefusalValidationError } from "./api/LambderApiRefusals.js";
 export type {
     LambderRefusalDeclaration,
     LambderRefusalVocabulary,
+    LambderRefusalVocabularyOption,
+    LambderMergedRefusalVocabulary,
     LambderApiAllowedRefusal,
     LambderApiAllowedRefusals,
     LambderEndpointRefusals,
@@ -466,7 +469,11 @@ export type {
 } from "./shared/wire/LambderApiOutcome.js";
 export { resolveApiOutcome } from "./shared/wire/LambderApiOutcome.js";
 export { createContext, isV2HttpEvent } from "./core/LambderContext.js";
-export type { LambderContextOptions } from "./core/LambderContext.js";
+export type { LambderContextOptions, LambderOriginProof } from "./core/LambderContext.js";
+
+// One summary line per API call (the callSummary option)
+export type { LambderCallSummary, LambderCallSummaryOption } from "./core/LambderCallSummary.js";
+export type { LambderCallOutcome, LambderCallOutcomeHint } from "./shared/wire/LambderCallOutcome.js";
 
 // Request payload compression: the wire format LambderCaller and the server share.
 export {

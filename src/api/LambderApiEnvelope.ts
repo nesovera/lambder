@@ -1,3 +1,4 @@
+import { outcomeOfEnvelope } from "../shared/wire/LambderCallOutcome.js";
 import type { z } from "zod";
 import type { LambderApiEnvelopeBody, LambderRefusalEnvelopeFields, LambderApiRefusalConfig, LambderApiRefusalEnvelope, LambderApiSuccessEnvelope } from "../shared/wire/LambderApiContract.js";
 import { LAMBDER_REFUSAL_CODES, isLambderRefusalCode, refusalMessageOf, type LambderApiRefusal, type LambderRefusalMessage } from "../shared/wire/LambderApiRefusal.js";
@@ -94,7 +95,8 @@ export const envelopeAnswer = (
         // casing replaces the envelope's own rather than shipping beside it.
         setAnswerHeader(headers, key, value);
     }
-    return { statusCode: options.statusCode ?? 200, headers, body: JSON.stringify(envelope) };
+    const statusCode = options.statusCode ?? 200;
+    return { statusCode, headers, body: JSON.stringify(envelope), outcome: outcomeOfEnvelope(envelope, statusCode) };
 };
 
 /**
@@ -230,6 +232,7 @@ export const validationAnswer = (zodError: z.ZodError, logList?: unknown[]): Lam
             ...(trimmed ? { issueCount: zodError.issues.length } : {}),
             ...(logList?.length ? { logList } : {}),
         } satisfies LambderValidationAnswerBody),
+        outcome: { outcome: "validation", code: null },
     };
 };
 

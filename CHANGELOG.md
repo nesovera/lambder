@@ -9,6 +9,86 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [13.0.1] - 2026-09-30
+
+A major: session data is checked against a schema on every read, and
+`dataRefresh` requires that schema. Beside it, one summary line per API call
+by default, an origin proof for the trusted forwarding headers, refusal codes
+declared per part of an app, a check that every translation keeps its
+placeholders, one round trip for a rate limit's windows, and every generated
+file in one call.
+
+### Changed (breaking)
+
+- **`session.dataRefresh` requires `session.dataSchema`**, the zod schema of
+  `session.data`, at compile time and at creation. Every read checks the
+  record's data against it and hands the request the schema's output; data
+  that does not match (a record written before a deploy changed its shape)
+  is refreshed on that read, whatever its deadline, and a refresh whose
+  output the schema refuses fails the read as a
+  `LambderSessionDataRefreshError`, writing nothing. Without `dataRefresh`
+  the schema is optional, and data that does not match ends the session.
+  With a schema, `createSession` and `updateSessionData` throw on data it
+  refuses and write nothing, rather than store a session its next read
+  would end. A record keeps its data as written or refreshed, and requests
+  are served the schema's output, so every read parses exactly what its
+  write was checked with. The same holds for the mock runtime's sessions.
+  - To move: give `dataSchema` beside `dataRefresh`, the schema your
+    `SessionData` type is, and derive the type from it
+    (`z.infer<typeof sessionDataSchema>`) so the two cannot drift.
+- **The DynamoDB rate limiter sends every window's write at once**, so a
+  policy capping several windows costs one round trip rather than one per
+  window. A window under its limit now counts an attempt another window
+  refuses (the smaller windows were counted first, and the larger ones
+  spared, before), and a window the table refused an attempt in is
+  remembered by the process until it resets, so a flood's later attempts
+  are refused without touching the table and stop raising the other
+  windows' counters. The memory limiter checks every window before counting
+  any, so an attempt it refuses counts nowhere.
+- **`LambderApiAnswer` and `LambderResponse` carry the answer's outcome**
+  (`outcome`, `callOutcome`), which the envelope builders and
+  `res.apiRefusal()` set, and `LambderInstanceBackends` takes a
+  `callSummary` writer.
+
+### Added
+
+- **One summary line per API call** (`callSummary`), written when the call
+  is answered: the endpoint, how it ended (`success`, `refusal` and its
+  code, a flag, `validation`, `crash`, a failing `created` hook's included),
+  the status, the duration and the handler's own time, whether an
+  idempotent answer was replayed, whether the invocation was the process's
+  first, and its request id with the id of the invocation that invoked it.
+  Nothing from the input, the session, the cookies or the caller's address.
+  By default each is one JSON line on stdout, which CloudWatch Logs Insights
+  reads field by field; a function receives each instead, and `false`
+  writes none. A test app collects them in `app.callSummaries`.
+- **The calling invocation's request id travels over invoke**
+  (`LAMBDER_PARENT_REQUEST_HEADER`), read by the callee from an invoke
+  alone, so the two functions' summary lines join.
+- **`originProof: { header, secrets }`**: the trusted client address and
+  host headers are read only from a request carrying the secret the proxy in
+  front of the app sets, so a request sent to the origin directly (an
+  `execute-api` or `lambda-url` address) is counted by the address it came
+  from. The header is taken off `ctx.headers`; `secrets` takes the previous
+  secret during a rotation; a secret under 32 characters, a proof guarding
+  no trusted header, and a proof header that is also a trusted one are
+  refused at creation.
+- **Refusal codes as a list of maps**: `declareRefusals([orderRefusals,
+  walletRefusals])`, on the server's init and the mock's alike, so each part
+  of an app declares its own codes, as guards and rate-limit policies are
+  declared. A code two maps declare is a compile error and a throw.
+- **Every translation keeps the default language's placeholders.** A block
+  whose text drops or adds a `{token}` against the default language's text
+  of the same key is refused where it arrives: an inline block when the
+  instance or an extension is created, a loaded one when its loader answers
+  (`loadLanguage` rejects, and the language stays on the default one), a
+  registered one at `registerDictionary`. Each error lists every mismatch of
+  the block.
+- **`generateApiFiles(config, { check })`** in `lambder/build`: every
+  contract, signature file, options file and guard-parameter file of every
+  app a generator script names, each app's module given once, in one call
+  that names every stale or broken file and does not stop at the first.
+
 ## [12.0.1] - 2026-09-30
 
 A major: endpoints are values. An app declares each endpoint with its

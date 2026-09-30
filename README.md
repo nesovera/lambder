@@ -65,7 +65,8 @@ const company = await caller.companies.get({ slug: "acme" });
 - **Simple route and API declaration.** Paths, regexes, predicates and
   structured matchers, chained fluently.
 - **Sessions.** Over a store of your choosing (DynamoDB, memory, your own),
-  with secrets hashed at rest, sliding expiration, data refresh and
+  with secrets hashed at rest, sliding expiration, session data checked
+  against its schema on every read and refreshed from its source, and
   cross-subdomain cookies.
 - **One API core, two runtimes.** The request pipeline (envelope, refusals,
   sessions, guards, rate limits, idempotency) is one isomorphic class; the
@@ -79,6 +80,10 @@ const company = await caller.companies.get({ slug: "acme" });
   cookies, and a guard against Lambda's response size cap.
 - **Hooks and actions.** Lifecycle hooks, plus `addAction()` for the non-HTTP
   invocations (EventBridge, SQS, custom events) the same function receives.
+- **A summary line per call.** Every API call is logged once, as JSON, with
+  its endpoint, outcome, refusal code, status and timings, and the request
+  ids that join it to the calls it made; nothing from its input or its
+  caller.
 - **Lambda to lambda calls.** `LambderInvokeCaller` invokes a Lambder app in
   another function directly, with no API Gateway in between, typed from the
   callee's own contract and carrying its refusals, crash detail and logs back.
@@ -135,7 +140,7 @@ The package ships five entry points; pick by where the code runs:
 | `lambder/client` | Browser and isomorphic shared code | `LambderCaller`, `LambderApiRefusal`/`refuse`, the API contract and envelope types, `LambderUploadRunner`, `LambderBackoffTimer`, `LambderSignedClaims`, `html`/`xml` tagged templates, `createLambderI18n` |
 | `lambder/mock` | Browser and Node, in development and tests | `LambderMockApp`, the mock runtime: your typed contract served from mock handlers over the real API pipeline and memory stores |
 | `lambder/testing` | Node, in tests | `lambderTestApp`: your real instance under test in this process, memory stores put under it in place, simulated browsers with typed callers in front of it, and the outcome assertions; the store conformance suites, to hold a store you write to the rules Lambder's own meet |
-| `lambder/build` | Node, in a build step | `writeApiSignatures`: the signature file both sides ship, written or checked from your instance; `writeApiOptions`: every API's declared options, policies and guard declarations as plain data, for the code that decides with them; `writeApiGuardParams`: one guard's parameters and nothing else, what a browser gating on that guard carries; `writeApiContract`: the contract as plain types a client compiles instead of the server |
+| `lambder/build` | Node, in a build step | `writeApiSignatures`: the signature file both sides ship, written or checked from your instance; `writeApiOptions`: every API's declared options, policies and guard declarations as plain data, for the code that decides with them; `writeApiGuardParams`: one guard's parameters and nothing else, what a browser gating on that guard carries; `writeApiContract`: the contract as plain types a client compiles instead of the server; `generateApiFiles`: every one of them, for every app a script names, in one call |
 
 Frontends and shared isomorphic packages should import from `lambder/client`
 only; the entry's module graph contains no AWS SDK, Node built-ins, or server

@@ -17,7 +17,7 @@ export { LambderBackoffTimer } from "./shared/util/LambderBackoffTimer.js";
 export { LambderSignedClaims, keyedDigest, randomSecret } from "./shared/util/LambderSignedClaims.js";
 export { constantTimeEquals } from "./shared/util/LambderTextDigest.js";
 export { lambderHandlerTransport } from "./invoke/lambderHandlerTransport.js";
-export { synthesizeLambdaHttpEvent, decodeLambdaHttpResult, localLambdaContext, LAMBDER_INVOKE_HEADER, LAMBDER_INVOKED_BY_HEADER, LAMBDER_INVOKE_PROTOCOL, } from "./invoke/LambderLambdaEvent.js";
+export { synthesizeLambdaHttpEvent, decodeLambdaHttpResult, localLambdaContext, LAMBDER_INVOKE_HEADER, LAMBDER_INVOKED_BY_HEADER, LAMBDER_PARENT_REQUEST_HEADER, LAMBDER_INVOKE_PROTOCOL, } from "./invoke/LambderLambdaEvent.js";
 // The API core: the request, answer, envelope and pipeline both the server and the mock runtime run
 export { LambderApiPipeline } from "./api/LambderApiPipeline.js";
 export { readApiEnvelope, restoreCompressedPayload } from "./api/LambderApiRequest.js";

@@ -28,6 +28,11 @@ export class LambderSessionReadError extends Error {
         this.name = "LambderSessionReadError";
     }
 }
+/** A schema's issues as a message may show them: each path and what was expected there, never the value found. */
+const describeSchemaIssues = (error) => error.issues.slice(0, 5).map((issue) => `${issue.path.length ? issue.path.join(".") : "(the data)"}: ${issue.message}`).join("; ")
+    + (error.issues.length > 5 ? `; and ${error.issues.length - 5} more` : "");
+/** A refresh's output the schema refuses, as the read fails with it. */
+const refreshRefused = (issues) => new LambderSessionDataRefreshError(new Error(`the refreshed data does not match session.dataSchema (${issues})`));
 /**
  * The longest either half of a session token may be. A minted token is two
  * 64-character hex halves; sixteen times that leaves a custom
@@ -95,8 +100,9 @@ export default class LambderSessionManager {
     enableSlidingExpiration;
     slidingWriteIntervalSeconds;
     dataRefresh;
+    dataSchema;
     crypto;
-    constructor({ store, sessionSalt, enableSlidingExpiration = true, slidingWriteIntervalSeconds, dataRefresh, crypto, }) {
+    constructor({ store, sessionSalt, enableSlidingExpiration = true, slidingWriteIntervalSeconds, dataRefresh, dataSchema, crypto, }) {
         this.store = store;
         this.sessionSalt = sessionSalt;
         this.enableSlidingExpiration = enableSlidingExpiration;
@@ -105,7 +111,16 @@ export default class LambderSessionManager {
             : assertPositiveInteger(slidingWriteIntervalSeconds, "session.slidingWriteIntervalSeconds");
         if (dataRefresh)
             assertPositiveInteger(dataRefresh.ttlSeconds, "session.dataRefresh.ttlSeconds");
+        if (dataRefresh && !dataSchema) {
+            throw new Error("Lambder: session.dataRefresh needs session.dataSchema, the schema session.data has. Data a refresh derives " +
+                "changes shape as the app does, and without the schema a record written before the change is served in its " +
+                "old shape until its refresh comes due; with it, such a record refreshes on its next read.");
+        }
+        if (dataSchema !== undefined && typeof dataSchema?.safeParse !== "function") {
+            throw new Error("Lambder: session.dataSchema is not a zod schema.");
+        }
         this.dataRefresh = dataRefresh ?? null;
+        this.dataSchema = dataSchema ?? null;
         this.crypto = crypto ?? new LambderWebCrypto();
         this.assertCryptoFitsStore(store);
         if (typeof sessionSalt !== "string" || sessionSalt.length === 0) {
@@ -167,6 +182,9 @@ export default class LambderSessionManager {
         // logout.
         if (!sessionKey)
             throw new Error("Lambder: createSession sessionKey is empty. It names the subject the session belongs to and partitions the store, so an empty one writes a record no read accepts.");
+        // Refused for the same reason: data the schema refuses would end the
+        // session on its first read, a sign-out right after the sign-in.
+        const served = this.servedDataOf(data, (issues) => new Error(`Lambder: createSession was given data that does not match session.dataSchema (${issues}).`));
         const sessionKeyHash = await this.sessionKeyHashOf(sessionKey);
         // The sort-key SECRET goes to the client; only its hash becomes the
         // store's range key, so the store never contains a usable token.
@@ -186,7 +204,7 @@ export default class LambderSessionManager {
             dataVersion: 0,
         };
         await this.store.create(session);
-        return { session, sessionToken, csrfToken };
+        return { session: { ...session, data: served }, sessionToken, csrfToken };
     }
     /**
      * Writes new session data onto the record, and nothing else: the expiry
@@ -217,14 +235,17 @@ export default class LambderSessionManager {
     async updateSessionData(session, newData) {
         if (!session)
             throw new Error("Invalid session");
+        // Data the schema refuses would end the session on its next read
+        // (see createSession), so the write that brings it fails instead.
+        const served = this.servedDataOf(newData, (issues) => new Error(`Lambder: updateSessionData was given data that does not match session.dataSchema (${issues}).`));
         const { sessionKeyHash, secretHash } = session;
         if (!this.dataRefresh) {
             const result = await this.store.update(sessionKeyHash, secretHash, { data: newData });
-            return result === "missing" ? null : { ...session, data: newData };
+            return result === "missing" ? null : { ...session, data: served };
         }
         const result = await this.store.update(sessionKeyHash, secretHash, { data: newData }, { dataVersion: session.dataVersion });
         if (result === "updated")
-            return { ...session, data: newData, dataVersion: session.dataVersion + 1 };
+            return { ...session, data: served, dataVersion: session.dataVersion + 1 };
         if (result === "missing")
             return null;
         // The data or its deadline was written in between: a revocation was
@@ -235,7 +256,7 @@ export default class LambderSessionManager {
         const now = Math.floor(Date.now() / 1000);
         if (await this.store.update(sessionKeyHash, secretHash, { data: newData, dataExpiresAt: now }) === "missing")
             return null;
-        return { ...session, data: newData, dataExpiresAt: now };
+        return { ...session, data: served, dataExpiresAt: now };
     }
     /**
      * The record a token names, read and structurally checked, with nothing
@@ -304,10 +325,22 @@ export default class LambderSessionManager {
         const now = Math.floor(Date.now() / 1000);
         const refreshed = {};
         const slid = {};
+        // The record's data checked against the schema (see
+        // LambderSessionDataOptions). Without dataRefresh nothing can rebuild
+        // data that does not match, so the session ends.
+        const read = this.dataSchema ? this.dataSchema.safeParse(session.data) : null;
+        if (read && !read.success && !this.dataRefresh) {
+            await this.deleteSession(session);
+            return null;
+        }
+        // What the request is served: the data as the schema reads it, or,
+        // once a refresh ran, the refresh's.
+        let served = read?.success ? read.data : session.data;
         // Renew session.data once its shelf life has passed (opt-in
-        // dataRefresh). A record created while dataRefresh was off has no
-        // dataExpiresAt, so it renews on its first read.
-        if (this.dataRefresh && (session.dataExpiresAt ?? 0) <= now) {
+        // dataRefresh), or at once when it does not match the schema. A
+        // record created while dataRefresh was off has no dataExpiresAt, so
+        // it renews on its first read.
+        if (this.dataRefresh && (read?.success === false || (session.dataExpiresAt ?? 0) <= now)) {
             let newData;
             try {
                 newData = await this.dataRefresh.refresh(session);
@@ -321,6 +354,7 @@ export default class LambderSessionManager {
                 await this.deleteSession(session);
                 return null;
             }
+            served = this.servedDataOf(newData, refreshRefused);
             refreshed.data = newData;
             refreshed.dataExpiresAt = now + this.dataRefresh.ttlSeconds;
         }
@@ -335,7 +369,7 @@ export default class LambderSessionManager {
                 slid.expiresAt = now + session.ttlInSeconds;
             }
         }
-        const renewed = { ...session, ...refreshed, ...slid };
+        const renewed = { ...session, ...refreshed, ...slid, data: served };
         if (refreshed.data === undefined && slid.expiresAt === undefined)
             return renewed;
         // Awaited, so it persists before Lambda freezes. A failing write is
@@ -361,11 +395,27 @@ export default class LambderSessionManager {
         }
         catch (err) {
             console.error(`Lambder session: the renewal write failed, so this session keeps its stored expiry. ${coerceToError(err).message}`);
-            return { ...session, ...refreshed };
+            return { ...session, ...refreshed, data: served };
         }
         return renewed;
     }
     ;
+    /**
+     * Data about to be stored, held to the schema: what a read of it will
+     * serve, or the error `refused` builds from where it does not match.
+     * Data the schema refuses is the app breaking its own declaration, and
+     * storing it would only move the failure to the next read, far from the
+     * code that wrote it. The data is stored as given, not as the schema's
+     * output, so every later read parses exactly what this check accepted.
+     */
+    servedDataOf(data, refused) {
+        if (!this.dataSchema)
+            return data;
+        const checked = this.dataSchema.safeParse(data);
+        if (checked.success)
+            return checked.data;
+        throw refused(describeSchemaIssues(checked.error));
+    }
     /**
      * Runs the dataRefresh callback immediately, regardless of
      * dataExpiresAt, and persists the result onto the same record, over the
@@ -390,13 +440,14 @@ export default class LambderSessionManager {
             await this.deleteSession(session);
             return null;
         }
+        const served = this.servedDataOf(newData, refreshRefused);
         const changes = { data: newData, dataExpiresAt: Math.floor(Date.now() / 1000) + this.dataRefresh.ttlSeconds };
         const result = await this.store.update(session.sessionKeyHash, session.secretHash, changes, { dataVersion: session.dataVersion });
         if (result === "missing")
             return null;
         // "stale": served, not written, and the record keeps the version it
         // was read with (see updateSessionData).
-        return { ...session, ...changes, ...(result === "updated" ? { dataVersion: session.dataVersion + 1 } : {}) };
+        return { ...session, ...changes, data: served, ...(result === "updated" ? { dataVersion: session.dataVersion + 1 } : {}) };
     }
     ;
     /**

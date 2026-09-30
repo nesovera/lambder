@@ -21,6 +21,14 @@ export class LambderResponse {
     isBodyBase64;
     compress;
     etag;
+    /**
+     * What this response answers an API call with (a success, a refusal and
+     * its code, a flag), when it was written as an API answer: the envelope
+     * builders and res.apiRefusal() set it, and the call's summary line reads
+     * it, so the line does not parse the body back. Null on any other
+     * response, which the line names `other`.
+     */
+    callOutcome;
     constructor(init) {
         this.statusCode = init.statusCode;
         this.headers = normalizeHeaders(init.headers);
@@ -28,6 +36,7 @@ export class LambderResponse {
         this.isBodyBase64 = init.isBodyBase64 ?? false;
         this.compress = init.compress ?? "auto";
         this.etag = init.etag ?? "auto";
+        this.callOutcome = init.callOutcome ?? null;
     }
     /**
      * A copy with its own header lists, for a request to write into. A
@@ -44,6 +53,7 @@ export class LambderResponse {
             isBodyBase64: this.isBodyBase64,
             compress: this.compress,
             etag: this.etag,
+            callOutcome: this.callOutcome,
         });
     }
     // The header methods delegate to the core's header helpers, so an answer
@@ -77,6 +87,7 @@ export const answerFromResponse = (response) => {
         isBodyBase64: response.isBodyBase64 || binary,
         compress: response.compress,
         etag: response.etag,
+        ...(response.callOutcome ? { outcome: response.callOutcome } : {}),
     };
 };
 /**
@@ -98,6 +109,7 @@ export const responseFromAnswer = (answer) => new LambderResponse({
     isBodyBase64: answer.isBodyBase64 ?? false,
     compress: answer.compress ?? "auto",
     etag: answer.etag ?? "auto",
+    callOutcome: answer.outcome ?? null,
 });
 const mimeOf = (contentType) => (contentType?.split(";")[0] ?? "").trim().toLowerCase();
 /** A content type whose body is text: sent as text when it is valid UTF-8 and not compressed. */

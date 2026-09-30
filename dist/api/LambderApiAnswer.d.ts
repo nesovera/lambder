@@ -1,3 +1,4 @@
+import type { LambderCallOutcomeHint } from "../shared/wire/LambderCallOutcome.js";
 import type { LambderApiHttpAnswer } from "../shared/wire/LambderApiOutcome.js";
 /**
  * The core's output for one API call, before any transport-level
@@ -23,6 +24,12 @@ export type LambderApiAnswer = {
     isBodyBase64?: boolean;
     compress?: boolean | "auto";
     etag?: boolean | "auto";
+    /**
+     * What the answer is, as the code that wrote it knows it, for the call's
+     * summary line: set by the envelope and validation builders, dropped by
+     * the stores like the other hints (a replay reads it back from the text).
+     */
+    outcome?: LambderCallOutcomeHint;
 };
 /**
  * An answer in the accessor form resolveApiOutcome() reads (the same view a

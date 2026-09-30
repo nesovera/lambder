@@ -1679,6 +1679,15 @@ describe('LambderMockApp - declarations read off the apiOptions table', () => {
             .toThrow(/"order\.create" can refuse with "app\/read-only" by the apiOptions and guardDeclarations tables, which the vocabulary declared on the mock init does not hold/);
     });
 
+    it('takes the vocabulary as the list of maps the server declares, and refuses a code two of them declare', async () => {
+        const { 'app/user-archived': archived, ...memberRefusals } = contractVocabulary;
+        const listed = mock.declareRefusals([memberRefusals, { 'app/user-archived': archived }])
+            .create({ ...requiredOptions, guards: declaredGuards, apiOptions: contractOptions, guardDeclarations: contractGuardDeclarations });
+        expect(() => listed.api('order.create', async () => ({ orderId: 'o', qty: 1 }))).not.toThrow();
+        // @ts-expect-error "app/read-only" is declared in two of the maps
+        expect(() => mock.declareRefusals([memberRefusals, { 'app/read-only': {} }])).toThrow(/the refusal code "app\/read-only" is declared in two of the maps given to declareRefusals\(\)/);
+    });
+
     it('requires a code on every refusal when the vocabulary says so, as the server does', async () => {
         vi.spyOn(console, 'error').mockImplementation(() => {});
         const strict = mock.declareRefusals(contractVocabulary, { requireCodes: true })

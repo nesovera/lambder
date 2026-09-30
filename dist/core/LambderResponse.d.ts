@@ -3,6 +3,7 @@ import type { LambderCompressionOption, LambderCompressionSettingsBase, LambderE
 import type { LambderRenderContext, LambderHttpEventFormat } from "./LambderContext.js";
 import type { LambderApiAnswer } from "../api/LambderApiAnswer.js";
 import type { LambderHttpStatusCode } from "../shared/wire/LambderHttpStatus.js";
+import type { LambderCallOutcomeHint } from "../shared/wire/LambderCallOutcome.js";
 export type LambderHeadersInput = Record<string, string | string[]>;
 /**
  * Final Lambda response: v1 (REST API) uses multiValueHeaders, v2 (HTTP API /
@@ -31,6 +32,8 @@ type LambderResponseInit = {
     compress?: boolean | "auto";
     /** "auto": ETag on GET/HEAD 200 when globally enabled. true: force. false: never. */
     etag?: boolean | "auto";
+    /** What the response answers an API call with, when it was written as an API answer; see LambderResponse.callOutcome. */
+    callOutcome?: LambderCallOutcomeHint | null;
 };
 /**
  * Intermediate response object returned by all response builder methods and by
@@ -49,6 +52,14 @@ export declare class LambderResponse {
     isBodyBase64: boolean;
     compress: boolean | "auto";
     etag: boolean | "auto";
+    /**
+     * What this response answers an API call with (a success, a refusal and
+     * its code, a flag), when it was written as an API answer: the envelope
+     * builders and res.apiRefusal() set it, and the call's summary line reads
+     * it, so the line does not parse the body back. Null on any other
+     * response, which the line names `other`.
+     */
+    callOutcome: LambderCallOutcomeHint | null;
     constructor(init: LambderResponseInit);
     /**
      * A copy with its own header lists, for a request to write into. A

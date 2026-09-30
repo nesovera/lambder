@@ -9,6 +9,7 @@ import type { LambderRateLimiter } from "../shared/contracts/LambderRateLimiter.
 import type { LambderSessionStore } from "../shared/contracts/LambderSessionStore.js";
 import { LAMBDER_BACKEND_SWAP, LAMBDER_CRASH_WATCH } from "../shared/util/LambderTestingDoors.js";
 import type { LambderApiContractShape } from "../shared/wire/LambderApiContract.js";
+import type { LambderCallSummary } from "../core/LambderCallSummary.js";
 import { LambderTestVisitor, type LambderTestVisitorArgs, type LambderTestVisitorOptions } from "./LambderTestVisitor.js";
 /**
  * What a test app may be told. Nothing is required: `lambderTestApp(lambder)`
@@ -100,6 +101,8 @@ export declare class LambderTestApp<TContract extends LambderApiContractShape = 
     private visitorCount;
     private resetCount;
     private readonly crashList;
+    /** Every call summary the app wrote since the last reset; see callSummaries. */
+    private readonly callSummaryList;
     /**
      * The call a crash happened under. The app's 500 says nothing about the
      * crash, so the error travels beside the answer, and with concurrent
@@ -117,6 +120,12 @@ export declare class LambderTestApp<TContract extends LambderApiContractShape = 
      * error an `event()` rejects with, which the test already holds.
      */
     get crashes(): readonly Error[];
+    /**
+     * The summary of every API call the app answered since the last reset,
+     * in order (see LambderCallSummary): what its callSummary option would
+     * have been handed, collected here instead of written to stdout.
+     */
+    get callSummaries(): readonly LambderCallSummary[];
     /** The session manager, for tests that inspect or manipulate sessions directly. Throws when the app has no sessions. */
     get sessionManager(): LambderSessionManager<TSessionData>;
     /**
@@ -159,10 +168,10 @@ export declare class LambderTestApp<TContract extends LambderApiContractShape = 
     event(event: unknown, context?: Partial<Context>): Promise<unknown>;
     /**
      * Rewinds what accumulated: sessions, rate-limit counters and replay
-     * records in the stores this test app made, the crashes it recorded, and
-     * the cookies of every visitor it created (each empties its jar the next
-     * time it is used). For a beforeEach. The app's own data (its database)
-     * is the app's to rewind.
+     * records in the stores this test app made, the crashes and call
+     * summaries it recorded, and the cookies of every visitor it created
+     * (each empties its jar the next time it is used). For a beforeEach. The
+     * app's own data (its database) is the app's to rewind.
      */
     reset(): void;
 }

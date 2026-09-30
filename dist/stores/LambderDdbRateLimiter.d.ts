@@ -20,12 +20,21 @@ export interface LambderDdbRateLimiterOptions {
  * Fixed-window rate limiter backed by DynamoDB.
  *
  * Each window is one item counted with a conditional `ADD`, so the increment
- * and the limit check are one atomic request. Windows are evaluated smallest
- * first and evaluation stops at the first exceeded one, which keeps blocked
- * requests cheap and spares the larger counters. Attempts count, not
- * successes: a counter checked before the refusing one keeps its increment,
- * since a compensating decrement would give up the conditional-ADD
- * atomicity. Items carry an `expiresAt` attribute for DynamoDB TTL.
+ * and the limit check are one atomic request, and every window's request is
+ * sent at once: a policy capping three windows costs one round trip on the
+ * request's critical path, not three. Attempts count, not successes: a window
+ * under its limit counts an attempt another window refuses, since a
+ * compensating decrement would give up the conditional-ADD atomicity. The
+ * refusal names the smallest window that refused. Items carry an `expiresAt`
+ * attribute for DynamoDB TTL.
+ *
+ * A window the table refused an attempt in stays at its limit until it
+ * resets, since a count only rises within its window. So the process
+ * remembers it until then, and refuses the key's next attempts from memory
+ * without touching the table: a flood costs each process one round of
+ * writes per window it fills, and the counters of its other windows stop
+ * rising once it is refused. Another process asks the table once and then
+ * remembers too.
  *
  * The tracker key is caller data (an address, a session key, whatever a
  * policy handler returned), so a key whose partition key would pass
@@ -47,9 +56,9 @@ export interface LambderDdbRateLimiterOptions {
  * means the partition holding this counter is flooded. A partition holds a
  * range of keys, though, not one: a flood on one address, or a session or
  * cache spike on a shared table, throttles every counter on the same
- * partition. The key's own counts tell the flood from its neighbours: the
- * throttled window's and every capped window's after it, the ones this
- * attempt has not been counted against yet, each read with a consistent
+ * partition. The key's own counts tell the flood from its neighbours: those
+ * of the windows whose write was throttled, the ones this attempt has not
+ * been counted against, each read with a consistent
  * GetItem, in parallel (reads have their own throughput, which the throttled
  * writes leave alone). A key at or over the limit of any of them is the
  * flood: it is refused, since passed on as a failure `failOpen` would wave
@@ -87,8 +96,8 @@ export declare class LambderDdbRateLimiter implements LambderRateLimiter {
     private readonly ready;
     private readonly ttlWindowMultiplier;
     private readonly now;
-    /** The windows seen during key-range throttles, by (partition key, window, window start); see the class doc. */
-    private readonly throttledWindows;
+    /** The windows found at their limit, and those whose read a throttle refused, by (partition key, window, window start); see the class doc. */
+    private readonly rememberedWindows;
     constructor(options: LambderDdbRateLimiterOptions);
     /** The clock the windows are computed against, for the engine's Retry-After. */
     clockMilliseconds(): number;
@@ -107,11 +116,10 @@ export declare class LambderDdbRateLimiter implements LambderRateLimiter {
      */
     private incrementWindow;
     /**
-     * The answer to a key-range throttle on the first of `uncounted`: that
-     * window and every capped one after it, the windows this attempt has not
-     * been counted against. The windows before it counted this attempt and
-     * allowed it, so reading them could only turn the attempt that filled
-     * one into a refusal.
+     * The answer to a key-range throttle on `uncounted`, the windows whose
+     * write the throttle refused and which have not counted this attempt.
+     * The others counted it and allowed it, so reading them could only turn
+     * the attempt that filled one into a refusal.
      *
      * Each count is read strongly consistent: the count that decides is the
      * one the throttled writes were racing to raise, and a replica lagging

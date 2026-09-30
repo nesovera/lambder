@@ -3,6 +3,7 @@ import type { LambderSessionRecord } from "../shared/contracts/LambderSessionSto
 import { readApiEnvelope, cookieValuesByName, isApiCallContentType, lowercaseHeaderNames, type LambderApiRequest } from "../api/LambderApiRequest.js";
 import { apiNameOfCallPath } from "../shared/wire/LambderApiNames.js";
 import { resolveClientIp } from "../shared/util/LambderClientIp.js";
+import { constantTimeEquals } from "../shared/util/LambderTextDigest.js";
 import { base64ToText } from "../shared/util/LambderBase64.js";
 import { LambderAnswerHeaders } from "../shared/wire/LambderAnswerHeaders.js";
 import { DEFAULT_API_PATH } from "../shared/wire/LambderDefaultApiPath.js";
@@ -212,6 +213,18 @@ const UNBOUND_CONTEXT_TOOLS: LambderContextTools = {
     chargeRateLimit: unboundTool("rateLimit"),
 };
 
+/**
+ * Proof that a request came through the proxy in front of the app: a header
+ * the proxy sets to a secret on every request it forwards, which a request
+ * sent to the origin directly cannot carry. See `originProof` at create().
+ */
+export type LambderOriginProof = {
+    /** The header the proxy sets, such as "x-origin-proof". */
+    header: string;
+    /** The values it may carry: the current secret, and during a rotation the one before it. */
+    secrets: readonly string[];
+};
+
 /** What createContext reads a request with: the instance's own settings for where an API call goes and which forwarded headers it trusts. */
 export type LambderContextOptions = {
     /** See `apiPath` at create(). Default: "/api", as there. */
@@ -220,6 +233,8 @@ export type LambderContextOptions = {
     trustedClientIpHeaders?: readonly string[];
     /** See `trustedHostHeaders` at create(). Default: none. */
     trustedHostHeaders?: readonly string[];
+    /** See `originProof` at create(). Default: none, so the trusted headers are read on every request. */
+    originProof?: LambderOriginProof | null;
 };
 
 /**
@@ -252,7 +267,7 @@ const withoutStagePrefix = (path: string, stage: string | undefined): string =>
 export const createContext = (
     event: LambderHttpEvent,
     lambdaContext: Context,
-    { apiPath = DEFAULT_API_PATH, trustedClientIpHeaders = [], trustedHostHeaders = [] }: LambderContextOptions = {},
+    { apiPath = DEFAULT_API_PATH, trustedClientIpHeaders = [], trustedHostHeaders = [], originProof = null }: LambderContextOptions = {},
 ): LambderRenderContext => {
     // Normalize the two API Gateway payload formats into one shape.
     const eventFormat: LambderHttpEventFormat = isV2HttpEvent(event) ? "v2" : "v1";
@@ -266,7 +281,7 @@ export const createContext = (
     let get: Record<string, string | undefined>;
     let cookiePairs: string[];
     let sourceIp: string;
-    const headers: APIGatewayProxyEventHeaders = event.headers ?? {};
+    let headers: APIGatewayProxyEventHeaders = event.headers ?? {};
 
     if(isV2HttpEvent(event)){
         host = headers.host || event.requestContext.domainName || "";
@@ -312,6 +327,20 @@ export const createContext = (
     for(const [name, values] of Object.entries(cookieList)) cookie[name] = values[0]!;
 
     const lowercasedHeaders = lowercaseHeaderNames(headers);
+
+    // The origin proof is read, then taken off the headers the app reads
+    // (ctx.headers, ctx.header()), so no handler, hook or log of them meets
+    // the secret; the raw event keeps it. A request that does not carry it
+    // came to the origin some other way than through the proxy, and the
+    // proxy's headers on it are whatever its sender wrote.
+    let proven = true;
+    if(originProof){
+        const proofHeader = originProof.header.toLowerCase();
+        const presented = lowercasedHeaders[proofHeader] ?? "";
+        proven = originProof.secrets.some((secret) => constantTimeEquals(presented, secret));
+        delete lowercasedHeaders[proofHeader];
+        headers = Object.fromEntries(Object.entries(headers).filter(([name]) => name.toLowerCase() !== proofHeader));
+    }
     const header = (name: string): string | undefined => lowercasedHeaders[name.toLowerCase()];
 
     // A trusted forwarding header is trusted because a proxy in front of this
@@ -321,18 +350,19 @@ export const createContext = (
     // address and the host are the ones the invoker named (clientIp and host,
     // delivered as sourceIp and Host), and no header is read for either.
     const invokedDirectly = event.requestContext?.apiId === LAMBDER_INVOKE_API_ID;
+    const readsForwarding = proven && !invokedDirectly;
 
     // The first trusted header carrying a well-formed host, leftmost entry,
     // else the host the gateway saw. Behind CloudFront a Function URL sees
     // its own lambda-url domain, since CloudFront sends an origin its own
     // Host, so cookie domains and host routing need the viewer's host from a
     // header the distribution writes.
-    for(const name of invokedDirectly ? [] : trustedHostHeaders){
+    for(const name of readsForwarding ? trustedHostHeaders : []){
         const forwarded = (lowercasedHeaders[name.toLowerCase()] ?? "").split(",")[0]!.trim();
         if(HOST_VALUE_PATTERN.test(forwarded)){ host = forwarded; break; }
     }
 
-    const ip = resolveClientIp(lowercasedHeaders, sourceIp, invokedDirectly ? [] : trustedClientIpHeaders);
+    const ip = resolveClientIp(lowercasedHeaders, sourceIp, readsForwarding ? trustedClientIpHeaders : []);
 
     // Decode body: keep the raw string, then parse as JSON with urlencoded fallback.
     const rawBody = event.isBase64Encoded

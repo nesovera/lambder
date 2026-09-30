@@ -51,6 +51,7 @@ const createApp = () => {
         session: {
             store: productionSessionStore,
             sessionSalt: 'salt',
+            dataSchema: z.custom<SessionData>(),
             dataRefresh: { ttlSeconds: 3600, refresh: async (session) => ({ ...session.data, refreshed: true }) },
         },
         // failOpen off on both: left on, a throwing production store would be

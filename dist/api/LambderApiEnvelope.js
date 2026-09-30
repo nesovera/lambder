@@ -1,3 +1,4 @@
+import { outcomeOfEnvelope } from "../shared/wire/LambderCallOutcome.js";
 import { LAMBDER_REFUSAL_CODES, isLambderRefusalCode, refusalMessageOf } from "../shared/wire/LambderApiRefusal.js";
 import { setAnswerHeader } from "../shared/wire/LambderAnswerHeaders.js";
 /*
@@ -73,7 +74,8 @@ export const envelopeAnswer = (envelope, options = {}) => {
         // casing replaces the envelope's own rather than shipping beside it.
         setAnswerHeader(headers, key, value);
     }
-    return { statusCode: options.statusCode ?? 200, headers, body: JSON.stringify(envelope) };
+    const statusCode = options.statusCode ?? 200;
+    return { statusCode, headers, body: JSON.stringify(envelope), outcome: outcomeOfEnvelope(envelope, statusCode) };
 };
 /**
  * A thrown refusal as an answer: its refusal and flags on the envelope,
@@ -187,6 +189,7 @@ export const validationAnswer = (zodError, logList) => {
             ...(trimmed ? { issueCount: zodError.issues.length } : {}),
             ...(logList?.length ? { logList } : {}),
         }),
+        outcome: { outcome: "validation", code: null },
     };
 };
 /** No API is registered under the requested name: a refusal, not a 404, so a typed caller reads it. */

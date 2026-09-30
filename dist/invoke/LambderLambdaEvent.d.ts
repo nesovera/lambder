@@ -10,6 +10,7 @@
  */
 import type { APIGatewayProxyEvent, APIGatewayProxyEventV2, Context } from "aws-lambda";
 import type { LambderHttpEventFormat } from "../core/LambderContext.js";
+import { LAMBDER_PARENT_REQUEST_HEADER } from "../shared/wire/LambderInvokeApiId.js";
 import type { LambderCompressedBrotliPayload, LambderCompressedGzipPayload } from "../shared/wire/LambderRequestPayload.js";
 /**
  * Marks a synthesized request as an invoke, for guards and hooks that want to
@@ -20,6 +21,7 @@ import type { LambderCompressedBrotliPayload, LambderCompressedGzipPayload } fro
 export declare const LAMBDER_INVOKE_HEADER = "x-lambder-invoke";
 /** The invoking function's name, when the caller runs in Lambda; for the callee's logs. */
 export declare const LAMBDER_INVOKED_BY_HEADER = "x-lambder-invoked-by";
+export { LAMBDER_PARENT_REQUEST_HEADER };
 /** The value of the marker header; a future incompatible event shape would bump it. */
 export declare const LAMBDER_INVOKE_PROTOCOL = "1";
 /** A session carried on a user's behalf: the two values a browser holds. */

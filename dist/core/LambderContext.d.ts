@@ -147,6 +147,17 @@ export type LambderContextTools = {
  * again by the instance on whatever context a beforeRender hook hands back.
  */
 export declare const bindContextTools: (ctx: Omit<LambderRenderContext, LambderContextToolName> | LambderRenderContext, tools: LambderContextTools) => LambderRenderContext;
+/**
+ * Proof that a request came through the proxy in front of the app: a header
+ * the proxy sets to a secret on every request it forwards, which a request
+ * sent to the origin directly cannot carry. See `originProof` at create().
+ */
+export type LambderOriginProof = {
+    /** The header the proxy sets, such as "x-origin-proof". */
+    header: string;
+    /** The values it may carry: the current secret, and during a rotation the one before it. */
+    secrets: readonly string[];
+};
 /** What createContext reads a request with: the instance's own settings for where an API call goes and which forwarded headers it trusts. */
 export type LambderContextOptions = {
     /** See `apiPath` at create(). Default: "/api", as there. */
@@ -155,7 +166,9 @@ export type LambderContextOptions = {
     trustedClientIpHeaders?: readonly string[];
     /** See `trustedHostHeaders` at create(). Default: none. */
     trustedHostHeaders?: readonly string[];
+    /** See `originProof` at create(). Default: none, so the trusted headers are read on every request. */
+    originProof?: LambderOriginProof | null;
 };
 /** The render context for one request: everything a route handler, an API handler, a hook or a guard reads about it, built once from the Lambda event. */
-export declare const createContext: (event: LambderHttpEvent, lambdaContext: Context, { apiPath, trustedClientIpHeaders, trustedHostHeaders }?: LambderContextOptions) => LambderRenderContext;
+export declare const createContext: (event: LambderHttpEvent, lambdaContext: Context, { apiPath, trustedClientIpHeaders, trustedHostHeaders, originProof }?: LambderContextOptions) => LambderRenderContext;
 export {};

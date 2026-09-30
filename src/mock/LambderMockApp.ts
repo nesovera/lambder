@@ -14,7 +14,7 @@ import type { LambderApiDefinition } from "../api/LambderApiDefinition.js";
 import { LambderApiRefusal, LAMBDER_REFUSAL_CODES, refuse as refuseApiCall, type LambderDeclaredRefuse, type LambderRefusalMessage } from "../shared/wire/LambderApiRefusal.js";
 import {
     allowedRefusalOf,
-    readRefusalVocabulary,
+    declaredRefusalVocabulary,
     toRefusalCodes,
     type LambderApiAllowedRefusal,
     type LambderApiAllowedRefusals,
@@ -23,7 +23,9 @@ import {
     type LambderHandlerRefusalsOf,
     type LambderRefusalDeclaration,
     type LambderRefusalVocabulary,
-    type LambderRefusalVocabularyChecks,
+    type LambderRefusalVocabularyOption,
+    type LambderRefusalVocabularyOptionChecks,
+    type LambderMergedRefusalVocabulary,
 } from "../api/LambderApiRefusals.js";
 import { coerceToError } from "../shared/wire/LambderCrashDetail.js";
 import { buildTransportEnvelope, type LambderApiTransport, type LambderApiTransportRequest } from "../shared/transport/LambderApiTransport.js";
@@ -41,7 +43,7 @@ import type { LambderApiIdempotencyConfig } from "../api/LambderApiIdempotency.j
 import { LambderMemoryRateLimiter } from "../stores/LambderMemoryRateLimiter.js";
 import { LambderMemoryIdempotencyStore } from "../stores/LambderMemoryIdempotencyStore.js";
 import { LambderMemorySessionStore } from "../stores/LambderMemorySessionStore.js";
-import LambderSessionManager, { type LambderCreatedSession } from "../session/LambderSessionManager.js";
+import LambderSessionManager, { type LambderCreatedSession, type LambderSessionDataOptions } from "../session/LambderSessionManager.js";
 import { isWebCryptoAvailable, LambderPlainSessionCrypto } from "../session/LambderSessionCrypto.js";
 import type { LambderSessionCookieOptions } from "../session/LambderSessionController.js";
 import { DEFAULT_SESSION_CSRF_COOKIE_KEY, DEFAULT_SESSION_TOKEN_COOKIE_KEY } from "../shared/wire/LambderSessionCookieNames.js";
@@ -236,7 +238,9 @@ export class LambderMockApp<
                         sessionSalt: sessionOptions.sessionSalt ?? "lambder-mock",
                         enableSlidingExpiration: sessionOptions.enableSlidingExpiration,
                         slidingWriteIntervalSeconds: sessionOptions.slidingWriteIntervalSeconds,
-                        dataRefresh: sessionOptions.dataRefresh,
+                        // As given: the manager refuses dataRefresh without
+                        // the schema, which an untyped caller can still pass.
+                        ...{ dataRefresh: sessionOptions.dataRefresh, dataSchema: sessionOptions.dataSchema } as LambderSessionDataOptions<S>,
                         // A plain-http page (device testing on a LAN) has no
                         // crypto.subtle, and a memory-only store is nothing
                         // anyone can leak, so hashing there protects nothing.
@@ -1093,21 +1097,24 @@ const lambderMockInitOf = <C extends LambderApiContractShape, S, TVocabulary ext
 export const initLambderMock = <C extends LambderApiContractShape, S = any>() => ({
     ...lambderMockInitOf<C, S, never, false>(null),
     /**
-     * Declares the server's refusal vocabulary on the mock: the same object,
-     * and the same `requireCodes`, the server's init declares, imported from
-     * shared code (codes, zod schemas, statuses and flags hold nothing
-     * secret). Given, every refusal an entry answers with is checked and sent
+     * Declares the server's refusal vocabulary on the mock: the same map, or
+     * list of maps, and the same `requireCodes`, the server's init declares,
+     * imported from shared code (codes, zod schemas, statuses and flags hold
+     * nothing secret). Given, every refusal an entry answers with is checked and sent
      * as the server would send it: the code among the codes the tables give
      * the entry, its data parsed through the code's schema from the input
      * form, and the declaration's status and flag. An entry whose tables name
      * a code needs it.
      */
-    declareRefusals<const TVocabulary extends LambderRefusalVocabulary, const TRequireCodes extends boolean = false>(
-        refusals: TVocabulary & LambderRefusalVocabularyChecks<TVocabulary>,
+    declareRefusals<const TVocabulary extends LambderRefusalVocabularyOption, const TRequireCodes extends boolean = false>(
+        refusals: TVocabulary & LambderRefusalVocabularyOptionChecks<TVocabulary>,
         options: { requireCodes?: TRequireCodes } = {},
     ){
-        const vocabulary = readRefusalVocabulary(refusals);
-        if(!vocabulary) throw new Error("LambderMockApp: declareRefusals() takes the vocabulary, an object of codes.");
-        return lambderMockInitOf<C, S, TVocabulary, TRequireCodes>({ refusals, vocabulary, requireCodes: (options.requireCodes ?? false) as TRequireCodes });
+        const declared = declaredRefusalVocabulary(refusals, "LambderMockApp");
+        return lambderMockInitOf<C, S, LambderMergedRefusalVocabulary<TVocabulary>, TRequireCodes>({
+            refusals: declared.refusals as LambderMergedRefusalVocabulary<TVocabulary>,
+            vocabulary: declared.vocabulary,
+            requireCodes: (options.requireCodes ?? false) as TRequireCodes,
+        });
     },
 });
