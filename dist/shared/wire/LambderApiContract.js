@@ -1,6 +1,6 @@
 /**
  * Lambder API Contract System
  *
- * Contracts are built via method chaining and inferred using typeof lambder.ApiContract
+ * Contracts are the endpoint declarations an instance registered, read with typeof lambder.ApiContract
  */
 export {};

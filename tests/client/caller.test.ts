@@ -21,7 +21,8 @@ import { lambderHandlerTransport } from '../../src/invoke/lambderHandlerTranspor
 import { apiNameKeyOf } from '../../src/shared/wire/LambderApiSignatureMap.js';
 import { createIdempotencyKey, createIdempotencyKeyScope } from '../../src/shared/wire/LambderIdempotencyKeyScope.js';
 import { resolveApiOutcome, type LambderApiHttpAnswer, type LambderApiOutcome } from '../../src/shared/wire/LambderApiOutcome.js';
-import type { LambderApiTransport } from '../../src/shared/transport/LambderApiTransport.js';
+import { buildTransportEnvelope, type LambderApiTransport, type LambderApiTransportRequest } from '../../src/shared/transport/LambderApiTransport.js';
+import { apiCallPath } from '../../src/shared/wire/LambderApiNames.js';
 
 /** Minimal Response stand-in: enough surface for the caller's dispatch. */
 const mockResponse = (body: any, init: { status?: number, statusText?: string, rawText?: string, invalidJson?: boolean } = {}) => ({
@@ -53,10 +54,10 @@ describe('LambderCaller - outcomes', () => {
         stubFetch(async () => mockResponse({ apiVersion: '1', payload: { name: 'Ada' } }));
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false });
 
-        const outcome = await caller.apiOutcome('getUser', {});
+        const outcome = await caller.apiOutcome('user.get', {});
         expect(outcome).toMatchObject({ ok: true, payload: { name: 'Ada' } });
 
-        expect(await caller.api('getUser', {})).toEqual({ name: 'Ada' });
+        expect(await caller.api('user.get', {})).toEqual({ name: 'Ada' });
     });
 
     it('a success whose payload is not an object is a server failure: no handler wrote it', async () => {
@@ -69,14 +70,14 @@ describe('LambderCaller - outcomes', () => {
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, errorHandler });
         for(const body of [{ apiVersion: '1', payload: null }, { apiVersion: '1', payload: 0 }, { apiVersion: '1', payload: 'ok' }, { apiVersion: '1' }]){
             stubFetch(async () => mockResponse(body));
-            const outcome = await caller.apiOutcome('maybeGet', {});
+            const outcome = await caller.apiOutcome('test.maybeGet', {});
             expect(outcome).toMatchObject({ ok: false, reason: 'server', error: { message: expect.stringMatching(/payload is not an object or an array/) } });
-            expect(await caller.api('maybeGet', {})).toBeUndefined();
+            expect(await caller.api('test.maybeGet', {})).toBeUndefined();
         }
         expect(errorHandler).toHaveBeenCalledTimes(8);
 
         stubFetch(async () => mockResponse({ apiVersion: '1', payload: [] }));
-        expect(await caller.apiOutcome('maybeGet', {})).toMatchObject({ ok: true, payload: [] });
+        expect(await caller.apiOutcome('test.maybeGet', {})).toMatchObject({ ok: true, payload: [] });
     });
 
     it('refusal envelope: reason refusal, handler called, envelope kept on the outcome', async () => {
@@ -84,14 +85,14 @@ describe('LambderCaller - outcomes', () => {
         const refusalHandler = vi.fn();
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, refusalHandler });
 
-        const outcome = await caller.apiOutcome('doThing', {});
+        const outcome = await caller.apiOutcome('test.doThing', {});
         expect(outcome).toMatchObject({ ok: false, reason: 'refusal', refusal: { type: 'warning', content: 'Denied.' } });
         expect(refusalHandler).toHaveBeenCalledWith({ type: 'warning', content: 'Denied.' });
         // An envelope refusal always carries the envelope, so the narrowed
         // outcome needs no optional read to reach it.
         if(!outcome.ok && outcome.reason === 'refusal') expect(outcome.response.refusal).toEqual({ type: 'warning', content: 'Denied.' });
 
-        expect(await caller.api('doThing', {})).toBeUndefined();
+        expect(await caller.api('test.doThing', {})).toBeUndefined();
     });
 
     it('a refusal an app spelled out as the empty string is still a refusal', async () => {
@@ -103,7 +104,7 @@ describe('LambderCaller - outcomes', () => {
         const refusalHandler = vi.fn();
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, refusalHandler });
 
-        const outcome = await caller.apiOutcome('doThing', {});
+        const outcome = await caller.apiOutcome('test.doThing', {});
 
         expect(outcome).toMatchObject({ ok: false, reason: 'refusal', refusal: { type: 'error', content: '' } });
         expect(refusalHandler).toHaveBeenCalledWith({ type: 'error', content: '' });
@@ -136,7 +137,7 @@ describe('LambderCaller - outcomes', () => {
         const versionExpiredHandler = vi.fn();
         const caller = new LambderCaller({ apiPath: '/api', apiVersion: '1', isCorsEnabled: false, versionExpiredHandler });
 
-        const outcome = await caller.apiOutcome('anything', {});
+        const outcome = await caller.apiOutcome('test.anything', {});
         expect(outcome).toMatchObject({ ok: false, reason: 'versionExpired' });
         expect(versionExpiredHandler).toHaveBeenCalledOnce();
     });
@@ -149,17 +150,17 @@ describe('LambderCaller - outcomes', () => {
         const errorHandler = vi.fn();
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, errorHandler });
 
-        const outcome = await caller.apiOutcome('crash', {});
+        const outcome = await caller.apiOutcome('test.crash', {});
         expect(outcome).toMatchObject({ ok: false, reason: 'server', status: 500, refusal: { type: 'error', content: 'Internal server error.' } });
         expect(errorHandler).toHaveBeenCalledOnce();
-        expect(await caller.api('crash', {})).toBe(undefined);
+        expect(await caller.api('test.crash', {})).toBe(undefined);
     });
 
     it('HTTP 500 with an HTML body: reason server, no refusal', async () => {
         stubFetch(async () => mockResponse(null, { status: 500, statusText: 'Internal Server Error', rawText: '<h1>dead</h1>' }));
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false });
 
-        const outcome = await caller.apiOutcome('crash', {});
+        const outcome = await caller.apiOutcome('test.crash', {});
         expect(outcome).toMatchObject({ ok: false, reason: 'server', status: 500 });
         if(!outcome.ok) expect(outcome.refusal).toBe(undefined);
     });
@@ -168,7 +169,7 @@ describe('LambderCaller - outcomes', () => {
         stubFetch(async () => mockResponse(null, { invalidJson: true }));
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false });
 
-        const outcome = await caller.apiOutcome('weird', {});
+        const outcome = await caller.apiOutcome('test.weird', {});
         expect(outcome).toMatchObject({ ok: false, reason: 'server', status: 200 });
     });
 
@@ -178,7 +179,7 @@ describe('LambderCaller - outcomes', () => {
         const apiInputValidationErrorHandler = vi.fn();
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, apiInputValidationErrorHandler });
 
-        const outcome = await caller.apiOutcome('register', { email: 'nope' });
+        const outcome = await caller.apiOutcome('account.register', { email: 'nope' });
         expect(outcome).toMatchObject({ ok: false, reason: 'validation', status: 422 });
         expect(apiInputValidationErrorHandler).toHaveBeenCalledWith(zodError);
     });
@@ -189,7 +190,7 @@ describe('LambderCaller - outcomes', () => {
         const errorHandler = vi.fn();
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, apiInputValidationErrorHandler, errorHandler });
 
-        const outcome = await caller.apiOutcome('register', { email: 'nope' });
+        const outcome = await caller.apiOutcome('account.register', { email: 'nope' });
         expect(outcome).toMatchObject({ ok: false, reason: 'server', status: 422 });
         expect(apiInputValidationErrorHandler).not.toHaveBeenCalled();
         expect(errorHandler).toHaveBeenCalledOnce();
@@ -200,18 +201,70 @@ describe('LambderCaller - outcomes', () => {
         const errorHandler = vi.fn();
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, errorHandler });
 
-        const outcome = await caller.apiOutcome('anything', {});
+        const outcome = await caller.apiOutcome('test.anything', {});
         expect(outcome).toMatchObject({ ok: false, reason: 'network' });
         expect(errorHandler).toHaveBeenCalledOnce();
-        await expect(caller.api('anything', {})).resolves.toBe(undefined);
+        await expect(caller.api('test.anything', {})).resolves.toBe(undefined);
     });
 
     it('no handlers configured: still resolves to an outcome without throwing', async () => {
         stubFetch(async () => { throw new TypeError('Failed to fetch'); });
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false });
 
-        const outcome = await caller.apiOutcome('anything', {});
+        const outcome = await caller.apiOutcome('test.anything', {});
         expect(outcome).toMatchObject({ ok: false, reason: 'network' });
+    });
+});
+
+describe('LambderCaller - an endpoint called through its group', () => {
+    type Contract = {
+        'orders.place': { input: { sku: string }, output: { orderId: string }, mode: 'public' },
+    };
+    const placedAnswer: LambderApiHttpAnswer = {
+        status: 200, statusText: 'OK', header: () => null,
+        json: async () => ({ apiVersion: '1', payload: { orderId: 'o-1' } }),
+        text: async () => '{"apiVersion":"1","payload":{"orderId":"o-1"}}',
+    };
+
+    it('sends caller.orders.place(input) to /api/orders/place with the body caller.api("orders.place", input) sends', async () => {
+        const sent: LambderApiTransportRequest[] = [];
+        const transport: LambderApiTransport = async (request) => { sent.push(request); return placedAnswer; };
+        const caller = new LambderCaller<Contract>({ apiPath: '/api', apiVersion: '1', isCorsEnabled: false, transport });
+
+        expect(await caller.orders.place({ sku: 'a' })).toEqual({ orderId: 'o-1' });
+        expect(await caller.api('orders.place', { sku: 'a' })).toEqual({ orderId: 'o-1' });
+        expect(await caller.orders.place.outcome({ sku: 'a' })).toMatchObject({ ok: true, payload: { orderId: 'o-1' } });
+
+        // Each call has its own abort signal; everything else it hands the transport is the same.
+        const [byGroup, byName, byOutcome] = sent.map(({ signal: _signal, ...request }) => request);
+        expect(byGroup).toEqual(byName);
+        expect(byOutcome).toEqual(byName);
+        expect(apiCallPath(byGroup!.apiPath, byGroup!.apiName)).toBe('/api/orders/place');
+        expect(buildTransportEnvelope(byGroup!)).toEqual({ version: '1', token: '', siteHost: 'localhost', payload: { sku: 'a' } });
+    });
+
+    it('posts to the endpoint\'s path through the fetch transport, the same body either way', async () => {
+        const fetchMock = stubFetch(async () => mockResponse({ apiVersion: '1', payload: { orderId: 'o-1' } }));
+        const caller = new LambderCaller<Contract>({ apiPath: '/api', apiVersion: '1', isCorsEnabled: false });
+
+        await caller.orders.place({ sku: 'a' });
+        await caller.api('orders.place', { sku: 'a' });
+
+        const [byGroup, byName] = fetchMock.mock.calls as unknown as [string, RequestInit][];
+        expect(byGroup![0]).toBe('/api/orders/place');
+        expect(byName![0]).toBe('/api/orders/place');
+        expect(byGroup![1].body).toBe(byName![1].body);
+    });
+
+    it('types the group call as the contract types the endpoint', async () => {
+        stubFetch(async () => mockResponse({ apiVersion: '1', payload: { orderId: 'o-1' } }));
+        const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false });
+
+        expectTypeOf(await caller.orders.place({ sku: 'a' })).toEqualTypeOf<{ orderId: string } | undefined>();
+        // @ts-expect-error the payload is the endpoint's input
+        await caller.orders.place({ sku: 1 });
+        // @ts-expect-error not an action of this group
+        await caller.orders.cancel({ sku: 'a' }).catch(() => {});
     });
 });
 
@@ -265,8 +318,8 @@ describe('LambderCaller - guardInputs transport', () => {
         const fetchMock = stubFetch(async () => mockResponse({ apiVersion: '1', payload: { ok: true } }));
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false });
 
-        await caller.api('doThing', { a: 1 }, { guardInputs: { captcha: { token: 't-1' } } });
-        await caller.api('doThing', { a: 1 });
+        await caller.api('test.doThing', { a: 1 }, { guardInputs: { captcha: { token: 't-1' } } });
+        await caller.api('test.doThing', { a: 1 });
 
         const firstBody = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string);
         const secondBody = JSON.parse(fetchMock.mock.calls[1]?.[1]?.body as string);
@@ -280,8 +333,8 @@ describe('LambderCaller - idempotency key transport', () => {
         const fetchMock = stubFetch(async () => mockResponse({ apiVersion: '1', payload: { ok: true } }));
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false });
 
-        await caller.api('doThing', { a: 1 }, { idempotencyKey: 'key-123' });
-        await caller.api('doThing', { a: 1 });
+        await caller.api('test.doThing', { a: 1 }, { idempotencyKey: 'key-123' });
+        await caller.api('test.doThing', { a: 1 });
 
         const firstBody = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string);
         const secondBody = JSON.parse(fetchMock.mock.calls[1]?.[1]?.body as string);
@@ -297,7 +350,7 @@ describe('LambderCaller - timeout and abort', () => {
         }));
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, timeoutMs: 20 });
 
-        const outcome = await caller.apiOutcome('slow', {});
+        const outcome = await caller.apiOutcome('test.slow', {});
         expect(outcome).toMatchObject({ ok: false, reason: 'timeout' });
     });
 
@@ -307,7 +360,7 @@ describe('LambderCaller - timeout and abort', () => {
 
         // The mock resolves immediately, so only the wiring is exercised;
         // a generous per-call override must not abort.
-        const outcome = await caller.apiOutcome('fast', {}, { timeoutMs: 10000 });
+        const outcome = await caller.apiOutcome('test.fast', {}, { timeoutMs: 10000 });
         expect(outcome.ok).toBe(true);
     });
 
@@ -330,7 +383,7 @@ describe('LambderCaller - timeout and abort', () => {
         }) as typeof removeEventListener;
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, timeoutMs: 5000 });
 
-        for(let i = 0; i < 10; i += 1) await caller.apiOutcome('thing', {}, { signal: controller.signal });
+        for(let i = 0; i < 10; i += 1) await caller.apiOutcome('test.thing', {}, { signal: controller.signal });
 
         expect(listeners).toBe(0);
     });
@@ -346,7 +399,7 @@ describe('LambderCaller - timeout and abort', () => {
         const errors: Error[] = [];
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, errorHandler: (err) => { errors.push(err); } });
 
-        const outcome = await caller.apiOutcome('anything', {}, { signal: controller.signal });
+        const outcome = await caller.apiOutcome('test.anything', {}, { signal: controller.signal });
 
         expect(outcome).toMatchObject({ ok: false, reason: 'network' });
         expect(fetchMock).not.toHaveBeenCalled();
@@ -362,7 +415,7 @@ describe('LambderCaller - timeout and abort', () => {
         controller.abort();
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, timeoutMs: 5000 });
 
-        const outcome = await caller.apiOutcome('anything', {}, { signal: controller.signal });
+        const outcome = await caller.apiOutcome('test.anything', {}, { signal: controller.signal });
         expect(outcome).toMatchObject({ ok: false, reason: 'network' });
     });
 });
@@ -372,7 +425,7 @@ describe('LambderCaller - the answer\'s logList', () => {
         stubFetch(async () => mockResponse({ apiVersion: '1', payload: { ok: true }, logList: [{ step: 1 }, { step: 2 }] }));
         const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => {});
         try {
-            await new LambderCaller({ apiPath: '/api', isCorsEnabled: false }).api('thing', {});
+            await new LambderCaller({ apiPath: '/api', isCorsEnabled: false }).api('test.thing', {});
             expect(consoleLog).toHaveBeenCalledTimes(2);
             expect(consoleLog).toHaveBeenCalledWith('[lambder]', { step: 1 });
 
@@ -382,14 +435,14 @@ describe('LambderCaller - the answer\'s logList', () => {
                 apiPath: '/api', isCorsEnabled: false,
                 logListHandler: (apiName, logList) => { seen.push([apiName, logList]); },
             });
-            await caller.api('thing', {});
-            expect(seen).toEqual([['thing', [{ step: 1 }, { step: 2 }]]]);
+            await caller.api('test.thing', {});
+            expect(seen).toEqual([['test.thing', [{ step: 1 }, { step: 2 }]]]);
             // The handler replaces the printing rather than adding to it.
             expect(consoleLog).not.toHaveBeenCalled();
 
             // And, like every other handler, it can be overridden per call.
             const perCall: unknown[] = [];
-            await caller.api('thing', {}, { logListHandler: (_apiName, logList) => { perCall.push(logList); } });
+            await caller.api('test.thing', {}, { logListHandler: (_apiName, logList) => { perCall.push(logList); } });
             expect(perCall).toEqual([[{ step: 1 }, { step: 2 }]]);
             expect(seen.length).toBe(1);
         } finally {
@@ -413,7 +466,7 @@ describe('LambderCaller - the logs of an answer that failed', () => {
             status: 500, statusText: 'Internal Server Error',
             rawText: JSON.stringify({ apiVersion: '1', payload: null, refusal: 'Internal server error.', logList: [{ step: 'before the crash' }] }),
         }));
-        expect((await caller.apiOutcome('crash', {})).ok).toBe(false);
+        expect((await caller.apiOutcome('test.crash', {})).ok).toBe(false);
 
         // The callee writes the call's logList onto the 422 body as it does
         // onto a success, so the reader surfaces it there too.
@@ -422,11 +475,11 @@ describe('LambderCaller - the logs of an answer that failed', () => {
             zodError: { name: 'ZodError', message: '', issues: [] },
             logList: [{ step: 'before the rejection' }],
         }, { status: 422 }));
-        expect((await caller.apiOutcome('register', { email: 'nope' })).ok).toBe(false);
+        expect((await caller.apiOutcome('account.register', { email: 'nope' })).ok).toBe(false);
 
         expect(seen).toEqual([
-            ['crash', [{ step: 'before the crash' }]],
-            ['register', [{ step: 'before the rejection' }]],
+            ['test.crash', [{ step: 'before the crash' }]],
+            ['account.register', [{ step: 'before the rejection' }]],
         ]);
     });
 });
@@ -434,7 +487,7 @@ describe('LambderCaller - the logs of an answer that failed', () => {
 describe('LambderCaller - what the contract decides at the call site', () => {
     type Contract = {
         'user.get': { input: { id: string }, output: { name: string } },
-        'ping': { input: undefined, output: string },
+        'test.ping': { input: undefined, output: string },
     };
 
     it('computes the output from the contract, so an annotation cannot replace it', async () => {
@@ -464,8 +517,8 @@ describe('LambderCaller - what the contract decides at the call site', () => {
         // @ts-expect-error nor on the outcome form
         await caller.apiOutcome('user.get');
         // An input that accepts undefined keeps the one-argument call.
-        await caller.api('ping');
-        await caller.apiOutcome('ping');
+        await caller.api('test.ping');
+        await caller.apiOutcome('test.ping');
     });
 
     it('requires an idempotencyKey exactly where the contract declares idempotency', async () => {
@@ -496,9 +549,9 @@ describe('LambderCaller - what the contract decides at the call site', () => {
         stubFetch(async () => mockResponse({ apiVersion: '1', payload: { ok: true } }));
         const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false });
 
-        await caller.api('ping', undefined, { headers: { 'X-Count': '123' } });
+        await caller.api('test.ping', undefined, { headers: { 'X-Count': '123' } });
         // @ts-expect-error a header value is a string, and a number must not compile and reach fetch
-        await caller.api('ping', undefined, { headers: { count: 123 } });
+        await caller.api('test.ping', undefined, { headers: { count: 123 } });
     });
 });
 
@@ -509,7 +562,7 @@ describe('LambderCaller - per-call handler overrides', () => {
         const perCallHandler = vi.fn();
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, errorHandler: constructorHandler });
 
-        await caller.apiOutcome('crash', {}, { errorHandler: perCallHandler });
+        await caller.apiOutcome('test.crash', {}, { errorHandler: perCallHandler });
         expect(perCallHandler).toHaveBeenCalledOnce();
         expect(constructorHandler).not.toHaveBeenCalled();
     });
@@ -520,7 +573,7 @@ describe('LambderCaller - per-call handler overrides', () => {
         const perCallHandler = vi.fn();
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, refusalHandler: constructorHandler });
 
-        await caller.apiOutcome('doThing', {}, { refusalHandler: perCallHandler });
+        await caller.apiOutcome('test.doThing', {}, { refusalHandler: perCallHandler });
         expect(perCallHandler).toHaveBeenCalledWith({ type: 'error', content: 'Denied.' });
         expect(constructorHandler).not.toHaveBeenCalled();
     });
@@ -548,8 +601,8 @@ describe('LambderCaller - lifecycle handlers and resilience', () => {
             fetchEndedHandler: ({ fetchResult }) => { endedWith = fetchResult; },
         });
 
-        await caller.apiOutcome('crash', {});
-        expect(started).toEqual(['crash']);
+        await caller.apiOutcome('test.crash', {});
+        expect(started).toEqual(['test.crash']);
         expect(endedWith).toBeInstanceOf(Error);
     });
 
@@ -561,7 +614,7 @@ describe('LambderCaller - lifecycle handlers and resilience', () => {
             fetchEndedHandler: ({ fetchResult }) => { endedWith = fetchResult; },
         });
 
-        await caller.apiOutcome('fine', {});
+        await caller.apiOutcome('test.fine', {});
         expect(endedWith).toMatchObject({ payload: { ok: true } });
     });
 
@@ -572,7 +625,7 @@ describe('LambderCaller - lifecycle handlers and resilience', () => {
             refusalHandler: () => { throw new Error('handler bug'); },
         });
 
-        const outcome = await caller.apiOutcome('doThing', {});
+        const outcome = await caller.apiOutcome('test.doThing', {});
         expect(outcome).toMatchObject({ ok: false, reason: 'unknown' });
         if(!outcome.ok && outcome.reason === 'unknown') expect(outcome.error.message).toBe('handler bug');
     });
@@ -584,14 +637,14 @@ describe('LambderCaller - guardInputsProvider', () => {
         const provider = vi.fn((apiName: string) => ({ orgPermission: { orgSlug: `org-for-${apiName}` } }));
         const caller = new LambderCaller<any, 'orgPermission'>({ apiPath: '/api', isCorsEnabled: false, guardInputsProvider: provider });
 
-        await caller.api('doThing', { a: 1 });
-        await caller.api('doThing', { a: 1 }, { guardInputs: { captcha: { token: 't-1' } } });
-        await caller.api('doThing', { a: 1 }, { guardInputs: { orgPermission: { orgSlug: 'explicit' } } });
+        await caller.api('test.doThing', { a: 1 });
+        await caller.api('test.doThing', { a: 1 }, { guardInputs: { captcha: { token: 't-1' } } });
+        await caller.api('test.doThing', { a: 1 }, { guardInputs: { orgPermission: { orgSlug: 'explicit' } } });
 
         const bodies = fetchMock.mock.calls.map((call) => JSON.parse(call[1]?.body as string));
-        expect(provider).toHaveBeenCalledWith('doThing');
-        expect(bodies[0].guardInputs).toEqual({ orgPermission: { orgSlug: 'org-for-doThing' } });
-        expect(bodies[1].guardInputs).toEqual({ orgPermission: { orgSlug: 'org-for-doThing' }, captcha: { token: 't-1' } });
+        expect(provider).toHaveBeenCalledWith('test.doThing');
+        expect(bodies[0].guardInputs).toEqual({ orgPermission: { orgSlug: 'org-for-test.doThing' } });
+        expect(bodies[1].guardInputs).toEqual({ orgPermission: { orgSlug: 'org-for-test.doThing' }, captcha: { token: 't-1' } });
         expect(bodies[2].guardInputs).toEqual({ orgPermission: { orgSlug: 'explicit' } });
     });
 
@@ -602,7 +655,7 @@ describe('LambderCaller - guardInputsProvider', () => {
             guardInputsProvider: async () => ({ orgPermission: { orgSlug: 'async-org' } }),
         });
 
-        await caller.api('doThing', { a: 1 });
+        await caller.api('test.doThing', { a: 1 });
 
         expect(JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string).guardInputs).toEqual({ orgPermission: { orgSlug: 'async-org' } });
     });
@@ -615,7 +668,7 @@ describe('LambderCaller - guardInputsProvider', () => {
             guardInputsProvider: () => { throw new Error('no organization selected'); },
         });
 
-        const outcome = await caller.apiOutcome('doThing', { a: 1 });
+        const outcome = await caller.apiOutcome('test.doThing', { a: 1 });
 
         expect(outcome.ok).toBe(false);
         expect(fetchMock).not.toHaveBeenCalled();
@@ -670,7 +723,7 @@ describe('LambderCaller - a 5xx keeps the envelope the server sent', () => {
         }));
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false });
 
-        const outcome = await caller.apiOutcome('crash', {});
+        const outcome = await caller.apiOutcome('test.crash', {});
         expect(outcome).toMatchObject({ ok: false, reason: 'server', status: 500, refusal: { type: 'error', content: 'Internal server error.' } });
         if(outcome.ok || outcome.reason !== 'server') throw new Error('unreachable');
         expect(outcome.response?.crash).toEqual(crash);
@@ -847,7 +900,7 @@ describe('LambderCaller - a stale bundle that the reload brings back', () => {
         // other's: kept one at a time, no load would see a repeat and the
         // page would reload indefinitely.
         stubTabStorage();
-        const bundle = { [await apiNameKeyOf('me')]: 'stale-me', [await apiNameKeyOf('config')]: 'stale-config' };
+        const bundle = { [await apiNameKeyOf('account.me')]: 'stale-me', [await apiNameKeyOf('app.config')]: 'stale-config' };
         const versionExpiredHandler = vi.fn();
         const errors: Error[] = [];
         const loadPage = async () => new (await loadPageCallerClass())({
@@ -859,31 +912,33 @@ describe('LambderCaller - a stale bundle that the reload brings back', () => {
         // or, when the second refusal lands after the first ask returned,
         // twice, and reports nothing.
         const first = await loadPage();
-        await Promise.all([first.apiOutcome('me', {}), first.apiOutcome('config', {})]);
+        await Promise.all([first.apiOutcome('account.me', {}), first.apiOutcome('app.config', {})]);
         const asksOnBoot = versionExpiredHandler.mock.calls.length;
         expect(asksOnBoot).toBeGreaterThan(0);
         expect(errors).toEqual([]);
 
         // The same bundle comes back, and this time config answers first.
         const second = await loadPage();
-        expect(await second.apiOutcome('config', {})).toMatchObject({ ok: false, reason: 'versionExpired' });
-        expect(await second.apiOutcome('me', {})).toMatchObject({ ok: false, reason: 'versionExpired' });
+        expect(await second.apiOutcome('app.config', {})).toMatchObject({ ok: false, reason: 'versionExpired' });
+        expect(await second.apiOutcome('account.me', {})).toMatchObject({ ok: false, reason: 'versionExpired' });
         expect(versionExpiredHandler).toHaveBeenCalledTimes(asksOnBoot);
         expect(errors.map((err) => err.message)).toEqual([
-            expect.stringMatching(/^Version expired again for API "config"/),
-            expect.stringMatching(/^Version expired again for API "me"/),
+            expect.stringMatching(/^Version expired again for API "app.config"/),
+            expect.stringMatching(/^Version expired again for API "account.me"/),
         ]);
 
         const third = await loadPage();
-        await Promise.all([third.apiOutcome('me', {}), third.apiOutcome('config', {})]);
+        await Promise.all([third.apiOutcome('account.me', {}), third.apiOutcome('app.config', {})]);
         expect(versionExpiredHandler).toHaveBeenCalledTimes(asksOnBoot);
     });
 
     it('stops after the second load for a version below the server\'s floor, where no signature is sent', async () => {
         stubTabStorage();
-        const server = initLambder().create({ apiPath: '/api', apiVersion: '2.0.0', minApiVersion: '2.0.0' })
-            .addApi('me', { input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (_ctx) => ({ ok: true }))
-            .addApi('config', { input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (_ctx) => ({ ok: true }));
+        const serverApp = initLambder().create({ apiPath: '/api', apiVersion: '2.0.0', minApiVersion: '2.0.0' });
+        const server = serverApp.registerApiGroups(
+            serverApp.defineApiGroup('account', { me: serverApp.defineApi({ input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (_ctx) => ({ ok: true })) }),
+            serverApp.defineApiGroup('app', { config: serverApp.defineApi({ input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (_ctx) => ({ ok: true })) }),
+        );
         const versionExpiredHandler = vi.fn();
         const errors: Error[] = [];
         const loadPage = async () => {
@@ -895,13 +950,13 @@ describe('LambderCaller - a stale bundle that the reload brings back', () => {
         };
 
         const first = await loadPage();
-        await Promise.all([first.apiOutcome('me', {}), first.apiOutcome('config', {})]);
+        await Promise.all([first.apiOutcome('account.me', {}), first.apiOutcome('app.config', {})]);
         const asksOnBoot = versionExpiredHandler.mock.calls.length;
         expect(asksOnBoot).toBeGreaterThan(0);
 
         const second = await loadPage();
-        expect(await second.apiOutcome('config', {})).toMatchObject({ ok: false, reason: 'versionExpired' });
-        expect(await second.apiOutcome('me', {})).toMatchObject({ ok: false, reason: 'versionExpired' });
+        expect(await second.apiOutcome('app.config', {})).toMatchObject({ ok: false, reason: 'versionExpired' });
+        expect(await second.apiOutcome('account.me', {})).toMatchObject({ ok: false, reason: 'versionExpired' });
         expect(versionExpiredHandler).toHaveBeenCalledTimes(asksOnBoot);
         expect(errors).toHaveLength(2);
     });
@@ -911,25 +966,25 @@ describe('LambderCaller - a stale bundle that the reload brings back', () => {
         const versionExpiredHandler = vi.fn();
         const errors: Error[] = [];
         const loadBundle = async (signature: string) => new (await loadPageCallerClass())({
-            apiPath: '/api', apiVersion: '1', apiSignatures: { [await apiNameKeyOf('me')]: signature }, versionExpiredHandler,
+            apiPath: '/api', apiVersion: '1', apiSignatures: { [await apiNameKeyOf('account.me')]: signature }, versionExpiredHandler,
             errorHandler: (err) => { errors.push(err); }, transport: refusedAsStale,
         });
 
-        await (await loadBundle('build-1')).apiOutcome('me', {});
+        await (await loadBundle('build-1')).apiOutcome('account.me', {});
         expect(versionExpiredHandler).toHaveBeenCalledTimes(1);
         // The reload got a newer build, and the server had moved on again.
-        await (await loadBundle('build-2')).apiOutcome('me', {});
+        await (await loadBundle('build-2')).apiOutcome('account.me', {});
         expect(versionExpiredHandler).toHaveBeenCalledTimes(2);
         expect(errors).toEqual([]);
         // The same build once more is the loop.
-        await (await loadBundle('build-2')).apiOutcome('me', {});
+        await (await loadBundle('build-2')).apiOutcome('account.me', {});
         expect(versionExpiredHandler).toHaveBeenCalledTimes(2);
         expect(errors).toHaveLength(1);
     });
 
     it('calls nothing for a refusal heard while the page\'s ask is still running, whichever caller hears it', async () => {
         stubTabStorage();
-        const bundle = { [await apiNameKeyOf('me')]: 'stale-me', [await apiNameKeyOf('config')]: 'stale-config' };
+        const bundle = { [await apiNameKeyOf('account.me')]: 'stale-me', [await apiNameKeyOf('app.config')]: 'stale-config' };
         // A handler that waits, as a reload prompt waits for its answer.
         let finishAsk!: () => void;
         const versionExpiredHandler = vi.fn(() => new Promise<void>((resolve) => { finishAsk = resolve; }));
@@ -937,9 +992,9 @@ describe('LambderCaller - a stale bundle that the reload brings back', () => {
         const PageCaller = await loadPageCallerClass();
         const pageCaller = () => new PageCaller({ apiPath: '/api', apiVersion: '1', apiSignatures: bundle, versionExpiredHandler, errorHandler, transport: refusedAsStale });
 
-        const asking = pageCaller().apiOutcome('me', {});
+        const asking = pageCaller().apiOutcome('account.me', {});
         await vi.waitFor(() => expect(versionExpiredHandler).toHaveBeenCalledOnce());
-        expect(await pageCaller().apiOutcome('config', {})).toMatchObject({ ok: false, reason: 'versionExpired' });
+        expect(await pageCaller().apiOutcome('app.config', {})).toMatchObject({ ok: false, reason: 'versionExpired' });
         expect(versionExpiredHandler).toHaveBeenCalledOnce();
         expect(errorHandler).not.toHaveBeenCalled();
 
@@ -954,10 +1009,10 @@ describe('LambderCaller - a stale bundle that the reload brings back', () => {
         const caller = new (await loadPageCallerClass())({ apiPath: '/api', apiVersion: '1', versionExpiredHandler, errorHandler, transport: refusedAsStale });
 
         const leavePageAsItIs = vi.fn();
-        await caller.apiOutcome('save', {}, { versionExpiredHandler: leavePageAsItIs });
+        await caller.apiOutcome('doc.save', {}, { versionExpiredHandler: leavePageAsItIs });
         expect(leavePageAsItIs).toHaveBeenCalledOnce();
 
-        expect(await caller.apiOutcome('save', {})).toMatchObject({ ok: false, reason: 'versionExpired' });
+        expect(await caller.apiOutcome('doc.save', {})).toMatchObject({ ok: false, reason: 'versionExpired' });
         expect(versionExpiredHandler).toHaveBeenCalledOnce();
         expect(errorHandler).not.toHaveBeenCalled();
     });
@@ -970,19 +1025,19 @@ describe('LambderCaller - a stale bundle that the reload brings back', () => {
         const versionExpiredHandler = vi.fn();
         const errors: Error[] = [];
         const bundleCaller = async (PageCaller: typeof LambderCaller, signature: string) => new PageCaller({
-            apiPath: '/api', apiVersion: '1', apiSignatures: { [await apiNameKeyOf('me')]: signature }, versionExpiredHandler,
+            apiPath: '/api', apiVersion: '1', apiSignatures: { [await apiNameKeyOf('account.me')]: signature }, versionExpiredHandler,
             errorHandler: (err) => { errors.push(err); }, transport: refusedAsStale,
         });
 
         // The first ask returned with the page still here, so the second
         // caller's refusal is asked about in turn.
         const firstPage = await loadPageCallerClass();
-        await (await bundleCaller(firstPage, 'build-1')).apiOutcome('me', {});
-        await (await bundleCaller(firstPage, 'build-1')).apiOutcome('me', {});
+        await (await bundleCaller(firstPage, 'build-1')).apiOutcome('account.me', {});
+        await (await bundleCaller(firstPage, 'build-1')).apiOutcome('account.me', {});
         expect(versionExpiredHandler).toHaveBeenCalledTimes(2);
         expect(errors).toEqual([]);
 
-        await (await bundleCaller(await loadPageCallerClass(), 'build-2')).apiOutcome('me', {});
+        await (await bundleCaller(await loadPageCallerClass(), 'build-2')).apiOutcome('account.me', {});
         expect(versionExpiredHandler).toHaveBeenCalledTimes(3);
         expect(errors).toEqual([]);
     });
@@ -992,27 +1047,27 @@ describe('LambderCaller - a stale bundle that the reload brings back', () => {
         const versionExpiredHandler = vi.fn();
         const errorHandler = vi.fn();
         const page = new (await loadPageCallerClass())({ apiPath: '/api', apiVersion: '1', versionExpiredHandler, errorHandler, transport: refusedAsStale });
-        const recordRefusal = (refusedAt: number) => store.set('lambder:version-expired', JSON.stringify({ at: refusedAt, confirmed: false, calls: [['me', '', '1', refusedAt]] }));
+        const recordRefusal = (refusedAt: number) => store.set('lambder:version-expired', JSON.stringify({ at: refusedAt, confirmed: false, calls: [['account.me', '', '1', refusedAt]] }));
 
         // Recorded as this document loaded: this page's own, with no reload since.
         recordRefusal(pageLoadedAt);
-        await page.apiOutcome('me', {});
+        await page.apiOutcome('account.me', {});
         expect(versionExpiredHandler).toHaveBeenCalledOnce();
         expect(errorHandler).not.toHaveBeenCalled();
 
         // Recorded before it: the reload brought the same bundle back.
         recordRefusal(pageLoadedAt - 1);
-        await page.apiOutcome('me', {});
+        await page.apiOutcome('account.me', {});
         expect(versionExpiredHandler).toHaveBeenCalledOnce();
         expect(errorHandler).toHaveBeenCalledOnce();
-        expect(errorHandler.mock.calls[0]![0]).toMatchObject({ message: expect.stringMatching(/^Version expired again for API "me"/) });
+        expect(errorHandler.mock.calls[0]![0]).toMatchObject({ message: expect.stringMatching(/^Version expired again for API "account.me"/) });
     });
 });
 
 describe('LambderCaller - CORS mode by default', () => {
     const fetchInitOf = async (options: { apiPath: string; isCorsEnabled?: boolean }) => {
         const fetchMock = stubFetch(async () => mockResponse({ apiVersion: '1', payload: {} }));
-        await new LambderCaller(options).apiOutcome('thing', {});
+        await new LambderCaller(options).apiOutcome('test.thing', {});
         return fetchMock.mock.calls[0]![1] as RequestInit;
     };
 

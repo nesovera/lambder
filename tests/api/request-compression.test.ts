@@ -39,20 +39,25 @@ const compressedApiEvent = async (apiName: string, payload: unknown, extra: Reco
     return createApiEvent({ apiName, ...compressed, ...extra });
 };
 
-const echoApi = () => initLambder().create({ apiPath: '/api' })
-    .addApi('echo', {
-        input: z.object({ notes: z.array(z.string()) }),
-        output: z.object({ count: z.number() }),
-    }, (ctx) => ({ count: ctx.apiPayload.notes.length }));
+const echoApi = () => {
+    const app = initLambder().create({ apiPath: '/api' });
+    return app.registerApiGroups(app.defineApiGroup('test', {
+        echo: app.defineApi({
+            input: z.object({ notes: z.array(z.string()) }),
+            output: z.object({ count: z.number() }),
+        }, (ctx) => ({ count: ctx.apiPayload.notes.length })),
+    }));
+};
 
 describe('Request compression - the caller side', () => {
     beforeEach(() => { vi.stubGlobal('location', { hostname: 'localhost' }); });
     afterEach(() => { vi.unstubAllGlobals(); });
 
-    /** Captures the request body the caller would send. */
-    const captureBody = () => {
+    /** Captures the request body the caller would send, and the address it would send it to. */
+    const captureBody = (urls: string[] = []) => {
         const bodies: any[] = [];
-        vi.stubGlobal('fetch', vi.fn(async (_url: any, init: any) => {
+        vi.stubGlobal('fetch', vi.fn(async (url: any, init: any) => {
+            urls.push(String(url));
             bodies.push(JSON.parse(init.body));
             return {
                 status: 200,
@@ -70,7 +75,7 @@ describe('Request compression - the caller side', () => {
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, requestCompression: true });
         const payload = bigPayload();
 
-        await caller.api('echo', payload);
+        await caller.api('test.echo', payload);
 
         expect(bodies[0].payload).toBeUndefined();
         expect(typeof bodies[0].payloadGz).toBe('string');
@@ -82,12 +87,15 @@ describe('Request compression - the caller side', () => {
     });
 
     it('leaves the routing fields of a compressed call in plain text', async () => {
-        const bodies = captureBody();
+        const urls: string[] = [];
+        const bodies = captureBody(urls);
         const caller = new LambderCaller({ apiPath: '/api', apiVersion: '7', isCorsEnabled: false, requestCompression: true });
 
-        await caller.api('echo', bigPayload(), { idempotencyKey: 'abcdefghijklmnop' });
+        await caller.api('test.echo', bigPayload(), { idempotencyKey: 'abcdefghijklmnop' });
 
-        expect(bodies[0].apiName).toBe('echo');
+        // The endpoint is the path, never a body field.
+        expect(urls[0]).toBe('/api/test/echo');
+        expect(bodies[0]).not.toHaveProperty('apiName');
         expect(bodies[0].version).toBe('7');
         expect(bodies[0].idempotencyKey).toBe('abcdefghijklmnop');
         expect(bodies[0].siteHost).toBe('localhost');
@@ -97,7 +105,7 @@ describe('Request compression - the caller side', () => {
         const bodies = captureBody();
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, requestCompression: true });
 
-        await caller.api('echo', { notes: ['one'] });
+        await caller.api('test.echo', { notes: ['one'] });
 
         expect(bodies[0].payload).toEqual({ notes: ['one'] });
         expect(bodies[0].payloadGz).toBeUndefined();
@@ -107,7 +115,7 @@ describe('Request compression - the caller side', () => {
         const bodies = captureBody();
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false });
 
-        await caller.api('echo', bigPayload());
+        await caller.api('test.echo', bigPayload());
 
         expect(bodies[0].payload).toBeDefined();
         expect(bodies[0].payloadGz).toBeUndefined();
@@ -122,8 +130,8 @@ describe('Request compression - the caller side', () => {
         const small = bigPayload(20);
         expect(new TextEncoder().encode(JSON.stringify(small)).length).toBeLessThan(DEFAULT_REQUEST_COMPRESSION_SETTINGS.minBytes);
 
-        await on.api('echo', bigPayload(), { compressRequest: false });
-        await off.api('echo', small, { compressRequest: true });
+        await on.api('test.echo', bigPayload(), { compressRequest: false });
+        await off.api('test.echo', small, { compressRequest: true });
 
         expect(bodies[0].payloadGz).toBeUndefined();
         expect(bodies[1].payloadGz).toBeDefined();
@@ -134,7 +142,7 @@ describe('Request compression - the caller side', () => {
         const bodies = captureBody();
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, requestCompression: true });
 
-        await caller.api('echo');
+        await caller.api('test.echo');
 
         expect('payload' in bodies[0]).toBe(false);
         expect('payloadGz' in bodies[0]).toBe(false);
@@ -149,7 +157,7 @@ describe('Request compression - the caller side', () => {
         expect(isRequestCompressionAvailable()).toBe(false);
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, requestCompression: true });
 
-        await caller.api('echo', bigPayload());
+        await caller.api('test.echo', bigPayload());
 
         expect(bodies[0].payload).toBeDefined();
         expect(bodies[0].payloadGz).toBeUndefined();
@@ -162,9 +170,9 @@ describe('Request compression - the caller side', () => {
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, requestCompression: true });
         const image = Buffer.from(Array.from({ length: 30_000 }, () => Math.floor(Math.random() * 256))).toString('base64');
 
-        await caller.api('upload', { photo: image });
+        await caller.api('test.upload', { photo: image });
         // Forcing it does not override that: a request is never made larger.
-        await caller.api('echo', { notes: ['tiny'] }, { compressRequest: true });
+        await caller.api('test.echo', { notes: ['tiny'] }, { compressRequest: true });
 
         expect(bodies[0].payloadGz).toBeUndefined();
         expect(bodies[0].payload).toEqual({ photo: image });
@@ -176,7 +184,7 @@ describe('Request compression - the caller side', () => {
         const bodies = captureBody();
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, requestCompression: { minBytes: 10 } });
 
-        await caller.api('echo', bigPayload(8));
+        await caller.api('test.echo', bigPayload(8));
 
         expect(bodies[0].payloadGz).toBeDefined();
     });
@@ -212,14 +220,14 @@ describe('Request compression - the caller side', () => {
 describe('Request compression - the server side', () => {
     it('restores a compressed payload for the handler', async () => {
         const payload = bigPayload();
-        const result = await echoApi().render(await compressedApiEvent('echo', payload), createMockContext());
+        const result = await echoApi().render(await compressedApiEvent('test.echo', payload), createMockContext());
 
         expect(JSON.parse(decodeBody(result)).payload).toEqual({ count: payload.notes.length });
     });
 
     it('still accepts a plain payload on the same API', async () => {
         const result = await echoApi().render(
-            createApiEvent({ apiName: 'echo', payload: { notes: ['a', 'b'] } }),
+            createApiEvent({ apiName: 'test.echo', payload: { notes: ['a', 'b'] } }),
             createMockContext(),
         );
 
@@ -228,11 +236,13 @@ describe('Request compression - the server side', () => {
 
     it('leaves the restored payload on ctx.post for preflight consumers', async () => {
         let seenPost: any;
-        const lambder = initLambder().create({ apiPath: '/api' })
-            .addApi('inspect', { input: z.object({ notes: z.array(z.string()) }), output: z.object({ ok: z.boolean() }) },
-                (ctx) => { seenPost = ctx.post; return { ok: true }; });
+        const app = initLambder().create({ apiPath: '/api' });
+        const lambder = app.registerApiGroups(app.defineApiGroup('test', {
+            inspect: app.defineApi({ input: z.object({ notes: z.array(z.string()) }), output: z.object({ ok: z.boolean() }) },
+                (ctx) => { seenPost = ctx.post; return { ok: true }; }),
+        }));
 
-        await lambder.render(await compressedApiEvent('inspect', bigPayload(10)), createMockContext());
+        await lambder.render(await compressedApiEvent('test.inspect', bigPayload(10)), createMockContext());
 
         expect(seenPost.payload).toEqual(bigPayload(10));
         // The wire fields are consumed, not left lying around.
@@ -242,7 +252,7 @@ describe('Request compression - the server side', () => {
 
     it('restores before guards and rate-limit key slices read the payload', async () => {
         const seen: string[] = [];
-        const lambder = initLambder().create({
+        const app = initLambder().create({
             apiPath: '/api',
             guards: {
                 inspectPayload: lambderGuard({
@@ -250,13 +260,16 @@ describe('Request compression - the server side', () => {
                     handler: (ctx, payload) => { seen.push(`guard:${payload.notes.length}`); },
                 }),
             },
-        }).addApi('guarded', {
-            input: z.object({ notes: z.array(z.string()) }),
-            output: z.object({ ok: z.boolean() }),
-            guards: 'inspectPayload',
-        }, (ctx) => ({ ok: true }));
+        });
+        const lambder = app.registerApiGroups(app.defineApiGroup('test', {
+            guarded: app.defineApi({
+                input: z.object({ notes: z.array(z.string()) }),
+                output: z.object({ ok: z.boolean() }),
+                guards: 'inspectPayload',
+            }, (ctx) => ({ ok: true })),
+        }));
 
-        const result = await lambder.render(await compressedApiEvent('guarded', bigPayload(4)), createMockContext());
+        const result = await lambder.render(await compressedApiEvent('test.guarded', bigPayload(4)), createMockContext());
 
         expect(seen).toEqual(['guard:4']);
         expect(JSON.parse(decodeBody(result)).payload).toEqual({ ok: true });
@@ -264,7 +277,7 @@ describe('Request compression - the server side', () => {
 
     it('validates the restored payload against the input schema', async () => {
         const result = await echoApi().render(
-            await compressedApiEvent('echo', { notes: 'not-an-array, '.repeat(30) }),
+            await compressedApiEvent('test.echo', { notes: 'not-an-array, '.repeat(30) }),
             createMockContext(),
         );
 
@@ -273,7 +286,7 @@ describe('Request compression - the server side', () => {
 
     it('refuses a payloadGz that is not a string', async () => {
         const result = await echoApi().render(
-            createApiEvent({ apiName: 'echo', payloadGz: 42, payloadBytes: 10 }),
+            createApiEvent({ apiName: 'test.echo', payloadGz: 42, payloadBytes: 10 }),
             createMockContext(),
         );
 
@@ -285,7 +298,7 @@ describe('Request compression - the server side', () => {
         const compressed = await compressPayloadGzip(JSON.stringify(bigPayload()), 0);
         for(const bytes of [undefined, 0, -5, 1.5, '100']){
             const result = await echoApi().render(
-                createApiEvent({ apiName: 'echo', payloadGz: compressed!.payloadGz, payloadBytes: bytes }),
+                createApiEvent({ apiName: 'test.echo', payloadGz: compressed!.payloadGz, payloadBytes: bytes }),
                 createMockContext(),
             );
             expect(result.statusCode).toBe(400);
@@ -300,11 +313,13 @@ describe('Request compression - the server side', () => {
     });
 
     it('refuses a payload declared over the configured ceiling without decompressing it', async () => {
-        const lambder = initLambder().create({ apiPath: '/api', maxRequestPayloadBytes: 1000 })
-            .addApi('echo', { input: z.object({ notes: z.array(z.string()) }), output: z.object({ count: z.number() }) },
-                (ctx) => ({ count: ctx.apiPayload.notes.length }));
+        const app = initLambder().create({ apiPath: '/api', maxRequestPayloadBytes: 1000 });
+        const lambder = app.registerApiGroups(app.defineApiGroup('test', {
+            echo: app.defineApi({ input: z.object({ notes: z.array(z.string()) }), output: z.object({ count: z.number() }) },
+                (ctx) => ({ count: ctx.apiPayload.notes.length })),
+        }));
 
-        const result = await lambder.render(await compressedApiEvent('echo', bigPayload()), createMockContext());
+        const result = await lambder.render(await compressedApiEvent('test.echo', bigPayload()), createMockContext());
 
         expect(result.statusCode).toBe(400);
         expect(JSON.parse(decodeBody(result)).refusal.content).toMatch(/exceeds the 1000 byte limit/);
@@ -315,7 +330,7 @@ describe('Request compression - the server side', () => {
         // the declared length, so it fails instead of allocating the rest.
         const bomb = gzipSync(Buffer.alloc(5_000_000, 0x61)).toString('base64');
         const result = await echoApi().render(
-            createApiEvent({ apiName: 'echo', payloadGz: bomb, payloadBytes: 100 }),
+            createApiEvent({ apiName: 'test.echo', payloadGz: bomb, payloadBytes: 100 }),
             createMockContext(),
         );
 
@@ -327,7 +342,7 @@ describe('Request compression - the server side', () => {
         const compressed = await compressPayloadGzip(JSON.stringify(bigPayload()), 0);
         const truncated = Buffer.from(compressed!.payloadGz, 'base64').subarray(0, 40).toString('base64');
         const result = await echoApi().render(
-            createApiEvent({ apiName: 'echo', payloadGz: truncated, payloadBytes: compressed!.payloadBytes }),
+            createApiEvent({ apiName: 'test.echo', payloadGz: truncated, payloadBytes: compressed!.payloadBytes }),
             createMockContext(),
         );
 
@@ -337,7 +352,7 @@ describe('Request compression - the server side', () => {
 
     it('refuses bytes that are not gzip at all', async () => {
         const result = await echoApi().render(
-            createApiEvent({ apiName: 'echo', payloadGz: Buffer.from('plain text').toString('base64'), payloadBytes: 10 }),
+            createApiEvent({ apiName: 'test.echo', payloadGz: Buffer.from('plain text').toString('base64'), payloadBytes: 10 }),
             createMockContext(),
         );
 
@@ -349,7 +364,7 @@ describe('Request compression - the server side', () => {
         const notJson = Buffer.from('{ this is not json');
         const result = await echoApi().render(
             createApiEvent({
-                apiName: 'echo',
+                apiName: 'test.echo',
                 payloadGz: gzipSync(notJson).toString('base64'),
                 payloadBytes: notJson.length,
             }),
@@ -363,7 +378,7 @@ describe('Request compression - the server side', () => {
     it('lets a compressed payload win over a plain one sent alongside it', async () => {
         const compressed = await compressPayloadGzip(JSON.stringify(bigPayload(5)), 0);
         const result = await echoApi().render(
-            createApiEvent({ apiName: 'echo', payload: { notes: ['plain', 'plain'] }, ...compressed }),
+            createApiEvent({ apiName: 'test.echo', payload: { notes: ['plain', 'plain'] }, ...compressed }),
             createMockContext(),
         );
 
@@ -383,7 +398,7 @@ describe('Request compression - the server side', () => {
         let serializations = 0;
         const payload = { toJSON(){ serializations += 1; return { notes: [] }; } };
 
-        await new LambderCaller({ apiPath: '/api', isCorsEnabled: false }).api('echo', payload as any);
+        await new LambderCaller({ apiPath: '/api', isCorsEnabled: false }).api('test.echo', payload as any);
 
         expect(serializations).toBe(1);
         vi.unstubAllGlobals();
@@ -404,22 +419,27 @@ describe('Request compression - the server side', () => {
 
 describe('Request compression - the deployment shape (HTTP API v2 + CORS)', () => {
     /** What a Function URL deployment actually delivers. */
-    const corsApi = () => initLambder().create({ apiPath: '/api', cors: true })
-        .addApi('echo', {
-            input: z.object({ notes: z.array(z.string()) }),
-            output: z.object({ count: z.number() }),
-        }, (ctx) => ({ count: ctx.apiPayload.notes.length }));
+    const corsApi = () => {
+        const app = initLambder().create({ apiPath: '/api', cors: true });
+        return app.registerApiGroups(app.defineApiGroup('test', {
+            echo: app.defineApi({
+                input: z.object({ notes: z.array(z.string()) }),
+                output: z.object({ count: z.number() }),
+            }, (ctx) => ({ count: ctx.apiPayload.notes.length })),
+        }));
+    };
 
-    const v2ApiEvent = (body: Record<string, unknown>) => createMockEventV2('/api', {
+    /** A call to test.echo, at the path a caller posts it to. */
+    const v2ApiEvent = (body: Record<string, unknown>) => createMockEventV2('/api/test/echo', {
         headers: { host: 'api.example.com', origin: 'https://example.com', 'content-type': 'application/json' },
-        requestContext: { ...createMockEventV2('/api').requestContext, http: { method: 'POST', path: '/api', protocol: 'HTTP/1.1', sourceIp: '9.9.9.9', userAgent: 'test' } },
+        requestContext: { ...createMockEventV2('/api/test/echo').requestContext, http: { method: 'POST', path: '/api/test/echo', protocol: 'HTTP/1.1', sourceIp: '9.9.9.9', userAgent: 'test' } },
         body: JSON.stringify(body),
     });
 
     it('restores a compressed payload from a v2 event', async () => {
         const compressed = await compressPayloadGzip(JSON.stringify(bigPayload(7)), 0);
 
-        const result = await corsApi().render(v2ApiEvent({ apiName: 'echo', ...compressed }), createMockContext());
+        const result = await corsApi().render(v2ApiEvent({ ...compressed }), createMockContext());
 
         expect(JSON.parse(decodeBody(result)).payload).toEqual({ count: 7 });
     });
@@ -428,7 +448,7 @@ describe('Request compression - the deployment shape (HTTP API v2 + CORS)', () =
         // Without them a cross-origin caller sees an opaque network failure
         // instead of the coded refusal, and cannot tell why the call failed.
         const result = await corsApi().render(
-            v2ApiEvent({ apiName: 'echo', payloadGz: Buffer.from('not gzip').toString('base64'), payloadBytes: 8 }),
+            v2ApiEvent({ payloadGz: Buffer.from('not gzip').toString('base64'), payloadBytes: 8 }),
             createMockContext(),
         );
 
@@ -440,18 +460,22 @@ describe('Request compression - the deployment shape (HTTP API v2 + CORS)', () =
 
 describe('Request compression - round trip through the real pipeline', () => {
     it('a compressing caller reaches a rate-limited, validated API', async () => {
-        const lambder = initLambder().create({ apiPath: '/api' })
-            .addApi('import', {
+        const app = initLambder().create({ apiPath: '/api' });
+        const lambder = app.registerApiGroups(app.defineApiGroup('test', {
+            import: app.defineApi({
                 input: z.object({ notes: z.array(z.string()) }),
                 output: z.object({ received: z.number() }),
-            }, (ctx) => ({ received: ctx.apiPayload.notes.length }));
+            }, (ctx) => ({ received: ctx.apiPayload.notes.length })),
+        }));
 
-        // The caller builds the envelope; the server consumes it verbatim.
+        // The caller builds the envelope and the path; the server consumes both verbatim.
         vi.stubGlobal('location', { hostname: 'localhost' });
         let capturedBody = '';
-        vi.stubGlobal('fetch', vi.fn(async (_url: any, init: any) => {
+        let capturedUrl = '';
+        vi.stubGlobal('fetch', vi.fn(async (url: any, init: any) => {
+            capturedUrl = String(url);
             capturedBody = init.body;
-            const result = await lambder.render(createApiEvent(JSON.parse(capturedBody)), createMockContext());
+            const result = await lambder.render(createApiEvent(JSON.parse(capturedBody), { path: capturedUrl }), createMockContext());
             const text = decodeBody(result);
             return {
                 status: result.statusCode,
@@ -464,8 +488,9 @@ describe('Request compression - round trip through the real pipeline', () => {
 
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, requestCompression: true });
         const payload = bigPayload(250);
-        const outcome = await caller.apiOutcome('import', payload);
+        const outcome = await caller.apiOutcome('test.import', payload);
 
+        expect(capturedUrl).toBe('/api/test/import');
         expect(JSON.parse(capturedBody).payloadGz).toBeDefined();
         expect(outcome.ok).toBe(true);
         expect(outcome.ok && outcome.payload).toEqual({ received: 250 });
@@ -474,7 +499,7 @@ describe('Request compression - round trip through the real pipeline', () => {
 
     it('keys a rate limit off a payload slice that only exists after restoring', async () => {
         const keys: string[] = [];
-        const lambder = initLambder().create({
+        const app = initLambder().create({
             apiPath: '/api',
             rateLimits: {
                 limiter: { isRateLimited: async (key: string) => { keys.push(key); return null; } } as any,
@@ -488,18 +513,21 @@ describe('Request compression - round trip through the real pipeline', () => {
                     },
                 },
             },
-        }).addApi('ingest', {
-            input: z.object({ tenant: z.string(), notes: z.array(z.string()) }),
-            output: z.object({ ok: z.boolean() }),
-            rateLimit: 'perTenant',
-        }, (ctx) => ({ ok: true }));
+        });
+        const lambder = app.registerApiGroups(app.defineApiGroup('test', {
+            ingest: app.defineApi({
+                input: z.object({ tenant: z.string(), notes: z.array(z.string()) }),
+                output: z.object({ ok: z.boolean() }),
+                rateLimit: 'perTenant',
+            }, (ctx) => ({ ok: true })),
+        }));
 
         const result = await lambder.render(
-            await compressedApiEvent('ingest', { tenant: 'acme', ...bigPayload(50) }),
+            await compressedApiEvent('test.ingest', { tenant: 'acme', ...bigPayload(50) }),
             createMockContext(),
         );
 
-        expect(keys).toEqual(['api|ingest|perTenant|custom:acme']);
+        expect(keys).toEqual(['api|test.ingest|perTenant|custom:acme']);
         expect(JSON.parse(decodeBody(result)).payload).toEqual({ ok: true });
     });
 });
@@ -514,7 +542,7 @@ describe('Request compression - Brotli from a Node caller (payloadBr)', () => {
 
     it('restores a payloadBr payload before validation and the handler', async () => {
         const payload = bigPayload();
-        const result = await echoApi().render(await brotliApiEvent('echo', payload), createMockContext());
+        const result = await echoApi().render(await brotliApiEvent('test.echo', payload), createMockContext());
 
         expect(result.statusCode).toBe(200);
         expect(JSON.parse(decodeBody(result)).payload).toEqual({ count: 400 });
@@ -523,7 +551,7 @@ describe('Request compression - Brotli from a Node caller (payloadBr)', () => {
     it('refuses a request that carries both payloadGz and payloadBr', async () => {
         const payload = bigPayload();
         const gzip = await compressPayloadGzip(JSON.stringify(payload), 0);
-        const result = await echoApi().render(await brotliApiEvent('echo', payload, { ...gzip }), createMockContext());
+        const result = await echoApi().render(await brotliApiEvent('test.echo', payload, { ...gzip }), createMockContext());
 
         expect(result.statusCode).toBe(400);
         const body = JSON.parse(decodeBody(result));
@@ -536,13 +564,13 @@ describe('Request compression - Brotli from a Node caller (payloadBr)', () => {
         const gzipBytes = await compressPayloadGzip(JSON.stringify(payload), 0);
         // gzip bytes under the Brotli field: not this algorithm.
         const wrongAlgorithm = await echoApi().render(createApiEvent({
-            apiName: 'echo', payloadBr: gzipBytes!.payloadGz, payloadBytes: gzipBytes!.payloadBytes,
+            apiName: 'test.echo', payloadBr: gzipBytes!.payloadGz, payloadBytes: gzipBytes!.payloadBytes,
         }), createMockContext());
         expect(wrongAlgorithm.statusCode).toBe(400);
 
         const compressed = await compressPayloadBrotli(JSON.stringify(payload), 0, 5);
         const wrongLength = await echoApi().render(createApiEvent({
-            apiName: 'echo', payloadBr: compressed!.payloadBr, payloadBytes: compressed!.payloadBytes + 1,
+            apiName: 'test.echo', payloadBr: compressed!.payloadBr, payloadBytes: compressed!.payloadBytes + 1,
         }), createMockContext());
         expect(wrongLength.statusCode).toBe(400);
         expect(JSON.parse(decodeBody(wrongLength)).refusal.content).toContain('declared length');

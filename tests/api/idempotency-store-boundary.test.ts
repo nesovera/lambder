@@ -32,17 +32,20 @@ describe('The scope key a store is handed', () => {
         const table = new MemoryDdb();
         const store = new LambderDdbIdempotencyStore({ tableName: 'test-table', client: table });
         const placed: number[] = [];
-        const lambder = initLambder().create({
+        const shop = initLambder().create({
             apiPath: '/api',
             idempotency: {
                 store,
                 callerIdentity: (_ctx, request) => request.headers['x-device-token'] ?? null,
             },
-        }).addApi('order.place', { input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true },
-            async (ctx) => {
-                placed.push(ctx.apiPayload.qty);
-                return { placed: ctx.apiPayload.qty };
-            });
+        });
+        const lambder = shop.registerApiGroups(shop.defineApiGroup('order', {
+            place: shop.defineApi({ input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true },
+                async (ctx) => {
+                    placed.push(ctx.apiPayload.qty);
+                    return { placed: ctx.apiPayload.qty };
+                }),
+        }));
         const app = lambderTestApp(lambder, { idempotency: { store } });
         const partitionKeys = () => [...table.items.values()].map((item) => item.pk!.S!);
         return { app, placed, partitionKeys };
@@ -88,17 +91,20 @@ describe('The fingerprint a request is claimed under', () => {
     it('refuses a payload nested too deep to canonicalize as the caller\'s error, not as a crash', async () => {
         const crashes: unknown[] = [];
         let handlerRuns = 0;
-        const app = lambderTestApp(initLambder().create({
+        const shop = initLambder().create({
             apiPath: '/api',
             idempotency: { store: new LambderMemoryIdempotencyStore() },
             crashes: { report: (error) => { crashes.push(error); } },
-        }).addApi('order.place', { input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true },
-            async (_ctx) => { handlerRuns += 1; return { placed: 1 }; }));
+        });
+        const app = lambderTestApp(shop.registerApiGroups(shop.defineApiGroup('order', {
+            place: shop.defineApi({ input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true },
+                async (_ctx) => { handlerRuns += 1; return { placed: 1 }; }),
+        })));
         // Sorting the keys recurses per level; the schema would strip the
         // field, but the fingerprint is taken before it runs.
         const depth = 200_000;
-        const body = `{"apiName":"order.place","payload":{"qty":1,"x":${'['.repeat(depth)}${']'.repeat(depth)}},"idempotencyKey":"${KEY}"}`;
-        const answer = await app.visitor().request('POST', '/api', { body, headers: { 'content-type': 'application/json' } });
+        const body = `{"payload":{"qty":1,"x":${'['.repeat(depth)}${']'.repeat(depth)}},"idempotencyKey":"${KEY}"}`;
+        const answer = await app.visitor().request('POST', '/api/order/place', { body, headers: { 'content-type': 'application/json' } });
         expect(answer.statusCode).toBe(400);
         expect(answer.json()).toMatchObject({ refusal: { code: LAMBDER_REFUSAL_CODES.invalidRequestPayload } });
         expect(handlerRuns).toBe(0);
@@ -148,14 +154,16 @@ describe('The stored answer a replay is built from', () => {
         // the record, and device C's replay would carry it.
         let visits = 0;
         const store = new ReferenceKeepingStore();
-        const lambder = initLambder().create({ apiPath: '/api', idempotency: { store } })
+        const shop = initLambder().create({ apiPath: '/api', idempotency: { store } });
+        const lambder = shop.registerApiGroups(shop.defineApiGroup('order', {
+            place: shop.defineApi({ input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true },
+                async (ctx) => ({ placed: ctx.apiPayload.qty })),
+        }))
             .addHook('beforeRender', async (ctx, res) => {
                 visits += 1;
                 ctx.setCookie('visit', String(visits));
                 return ctx;
-            })
-            .addApi('order.place', { input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true },
-                async (ctx) => ({ placed: ctx.apiPayload.qty }));
+            });
         const app = lambderTestApp(lambder, { idempotency: { store } });
 
         for(const clientIp of ['203.0.113.1', '203.0.113.2', '203.0.113.3']){

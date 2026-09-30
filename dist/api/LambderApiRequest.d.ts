@@ -18,7 +18,15 @@ export declare const lowercaseHeaderNames: (headers: Record<string, string | und
  * transport request, and from here on nothing in the pipeline knows which.
  */
 export type LambderApiRequest = {
+    /** The endpoint called: `group.action`, read off the path the call was posted to (`{apiPath}/{group}/{action}`). */
     apiName: string;
+    /**
+     * Set on a call posted to apiPath itself with the endpoint named in the
+     * body, the way callers did before endpoints had paths: such a caller is a
+     * page loaded from an older build, and it is answered that its version
+     * expired, which reloads it.
+     */
+    retiredPath?: true;
     /** The caller's apiVersion, informational; null when it sent none. */
     version: string | null;
     /** The signature the caller carries for this endpoint (see LambderApiSignatureMap), for the signature gate; null when it sent none. */
@@ -79,13 +87,14 @@ export type LambderApiRequestInfo = {
  */
 export declare const isApiCallContentType: (lowercasedHeaders: Record<string, string | undefined>) => boolean;
 /**
- * Reads the posted envelope into a request. Null when the body carries no
- * apiName, which is how the server tells an API call from a route with a
- * JSON body. Everything is taken as posted: a malformed idempotencyKey or
- * guardInputs value is the engines' to refuse, with the client-facing
- * message they already give.
+ * Reads the posted envelope of a call to `apiName` into a request; the name
+ * comes from where the call was posted, never from the body. Everything is
+ * taken as posted: a malformed idempotencyKey or guardInputs value is the
+ * engines' to refuse, with the client-facing message they already give.
  */
-export declare const readApiEnvelope: (post: Record<string, unknown> | null | undefined, info: LambderApiRequestInfo) => LambderApiRequest | null;
+export declare const readApiEnvelope: (post: Record<string, unknown> | null | undefined, info: LambderApiRequestInfo, apiName: string, flags?: {
+    retiredPath?: true;
+}) => LambderApiRequest;
 /** Outcome of restoring a compressed request payload; the message is client-facing. */
 export type LambderRestorePayloadResult = {
     ok: true;

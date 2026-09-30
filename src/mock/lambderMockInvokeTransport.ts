@@ -1,4 +1,6 @@
 import type { LambderApiAnswer } from "../api/LambderApiAnswer.js";
+import { apiNameOfCallPath } from "../shared/wire/LambderApiNames.js";
+import { DEFAULT_API_PATH } from "../shared/wire/LambderDefaultApiPath.js";
 import { readApiEnvelope, cookieValuesByName, isApiCallContentType, lowercaseHeaderNames, type LambderApiRequest } from "../api/LambderApiRequest.js";
 import { getAnswerHeader } from "../shared/wire/LambderAnswerHeaders.js";
 import { base64ToText } from "../shared/util/LambderBase64.js";
@@ -16,11 +18,19 @@ import { normalizeClientIp } from "../shared/util/LambderClientIp.js";
  * returned function still fits LambderInvokeTransport.
  */
 export type LambderMockInvokeEvent = {
+    /** The path the call was made to, `{apiPath}/{group}/{action}`. */
+    rawPath?: string | undefined;
     body?: string | undefined;
     isBase64Encoded?: boolean | undefined;
     headers?: Record<string, string | undefined> | undefined;
     cookies?: string[] | undefined;
-    requestContext?: { http?: { sourceIp?: string } | undefined; domainName?: string } | undefined;
+    requestContext?: { http?: { method?: string; sourceIp?: string } | undefined; domainName?: string } | undefined;
+};
+
+/** The options of lambderMockInvokeTransport. */
+export type LambderMockInvokeTransportOptions = {
+    /** The apiPath the mocked function serves its calls under, as its LambderInvokeCaller names it. Default: "/api", as there. */
+    apiPath?: string;
 };
 
 /** What the callee answers with: the Lambda response object LambderInvokeCaller decodes. */
@@ -44,23 +54,30 @@ export type LambderMockInvokeResult = {
  */
 export const lambderMockInvokeTransport = (
     mockApp: { handleRequest(request: LambderApiRequest): Promise<LambderApiAnswer> },
+    options: LambderMockInvokeTransportOptions = {},
 ): ((event: LambderMockInvokeEvent, options: { signal?: AbortSignal }) => Promise<LambderMockInvokeResult>) => async (event, { signal }) => {
+    const apiPath = options.apiPath ?? DEFAULT_API_PATH;
     const rawBody = event.body ?? "";
     const body = event.isBase64Encoded ? base64ToText(rawBody) : rawBody;
     let post: Record<string, unknown> = {};
     try { post = JSON.parse(body || "{}") ?? {}; } catch { post = {}; }
     const headers = lowercaseHeaderNames(event.headers);
     const cookies = cookieValuesByName(event.cookies ?? []);
-    // A POST of another type is no API call on the server either. The
-    // address is the one the synthesized event carries in sourceIp, as the
-    // server's createContext reads it; no forwarding header is trusted here
-    // either, so a per-IP limit keys the same address under both adapters.
-    const request = isApiCallContentType(headers) && readApiEnvelope(post, {
+    // A JSON POST to `{apiPath}/{group}/{action}` is a call, as the server's
+    // createContext reads it; anything else (another method or type, a path
+    // outside apiPath) is no API call on the server either, and a mock
+    // serves no routes. The address is the one the synthesized event carries
+    // in sourceIp, as createContext reads it; no forwarding header is trusted
+    // here either, so a per-IP limit keys the same address under both adapters.
+    const apiName = event.requestContext?.http?.method === "POST" && isApiCallContentType(headers)
+        ? apiNameOfCallPath(apiPath, event.rawPath ?? "")
+        : null;
+    const request = apiName !== null && readApiEnvelope(post, {
         headers, cookies,
         ip: normalizeClientIp(event.requestContext?.http?.sourceIp ?? ""),
         host: headers.host || event.requestContext?.domainName || "lambder-invoke",
         ...(signal ? { signal } : {}),
-    });
+    }, apiName);
     if(!request){
         return { functionError: null, result: { statusCode: 404, headers: { "content-type": "text/plain; charset=utf-8" }, body: "Not found.", isBase64Encoded: false } };
     }

@@ -10,7 +10,7 @@ Use it when one function's work belongs in another function: a lambda inside a
 VPC with no egress calling the one that has it, a function whose IAM role a
 public web function should not carry, a `tools/` script or a scheduled lambda
 reaching into a deployed app. The callee stays an ordinary Lambder app whose
-APIs are registered with `addApi`, so everything it offers over HTTP comes
+endpoints are ordinary groups, so everything it offers over HTTP comes
 along unchanged: zod validation, the inferred contract, refusals, guards, rate
 limits, idempotency, Brotli in both directions, `logList`, and the crash detail
 its global error handler chooses to send.
@@ -36,7 +36,7 @@ and it is worth writing for that alone:
 import { initLambder, lambderGuard, refuse, LAMBDER_INVOKE_HEADER, LAMBDER_INVOKE_PROTOCOL } from "lambder";
 import { z } from "zod";
 
-const lambder = initLambder().create({
+const lambderApp = initLambder().create({
     apiPath: "/api",
     guards: {
         // NOT an authorization: the marker is an ordinary request header, so
@@ -51,18 +51,21 @@ const lambder = initLambder().create({
             },
         }),
     },
-    requirePublicApiGuards: true,
+    requireApiGuards: true,
     // The only caller is our own code, so the framework's 500 carries the
     // crash in full, with the call's logList beside it.
     crashes: { reveal: () => true },
 });
 
-lambder.addApi("sendEmail", {
-    input: z.object({ to: z.string(), subject: z.string(), html: z.string() }),
-    output: z.object({ messageId: z.string() }),
-    guards: "arrivedByInvoke",
-}, async (ctx) => await sendThroughSes(ctx.apiPayload));
+const emailApis = lambderApp.defineApiGroup("email", {
+    send: lambderApp.defineApi({
+        input: z.object({ to: z.string(), subject: z.string(), html: z.string() }),
+        output: z.object({ messageId: z.string() }),
+        guards: "arrivedByInvoke",
+    }, async (ctx) => await sendThroughSes(ctx.apiPayload)),
+});
 
+export const lambder = lambderApp.registerApiGroups(emailApis);
 export type GatewayApiContract = typeof lambder.ApiContract;
 export const handler = lambder.getHandler();
 ```
@@ -81,17 +84,24 @@ export const gatewayCaller = new LambderInvokeCaller<GatewayApiContract>({
     onFailure: reportFailure,
 });
 
-// Fully typed: API names autocomplete, the payload and the result are inferred.
-const sent = await gatewayCaller.api("sendEmail", { to, subject, html });
+// Fully typed: groups and endpoints autocomplete, the payload and the result are inferred.
+const sent = await gatewayCaller.email.send({ to, subject, html });
 ```
+
+Every group of the callee's contract is a property of the caller:
+`gatewayCaller.email.send(input)` calls the endpoint `email.send`, and
+`gatewayCaller.email.send.outcome(input)` resolves to its full outcome (see
+[`api()` and `apiOutcome()`](#api-and-apioutcome)). Code that holds the
+endpoint's name as a value calls `gatewayCaller.api("email.send", input)` and
+`gatewayCaller.apiOutcome("email.send", input)`, the same two calls by name.
 
 The contract is a type, so the import never reaches a bundle and the two
 packages may resolve their own copies of `lambder` and `zod`: contract entries
 are structural (`{ input, output, guards? }` of plain inferred types), so
-nothing has to be the same instance. A misspelt API name, a missing payload
-field, a guard input left out or a field the callee stopped returning is a
-compile error on the caller's side, and the callee parses the input against the
-same schema at runtime.
+nothing has to be the same instance. A misspelt group or endpoint, a missing
+payload field, a guard input left out or a field the callee stopped returning
+is a compile error on the caller's side, and the callee parses the input
+against the same schema at runtime.
 
 ### The Lambda SDK
 
@@ -111,13 +121,15 @@ grant is the authorization for the whole protocol.
 ## What one call sends, and what the callee sees
 
 The caller synthesizes a payload-format-2.0 event (the HTTP API and Function
-URL shape: single-valued headers and a `cookies` array) and `POST`s it to the
-callee's `apiPath`, so `createContext` builds an ordinary API context:
+URL shape: single-valued headers and a `cookies` array) and `POST`s it to
+`{apiPath}/{group}/{action}` under the callee's `apiPath`, so `createContext`
+builds an ordinary API context:
 
 | `ctx` field | Value |
 | --- | --- |
-| `method`, `path` | `POST` and `apiPath`, which is what makes it an API call |
-| `apiName`, `apiPayload` | From the body envelope, after a compressed payload is restored |
+| `method`, `path` | `POST` and `{apiPath}/{group}/{action}`, which is what makes it an API call |
+| `apiName` | The endpoint the path names, `group.action` |
+| `apiPayload` | From the body envelope, after a compressed payload is restored |
 | `host` | The `host` option, defaulting to the callee's function name, so hooks that branch on host see a stable value. The callee's `trustedHostHeaders` are not read on an invoke |
 | `ip` | The per-call `clientIp`, which becomes the event's `requestContext.http.sourceIp`; empty when the call did not supply one. The callee's `trustedClientIpHeaders` are not read on an invoke |
 | `header("x-lambder-invoke")` | `"1"` |
@@ -126,9 +138,10 @@ callee's `apiPath`, so `createContext` builds an ordinary API context:
 | `headers` | The above plus any per-call `headers` |
 | `event`, `lambdaContext` | The synthesized event and the callee's own real context |
 
-The body is the envelope `LambderCaller` sends: `apiName`, `version`, `token`,
-`siteHost`, `payload` (or `payloadBr` plus `payloadBytes`), `guardInputs` and
-`idempotencyKey`. Nothing marks an invoke to the app but the marker header,
+The body is the envelope `LambderCaller` sends: `version`, `signature`,
+`token`, `siteHost`, `payload` (or `payloadBr` plus `payloadBytes`),
+`guardInputs` and `idempotencyKey`. The endpoint is the path, never a field of
+the body. Nothing marks an invoke to the app but the marker header,
 which is the point: every server feature applies unchanged. The server itself
 tells the two apart in one place, the forwarding headers. An invoke's event
 carries `lambder-invoke` as its `requestContext.apiId`, a field a gateway
@@ -185,6 +198,7 @@ would bump).
 | `timeoutMs` | none | Default per-call timeout. The callee keeps running regardless, so its own timeout is the real ceiling |
 | `onLogList` | `console.log` | Receives each answer's `logList`, with the API name |
 | `onFailure` | none | Awaited for every failed call, before `api()` throws or `apiOutcome()` returns. A throw inside it is logged and ignored: `apiOutcome()` never throws |
+| `beforeCall` | none | Run before every call (`api()`, `apiOutcome()`, a group's call, `request()`) with its endpoint name or `METHOD path`, before anything is built or sent. What it throws is thrown to the caller, from `apiOutcome()` too; see below |
 | `sessionTokenCookieKey` | `"LMDRSESSIONTKID"` | The session token cookie's name, when a session is carried and the callee uses a non-default `tokenCookieKey`. The CSRF value rides in the envelope's `token` field, which has no name to configure |
 | `transport` | the Lambda SDK | Replaces the SDK: `(event, { functionName, eventJson, signal }) => Promise<{ functionError, result }>`. `eventJson` is the event serialized once; the SDK sends those bytes as they are |
 | `guardInputsProvider` | none | Supplies guard inputs for every call from one place |
@@ -235,6 +249,11 @@ finishes its work.
 
 ## `api()` and `apiOutcome()`
 
+Each endpoint is reached two ways, and both are the same call: by its group,
+`caller.files.read(input)` and `caller.files.read.outcome(input)`, and by
+name, `caller.api("files.read", input)` and `caller.apiOutcome("files.read",
+input)`. The endpoint itself is `api()`, and its `.outcome` is `apiOutcome()`.
+
 `api()` resolves to the typed payload and throws a `LambderInvokeError` on
 every failure. That is the opposite of `LambderCaller.api()`, which collapses a
 failure to `undefined` so a UI keeps rendering, and the difference is deliberate: a
@@ -248,14 +267,14 @@ failure (see [APIs](./apis.md#defining-apis)).
 
 ```typescript
 // Throws on any failure; typed as the declared output, here `{ file: { body, contentType } | null }`.
-const { file } = await gatewayCaller.api("files.read", { bucketName, filePath });
+const { file } = await gatewayCaller.files.read({ bucketName, filePath });
 ```
 
 `apiOutcome()` never throws and resolves to a discriminated union, for sites
 that degrade rather than fail:
 
 ```typescript
-const outcome = await gatewayCaller.apiOutcome("verifyToken", { provider, token });
+const outcome = await gatewayCaller.auth.verifyToken.outcome({ provider, token });
 if (outcome.ok) {
     signIn(outcome.payload);
 } else if (outcome.reason === "refusal") {
@@ -339,13 +358,15 @@ on the callee, and its answers go plain for this caller as for a browser
 (see [Responses](./responses.md#compression)):
 
 ```typescript
-lambder.addApi("files.read", {
-    input: z.object({ bucketName: z.string(), filePath: z.string() }),
-    output: z.object({ file: z.object({ body: z.string(), contentType: z.string() }).nullable() }),
-    guards: "arrivedByInvoke",
-    // A multi-megabyte base64 body would cost tens of milliseconds to compress and arrive no smaller.
-    compress: false,
-}, async ({ apiPayload }) => ({ file: await readStoredFile(apiPayload.bucketName, apiPayload.filePath) }));
+const fileApis = lambderApp.defineApiGroup("files", {
+    read: lambderApp.defineApi({
+        input: z.object({ bucketName: z.string(), filePath: z.string() }),
+        output: z.object({ file: z.object({ body: z.string(), contentType: z.string() }).nullable() }),
+        guards: "arrivedByInvoke",
+        // A multi-megabyte base64 body would cost tens of milliseconds to compress and arrive no smaller.
+        compress: false,
+    }, async ({ apiPayload }) => ({ file: await readStoredFile(apiPayload.bucketName, apiPayload.filePath) })),
+});
 ```
 
 The restore is capped by `maxResponsePayloadBytes` (default 20,000,000), so a
@@ -368,8 +389,8 @@ const caller = new LambderInvokeCaller<GatewayApiContract>({
     // requestCompression: { minBytes: 64_000, quality: 4 },   // only genuinely large calls
 });
 
-await caller.api("sendPushBatch", { recipients: bigList });                 // goes compressed
-await caller.api("saveFile", { body: base64 }, { compressRequest: false }); // goes plain
+await caller.push.sendBatch({ recipients: bigList });                   // goes compressed
+await caller.files.save({ body: base64 }, { compressRequest: false });   // goes plain
 ```
 
 It is only ever sent compressed when that is actually smaller, so a payload
@@ -450,6 +471,22 @@ const reportFailure: LambderInvokeFailureHandler =
     };
 ```
 
+`beforeCall` is the other side of the same caller: a rule the calling code
+must keep, checked on every call before anything leaves. Nothing was sent, so
+what it throws is no failure of the callee: it reaches the caller as it was
+thrown, from `apiOutcome()` as much as from `api()`, and `onFailure` is not
+told. A caller that must never go out while a database transaction is open
+says so once:
+
+```typescript
+const payments = new LambderInvokeCaller<PaymentsContract>({
+    functionName: "payments",
+    beforeCall: (name) => {
+        if (inTransaction()) throw new Error(`${name} called inside a transaction`);
+    },
+});
+```
+
 An app that reports failures here should skip a `LambderInvokeError` in its
 `crashes.report`, so a thrown `api()` failure is not recorded twice:
 `if (isLambderInvokeError(error)) return;`. The framework does not skip it for
@@ -469,7 +506,7 @@ mode makes the options argument, and the shape of each value, mandatory at the
 call site:
 
 ```typescript
-await caller.api("cacheUrl", { url }, { guardInputs: { deviceAuth: { deviceToken } } });
+await caller.urls.cache({ url }, { guardInputs: { deviceAuth: { deviceToken } } });
 ```
 
 `guardInputsProvider` supplies values for every call from one place, with
@@ -518,7 +555,7 @@ A session API on the callee runs on a user's behalf when the call carries the
 two values a browser holds, the session token and the CSRF token:
 
 ```typescript
-const outcome = await caller.apiOutcome("account.summary", { month }, {
+const outcome = await caller.account.summary.outcome({ month }, {
     session: { token: sessionToken, csrf: csrfToken },
 });
 ```
@@ -537,7 +574,7 @@ nobody unless the caller reads it. Every outcome carries `cookies`, the
 answer's `Set-Cookie` values, for exactly that:
 
 ```typescript
-const outcome = await caller.apiOutcome("account.summary", { month }, { session });
+const outcome = await caller.account.summary.outcome({ month }, { session });
 // The callee rotated or cleared the session: keep the new values, or drop them.
 const rotated = outcome.cookies.find((cookie) => cookie.startsWith("LMDRSESSIONTKID="));
 ```
@@ -602,7 +639,7 @@ const caller = new LambderInvokeCaller<GatewayApiContract>({
     transport: LambderInvokeCaller.localTransport(lambder.getHandler()),
 });
 
-expect(await caller.api("sendEmail", { to, subject, html })).toEqual({ messageId: "..." });
+expect(await caller.email.send({ to, subject, html })).toEqual({ messageId: "..." });
 ```
 
 A second argument overrides fields of the `Context` the handler receives
@@ -625,18 +662,21 @@ way it does over HTTP, and, as with an invoke, the callee keeps running: a
 function call in this process cannot be cancelled. And the
 [mock runtime](./mock.md) can stand in for a callee here:
 `transport: lambderMockInvokeTransport(mockApp)` answers this caller from the
-same registry a browser test uses.
+same registry a browser test uses (`{ apiPath }` as its second argument when
+the caller's is not `"/api"`).
 
 `LambderInvokeCaller.createEvent({ apiPath, apiName, payload })` returns the
-event a call would send, with a plain payload, for a boot check that hands a
-built deployment package an event file and asserts it answers. Calling an API
-name that does not exist is a useful smoke test on its own: unless the callee
-registered its own `setApiFallbackHandler`, the answer is a 200 envelope whose
-`refusal` carries `LAMBDER_REFUSAL_CODES.apiNotFound`, which proves the
-whole bundle loaded and the pipeline ran.
+event a call would send, a POST to `{apiPath}/{group}/{action}` with a plain
+payload, for a boot check that hands a built deployment package an event file
+and asserts it answers. `apiName` is `group.action`, as every endpoint's name
+is, and one that is not two identifiers throws, since it names no path.
+Calling an endpoint that does not exist is a useful smoke test on its own:
+unless the callee registered its own `setApiFallbackHandler`, the answer is a
+200 envelope whose `refusal` carries `LAMBDER_REFUSAL_CODES.apiNotFound`,
+which proves the whole bundle loaded and the pipeline ran.
 
 ```typescript
-const event = LambderInvokeCaller.createEvent({ apiPath: "/api", apiName: "boot-check-no-such-api" });
+const event = LambderInvokeCaller.createEvent({ apiPath: "/api", apiName: "bootCheck.noSuchApi" });
 ```
 
 It accepts the same fields a call does (`payload`, `host`, `apiVersion`,

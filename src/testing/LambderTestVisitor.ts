@@ -1,4 +1,6 @@
-import LambderCaller, { type LambderCallerOptions } from "../client/LambderCaller.js";
+import LambderCaller, { type LambderCallerGroupCalls, type LambderCallerMembers, type LambderCallerOptions } from "../client/LambderCaller.js";
+import { withApiGroupCalls } from "../shared/wire/LambderApiGroupCalls.js";
+import type { LambderApiOutcome } from "../shared/wire/LambderApiOutcome.js";
 import type { LambderHttpEventFormat } from "../core/LambderContext.js";
 import type { LambderHandler } from "../core/LambderCreateOptions.js";
 import { lambderHandlerTransport } from "../invoke/lambderHandlerTransport.js";
@@ -88,7 +90,7 @@ export type LambderTestVisitorArgs<TOptions, TProvidedGuards extends string> =
  *
  * Created by `LambderTestApp.visitor()` and `signIn()`, not constructed.
  */
-export class LambderTestVisitor<TContract extends LambderApiContractShape = any, TSessionData = any, TProvidedGuards extends string = never> {
+class LambderTestVisitorCore<TContract extends LambderApiContractShape = any, TSessionData = any, TProvidedGuards extends string = never> {
     readonly host: string;
     readonly clientIp: string;
     /**
@@ -99,7 +101,7 @@ export class LambderTestVisitor<TContract extends LambderApiContractShape = any,
      */
     readonly caller: LambderCaller<TContract, TProvidedGuards>;
     /** The payload on success, `undefined` on a failure: LambderCaller.api, through this visitor. */
-    readonly api: LambderCaller<TContract, TProvidedGuards>["api"];
+    readonly api: LambderCallerMembers<TContract, TProvidedGuards>["api"];
     /**
      * The full outcome, never throwing: LambderCaller.apiOutcome, through
      * this visitor. Pair it with assertApiSuccess / assertApiFailure.
@@ -109,23 +111,23 @@ export class LambderTestVisitor<TContract extends LambderApiContractShape = any,
      * 500"; here that error's `cause` is what the app actually threw, stack
      * included, so a failing test points at the line in the handler.
      */
-    readonly apiOutcome: LambderCaller<TContract, TProvidedGuards>["apiOutcome"];
+    readonly apiOutcome: LambderCallerMembers<TContract, TProvidedGuards>["apiOutcome"];
 
-    private readonly wiring: LambderTestVisitorWiring<TSessionData>;
-    private readonly headers: Record<string, string>;
-    private readonly cookieJar: LambderCookieJar;
-    private seenResetCount: number;
+    readonly #wiring: LambderTestVisitorWiring<TSessionData>;
+    readonly #headers: Record<string, string>;
+    readonly #cookieJar: LambderCookieJar;
+    #seenResetCount: number;
 
     constructor(wiring: LambderTestVisitorWiring<TSessionData>, options: LambderTestVisitorOptions<TContract, TProvidedGuards> & { host: string; clientIp: string }){
-        this.wiring = wiring;
+        this.#wiring = wiring;
         this.host = options.host;
         this.clientIp = options.clientIp;
-        this.headers = options.headers ?? {};
-        this.cookieJar = new LambderCookieJar({ host: this.host });
-        this.seenResetCount = wiring.resetCount();
+        this.#headers = options.headers ?? {};
+        this.#cookieJar = new LambderCookieJar({ host: this.host });
+        this.#seenResetCount = wiring.resetCount();
 
         const handlerTransport = lambderHandlerTransport(wiring.handler, { host: this.host, clientIp: this.clientIp, eventFormat: wiring.eventFormat });
-        const withVisitorHeaders: LambderApiTransport = (request) => handlerTransport({ ...request, headers: { ...this.headers, ...request.headers } });
+        const withVisitorHeaders: LambderApiTransport = (request) => handlerTransport({ ...request, headers: { ...this.#headers, ...request.headers } });
         this.caller = new LambderCaller<TContract, TProvidedGuards>({
             apiPath: wiring.apiPath,
             apiVersion: options.apiVersion,
@@ -145,12 +147,18 @@ export class LambderTestVisitor<TContract extends LambderApiContractShape = any,
         if(wiring.sessionCookieNames){
             this.caller.setSessionCookieKey(wiring.sessionCookieNames.tokenCookieKey, wiring.sessionCookieNames.csrfCookieKey);
         }
-        this.api = this.caller.api.bind(this.caller);
-        this.apiOutcome = (async (...callArgs: Parameters<LambderCaller<TContract, TProvidedGuards>["apiOutcome"]>) => {
-            const { result: outcome, crash } = await wiring.watchCrash(() => this.caller.apiOutcome(...callArgs));
+        const caller = this.caller as unknown as { api(apiName: string, ...args: unknown[]): Promise<unknown>; apiOutcome(apiName: string, ...args: unknown[]): Promise<LambderApiOutcome<unknown>> };
+        const apiOutcome = async (apiName: string, ...callArgs: unknown[]) => {
+            const { result: outcome, crash } = await wiring.watchCrash(() => caller.apiOutcome(apiName, ...callArgs));
             if(crash && !outcome.ok && "error" in outcome && outcome.error.cause === undefined) outcome.error.cause = crash;
             return outcome;
-        }) as LambderCaller<TContract, TProvidedGuards>["apiOutcome"];
+        };
+        this.api = ((apiName: string, ...callArgs: unknown[]) => caller.api(apiName, ...callArgs)) as LambderCallerMembers<TContract, TProvidedGuards>["api"];
+        this.apiOutcome = apiOutcome as LambderCallerMembers<TContract, TProvidedGuards>["apiOutcome"];
+        // Each group of the contract, as on a caller, through this visitor's
+        // own two calls: visitor.orders.place.outcome(input) carries the crash
+        // cause as visitor.apiOutcome does.
+        return withApiGroupCalls(this, (apiName, args) => caller.api(apiName, ...args), (apiName, args) => apiOutcome(apiName, ...args));
     }
 
     /**
@@ -160,12 +168,12 @@ export class LambderTestVisitor<TContract extends LambderApiContractShape = any,
      * emptied store would read as signed in until an answer said otherwise.
      */
     get jar(): LambderCookieJar {
-        const resetCount = this.wiring.resetCount();
-        if(resetCount !== this.seenResetCount){
-            this.cookieJar.clear();
-            this.seenResetCount = resetCount;
+        const resetCount = this.#wiring.resetCount();
+        if(resetCount !== this.#seenResetCount){
+            this.#cookieJar.clear();
+            this.#seenResetCount = resetCount;
         }
-        return this.cookieJar;
+        return this.#cookieJar;
     }
 
     /**
@@ -194,13 +202,13 @@ export class LambderTestVisitor<TContract extends LambderApiContractShape = any,
             path: pathname,
             query,
             host: this.host,
-            headers: { ...this.headers, ...init.headers },
+            headers: { ...this.#headers, ...init.headers },
             clientIp: this.clientIp,
             cookies: this.jar.cookiePairs(cookieScope),
             body: init.body,
-        }, { invoke: false, eventFormat: this.wiring.eventFormat });
+        }, { invoke: false, eventFormat: this.#wiring.eventFormat });
         const result = await decodeLambdaHttpResult(
-            await this.wiring.handler(event, localLambdaContext("lambder-test")),
+            await this.#wiring.handler(event, localLambdaContext("lambder-test")),
             DEFAULT_MAX_RESTORED_PAYLOAD_BYTES,
         );
         if(result.cookies.length) this.jar.storeSetCookies(result.cookies, cookieScope);
@@ -220,10 +228,10 @@ export class LambderTestVisitor<TContract extends LambderApiContractShape = any,
      * answer sessionExpired with nothing to say why.
      */
     async signIn(sessionKey: string, data: TSessionData, options: { ttlSeconds?: number } = {}): Promise<LambderCreatedSession<TSessionData>> {
-        if(!this.wiring.sessionCookieNames) throw new Error("LambderTestVisitor: signIn() needs an app with sessions. Pass the session option to create().");
-        const { created, setCookies } = await this.wiring.issueSession(this.host, sessionKey, data, options.ttlSeconds);
+        if(!this.#wiring.sessionCookieNames) throw new Error("LambderTestVisitor: signIn() needs an app with sessions. Pass the session option to create().");
+        const { created, setCookies } = await this.#wiring.issueSession(this.host, sessionKey, data, options.ttlSeconds);
         this.jar.storeSetCookies(setCookies, { host: this.host });
-        if(this.jar.get(this.wiring.sessionCookieNames.tokenCookieKey, { host: this.host, includeHttpOnly: true }) === undefined){
+        if(this.jar.get(this.#wiring.sessionCookieNames.tokenCookieKey, { host: this.host, includeHttpOnly: true }) === undefined){
             throw new Error(
                 `LambderTestVisitor: the session cookie did not stick for host "${this.host}", the way a browser on that host would drop it. ` +
                 "The app most likely scopes its session cookie to a domain this host is not under: " +
@@ -233,3 +241,18 @@ export class LambderTestVisitor<TContract extends LambderApiContractShape = any,
         return created;
     }
 }
+
+/**
+ * One simulated browser in front of a real Lambder app, with the app's
+ * endpoints by group as a caller has them: `visitor.orders.place(input)`,
+ * `visitor.orders.place.outcome(input)`.
+ */
+export type LambderTestVisitor<TContract extends LambderApiContractShape = any, TSessionData = any, TProvidedGuards extends string = never> =
+    LambderTestVisitorCore<TContract, TSessionData, TProvidedGuards> & LambderCallerGroupCalls<TContract, TProvidedGuards>;
+
+export const LambderTestVisitor = LambderTestVisitorCore as unknown as {
+    new <TContract extends LambderApiContractShape = any, TSessionData = any, TProvidedGuards extends string = never>(
+        ...args: ConstructorParameters<typeof LambderTestVisitorCore<TContract, TSessionData, TProvidedGuards>>
+    ): LambderTestVisitor<TContract, TSessionData, TProvidedGuards>;
+    readonly prototype: LambderTestVisitorCore<any, any, any>;
+};

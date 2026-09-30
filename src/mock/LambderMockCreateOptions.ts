@@ -39,6 +39,7 @@ import type {
     LambderMockLatency,
     LambderMockRateLimitPolicies,
     LambderMockSessionCallContext,
+    LambderMockSessionGuardsCheck,
     LambderMockSurplusKeys,
 } from "./LambderMockTypes.js";
 
@@ -168,8 +169,8 @@ type LambderMockGuardsOption<C, S, G, D> =
     // nothing else; inferred from here as well, a missing table would be
     // taken as its constraint and hold every guard to `session: boolean`.
     [LambderContractGuardNames<C>] extends [never]
-        ? { guards?: G & LambderMockGuards<C, S> & LambderMockGuardShapes<S, G> & LambderMockGuardsAgree<G, NoInfer<D>> }
-        : { guards: G & LambderMockGuards<C, S> & LambderMockGuardShapes<S, G> & LambderMockGuardsAgree<G, NoInfer<D>> };
+        ? { guards?: G & LambderMockGuards<C, S> & LambderMockGuardShapes<S, G> & LambderMockGuardsAgree<G, NoInfer<D>> & LambderMockSessionGuardsCheck<C, G> }
+        : { guards: G & LambderMockGuards<C, S> & LambderMockGuardShapes<S, G> & LambderMockGuardsAgree<G, NoInfer<D>> & LambderMockSessionGuardsCheck<C, G> };
 
 /**
  * The sessions, idempotency and rateLimits options: each required whenever
@@ -248,10 +249,9 @@ export type LambderMockAppOptions<
      * exports them (`apiOptions`). Given, every entry's guards, rateLimit and
      * idempotency are read off the table rather than restated: an entry is
      * its handler (and an input schema, if it has one), a restated option is
-     * a compile error, and an endpoint whose mode the table and the builder
-     * disagree on is refused at registration. A restNotMocked answer reads
-     * the endpoint's mode off the table too, so a session endpoint nothing
-     * mocks still reads the session first. The table has to cover the
+     * a compile error, and the entry takes the table's mode. A notMocked
+     * entry and a restNotMocked answer read the endpoint's mode off the table
+     * too, so a session endpoint nothing mocks still reads the session first. The table has to cover the
      * contract (see LambderMockApiOptionsCover).
      */
     apiOptions?: A & LambderMockApiOptionsCover<C>;

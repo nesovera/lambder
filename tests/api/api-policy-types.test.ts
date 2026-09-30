@@ -43,21 +43,26 @@ const createApp = () => initLambder().create({
 
 describe('The rateLimit option is non-empty by construction, like the guards option', () => {
     it('rejects the three empty forms at the type level', () => {
-        const lambder = createApp();
+        const app = createApp();
         // @ts-expect-error an empty map declares no policy
-        expect(() => lambder.addApi('a', { ...testSchema, rateLimit: {} }, async (_ctx) => null)).toThrow();
+        const emptyMap = app.defineApi({ ...testSchema, rateLimit: {} }, async (_ctx) => ({ result: 'ok' }));
+        expect(() => app.registerApiGroups(app.defineApiGroup('emptyMap', { a: emptyMap }))).toThrow();
         // @ts-expect-error an empty list declares no policy
-        expect(() => lambder.addApi('b', { ...testSchema, rateLimit: [] }, async (_ctx) => null)).toThrow();
+        const emptyList = app.defineApi({ ...testSchema, rateLimit: [] }, async (_ctx) => ({ result: 'ok' }));
+        expect(() => app.registerApiGroups(app.defineApiGroup('emptyList', { b: emptyList }))).toThrow();
         // @ts-expect-error a named policy with an undefined value declares nothing
-        expect(() => lambder.addApi('c', { ...testSchema, rateLimit: { perIp: undefined } }, async (_ctx) => null)).toThrow();
+        const undefinedPolicy = app.defineApi({ ...testSchema, rateLimit: { perIp: undefined } }, async (_ctx) => ({ result: 'ok' }));
+        expect(() => app.registerApiGroups(app.defineApiGroup('undefinedPolicy', { c: undefinedPolicy }))).toThrow();
     });
 
     it('still accepts every non-empty form', () => {
-        expect(() => createApp()
-            .addApi('one', { ...testSchema, rateLimit: 'perIp' }, async (_ctx) => ({ result: 'ok' }))
-            .addApi('list', { ...testSchema, rateLimit: ['perIp'] }, async (_ctx) => ({ result: 'ok' }))
-            .addApi('map', { ...testSchema, rateLimit: { perIp: true } }, async (_ctx) => ({ result: 'ok' }))
-            .addApi('tuned', { ...testSchema, rateLimit: { perIp: { perMin: 1 } } }, async (_ctx) => ({ result: 'ok' })))
+        const app = createApp();
+        expect(() => app.registerApiGroups(app.defineApiGroup('test', {
+            one: app.defineApi({ ...testSchema, rateLimit: 'perIp' }, async (_ctx) => ({ result: 'ok' })),
+            list: app.defineApi({ ...testSchema, rateLimit: ['perIp'] }, async (_ctx) => ({ result: 'ok' })),
+            map: app.defineApi({ ...testSchema, rateLimit: { perIp: true } }, async (_ctx) => ({ result: 'ok' })),
+            tuned: app.defineApi({ ...testSchema, rateLimit: { perIp: { perMin: 1 } } }, async (_ctx) => ({ result: 'ok' })),
+        })))
             .not.toThrow();
     });
 });
@@ -79,25 +84,29 @@ describe('A payload slice is held to a union input whole, not member by member',
         // refused 422 by the slice's own parse.
         const eitherKind = z.discriminatedUnion('kind', [z.object({ kind: z.literal('a'), email: z.string() }), z.object({ kind: z.literal('b') })]);
         const app = createSliceApp();
-        app.addApi('guarded', {
-            input: eitherKind,
-            output: z.object({}),
-            // @ts-expect-error a `kind: "b"` payload carries no email for the guard's slice
-            guards: 'emailOwner',
-        }, async (_ctx) => ({}));
-        app.addApi('limited', {
-            input: eitherKind,
-            output: z.object({}),
-            // @ts-expect-error a `kind: "b"` payload carries no email for the key's slice
-            rateLimit: 'perEmail',
-        }, async (_ctx) => ({}));
+        app.registerApiGroups(app.defineApiGroup('test', {
+            guarded: app.defineApi({
+                input: eitherKind,
+                output: z.object({}),
+                // @ts-expect-error a `kind: "b"` payload carries no email for the guard's slice
+                guards: 'emailOwner',
+            }, async (_ctx) => ({})),
+            limited: app.defineApi({
+                input: eitherKind,
+                output: z.object({}),
+                // @ts-expect-error a `kind: "b"` payload carries no email for the key's slice
+                rateLimit: 'perEmail',
+            }, async (_ctx) => ({})),
+        }));
     });
 
     it('accepts a slice every member carries, and a plain input that carries it', () => {
         const everyKind = z.discriminatedUnion('kind', [z.object({ kind: z.literal('a'), email: z.string() }), z.object({ kind: z.literal('b'), email: z.string() })]);
-        expect(() => createSliceApp()
-            .addApi('union', { input: everyKind, output: z.object({}), guards: 'emailOwner', rateLimit: 'perEmail' }, async (_ctx) => ({}))
-            .addApi('plain', { input: z.object({ email: z.string(), name: z.string() }), output: z.object({}), guards: 'emailOwner', rateLimit: 'perEmail' }, async (_ctx) => ({})))
+        const app = createSliceApp();
+        expect(() => app.registerApiGroups(app.defineApiGroup('test', {
+            union: app.defineApi({ input: everyKind, output: z.object({}), guards: 'emailOwner', rateLimit: 'perEmail' }, async (_ctx) => ({})),
+            plain: app.defineApi({ input: z.object({ email: z.string(), name: z.string() }), output: z.object({}), guards: 'emailOwner', rateLimit: 'perEmail' }, async (_ctx) => ({})),
+        })))
             .not.toThrow();
     });
 });
@@ -129,36 +138,47 @@ describe('A declared guard or rate limit is held to the fields the API\'s input 
 
     it('refuses an apiInput guard the input does not carry, as a name, a list or a map', () => {
         const app = createKeyedApp();
-        // @ts-expect-error the input carries no email for the guard's slice
-        app.addSessionApi('byName', { ...noEmail, guards: 'emailOwner' }, async () => ({}));
-        // @ts-expect-error the same, in the list form
-        app.addSessionApi('byList', { ...noEmail, guards: ['emailOwner'] }, async () => ({}));
-        // @ts-expect-error the same, in the map form
-        app.addSessionApi('byMap', { ...noEmail, guards: { emailOwner: true } }, async () => ({}));
-        // @ts-expect-error and on a public API
-        app.addApi('public', { ...noEmail, guards: 'emailOwner' }, async () => ({}));
+        app.registerApiGroups(app.defineApiGroup('test', {
+            // @ts-expect-error the input carries no email for the guard's slice
+            byName: app.defineApi({ ...noEmail, guards: 'emailOwner' }, async () => ({})),
+            // @ts-expect-error the same, in the list form
+            byList: app.defineApi({ ...noEmail, guards: ['emailOwner'] }, async () => ({})),
+            // @ts-expect-error the same, in the map form
+            byMap: app.defineApi({ ...noEmail, guards: { emailOwner: true } }, async () => ({})),
+            // @ts-expect-error and on a session API
+            session: app.defineApi({ ...noEmail, guards: ['sessionOnly', 'emailOwner'] }, async () => ({})),
+        }));
     });
 
     it('refuses an apiInput-keyed rate limit the input does not carry, as a name, a list or a map', () => {
         const app = createKeyedApp();
-        // @ts-expect-error the input carries no email for the key's slice
-        app.addSessionApi('byName', { ...noEmail, rateLimit: 'perEmail' }, async () => ({}));
-        // @ts-expect-error the same, in the list form
-        app.addSessionApi('byList', { ...noEmail, rateLimit: ['perEmail'] }, async () => ({}));
-        // @ts-expect-error the same, in the map form
-        app.addSessionApi('byMap', { ...noEmail, rateLimit: { perEmail: true } }, async () => ({}));
-        // @ts-expect-error and on a public API
-        app.addApi('public', { ...noEmail, rateLimit: 'perEmail' }, async () => ({}));
+        app.registerApiGroups(app.defineApiGroup('test', {
+            // @ts-expect-error the input carries no email for the key's slice
+            byName: app.defineApi({ ...noEmail, guards: 'sessionOnly', rateLimit: 'perEmail' }, async () => ({})),
+            // @ts-expect-error the same, in the list form
+            byList: app.defineApi({ ...noEmail, guards: 'sessionOnly', rateLimit: ['perEmail'] }, async () => ({})),
+            // @ts-expect-error the same, in the map form
+            byMap: app.defineApi({ ...noEmail, guards: 'sessionOnly', rateLimit: { perEmail: true } }, async () => ({})),
+            // @ts-expect-error and on a public API
+            public: app.defineApi({ ...noEmail, rateLimit: 'perEmail' }, async () => ({})),
+        }));
     });
 
-    it('still keeps a session guard and a session-keyed policy off public APIs, at compile time and at registration', () => {
+    it('still keeps a session-keyed policy off an API no guard of which needs a session, and a session guard off an instance without sessions, at compile time and at registration', () => {
         const app = createKeyedApp();
-        // @ts-expect-error a public API reads no session for the guard
-        expect(() => app.addApi('guarded', { ...withEmail, guards: 'sessionOnly' }, async () => ({})))
-            .toThrow(/uses guard "sessionOnly" \(session: true\), which requires addSessionApi/);
         // @ts-expect-error a public API has no session to key the limit by
-        expect(() => app.addApi('limited', { ...withEmail, rateLimit: 'perSession' }, async () => ({})))
-            .toThrow(/uses rate-limit policy "perSession" \(per "session"\), which requires addSessionApi/);
+        const limited = app.defineApi({ ...withEmail, rateLimit: 'perSession' }, async () => ({}));
+        expect(() => app.registerApiGroups(app.defineApiGroup('test', { limited })))
+            .toThrow(/uses rate-limit policy "perSession" \(per "session"\), which counts per session, and none of its guards needs a session/);
+        const sessionless = initLambder().create({
+            files: testPublicFiles(),
+            apiPath: '/api',
+            guards: { sessionOnly: lambderGuard({ session: true, handler: async () => {} }) },
+        });
+        // @ts-expect-error an instance without sessions has no session for the guard to read
+        const guarded = sessionless.defineApi({ ...withEmail, guards: 'sessionOnly' }, async () => ({}));
+        expect(() => sessionless.registerApiGroups(sessionless.defineApiGroup('test', { guarded })))
+            .toThrow(/a guard of API "test\.guarded" needs a session, and the instance was created without the session option/);
     });
 
     it('names the guards and policies at fault, and none when the input carries their fields', () => {
@@ -171,11 +191,13 @@ describe('A declared guard or rate limit is held to the fields the API\'s input 
     });
 
     it('accepts every form when the input carries the fields', () => {
-        expect(() => createKeyedApp()
-            .addSessionApi('byName', { ...withEmail, guards: 'emailOwner', rateLimit: 'perEmail' }, async () => ({}))
-            .addSessionApi('byList', { ...withEmail, guards: ['emailOwner', 'sessionOnly'], rateLimit: ['perEmail', 'perSession'] }, async () => ({}))
-            .addSessionApi('byMap', { ...withEmail, guards: { emailOwner: true }, rateLimit: { perEmail: true } }, async () => ({}))
-            .addApi('public', { ...withEmail, guards: 'emailOwner', rateLimit: 'perEmail' }, async () => ({})))
+        const app = createKeyedApp();
+        expect(() => app.registerApiGroups(app.defineApiGroup('test', {
+            byName: app.defineApi({ ...withEmail, guards: 'emailOwner', rateLimit: 'perEmail' }, async () => ({})),
+            byList: app.defineApi({ ...withEmail, guards: ['emailOwner', 'sessionOnly'], rateLimit: ['perEmail', 'perSession'] }, async () => ({})),
+            byMap: app.defineApi({ ...withEmail, guards: { sessionOnly: true, emailOwner: true }, rateLimit: { perEmail: true } }, async () => ({})),
+            session: app.defineApi({ ...withEmail, guards: 'sessionOnly', rateLimit: 'perEmail' }, async () => ({})),
+        })))
             .not.toThrow();
     });
 });

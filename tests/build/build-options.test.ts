@@ -33,14 +33,14 @@ const nextFile = () => join(directory, `apiOptions-${fileCount++}.generated.ts`)
 
 let moduleCount = 0;
 /** A module exporting an app's options as the app reports them: what the server's entry is to writeApiOptions, which imports it. */
-const moduleFor = (app: LambderApiOptionsSource, exportName = 'default') => {
+const moduleFor = async (app: LambderApiOptionsSource, exportName = 'default') => {
     const path = join(directory, `instance-${moduleCount++}.mjs`);
-    writeFileSync(path, `const instance = { apiOptionEntries: () => (${JSON.stringify(app.apiOptionEntries())}) };\nexport ${exportName === 'default' ? 'default instance' : `{ instance as ${exportName} }`};\n`);
+    writeFileSync(path, `const instance = { apiOptionEntries: async () => (${JSON.stringify(await app.apiOptionEntries())}) };\nexport ${exportName === 'default' ? 'default instance' : `{ instance as ${exportName} }`};\n`);
     return path;
 };
 
-const write = (app: LambderApiOptionsSource, options: Omit<LambderApiOptionsFileOptions, 'module'>) =>
-    writeApiOptions({ module: moduleFor(app), ...options });
+const write = async (app: LambderApiOptionsSource, options: Omit<LambderApiOptionsFileOptions, 'module'>) =>
+    writeApiOptions({ module: await moduleFor(app), ...options });
 
 type Permission = 'ORDERS.MANAGE' | 'ORDERS.VIEW' | 'STAFF.MANAGE';
 
@@ -53,41 +53,46 @@ const storeGuards = {
 };
 
 /** A store app with every shape of option: a guard per input mode, a policy per kind of key, overrides, idempotency. */
-const storeApp = (ordersNeed: Permission | readonly Permission[] = 'ORDERS.MANAGE') => initLambder<{ userId: string }>().declareRefusals({ 'not-staff': { notAuthorized: true, status: 403 }, 'order-closed': {}, 'invite-pending': { data: z.object({ sentAt: z.string() }) } }).create({
-    apiPath: '/api',
-    session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
-    idempotency: { store: new LambderMemoryIdempotencyStore() },
-    guards: storeGuards,
-    rateLimits: {
-        limiter: new LambderMemoryRateLimiter(),
-        policies: {
-            authPerIp: { perMin: 10, perHour: 60, per: 'ip' },
-            codePerEmail: {
-                perMin: 4, perDay: 30, budget: 'perPolicy', chargeAt: 'beforeGuards',
-                per: lambderRateLimitKey({ apiInput: z.object({ email: z.string() }), handler: (_ctx, { email }) => email.toLowerCase() }),
-                refusal: { type: 'warning', content: 'Too many codes for this address. Try again later.' },
+const storeApp = (ordersNeed: Permission | readonly Permission[] = 'ORDERS.MANAGE') => {
+    const app = initLambder<{ userId: string }>().declareRefusals({ 'not-staff': { notAuthorized: true, status: 403 }, 'order-closed': {}, 'invite-pending': { data: z.object({ sentAt: z.string() }) } }).create({
+        apiPath: '/api',
+        session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
+        idempotency: { store: new LambderMemoryIdempotencyStore() },
+        guards: storeGuards,
+        rateLimits: {
+            limiter: new LambderMemoryRateLimiter(),
+            policies: {
+                authPerIp: { perMin: 10, perHour: 60, per: 'ip' },
+                codePerEmail: {
+                    perMin: 4, perDay: 30, budget: 'perPolicy', chargeAt: 'beforeGuards',
+                    per: lambderRateLimitKey({ apiInput: z.object({ email: z.string() }), handler: (_ctx, { email }) => email.toLowerCase() }),
+                    refusal: { type: 'warning', content: 'Too many codes for this address. Try again later.' },
+                },
+                remindPerSession: { perHour: 20, per: 'session' },
+                invitesPerRecipient: { perMonth: 3, budget: 'perPolicy' },
             },
-            remindPerSession: { perHour: 20, per: 'session' },
-            invitesPerRecipient: { perMonth: 3, budget: 'perPolicy' },
         },
-    },
-})
-    .addApi('order.lookup', { input: z.object({ code: z.string() }), output: z.object({ found: z.boolean() }), guards: { open: 'A lookup code is the whole secret.' }, rateLimit: 'authPerIp', refusals: 'order-closed' }, async (_ctx) => ({ found: true }))
-    .addApi('code.send', { input: z.object({ email: z.string() }), output: z.object({ sent: z.boolean() }), guards: 'captcha', rateLimit: { authPerIp: { perMin: 3 }, codePerEmail: true } }, async (_ctx) => ({ sent: true }))
-    .addApi('device.ping', { input: z.object({ deviceToken: z.string() }), output: z.object({ ok: z.boolean() }), guards: ['device'] }, async (_ctx) => ({ ok: true }))
-    .addSessionApi('orders.list', { input: z.object({}), output: z.array(z.string()), guards: { store: ordersNeed } }, async (_ctx) => [])
-    .addSessionApi('staff.invite', { input: z.object({ email: z.string() }), output: z.object({ invited: z.boolean() }), guards: { store: ['STAFF.MANAGE', 'ORDERS.MANAGE'] }, rateLimit: 'remindPerSession', idempotency: { ttlSeconds: 600 }, refusals: ['invite-pending'] }, async (_ctx) => ({ invited: true }))
-    .addSessionApi('me', { input: z.object({}), output: z.object({ userId: z.string() }), guards: 'owner', idempotency: true }, async (ctx) => ({ userId: ctx.session.data.userId }));
+    });
+    const { defineApi } = app;
+    return app.registerApiGroups(
+        app.defineApiGroup('order', { lookup: defineApi({ input: z.object({ code: z.string() }), output: z.object({ found: z.boolean() }), guards: { open: 'A lookup code is the whole secret.' }, rateLimit: 'authPerIp', refusals: 'order-closed' }, async (_ctx) => ({ found: true })) }),
+        app.defineApiGroup('code', { send: defineApi({ input: z.object({ email: z.string() }), output: z.object({ sent: z.boolean() }), guards: 'captcha', rateLimit: { authPerIp: { perMin: 3 }, codePerEmail: true } }, async (_ctx) => ({ sent: true })) }),
+        app.defineApiGroup('device', { ping: defineApi({ input: z.object({ deviceToken: z.string() }), output: z.object({ ok: z.boolean() }), guards: ['device'] }, async (_ctx) => ({ ok: true })) }),
+        app.defineApiGroup('orders', { list: defineApi({ input: z.object({}), output: z.array(z.string()), guards: { store: ordersNeed } }, async (_ctx) => []) }),
+        app.defineApiGroup('staff', { invite: defineApi({ input: z.object({ email: z.string() }), output: z.object({ invited: z.boolean() }), guards: { store: ['STAFF.MANAGE', 'ORDERS.MANAGE'] }, rateLimit: 'remindPerSession', idempotency: { ttlSeconds: 600 }, refusals: ['invite-pending'] }, async (_ctx) => ({ invited: true })) }),
+        app.defineApiGroup('account', { me: defineApi({ input: z.object({}), output: z.object({ userId: z.string() }), guards: 'owner', idempotency: true }, async (ctx) => ({ userId: ctx.session.data.userId })) }),
+    );
+};
 
 describe('Lambder.apiOptionEntries', () => {
-    it('reports every API sorted by name, with its mode and options as written', () => {
-        const { apis } = storeApp().apiOptionEntries();
+    it('reports every API sorted by name, with its mode and options as written', async () => {
+        const { apis } = await storeApp().apiOptionEntries();
 
-        expect(Object.keys(apis)).toEqual(['code.send', 'device.ping', 'me', 'order.lookup', 'orders.list', 'staff.invite']);
+        expect(Object.keys(apis)).toEqual(['account.me', 'code.send', 'device.ping', 'order.lookup', 'orders.list', 'staff.invite']);
         expect(apis).toEqual({
+            'account.me': { mode: 'session', guards: 'owner', idempotency: true },
             'code.send': { mode: 'public', guards: 'captcha', rateLimit: { authPerIp: { perMin: 3 }, codePerEmail: true } },
             'device.ping': { mode: 'public', guards: ['device'] },
-            me: { mode: 'session', guards: 'owner', idempotency: true },
             'order.lookup': { mode: 'public', guards: { open: 'A lookup code is the whole secret.' }, rateLimit: 'authPerIp', refusals: 'order-closed' },
             'orders.list': { mode: 'session', guards: { store: 'ORDERS.MANAGE' } },
             // Its own refusals as written; the code its guard adds is on the guard's declaration.
@@ -95,8 +100,8 @@ describe('Lambder.apiOptionEntries', () => {
         });
     });
 
-    it('reduces each policy to what is not code, and each guard to its input mode', () => {
-        const { rateLimitPolicies, guards } = storeApp().apiOptionEntries();
+    it('reduces each policy to what is not code, and each guard to its input mode', async () => {
+        const { rateLimitPolicies, guards } = await storeApp().apiOptionEntries();
 
         expect(rateLimitPolicies).toEqual({
             authPerIp: { perMin: 10, perHour: 60, per: 'ip' },
@@ -114,19 +119,26 @@ describe('Lambder.apiOptionEntries', () => {
         });
     });
 
-    it('refuses a guard parameter that is not plain data, naming the API and where it sits', () => {
-        const withSchema = initLambder().create({ apiPath: '/api', guards: { shape: lambderGuard({ handler: (_ctx, _payload, _schema: z.ZodType) => {} }) } })
-            .addApi('a', { input: z.object({}), output: z.object({}), guards: { shape: z.object({}) } }, async (_ctx) => ({}));
-        expect(() => withSchema.apiOptionEntries()).toThrow(/the guards option of API "a" must be plain data .* but shape is an instance of ZodObject/);
+    it('refuses a guard parameter that is not plain data, naming the API and where it sits', async () => {
+        const schemaApp = initLambder().create({ apiPath: '/api', guards: { shape: lambderGuard({ handler: (_ctx, _payload, _schema: z.ZodType) => {} }) } });
+        const withSchema = schemaApp.registerApiGroups(schemaApp.defineApiGroup('test', {
+            a: schemaApp.defineApi({ input: z.object({}), output: z.object({}), guards: { shape: z.object({}) } }, async (_ctx) => ({})),
+        }));
+        await expect(withSchema.apiOptionEntries()).rejects.toThrow(/the guards option of API "test\.a" must be plain data .* but shape is an instance of ZodObject/);
 
-        const withFunction = initLambder().create({ apiPath: '/api', guards: { pick: lambderGuard({ handler: (_ctx, _payload, _pick: { by: (row: unknown) => boolean }) => {} }) } })
-            .addApi('b', { input: z.object({}), output: z.object({}), guards: { pick: { by: () => true } } }, async (_ctx) => ({}));
-        expect(() => withFunction.apiOptionEntries()).toThrow(/API "b" .* but pick\.by is a function/);
+        const functionApp = initLambder().create({ apiPath: '/api', guards: { pick: lambderGuard({ handler: (_ctx, _payload, _pick: { by: (row: unknown) => boolean }) => {} }) } });
+        const withFunction = functionApp.registerApiGroups(functionApp.defineApiGroup('test', {
+            b: functionApp.defineApi({ input: z.object({}), output: z.object({}), guards: { pick: { by: () => true } } }, async (_ctx) => ({})),
+        }));
+        await expect(withFunction.apiOptionEntries()).rejects.toThrow(/API "test\.b" .* but pick\.by is a function/);
     });
 
-    it('is the same for an app with no guards and no policies', () => {
-        const bare = initLambder().create({ apiPath: '/api' }).addApi('ping', { input: z.object({}), output: z.object({}) }, async (_ctx) => ({}));
-        expect(bare.apiOptionEntries()).toEqual({ apis: { ping: { mode: 'public' } }, rateLimitPolicies: {}, guards: {} });
+    it('is the same for an app with no guards and no policies', async () => {
+        const bareApp = initLambder().create({ apiPath: '/api' });
+        const bare = bareApp.registerApiGroups(bareApp.defineApiGroup('health', {
+            ping: bareApp.defineApi({ input: z.object({}), output: z.object({}) }, async (_ctx) => ({})),
+        }));
+        expect(await bare.apiOptionEntries()).toEqual({ apis: { 'health.ping': { mode: 'public' } }, rateLimitPolicies: {}, guards: {} });
     });
 });
 
@@ -138,7 +150,7 @@ describe('writeApiOptions', () => {
         const result = await write(app, { file });
 
         expect(result).toMatchObject({ ok: true, written: true, counts: { apis: 6, rateLimitPolicies: 4, guards: 5 } });
-        expect(result.changes.apis.added).toEqual(['code.send', 'device.ping', 'me', 'order.lookup', 'orders.list', 'staff.invite']);
+        expect(result.changes.apis.added).toEqual(['account.me', 'code.send', 'device.ping', 'order.lookup', 'orders.list', 'staff.invite']);
         const contents = readFileSync(file, 'utf8');
         expect(contents).toMatch(/^\/\/ Generated by writeApiOptions\(\) from lambder\/build\. Do not edit\./);
         expect(contents).toContain('import type { LambderApiOptionEntry, LambderRateLimitPolicyEntry, LambderGuardDeclarationEntry } from "lambder/client";');
@@ -146,7 +158,7 @@ describe('writeApiOptions', () => {
         expect(contents).toContain('} as const satisfies Record<string, LambderApiOptionEntry>;');
         expect(contents).toContain('} as const satisfies Record<string, LambderRateLimitPolicyEntry>;');
         expect(contents).toContain('} as const satisfies Record<string, LambderGuardDeclarationEntry>;');
-        expect(readOptionTables(contents)).toEqual(app.apiOptionEntries());
+        expect(readOptionTables(contents)).toEqual(await app.apiOptionEntries());
         // The header may speak of handlers; the tables hold none.
         expect(JSON.stringify(readOptionTables(contents))).not.toContain('handler');
     });
@@ -179,8 +191,10 @@ describe('writeApiOptions', () => {
 
         expect(await write(storeApp(), { file, check: true })).toMatchObject({ ok: true, written: false });
 
-        const fewerPolicies = initLambder().create({ apiPath: '/api', guards: { open: storeGuards.open }, rateLimits: { limiter: new LambderMemoryRateLimiter(), policies: { authPerIp: { perMin: 5, per: 'ip' } } } })
-            .addApi('order.lookup', { input: z.object({}), output: z.object({}), guards: { open: 'A lookup code is the whole secret.' }, rateLimit: 'authPerIp' }, async (_ctx) => ({}));
+        const fewerPoliciesApp = initLambder().create({ apiPath: '/api', guards: { open: storeGuards.open }, rateLimits: { limiter: new LambderMemoryRateLimiter(), policies: { authPerIp: { perMin: 5, per: 'ip' } } } });
+        const fewerPolicies = fewerPoliciesApp.registerApiGroups(fewerPoliciesApp.defineApiGroup('order', {
+            lookup: fewerPoliciesApp.defineApi({ input: z.object({}), output: z.object({}), guards: { open: 'A lookup code is the whole secret.' }, rateLimit: 'authPerIp' }, async (_ctx) => ({})),
+        }));
         const stale = await write(fewerPolicies, { file, check: true });
         expect(stale.ok).toBe(false);
         expect(stale.lines[0]).toMatch(/is stale: regenerate it/);
@@ -203,7 +217,7 @@ describe('writeApiOptions', () => {
         expect(check.lines[0]).toMatch(/does not hold the three tables as written/);
 
         expect(await write(storeApp(), { file })).toMatchObject({ ok: true, written: true });
-        expect(readOptionTables(readFileSync(file, 'utf8'))).toEqual(storeApp().apiOptionEntries());
+        expect(readOptionTables(readFileSync(file, 'utf8'))).toEqual(await storeApp().apiOptionEntries());
     });
 
     it('writes the header and semicolons an app asks for', async () => {
@@ -218,7 +232,7 @@ describe('writeApiOptions', () => {
 
     it('imports the module it is given and reads the export it is told to', async () => {
         const app = storeApp();
-        const module = moduleFor(app, 'lambder');
+        const module = await moduleFor(app, 'lambder');
         expect(await writeApiOptions({ module, exportName: 'lambder', file: nextFile() })).toMatchObject({ ok: true, written: true });
         await expect(writeApiOptions({ module, file: nextFile() })).rejects.toThrow(/has no export "default" that reports API options/);
         await expect(writeApiOptions({ module: join(directory, 'missing.mjs'), file: nextFile() })).rejects.toThrow(/could not load .*missing\.mjs$/);
@@ -226,8 +240,8 @@ describe('writeApiOptions', () => {
 });
 
 describe('writeApiGuardParams', () => {
-    const writeParams = (app: LambderApiOptionsSource, options: { guard: string; file: string; check?: boolean; header?: string; semicolons?: boolean }) =>
-        writeApiGuardParams({ module: moduleFor(app), ...options });
+    const writeParams = async (app: LambderApiOptionsSource, options: { guard: string; file: string; check?: boolean; header?: string; semicolons?: boolean }) =>
+        writeApiGuardParams({ module: await moduleFor(app), ...options });
 
     it('writes the parameter each API gives one guard, for the APIs that declare it, and nothing else', async () => {
         const file = nextFile();
@@ -284,13 +298,13 @@ describe('writeApiGuardParams', () => {
 
 /** The tables as a generated module holds them: `as const`, so every reader below sees literals. */
 const apiOptions = {
+    'account.me': { mode: 'session', guards: 'owner', idempotency: true },
     'code.send': { mode: 'public', guards: 'captcha', rateLimit: { authPerIp: { perMin: 3 }, codePerEmail: true } },
     'device.ping': { mode: 'public', guards: ['device'] },
-    me: { mode: 'session', guards: 'owner', idempotency: true },
     'order.lookup': { mode: 'public', guards: { open: 'A lookup code is the whole secret.' }, rateLimit: 'authPerIp' },
     'orders.list': { mode: 'session', guards: { store: 'ORDERS.MANAGE' } },
     'staff.invite': { mode: 'session', guards: { store: ['STAFF.MANAGE', 'ORDERS.MANAGE'] }, rateLimit: 'remindPerSession', idempotency: { ttlSeconds: 600 } },
-    health: { mode: 'public' },
+    'health.ping': { mode: 'public' },
 } as const satisfies LambderApiOptionEntries['apis'];
 const rateLimitPolicies = {
     authPerIp: { perMin: 10, perHour: 60, per: 'ip' },
@@ -312,26 +326,26 @@ describe('Reading the generated tables', () => {
         expectTypeOf<LambderApisWithGuard<typeof apiOptions, 'captcha'>>().toEqualTypeOf<'code.send'>();
         expectTypeOf<LambderApisWithGuard<typeof apiOptions, 'device'>>().toEqualTypeOf<'device.ping'>();
         expectTypeOf<LambderApisWithGuard<typeof apiOptions, 'nobody'>>().toEqualTypeOf<never>();
-        expectTypeOf<LambderApisGuardedBy<typeof apiOptions, 'owner'>>().toEqualTypeOf<'me'>();
+        expectTypeOf<LambderApisGuardedBy<typeof apiOptions, 'owner'>>().toEqualTypeOf<'account.me'>();
         expectTypeOf<LambderApisGuardedBy<typeof apiOptions, { store: 'ORDERS.MANAGE' }>>().toEqualTypeOf<'orders.list'>();
-        expectTypeOf<LambderApisWithMode<typeof apiOptions, 'session'>>().toEqualTypeOf<'me' | 'orders.list' | 'staff.invite'>();
+        expectTypeOf<LambderApisWithMode<typeof apiOptions, 'session'>>().toEqualTypeOf<'account.me' | 'orders.list' | 'staff.invite'>();
     });
 
     it('reads a guard parameter with the literal the table pins', () => {
         expectTypeOf<LambderGuardParamOf<(typeof apiOptions)['orders.list'], 'store'>>().toEqualTypeOf<'ORDERS.MANAGE'>();
         expectTypeOf<LambderGuardParamOf<(typeof apiOptions)['staff.invite'], 'store'>>().toEqualTypeOf<readonly ['STAFF.MANAGE', 'ORDERS.MANAGE']>();
-        expectTypeOf<LambderGuardParamOf<(typeof apiOptions)['me'], 'owner'>>().toEqualTypeOf<true>();
+        expectTypeOf<LambderGuardParamOf<(typeof apiOptions)['account.me'], 'owner'>>().toEqualTypeOf<true>();
         expectTypeOf<LambderGuardParamOf<(typeof apiOptions)['device.ping'], 'device'>>().toEqualTypeOf<true>();
-        expectTypeOf<LambderGuardParamOf<(typeof apiOptions)['health'], 'owner'>>().toEqualTypeOf<undefined>();
-        expectTypeOf<LambderGuardParamOf<(typeof apiOptions)['me'], 'store'>>().toEqualTypeOf<undefined>();
+        expectTypeOf<LambderGuardParamOf<(typeof apiOptions)['health.ping'], 'owner'>>().toEqualTypeOf<undefined>();
+        expectTypeOf<LambderGuardParamOf<(typeof apiOptions)['account.me'], 'store'>>().toEqualTypeOf<undefined>();
 
         expect(apiGuardParam(apiOptions, 'orders.list', 'store')).toBe('ORDERS.MANAGE');
         expect(apiGuardParam(apiOptions, 'staff.invite', 'store')).toEqual(['STAFF.MANAGE', 'ORDERS.MANAGE']);
         expect(apiGuardParam(apiOptions, 'order.lookup', 'open')).toBe('A lookup code is the whole secret.');
-        expect(apiGuardParam(apiOptions, 'me', 'owner')).toBe(true);
+        expect(apiGuardParam(apiOptions, 'account.me', 'owner')).toBe(true);
         expect(apiGuardParam(apiOptions, 'device.ping', 'device')).toBe(true);
-        expect(apiGuardParam(apiOptions, 'health', 'owner')).toBeUndefined();
-        expect(apiGuardParam(apiOptions, 'me', 'store')).toBeUndefined();
+        expect(apiGuardParam(apiOptions, 'health.ping', 'owner')).toBeUndefined();
+        expect(apiGuardParam(apiOptions, 'account.me', 'store')).toBeUndefined();
         // A guard named for something Object.prototype carries reads as absent, not as the inherited function.
         expect(apiGuardParam(apiOptions, 'orders.list', 'toString')).toBeUndefined();
         // Over a union of names, the parameter is the union of what each declares.
@@ -421,12 +435,21 @@ describe('lambderMockPoliciesFrom', () => {
                 owner: mock.guard({ handler: () => {} }),
             },
         });
-        // Without the declarations, nothing more than the contract is asked:
-        // it names a guardInput's shape and a public endpoint's guards, and
-        // sees neither of the two disagreements above.
+        // Without the declarations, only what the contract says is asked: a
+        // guardInput's shape, a public endpoint's guards needing no session,
+        // and a session endpoint naming a guard that needs one. It cannot see
+        // an input mode the server's guard does not have.
         mock.create({
             sessions: true, idempotency: true, rateLimits: { policies },
-            guards: { ...agreeing, owner: mock.guard({ apiInput: z.object({ userId: z.string() }), handler: () => {} }) },
+            guards: { ...agreeing, owner: mock.guard({ apiInput: z.object({ userId: z.string() }), session: true, handler: () => {} }) },
+        });
+        mock.create({
+            sessions: true, idempotency: true, rateLimits: { policies },
+            // @ts-expect-error owner is account.me's only guard, so without session: true the mock would run that session endpoint as public.
+            guards: {
+                ...agreeing,
+                owner: mock.guard({ handler: () => {} }),
+            },
         });
     });
 });

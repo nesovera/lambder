@@ -6,7 +6,7 @@ shape: a string hash key `pk`, a string range key `sk`, and TTL on an
 
 | System | Item prefix | Needed for |
 | --- | --- | --- |
-| Sessions | (its own table) | `addSessionApi`, `addSessionRoute`, the session controller |
+| Sessions | (its own table) | Endpoints whose guards need a session, `addSessionRoute`, the session controller |
 | [`LambderDdbCache`](./ddb-cache.md) | `CACHE#` | Cached values |
 | [`LambderDdbRateLimiter`](./ddb-rate-limiter.md) | `RL#` | Rate-limit counters |
 | [`LambderDdbIdempotencyStore`](./ddb-idempotency.md) | `IDEM#` | Idempotency claims and replays |

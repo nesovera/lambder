@@ -1,5 +1,5 @@
 /**
- * The API contract a chained app exposes as `typeof lambder.ApiContract`:
+ * The API contract an app's registered groups expose as `typeof lambder.ApiContract`:
  * what each entry carries (input, output, guardInputs, guards), and what a
  * client may hold the server to with `satisfies`. Most of the value here is
  * type-level, so `npm run typecheck` (tsconfig.tests.json) is what makes the
@@ -12,7 +12,6 @@ import { z } from 'zod';
 import Lambder, { initLambder } from '../../src/core/Lambder.js';
 import { LambderMemorySessionStore } from '../../src/stores/LambderMemorySessionStore.js';
 import { lambderGuard } from '../../src/core/LambderPolicyBuilders.js';
-import type { LambderGuardMetaMap } from '../../src/api/LambderApiGuards.js';
 import LambderCaller from '../../src/client/LambderCaller.js';
 import type { LambderApiContractShape, LambderContractKeysWithGuard, LambderJsonOf } from '../../src/shared/wire/LambderApiContract.js';
 import { createApiEvent, createMockContext, testPublicFiles } from '../helpers.js';
@@ -49,100 +48,109 @@ const testSchema = { input: z.object({ value: z.string() }), output: z.object({ 
 
 describe('ApiContract - the guards option on the contract', () => {
     it('carries the declared guards option verbatim, in each of its three forms', () => {
-        const app = createApp()
-            .addApi('single', { ...testSchema, guards: 'notBanned' }, async (_ctx) => ({ result: 'ok' }))
-            .addApi('list', { ...testSchema, guards: ['notBanned', 'captcha'] }, async (_ctx) => ({ result: 'ok' }))
-            .addApi('map', { ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } }, async (_ctx) => ({ result: 'ok' }));
+        const created = createApp();
+        const app = created.registerApiGroups(created.defineApiGroup('test', {
+            single: created.defineApi({ ...testSchema, guards: 'notBanned' }, async (_ctx) => ({ result: 'ok' })),
+            list: created.defineApi({ ...testSchema, guards: ['notBanned', 'captcha'] }, async (_ctx) => ({ result: 'ok' })),
+            map: created.defineApi({ ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } }, async (_ctx) => ({ result: 'ok' })),
+        }));
 
         type Contract = typeof app.ApiContract;
 
         // The literal survives: not widened to string, string[] or Permission.
-        expectTypeOf<Contract['single']['guards']>().toEqualTypeOf<'notBanned'>();
-        expectTypeOf<Contract['list']['guards']>().toEqualTypeOf<readonly ['notBanned', 'captcha']>();
-        expectTypeOf<Contract['map']['guards']>().toEqualTypeOf<{ readonly orgPermission: 'USERS.MANAGE' }>();
+        expectTypeOf<Contract['test.single']['guards']>().toEqualTypeOf<'notBanned'>();
+        expectTypeOf<Contract['test.list']['guards']>().toEqualTypeOf<readonly ['notBanned', 'captcha']>();
+        expectTypeOf<Contract['test.map']['guards']>().toEqualTypeOf<{ readonly orgPermission: 'USERS.MANAGE' }>();
 
         // Input and output stay where they were.
-        expectTypeOf<Contract['single']['input']>().toEqualTypeOf<{ value: string }>();
-        expectTypeOf<Contract['single']['output']>().toEqualTypeOf<{ result: string }>();
+        expectTypeOf<Contract['test.single']['input']>().toEqualTypeOf<{ value: string }>();
+        expectTypeOf<Contract['test.single']['output']>().toEqualTypeOf<{ result: string }>();
 
         // The field exists for `typeof` only: it is declared, never assigned.
         expect(app.ApiContract).toBeUndefined();
     });
 
     it('lists the endpoints that declare one guard, in any of the three forms, beside other guards or alone', () => {
-        const _app = createApp()
-            .addApi('single', { ...testSchema, guards: 'notBanned' }, async (_ctx) => ({ result: 'ok' }))
-            .addApi('list', { ...testSchema, guards: ['notBanned', 'captcha'] }, async (_ctx) => ({ result: 'ok' }))
-            .addApi('map', { ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } }, async (_ctx) => ({ result: 'ok' }))
-            .addApi('open', testSchema, async (_ctx) => ({ result: 'ok' }));
+        const app = createApp();
+        const _app = app.registerApiGroups(app.defineApiGroup('test', {
+            single: app.defineApi({ ...testSchema, guards: 'notBanned' }, async (_ctx) => ({ result: 'ok' })),
+            list: app.defineApi({ ...testSchema, guards: ['notBanned', 'captcha'] }, async (_ctx) => ({ result: 'ok' })),
+            map: app.defineApi({ ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } }, async (_ctx) => ({ result: 'ok' })),
+            open: app.defineApi(testSchema, async (_ctx) => ({ result: 'ok' })),
+        }));
 
         type Contract = typeof _app.ApiContract;
 
-        expectTypeOf<LambderContractKeysWithGuard<Contract, 'notBanned'>>().toEqualTypeOf<'single' | 'list'>();
-        expectTypeOf<LambderContractKeysWithGuard<Contract, 'captcha'>>().toEqualTypeOf<'list'>();
-        expectTypeOf<LambderContractKeysWithGuard<Contract, 'orgPermission'>>().toEqualTypeOf<'map'>();
+        expectTypeOf<LambderContractKeysWithGuard<Contract, 'notBanned'>>().toEqualTypeOf<'test.single' | 'test.list'>();
+        expectTypeOf<LambderContractKeysWithGuard<Contract, 'captcha'>>().toEqualTypeOf<'test.list'>();
+        expectTypeOf<LambderContractKeysWithGuard<Contract, 'orgPermission'>>().toEqualTypeOf<'test.map'>();
         expectTypeOf<LambderContractKeysWithGuard<Contract, 'sessionOnly'>>().toEqualTypeOf<never>();
 
         // A list held to exactly those endpoints, checked in both directions.
-        const _NOT_BANNED_APIS = ['single', 'list'] as const satisfies readonly LambderContractKeysWithGuard<Contract, 'notBanned'>[];
+        const _NOT_BANNED_APIS = ['test.single', 'test.list'] as const satisfies readonly LambderContractKeysWithGuard<Contract, 'notBanned'>[];
         expectTypeOf<Exclude<LambderContractKeysWithGuard<Contract, 'notBanned'>, (typeof _NOT_BANNED_APIS)[number]>>().toEqualTypeOf<never>();
-        // @ts-expect-error 'map' does not declare notBanned
-        const _wrong = ['map'] as const satisfies readonly LambderContractKeysWithGuard<Contract, 'notBanned'>[];
+        // @ts-expect-error 'test.map' does not declare notBanned
+        const _wrong = ['test.map'] as const satisfies readonly LambderContractKeysWithGuard<Contract, 'notBanned'>[];
     });
 
     it('records what a client sends (the input form) and what it receives (the JSON form), and hands the handler the parsed forms', () => {
-        const _app = createApp()
-            .addApi('typed', {
+        const app = createApp();
+        const _app = app.registerApiGroups(app.defineApiGroup('test', {
+            typed: app.defineApi({
                 input: z.object({ page: z.number().default(1), id: z.string().transform(Number) }),
                 output: z.object({ at: z.date(), total: z.number(), tags: z.array(z.string()), note: z.string().optional() }),
             }, async (ctx) => {
                 // The handler's side: parsed input, and the output as authored.
                 expectTypeOf(ctx.apiPayload).toEqualTypeOf<{ page: number; id: number }>();
                 return { at: new Date(), total: ctx.apiPayload.id, tags: [] };
-            })
-            .addApi('scoped', {
+            }),
+            scoped: app.defineApi({
                 // Parsed, `org` is a number; posted, it is the string the guard reads.
                 input: z.object({ org: z.string().transform((value) => value.length), body: z.string() }),
                 output: z.object({}),
                 guards: 'lowercaseOrg',
-            }, async (_ctx) => ({}));
+            }, async (_ctx) => ({})),
+        }));
 
         type Contract = typeof _app.ApiContract;
 
         // A defaulted field is optional to send, and a transform's source is what is posted.
-        expectTypeOf<Contract['typed']['input']>().toEqualTypeOf<{ page?: number | undefined; id: string }>();
+        expectTypeOf<Contract['test.typed']['input']>().toEqualTypeOf<{ page?: number | undefined; id: string }>();
         // A Date arrives as its string; nothing else changes.
-        expectTypeOf<Contract['typed']['output']>().toEqualTypeOf<{ at: string; total: number; tags: string[]; note?: string | undefined }>();
+        expectTypeOf<Contract['test.typed']['output']>().toEqualTypeOf<{ at: string; total: number; tags: string[]; note?: string | undefined }>();
         // A guard whose apiInput slice is a transformed field can be declared:
         // the slice is compared in the form a client posts, not the parsed one.
-        expectTypeOf<Contract['scoped']['guards']>().toEqualTypeOf<'lowercaseOrg'>();
+        expectTypeOf<Contract['test.scoped']['guards']>().toEqualTypeOf<'lowercaseOrg'>();
     });
 
     it('keeps unknown, records and recursive JSON as they are, and writes an array\'s undefined as null', () => {
-        const _app = createApp()
-            .addApi('loose', {
+        const app = createApp();
+        const _app = app.registerApiGroups(app.defineApiGroup('test', {
+            loose: app.defineApi({
                 input: z.object({}),
                 output: z.object({ data: z.unknown(), meta: z.record(z.string(), z.unknown()), doc: z.json(), cells: z.array(z.string().optional()) }),
-            }, async (_ctx) => ({ data: 1, meta: {}, doc: null, cells: [] }))
+            }, async (_ctx) => ({ data: 1, meta: {}, doc: null, cells: [] })),
             // @ts-expect-error an unknown output may be anything, and an API answers with an object or an array
-            .addApi('anything', { input: z.object({}), output: z.unknown() }, async (_ctx) => 1);
+            anything: app.defineApi({ input: z.object({}), output: z.unknown() }, async (_ctx) => 1),
+        }));
 
         type Contract = typeof _app.ApiContract;
-        type Loose = Contract['loose']['output'];
+        type Loose = Contract['test.loose']['output'];
         expectTypeOf<Loose['data']>().toEqualTypeOf<unknown>();
         expectTypeOf<Loose['meta']>().toEqualTypeOf<Record<string, unknown>>();
         expectTypeOf<Loose['cells']>().toEqualTypeOf<(string | null)[]>();
-        expectTypeOf<Contract['anything']['output']>().toEqualTypeOf<unknown>();
+        expectTypeOf<Contract['test.anything']['output']>().toEqualTypeOf<unknown>();
 
         // A typed call over the recursive z.json() type resolves.
         const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false });
-        const read = async () => (await caller.api('loose', {}))?.doc;
+        const read = async () => (await caller.api('test.loose', {}))?.doc;
         expectTypeOf(read).returns.resolves.not.toBeNever();
     });
 
     it('makes a key whose value may be undefined optional, as JSON leaves it out, and writes a Map or a Set as an empty object', async () => {
-        const app = createApp()
-            .addApi('profile', {
+        const created = createApp();
+        const app = created.registerApiGroups(created.defineApiGroup('test', {
+            profile: created.defineApi({
                 input: z.object({}),
                 output: z.object({
                     name: z.string(),
@@ -151,13 +159,14 @@ describe('ApiContract - the guards option on the contract', () => {
                     visits: z.map(z.string(), z.number()),
                     tags: z.set(z.string()),
                 }),
-            }, async (_ctx) => ({ name: 'Ada', nickname: null, visits: new Map([['home', 2]]), tags: new Set(['a']) }));
+            }, async (_ctx) => ({ name: 'Ada', nickname: null, visits: new Map([['home', 2]]), tags: new Set(['a']) })),
+        }));
 
         type Contract = typeof app.ApiContract;
-        expectTypeOf<Contract['profile']['output']>().toEqualTypeOf<{ name: string; bio?: string; nickname?: string; visits: {}; tags: {} }>();
+        expectTypeOf<Contract['test.profile']['output']>().toEqualTypeOf<{ name: string; bio?: string; nickname?: string; visits: {}; tags: {} }>();
 
         // What the type says is what the wire carries.
-        const response = await app.render(createApiEvent({ apiName: 'profile', payload: {} }), createMockContext());
+        const response = await app.render(createApiEvent({ apiName: 'test.profile', payload: {} }), createMockContext());
         expect(JSON.parse(response.body || '{}').payload).toEqual({ name: 'Ada', visits: {}, tags: {} });
     });
 
@@ -180,23 +189,27 @@ describe('ApiContract - the guards option on the contract', () => {
     });
 
     it('an API that declares no guards has no guards entry at all', () => {
-        const _app = createApp()
-            .addApi('open', testSchema, async (_ctx) => ({ result: 'ok' }));
+        const app = createApp();
+        const _app = app.registerApiGroups(app.defineApiGroup('test', {
+            open: app.defineApi(testSchema, async (_ctx) => ({ result: 'ok' })),
+        }));
 
         type Contract = typeof _app.ApiContract;
 
-        expectTypeOf<Contract['open']>().not.toHaveProperty('guards');
-        expectTypeOf<Contract['open']>().not.toHaveProperty('guardInputs');
+        expectTypeOf<Contract['test.open']>().not.toHaveProperty('guards');
+        expectTypeOf<Contract['test.open']>().not.toHaveProperty('guardInputs');
         // @ts-expect-error an unguarded API has nothing to read here
-        type _NoGuards = Contract['open']['guards'];
+        type _NoGuards = Contract['test.open']['guards'];
     });
 
     it('a guardInput-mode guard lands on both guardInputs and guards', () => {
-        const _app = createApp()
-            .addApi('contact', { ...testSchema, guards: { captcha: true, orgPermission: 'BILLING.MANAGE' } },
-                async (_ctx) => ({ result: 'ok' }));
+        const app = createApp();
+        const _app = app.registerApiGroups(app.defineApiGroup('test', {
+            contact: app.defineApi({ ...testSchema, guards: { captcha: true, orgPermission: 'BILLING.MANAGE' } },
+                async (_ctx) => ({ result: 'ok' })),
+        }));
 
-        type Entry = (typeof _app.ApiContract)['contact'];
+        type Entry = (typeof _app.ApiContract)['test.contact'];
 
         // What the client must send stays the guard's own input shape...
         expectTypeOf<Entry['guardInputs']>().toEqualTypeOf<{ captcha: { token: string } }>();
@@ -204,21 +217,30 @@ describe('ApiContract - the guards option on the contract', () => {
         expectTypeOf<Entry['guards']>().toEqualTypeOf<{ readonly captcha: true, readonly orgPermission: 'BILLING.MANAGE' }>();
     });
 
-    it('session APIs carry their guards too, including on a requireSessionApiGuards instance', () => {
-        const _app = initLambder<{ userId: string }>().create({
+    it('session APIs carry their guards too, including on a requireApiGuards instance', () => {
+        const app = initLambder<{ userId: string }>().create({
             files: testPublicFiles(),
             apiPath: '/api',
             session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
             guards,
-            requireSessionApiGuards: true,
-        })
-            .addSessionApi('me', { ...testSchema, guards: 'sessionOnly' }, async (_ctx) => ({ result: 'ok' }))
-            .addSessionApi('users.list', { ...testSchema, guards: { orgPermission: 'USERS.VIEW' } }, async (_ctx) => ({ result: 'ok' }));
+            requireApiGuards: true,
+        });
+        const _app = app.registerApiGroups(
+            app.defineApiGroup('account', {
+                me: app.defineApi({ ...testSchema, guards: 'sessionOnly' }, async (_ctx) => ({ result: 'ok' })),
+            }),
+            app.defineApiGroup('users', {
+                list: app.defineApi({ ...testSchema, guards: { sessionOnly: true, orgPermission: 'USERS.VIEW' } }, async (_ctx) => ({ result: 'ok' })),
+            }),
+        );
 
         type Contract = typeof _app.ApiContract;
 
-        expectTypeOf<Contract['me']['guards']>().toEqualTypeOf<'sessionOnly'>();
-        expectTypeOf<Contract['users.list']['guards']>().toEqualTypeOf<{ readonly orgPermission: 'USERS.VIEW' }>();
+        expectTypeOf<Contract['account.me']['guards']>().toEqualTypeOf<'sessionOnly'>();
+        expectTypeOf<Contract['users.list']['guards']>().toEqualTypeOf<{ readonly sessionOnly: true; readonly orgPermission: 'USERS.VIEW' }>();
+        // The session guard is what makes each a session API.
+        expectTypeOf<Contract['account.me']['mode']>().toEqualTypeOf<'session'>();
+        expectTypeOf<Contract['users.list']['mode']>().toEqualTypeOf<'session'>();
     });
 
     it('a declaration names only the guards it declared: guardData and guardInputs do not widen to the whole map', () => {
@@ -227,25 +249,32 @@ describe('ApiContract - the guards option on the contract', () => {
         // (every declarable name) rather than the literal. If it ever were,
         // ctx.guardData would claim guards that never ran and the contract
         // would demand guardInputs the call does not need, both silently.
-        createApp().addApi('narrow', { ...testSchema, guards: { orgPermission: 'USERS.VIEW' } }, async (ctx) => {
+        createApp().defineApi({ ...testSchema, guards: { orgPermission: 'USERS.VIEW' } }, async (ctx) => {
             expectTypeOf<typeof ctx.guardData>().toEqualTypeOf<{ orgPermission: { permission: Permission } }>();
             // captcha is declarable here and was not declared: it must not appear.
             expectTypeOf<typeof ctx.guardData>().not.toHaveProperty('captcha');
             return { result: ctx.guardData.orgPermission.permission };
         });
 
-        const _app = createApp()
-            .addApi('narrowContract', { ...testSchema, guards: { orgPermission: 'USERS.VIEW' } }, async (_ctx) => ({ result: 'ok' }));
+        const app = createApp();
+        const _app = app.registerApiGroups(app.defineApiGroup('test', {
+            narrowContract: app.defineApi({ ...testSchema, guards: { orgPermission: 'USERS.VIEW' } }, async (_ctx) => ({ result: 'ok' })),
+        }));
         // No declared guardInput guard, so the contract asks the client for nothing.
-        expectTypeOf<(typeof _app.ApiContract)['narrowContract']>().not.toHaveProperty('guardInputs');
+        expectTypeOf<(typeof _app.ApiContract)['test.narrowContract']>().not.toHaveProperty('guardInputs');
     });
 
-    it('guards survive plugin composition through .use()', () => {
-        const usersPlugin = <T>(lambder: Lambder<T, {}, any, LambderGuardMetaMap<typeof guards>, any, any>) =>
-            lambder.addApi('users.remove', { ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } },
-                async (_ctx) => ({ result: 'ok' }));
+    it('guards survive a group built in another module, against the instance\'s types', () => {
+        // What a module holding one group writes: a function over the
+        // instance, typed by what create() configured on it.
+        const usersGroup = (lambder: Lambder<ReturnType<typeof createApp>['AppTypes'], any>) =>
+            lambder.defineApiGroup('users', {
+                remove: lambder.defineApi({ ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } },
+                    async (_ctx) => ({ result: 'ok' })),
+            });
 
-        const _app = createApp().use(usersPlugin);
+        const app = createApp();
+        const _app = app.registerApiGroups(usersGroup(app));
         type Contract = typeof _app.ApiContract;
 
         expectTypeOf<Contract['users.remove']['guards']>().toEqualTypeOf<{ readonly orgPermission: 'USERS.MANAGE' }>();
@@ -253,11 +282,19 @@ describe('ApiContract - the guards option on the contract', () => {
 });
 
 describe('ApiContract - pinning a client-side needs map to the declarations', () => {
-    const _app = createApp()
-        .addApi('users.list', { ...testSchema, guards: { orgPermission: 'USERS.VIEW' } }, async (_ctx) => ({ result: 'ok' }))
-        .addApi('users.remove', { ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } }, async (_ctx) => ({ result: 'ok' }))
-        .addApi('billing.pay', { ...testSchema, guards: { orgPermission: 'BILLING.MANAGE', captcha: true } }, async (_ctx) => ({ result: 'ok' }))
-        .addApi('ping', testSchema, async (_ctx) => ({ result: 'ok' }));
+    const app = createApp();
+    const _app = app.registerApiGroups(
+        app.defineApiGroup('users', {
+            list: app.defineApi({ ...testSchema, guards: { orgPermission: 'USERS.VIEW' } }, async (_ctx) => ({ result: 'ok' })),
+            remove: app.defineApi({ ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } }, async (_ctx) => ({ result: 'ok' })),
+        }),
+        app.defineApiGroup('billing', {
+            pay: app.defineApi({ ...testSchema, guards: { orgPermission: 'BILLING.MANAGE', captcha: true } }, async (_ctx) => ({ result: 'ok' })),
+        }),
+        app.defineApiGroup('health', {
+            ping: app.defineApi(testSchema, async (_ctx) => ({ result: 'ok' })),
+        }),
+    );
 
     type Contract = typeof _app.ApiContract;
     /** What the server itself says the API needs; never for an API that declares no such guard. */
@@ -289,11 +326,11 @@ describe('ApiContract - pinning a client-side needs map to the declarations', ()
 
     it('an API that declares no such guard cannot be claimed to need one', () => {
         const NEEDS = {
-            // @ts-expect-error 'ping' declares no orgPermission guard, so nothing satisfies never
-            ping: 'USERS.VIEW',
+            // @ts-expect-error 'health.ping' declares no orgPermission guard, so nothing satisfies never
+            'health.ping': 'USERS.VIEW',
         } as const satisfies NeedsMap;
 
-        expect(NEEDS.ping).toBe('USERS.VIEW');
+        expect(NEEDS['health.ping']).toBe('USERS.VIEW');
     });
 
     it('an API name the server never registered does not compile', () => {
@@ -331,10 +368,12 @@ describe('ApiContract - pinning a client-side needs map to the declarations', ()
 });
 
 describe('ApiContract - a guards entry changes nothing for consumers', () => {
-    const _app = createApp()
-        .addApi('open', testSchema, async (_ctx) => ({ result: 'ok' }))
-        .addApi('guarded', { ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } }, async (_ctx) => ({ result: 'ok' }))
-        .addApi('captchaed', { ...testSchema, guards: 'captcha' }, async (_ctx) => ({ result: 'ok' }));
+    const app = createApp();
+    const _app = app.registerApiGroups(app.defineApiGroup('test', {
+        open: app.defineApi(testSchema, async (_ctx) => ({ result: 'ok' })),
+        guarded: app.defineApi({ ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } }, async (_ctx) => ({ result: 'ok' })),
+        captchaed: app.defineApi({ ...testSchema, guards: 'captcha' }, async (_ctx) => ({ result: 'ok' })),
+    }));
 
     type Contract = typeof _app.ApiContract;
 
@@ -358,12 +397,12 @@ describe('ApiContract - a guards entry changes nothing for consumers', () => {
         // hand-written contract (what a client holds, and what the mock
         // registry is checked against) could say mode: "sesion" and every
         // mode-dependent check would silently answer "either".
-        type Typo = { thing: { input: { value: string }; output: null; mode: 'sesion' } };
+        type Typo = { 'test.thing': { input: { value: string }; output: null; mode: 'sesion' } };
         // @ts-expect-error "sesion" is not a mode; the modes are "public" and "session"
         expectTypeOf<Typo>().toExtend<LambderApiContractShape>();
 
         type Written = {
-            thing: { input: { value: string }; output: null; mode: 'session'; guards: readonly ['notBanned']; rateLimit: 'perIp'; idempotency: { ttlSeconds: 60 } };
+            'test.thing': { input: { value: string }; output: null; mode: 'session'; guards: readonly ['notBanned']; rateLimit: 'perIp'; idempotency: { ttlSeconds: 60 } };
         };
         expectTypeOf<Written>().toExtend<LambderApiContractShape>();
     });
@@ -372,12 +411,12 @@ describe('ApiContract - a guards entry changes nothing for consumers', () => {
         const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false });
 
         // Declaring guards does not, by itself, make the options argument mandatory.
-        await caller.api('open', { value: 'x' });
-        await caller.api('guarded', { value: 'x' });
+        await caller.api('test.open', { value: 'x' });
+        await caller.api('test.guarded', { value: 'x' });
         // A guardInput-mode guard still does.
-        await caller.api('captchaed', { value: 'x' }, { guardInputs: { captcha: { token: 'abc' } } });
+        await caller.api('test.captchaed', { value: 'x' }, { guardInputs: { captcha: { token: 'abc' } } });
         // @ts-expect-error the captcha token cannot be omitted
-        await caller.api('captchaed', { value: 'x' }).catch(() => {});
+        await caller.api('test.captchaed', { value: 'x' }).catch(() => {});
 
         expect(fetchMock).toHaveBeenCalledTimes(4);
     });
@@ -385,10 +424,12 @@ describe('ApiContract - a guards entry changes nothing for consumers', () => {
     it('the guards declaration is type-only: nothing about it reaches the wire', async () => {
         const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false });
 
-        await caller.api('guarded', { value: 'x' });
+        await caller.api('test.guarded', { value: 'x' });
         const body = JSON.parse((fetchMock.mock.calls[0]?.[1] as any).body as string);
 
-        expect(body.apiName).toBe('guarded');
+        // The name is where the call goes, and the body carries the payload.
+        expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/test/guarded');
+        expect('apiName' in body).toBe(false);
         expect(body.payload).toEqual({ value: 'x' });
         // The declaration lives on the type, not in the envelope: the client
         // sends nothing about it, and the server reads its own registration.
@@ -400,7 +441,7 @@ describe('ApiContract - a guards entry changes nothing for consumers', () => {
 describe('ApiContract - the declaration is what runs', () => {
     it('the param the contract records is the param the guard receives', async () => {
         let sawPermission: Permission | null = null;
-        const app = initLambder().create({
+        const created = initLambder().create({
             files: testPublicFiles(),
             apiPath: '/api',
             guards: {
@@ -408,9 +449,11 @@ describe('ApiContract - the declaration is what runs', () => {
                     handler: async (_ctx, _payload, permission: Permission) => { sawPermission = permission; },
                 }),
             },
-        })
-            .addApi('users.remove', { ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } },
-                async (_ctx) => ({ result: 'removed' }));
+        });
+        const app = created.registerApiGroups(created.defineApiGroup('users', {
+            remove: created.defineApi({ ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } },
+                async (_ctx) => ({ result: 'removed' })),
+        }));
 
         type Declared = (typeof app.ApiContract)['users.remove']['guards']['orgPermission'];
         expectTypeOf<Declared>().toEqualTypeOf<'USERS.MANAGE'>();
@@ -428,10 +471,16 @@ describe('ApiContract - the declaration is what runs', () => {
 });
 
 describe('ApiContract - the shape every consumer is checked against', () => {
-    const _app = createApp()
-        .addApi('open', testSchema, async (_ctx) => ({ result: 'ok' }))
-        .addApi('guarded', { ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } }, async (_ctx) => ({ result: 'ok' }))
-        .addSessionApi('member', { ...testSchema, guards: 'sessionOnly' }, async (_ctx) => ({ result: 'ok' }));
+    const app = createApp();
+    const _app = app.registerApiGroups(
+        app.defineApiGroup('test', {
+            open: app.defineApi(testSchema, async (_ctx) => ({ result: 'ok' })),
+            guarded: app.defineApi({ ...testSchema, guards: { orgPermission: 'USERS.MANAGE' } }, async (_ctx) => ({ result: 'ok' })),
+        }),
+        app.defineApiGroup('account', {
+            member: app.defineApi({ ...testSchema, guards: 'sessionOnly' }, async (_ctx) => ({ result: 'ok' })),
+        }),
+    );
 
     type Contract = typeof _app.ApiContract;
 
@@ -439,9 +488,9 @@ describe('ApiContract - the shape every consumer is checked against', () => {
         // Every `[X] extends [never]` branch in the mock and the caller keys
         // on absence, so an entry that carried the key would change what the
         // contract means.
-        expectTypeOf<Contract['open']>().not.toHaveProperty('guards');
-        expectTypeOf<Contract['open']>().not.toHaveProperty('rateLimit');
-        expectTypeOf<Contract['guarded']['guards']>().toEqualTypeOf<{ readonly orgPermission: 'USERS.MANAGE' }>();
+        expectTypeOf<Contract['test.open']>().not.toHaveProperty('guards');
+        expectTypeOf<Contract['test.open']>().not.toHaveProperty('rateLimit');
+        expectTypeOf<Contract['test.guarded']['guards']>().toEqualTypeOf<{ readonly orgPermission: 'USERS.MANAGE' }>();
     });
 
     it('satisfies the contract-shape constraint as inferred, and as a type alias written out member by member', () => {

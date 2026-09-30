@@ -209,7 +209,7 @@ export class LambderApiRateLimitsEngine {
                 throw new Error(`Lambder: API "${apiName}" references rate-limit policy "${name}", which declares no per: its key is the one a handler passes to ctx.rateLimit("${name}", key), so the request alone cannot be counted against it.`);
             }
             if (policy.per === "session" && mode !== "session") {
-                throw new Error(`Lambder: API "${apiName}" uses rate-limit policy "${name}" (per "session"), which requires addSessionApi.`);
+                throw new Error(`Lambder: API "${apiName}" uses rate-limit policy "${name}" (per "session"), which counts per session, and none of its guards needs a session.`);
             }
             if (override)
                 assertWindowLimits(`API "${apiName}" override of rate-limit policy "${name}"`, override);

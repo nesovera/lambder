@@ -34,7 +34,10 @@ lambder
     });
 ```
 
-Routes are matched in registration order, first match wins.
+Routes are matched in registration order, first match wins. API groups sit
+in the same chain, where their `registerApiGroups()` call stands: a route
+registered before them sees their calls first
+([APIs](./apis.md#groups-across-files-and-lazy-groups)).
 
 ### Matcher forms
 
@@ -306,9 +309,11 @@ Semantics:
 
 ## Modular routes
 
-Route and API modules are plain functions over the instance, applied with
-`use()`; inferred types are preserved through the chain. See
-[APIs](./apis.md#modular-apis-with-use).
+Route modules are plain functions over the instance, applied with `use()`,
+which hands the instance to the function (routes, hooks and actions) and
+continues the chain. Endpoints are values instead: a module exports its
+groups, and the entry registers them. See
+[APIs](./apis.md#groups-across-files-and-lazy-groups).
 
 ## Event formats
 

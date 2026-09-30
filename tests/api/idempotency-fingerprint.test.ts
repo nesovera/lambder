@@ -28,18 +28,21 @@ import { LambderApiOutputValidationError } from '../../src/api/LambderApiOutputV
 
 const createShop = () => {
     const placed: number[] = [];
-    const app = lambderTestApp(initLambder().declareRefusals({ 'app/out-of-stock': {} }).create({
+    const shop = initLambder().declareRefusals({ 'app/out-of-stock': {} }).create({
         apiPath: '/api',
         idempotency: { store: new LambderMemoryIdempotencyStore() },
         guards: { coupon: { guardInput: z.object({ code: z.string() }), handler: async () => {} } },
-    }).addApi('order.place', { input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true, refusals: 'app/out-of-stock' },
-        async (ctx) => {
-            if(ctx.apiPayload.qty > 5) refuse('Only 5 in stock.', { code: 'app/out-of-stock' });
-            placed.push(ctx.apiPayload.qty);
-            return { placed: ctx.apiPayload.qty };
-        })
-        .addApi('order.withCoupon', { input: z.object({ qty: z.number(), note: z.string() }), output: z.object({ placed: z.number() }), idempotency: true, guards: 'coupon' },
-            async (ctx) => ({ placed: ctx.apiPayload.qty })));
+    });
+    const app = lambderTestApp(shop.registerApiGroups(shop.defineApiGroup('order', {
+        place: shop.defineApi({ input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true, refusals: 'app/out-of-stock' },
+            async (ctx) => {
+                if(ctx.apiPayload.qty > 5) refuse('Only 5 in stock.', { code: 'app/out-of-stock' });
+                placed.push(ctx.apiPayload.qty);
+                return { placed: ctx.apiPayload.qty };
+            }),
+        withCoupon: shop.defineApi({ input: z.object({ qty: z.number(), note: z.string() }), output: z.object({ placed: z.number() }), idempotency: true, guards: 'coupon' },
+            async (ctx) => ({ placed: ctx.apiPayload.qty })),
+    })));
     return { app, placed };
 };
 
@@ -210,9 +213,11 @@ describe('A store with no room for a claim', () => {
         const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
         let releaseOrder!: () => void;
         const orderGate = new Promise<void>((resolve) => { releaseOrder = resolve; });
-        const app = lambderTestApp(initLambder().create({ apiPath: '/api', idempotency: { store } })
-            .addApi('order.place', { input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true },
-                async (ctx) => { await orderGate; return { placed: ctx.apiPayload.qty }; }), { idempotency: { store } });
+        const shop = initLambder().create({ apiPath: '/api', idempotency: { store } });
+        const app = lambderTestApp(shop.registerApiGroups(shop.defineApiGroup('order', {
+            place: shop.defineApi({ input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true },
+                async (ctx) => { await orderGate; return { placed: ctx.apiPayload.qty }; }),
+        })), { idempotency: { store } });
         try {
             // The one record the store has room for: an order still running.
             const running = app.visitor().apiOutcome('order.place', { qty: 1 }, { idempotencyKey: createIdempotencyKeyScope() });
@@ -237,7 +242,7 @@ describe('A retry after a timeout runs the operation once', () => {
     const createGuardedShop = () => {
         const spent = new Set<string>();
         const placed: number[] = [];
-        const lambder = initLambder().create({
+        const shop = initLambder().create({
             apiPath: '/api',
             idempotency: { store: new LambderMemoryIdempotencyStore() },
             rateLimits: {
@@ -254,18 +259,21 @@ describe('A retry after a timeout runs the operation once', () => {
                     },
                 }),
             },
-        }).addApi('order.place', { input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true, guards: 'captcha' },
-            async (ctx) => {
-                await new Promise((resolve) => setTimeout(resolve, 60));
-                placed.push(ctx.apiPayload.qty);
-                return { placed: placed.length };
-            })
-            .addApi('order.limited', { input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true, rateLimit: 'onePerIp' },
+        });
+        const lambder = shop.registerApiGroups(shop.defineApiGroup('order', {
+            place: shop.defineApi({ input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true, guards: 'captcha' },
                 async (ctx) => {
                     await new Promise((resolve) => setTimeout(resolve, 60));
                     placed.push(ctx.apiPayload.qty);
                     return { placed: placed.length };
-                });
+                }),
+            limited: shop.defineApi({ input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true, rateLimit: 'onePerIp' },
+                async (ctx) => {
+                    await new Promise((resolve) => setTimeout(resolve, 60));
+                    placed.push(ctx.apiPayload.qty);
+                    return { placed: placed.length };
+                }),
+        }));
         const caller = new LambderInvokeCaller<typeof lambder.ApiContract>({ functionName: 'shop', transport: LambderInvokeCaller.localTransport(lambder.getHandler()) });
         return { caller, placed };
     };
@@ -325,9 +333,11 @@ describe('A retry after a timeout runs the operation once', () => {
 
 describe('A call that could not be built', () => {
     it('leaves the invoke caller\'s key untried, as the browser caller does, so the next refusal moves it', async () => {
-        const lambder = initLambder().create({ apiPath: '/api', idempotency: { store: new LambderMemoryIdempotencyStore() } })
-            .addApi('order.place', { input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true },
-                async (ctx) => ({ placed: ctx.apiPayload.qty }));
+        const shop = initLambder().create({ apiPath: '/api', idempotency: { store: new LambderMemoryIdempotencyStore() } });
+        const lambder = shop.registerApiGroups(shop.defineApiGroup('order', {
+            place: shop.defineApi({ input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true },
+                async (ctx) => ({ placed: ctx.apiPayload.qty })),
+        }));
         const caller = new LambderInvokeCaller<typeof lambder.ApiContract>({ functionName: 'shop', transport: LambderInvokeCaller.localTransport(lambder.getHandler()) });
         const scope = createIdempotencyKeyScope();
         const key = scope.current;
@@ -347,17 +357,20 @@ describe('An answer that breaks its output schema', () => {
     it('is recorded as the key\'s answer, so a retry is told the crash instead of running the operation again', async () => {
         const charged: number[] = [];
         const crashes: unknown[] = [];
-        const lambder = initLambder().create({
+        const shop = initLambder().create({
             apiPath: '/api',
             idempotency: { store: new LambderMemoryIdempotencyStore() },
             crashes: { report: (error) => { crashes.push(error); } },
-        }).addApi('card.charge', { input: z.object({ cents: z.number() }), output: z.object({ receipt: z.string() }), idempotency: true },
-            async (ctx) => {
-                charged.push(ctx.apiPayload.cents);
-                // A row whose column came back a number: the charge has
-                // happened, and the answer breaks the schema after it.
-                return { receipt: 42 } as unknown as { receipt: string };
-            });
+        });
+        const lambder = shop.registerApiGroups(shop.defineApiGroup('card', {
+            charge: shop.defineApi({ input: z.object({ cents: z.number() }), output: z.object({ receipt: z.string() }), idempotency: true },
+                async (ctx) => {
+                    charged.push(ctx.apiPayload.cents);
+                    // A row whose column came back a number: the charge has
+                    // happened, and the answer breaks the schema after it.
+                    return { receipt: 42 } as unknown as { receipt: string };
+                }),
+        }));
         const caller = new LambderInvokeCaller<typeof lambder.ApiContract>({ functionName: 'shop', transport: LambderInvokeCaller.localTransport(lambder.getHandler()) });
 
         for(let attempt = 0; attempt < 3; attempt++){
@@ -378,15 +391,18 @@ describe('An answer that breaks its output schema', () => {
     const chargeThrice = async (output: z.ZodType<{ receipt: string }, { receipt: string }>) => {
         const charged: number[] = [];
         const crashes: unknown[] = [];
-        const lambder = initLambder().create({
+        const shop = initLambder().create({
             apiPath: '/api',
             idempotency: { store: new LambderMemoryIdempotencyStore() },
             crashes: { report: (error) => { crashes.push(error); } },
-        }).addApi('card.charge', { input: z.object({ cents: z.number() }), output, idempotency: true },
-            async (ctx) => {
-                charged.push(ctx.apiPayload.cents);
-                return { receipt: 'r-1' };
-            });
+        });
+        const lambder = shop.registerApiGroups(shop.defineApiGroup('card', {
+            charge: shop.defineApi({ input: z.object({ cents: z.number() }), output, idempotency: true },
+                async (ctx) => {
+                    charged.push(ctx.apiPayload.cents);
+                    return { receipt: 'r-1' };
+                }),
+        }));
         const caller = new LambderInvokeCaller<typeof lambder.ApiContract>({ functionName: 'shop', transport: LambderInvokeCaller.localTransport(lambder.getHandler()) });
         for(let attempt = 0; attempt < 3; attempt++){
             const outcome = await caller.apiOutcome('card.charge', { cents: 500 }, { idempotencyKey: KEY });

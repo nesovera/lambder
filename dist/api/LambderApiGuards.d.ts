@@ -72,9 +72,11 @@ export type LambderGuardRefusals<TRefusals extends readonly string[] = readonly 
  *
  * Orthogonally, a guard may also:
  *
- * - declare `session: true`: the guard needs ctx.session, so it is only
- *   declarable on addSessionApi (compile error and startup assert on public
- *   APIs) and its handler receives the session-typed context.
+ * - declare `session: true`: the guard needs ctx.session, so it makes every
+ *   endpoint declaring it a session endpoint (the session is read before the
+ *   guards run, a call without one is answered sessionExpired, and the
+ *   endpoint's handler receives the session-typed context), and it receives
+ *   the session-typed context itself.
  * - take a PARAMETER: annotate a 3rd handler argument
  *   (`(ctx, payload, param: YourType) => ...`) and APIs pass the value in
  *   their declaration: `guards: { yourGuard: paramValue }`. The value is
@@ -272,19 +274,16 @@ export type LambderGuardMetaMap<TGuards> = {
     [K in keyof TGuards]: LambderGuardMeta<TGuards[K]>;
 };
 /**
- * Guard names an API may declare: every guard the instance holds, session
- * guards only on session APIs. Whether the API's input carries the fields an
- * apiInput guard reads is asked of the names it declared, once that input is
- * known, by LambderGuardNamesInputLacks.
+ * Guard names an API may declare: every guard the instance holds, a session
+ * guard included, which makes the API a session one (LambderApiModeOf).
+ * Whether the API's input carries the fields an apiInput guard reads is
+ * asked of the names it declared, once that input is known, by
+ * LambderGuardNamesInputLacks.
  */
-export type LambderAllowedGuardNames<TGuards, TIncludeSession extends boolean = true> = {
-    [K in keyof TGuards]: TGuards[K] extends {
-        session: true;
-    } ? (TIncludeSession extends true ? K : never) : K;
-}[keyof TGuards] & string;
+export type LambderAllowedGuardNames<TGuards> = keyof TGuards & string;
 /**
  * The apiInput guards among `TNames` whose fields the API's payload does not
- * carry. addApi and addSessionApi ask this once the API's input is known, of
+ * carry. defineApi asks this once the API's input is known, of
  * the names its guards option holds; see LambderPayloadSliceCheck.
  *
  * The payload is compared whole, not member by member: a bare `TPayload
@@ -298,14 +297,14 @@ export type LambderGuardNamesInputLacks<TGuards, TNames, TPayload> = {
     } ? ([TPayload] extends [R] ? never : K) : never;
 }[TNames & keyof TGuards] & string;
 /** The allowed guard names whose handler takes no param (usable in the string/array forms). */
-export type LambderParamlessGuardNames<TGuards, TIncludeSession extends boolean> = {
-    [K in LambderAllowedGuardNames<TGuards, TIncludeSession> & keyof TGuards]: TGuards[K] extends {
+export type LambderParamlessGuardNames<TGuards> = {
+    [K in LambderAllowedGuardNames<TGuards> & keyof TGuards]: TGuards[K] extends {
         param: undefined;
     } ? K & string : never;
-}[LambderAllowedGuardNames<TGuards, TIncludeSession> & keyof TGuards];
+}[LambderAllowedGuardNames<TGuards> & keyof TGuards];
 /** The map form's full shape: every declarable guard name, each carrying its own param type. */
-type LambderGuardsMap<TGuards, TIncludeSession extends boolean> = {
-    readonly [K in LambderAllowedGuardNames<TGuards, TIncludeSession> & keyof TGuards]?: TGuards[K] extends {
+type LambderGuardsMap<TGuards> = {
+    readonly [K in LambderAllowedGuardNames<TGuards> & keyof TGuards]?: TGuards[K] extends {
         param: undefined;
     } ? true : TGuards[K] extends {
         param: infer P;
@@ -324,10 +323,10 @@ type LambderGuardsMap<TGuards, TIncludeSession extends boolean> = {
  * compiler builds it once per instance rather than once per API; see
  * LambderPayloadSliceCheck for why, and for where the input is asked.
  */
-export type LambderGuardsOption<TGuards, TIncludeSession extends boolean> = LambderParamlessGuardNames<TGuards, TIncludeSession> | readonly [
-    LambderParamlessGuardNames<TGuards, TIncludeSession>,
-    ...LambderParamlessGuardNames<TGuards, TIncludeSession>[]
-] | LambderNonEmptyOptionMap<LambderGuardsMap<TGuards, TIncludeSession>>;
+export type LambderGuardsOption<TGuards> = LambderParamlessGuardNames<TGuards> | readonly [
+    LambderParamlessGuardNames<TGuards>,
+    ...LambderParamlessGuardNames<TGuards>[]
+] | LambderNonEmptyOptionMap<LambderGuardsMap<TGuards>>;
 /**
  * The typed ctx.guardData an API's handler sees: declared guards that return
  * a value, keyed by name. Check-only (void) guards never appear.

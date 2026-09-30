@@ -23,17 +23,21 @@ afterEach(() => { vi.restoreAllMocks(); });
 
 type Report = { message: string; site: LambderCrashSite };
 
-const createApp = (crashes: LambderCrashOptions = {}) => initLambder().create({ apiPath: '/api', crashes })
-    .addApi('crash', { input: z.object({}), output: z.object({}) }, async (ctx) => {
-        ctx.logList.push({ before: 'the throw' });
-        throw new Error('boom');
-    })
-    .addApi('refused', { input: z.object({}), output: z.object({}) }, async () => refuse('No.'))
-    .addApi('fine', { input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (_ctx) => ({ ok: true }))
-    .addRoute('/broken', async () => { throw new Error('the page broke'); })
-    .addAction((event): event is { source: 'nightly' } => (event as { source?: string })?.source === 'nightly', async () => {
-        throw new Error('the job broke');
-    });
+const createApp = (crashes: LambderCrashOptions = {}) => {
+    const app = initLambder().create({ apiPath: '/api', crashes });
+    return app.registerApiGroups(app.defineApiGroup('test', {
+        crash: app.defineApi({ input: z.object({}), output: z.object({}) }, async (ctx) => {
+            ctx.logList.push({ before: 'the throw' });
+            throw new Error('boom');
+        }),
+        refused: app.defineApi({ input: z.object({}), output: z.object({}) }, async () => refuse('No.')),
+        fine: app.defineApi({ input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (_ctx) => ({ ok: true })),
+    }))
+        .addRoute('/broken', async () => { throw new Error('the page broke'); })
+        .addAction((event): event is { source: 'nightly' } => (event as { source?: string })?.source === 'nightly', async () => {
+            throw new Error('the job broke');
+        });
+};
 
 const recorder = () => {
     const reports: Report[] = [];
@@ -50,11 +54,11 @@ describe('crashes.report', () => {
             },
         }));
 
-        const outcome = await app.visitor().apiOutcome('crash', {});
+        const outcome = await app.visitor().apiOutcome('test.crash', {});
         order.push('answered');
 
         assertApiFailure(outcome, 'server', { status: 500 });
-        expect(order).toEqual(['reported boom at api crash', 'answered']);
+        expect(order).toEqual(['reported boom at api test.crash', 'answered']);
     });
 
     it('is told a route crash, a failed event action and an event nothing matched, and the event errors still reach Lambda', async () => {
@@ -79,7 +83,7 @@ describe('crashes.report', () => {
         const app = createApp({ report }).addHook('created', async () => { throw new Error('secrets unreachable'); });
         const tested = lambderTestApp(app);
 
-        assertApiFailure(await tested.visitor().apiOutcome('fine', {}), 'server');
+        assertApiFailure(await tested.visitor().apiOutcome('test.fine', {}), 'server');
         await expect(tested.event({ source: 'nightly' })).rejects.toThrow('secrets unreachable');
 
         expect(reports.map(({ message, site }) => [site.kind, message])).toEqual([
@@ -92,8 +96,8 @@ describe('crashes.report', () => {
         const { reports, report } = recorder();
         const app = lambderTestApp(createApp({ report }));
 
-        assertApiFailure(await app.visitor().apiOutcome('refused', {}), 'refusal');
-        assertApiSuccess(await app.visitor().apiOutcome('fine', {}));
+        assertApiFailure(await app.visitor().apiOutcome('test.refused', {}), 'refusal');
+        assertApiSuccess(await app.visitor().apiOutcome('test.fine', {}));
         expect(reports).toEqual([]);
     });
 
@@ -101,7 +105,7 @@ describe('crashes.report', () => {
         const error = vi.spyOn(console, 'error').mockImplementation(() => {});
         const app = lambderTestApp(createApp({ report: async () => { throw new Error('reporter down'); } }));
 
-        assertApiFailure(await app.visitor().apiOutcome('crash', {}), 'server', { status: 500 });
+        assertApiFailure(await app.visitor().apiOutcome('test.crash', {}), 'server', { status: 500 });
         const logged = error.mock.calls.find((call) => String(call[0]).includes('crashes.report threw'));
         expect((logged?.[1] as Error).message).toBe('boom');
         expect((logged?.[3] as Error).message).toBe('reporter down');
@@ -118,7 +122,7 @@ describe('crashes.report', () => {
         const app = lambderTestApp(createApp({ report: () => stalled, reportTimeoutMs: 20 }));
 
         const started = Date.now();
-        assertApiFailure(await app.visitor().apiOutcome('crash', {}), 'server', { status: 500 });
+        assertApiFailure(await app.visitor().apiOutcome('test.crash', {}), 'server', { status: 500 });
         await expect(app.event({ source: 'nightly' })).rejects.toThrow('the job broke');
         expect(Date.now() - started).toBeLessThan(2_000);
 
@@ -136,7 +140,7 @@ describe('crashes.report', () => {
         const { reports, report } = recorder();
         const app = lambderTestApp(createApp({ report }).setGlobalErrorHandler(() => { throw new Error('handler broke'); }));
 
-        assertApiFailure(await app.visitor().apiOutcome('crash', {}), 'server', { status: 500 });
+        assertApiFailure(await app.visitor().apiOutcome('test.crash', {}), 'server', { status: 500 });
         expect(reports.map(({ message }) => message)).toEqual(['boom', 'Lambder: the global error handler threw while answering a crash.']);
     });
 });
@@ -146,8 +150,8 @@ describe('a crash nothing answered', () => {
         const error = vi.spyOn(console, 'error').mockImplementation(() => {});
         const app = lambderTestApp(createApp());
 
-        assertApiFailure(await app.visitor().apiOutcome('crash', {}), 'server', { status: 500 });
-        expect(String(error.mock.calls[0]?.[0])).toContain('POST /api crashed');
+        assertApiFailure(await app.visitor().apiOutcome('test.crash', {}), 'server', { status: 500 });
+        expect(String(error.mock.calls[0]?.[0])).toContain('POST /api/test/crash crashed');
         expect((error.mock.calls[0]?.[1] as Error).message).toBe('boom');
     });
 
@@ -155,7 +159,7 @@ describe('a crash nothing answered', () => {
         const error = vi.spyOn(console, 'error').mockImplementation(() => {});
         const app = lambderTestApp(createApp(recorder()));
 
-        assertApiFailure(await app.visitor().apiOutcome('crash', {}), 'server', { status: 500 });
+        assertApiFailure(await app.visitor().apiOutcome('test.crash', {}), 'server', { status: 500 });
         expect(error).not.toHaveBeenCalled();
     });
 });
@@ -165,13 +169,13 @@ describe('crashes.reveal', () => {
         vi.spyOn(console, 'error').mockImplementation(() => {});
         const app = lambderTestApp(createApp({ reveal: (ctx) => ctx.header('x-developer') === 'yes' }));
 
-        const revealed = await app.visitor({ headers: { 'x-developer': 'yes' } }).apiOutcome('crash', {});
+        const revealed = await app.visitor({ headers: { 'x-developer': 'yes' } }).apiOutcome('test.crash', {});
         assertApiFailure(revealed, 'server', { status: 500 });
         expect(revealed.response?.crash).toMatchObject({ name: 'Error', message: 'boom', requestId: expect.any(String) });
         expect(revealed.response?.crash?.stack).toContain('crash-reporting.test.ts');
         expect(revealed.response?.logList).toEqual([{ before: 'the throw' }]);
 
-        const hidden = await app.visitor().apiOutcome('crash', {});
+        const hidden = await app.visitor().apiOutcome('test.crash', {});
         assertApiFailure(hidden, 'server', { status: 500 });
         expect(hidden.response?.crash).toBeUndefined();
         expect(hidden.response?.logList).toBeUndefined();
@@ -189,13 +193,13 @@ describe('crashes.reveal', () => {
     it('reveals nothing when it throws, and nothing through an app\'s own error handler', async () => {
         const error = vi.spyOn(console, 'error').mockImplementation(() => {});
         const throwing = lambderTestApp(createApp({ reveal: () => { throw new Error('reveal broke'); } }));
-        const hidden = await throwing.visitor().apiOutcome('crash', {});
+        const hidden = await throwing.visitor().apiOutcome('test.crash', {});
         assertApiFailure(hidden, 'server');
         expect(hidden.response?.crash).toBeUndefined();
         expect(error.mock.calls.some((call) => String(call[0]).includes('crashes.reveal threw'))).toBe(true);
 
         const handled = lambderTestApp(createApp({ reveal: () => true }).setGlobalErrorHandler((_err, _ctx, res) => res.apiRefusal({ refusal: 'Ours.' }, { statusCode: 500 })));
-        const answered = await handled.visitor().apiOutcome('crash', {});
+        const answered = await handled.visitor().apiOutcome('test.crash', {});
         assertApiFailure(answered, 'server');
         expect(answered.response?.crash).toBeUndefined();
         expect(answered.refusal?.content).toBe('Ours.');
@@ -209,17 +213,23 @@ describe('a context a beforeRender hook handed back', () => {
      * session the pipeline reads lands on the replacement, the one object
      * the handler holds.
      */
-    const createTenantApp = (crashes: LambderCrashOptions) => initLambder<{ userId: string }>().create({
-        apiPath: '/api',
-        session: { store: new LambderMemorySessionStore(), sessionSalt: 'crash-salt' },
-        crashes,
-    })
-        .addHook('beforeRender', (ctx) => {
-            const replaced: LambderRenderContext & { tenant: string } = { ...ctx, tenant: 'acme' };
-            return replaced;
-        })
-        .addSessionApi('crashSigned', { input: z.object({}), output: z.object({}) }, async () => { throw new Error('signed boom'); })
-        .addRoute('/broken', async () => { throw new Error('the page broke'); });
+    const createTenantApp = (crashes: LambderCrashOptions) => {
+        const app = initLambder<{ userId: string }>().create({
+            apiPath: '/api',
+            session: { store: new LambderMemorySessionStore(), sessionSalt: 'crash-salt' },
+            guards: { signedIn: initLambder<{ userId: string }>().guard({ session: true, handler: async () => {} }) },
+            crashes,
+        });
+        return app
+            .addHook('beforeRender', (ctx) => {
+                const replaced: LambderRenderContext & { tenant: string } = { ...ctx, tenant: 'acme' };
+                return replaced;
+            })
+            .registerApiGroups(app.defineApiGroup('test', {
+                crashSigned: app.defineApi({ input: z.object({}), output: z.object({}), guards: 'signedIn' }, async () => { throw new Error('signed boom'); }),
+            }))
+            .addRoute('/broken', async () => { throw new Error('the page broke'); });
+    };
     const tenantOf = (ctx: LambderRenderContext | null) => (ctx as (LambderRenderContext & { tenant?: string }) | null)?.tenant;
 
     it('is the one the reporter and reveal are handed, the session the call read included', async () => {
@@ -237,7 +247,7 @@ describe('a context a beforeRender hook handed back', () => {
         }));
         const visitor = await app.signIn('ada', { userId: 'ada' });
 
-        assertApiFailure(await visitor.apiOutcome('crashSigned', {}), 'server', { status: 500 });
+        assertApiFailure(await visitor.apiOutcome('test.crashSigned', {}), 'server', { status: 500 });
         expect((await visitor.request('GET', '/broken')).statusCode).toBe(500);
 
         expect(reports).toEqual([

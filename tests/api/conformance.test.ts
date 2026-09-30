@@ -39,6 +39,7 @@ const makeGate = () => {
 };
 
 const serverGuards = {
+    signedIn: lambderGuard({ session: true, handler: async () => {} }),
     role: lambderGuard({
         guardInput: z.object({ wanted: z.enum(['admin', 'member']) }),
         session: true,
@@ -64,36 +65,42 @@ const createServer = (gate: ReturnType<typeof makeGate>) => {
         // key. Both sides read the same field of the same request type.
         idempotency: { store: new LambderMemoryIdempotencyStore(), callerIdentity: (_ctx, request) => request.ip },
     });
+    const { defineApi } = app;
     let counter = 0;
-    return app
-        .addApi('ok', { input: z.object({ n: z.number() }), output: z.object({ doubled: z.number() }) }, async (ctx) => ({ doubled: ctx.apiPayload.n * 2 }))
-        .addApi('refuse', { input: z.object({}), output: z.any(), refusals: 'app/nope' }, async (ctx) => ctx.refuse('Nope.', { code: 'app/nope', title: 'No' }))
-        .addApi('deny', { input: z.object({}), output: z.any() }, async () => refuse('Denied.', { notAuthorized: true }))
-        .addApi('login', { input: z.object({ user: z.string(), role: z.enum(['admin', 'member']) }), output: z.object({ ok: z.boolean() }) },
-            async (ctx) => { await app.getSessionController(ctx).createSession(ctx.apiPayload.user, { userId: ctx.apiPayload.user, role: ctx.apiPayload.role }); return { ok: true }; })
-        .addSessionApi('me', { input: z.object({}), output: z.object({ userId: z.string() }) }, async (ctx) => ({ userId: ctx.session.data.userId }))
-        .addSessionApi('guarded', { input: z.object({}), output: z.object({ role: z.string() }), guards: { role: true } }, async (ctx) => ({ role: ctx.guardData.role.role }))
-        .addApi('limited', { input: z.object({}), output: z.object({ n: z.number() }), rateLimit: 'tight' }, async (_ctx) => ({ n: 1 }))
-        .addSessionApi('limitedPerCaller', { input: z.object({}), output: z.object({ n: z.number() }), rateLimit: 'perCaller' }, async (_ctx) => ({ n: 1 }))
-        .addApi('noted', { input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (ctx) => {
-            ctx.logList.push('a line for the envelope');
-            return { ok: true };
-        })
-        .addApi('headed', { input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (ctx) => {
-            ctx.responseHeaders.set('X-Observed', 'from the handler');
-            return { ok: true };
-        })
-        .addApi('once', { input: z.object({}), output: z.object({ counter: z.number() }), idempotency: true }, async (_ctx) => { counter += 1; return { counter }; })
-        .addApi('slow', { input: z.object({}), output: z.object({ done: z.boolean() }), idempotency: true }, async (_ctx) => { gate.enter(); await gate.opened; return { done: true }; })
-        .addApi('crash', { input: z.object({}), output: z.any() }, async () => { throw new Error('boom'); })
-        // A handler that writes the call's headers and then throws: the one
-        // exit where "the headers belong to the call" is easiest to lose,
-        // because the crash unwinds past the step that drains them.
-        .addApi('crashAfterLogin', { input: z.object({}), output: z.any() }, async (ctx) => {
-            await app.getSessionController(ctx).createSession('ada', { userId: 'ada', role: 'admin' });
-            throw new Error('boom');
-        })
-        .addApi('echo', { input: z.object({ notes: z.array(z.string()) }), output: z.object({ count: z.number() }) }, async (ctx) => ({ count: ctx.apiPayload.notes.length }));
+    return app.registerApiGroups(
+        app.defineApiGroup('test', {
+            ok: defineApi({ input: z.object({ n: z.number() }), output: z.object({ doubled: z.number() }) }, async (ctx) => ({ doubled: ctx.apiPayload.n * 2 })),
+            refuse: defineApi({ input: z.object({}), output: z.any(), refusals: 'app/nope' }, async (ctx) => ctx.refuse('Nope.', { code: 'app/nope', title: 'No' })),
+            deny: defineApi({ input: z.object({}), output: z.any() }, async () => refuse('Denied.', { notAuthorized: true })),
+            limited: defineApi({ input: z.object({}), output: z.object({ n: z.number() }), rateLimit: 'tight' }, async (_ctx) => ({ n: 1 })),
+            noted: defineApi({ input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (ctx) => {
+                ctx.logList.push('a line for the envelope');
+                return { ok: true };
+            }),
+            headed: defineApi({ input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (ctx) => {
+                ctx.responseHeaders.set('X-Observed', 'from the handler');
+                return { ok: true };
+            }),
+            once: defineApi({ input: z.object({}), output: z.object({ counter: z.number() }), idempotency: true }, async (_ctx) => { counter += 1; return { counter }; }),
+            slow: defineApi({ input: z.object({}), output: z.object({ done: z.boolean() }), idempotency: true }, async (_ctx) => { gate.enter(); await gate.opened; return { done: true }; }),
+            crash: defineApi({ input: z.object({}), output: z.any() }, async () => { throw new Error('boom'); }),
+            // A handler that writes the call's headers and then throws: the one
+            // exit where "the headers belong to the call" is easiest to lose,
+            // because the crash unwinds past the step that drains them.
+            crashAfterLogin: defineApi({ input: z.object({}), output: z.any() }, async (ctx) => {
+                await app.getSessionController(ctx).createSession('ada', { userId: 'ada', role: 'admin' });
+                throw new Error('boom');
+            }),
+            echo: defineApi({ input: z.object({ notes: z.array(z.string()) }), output: z.object({ count: z.number() }) }, async (ctx) => ({ count: ctx.apiPayload.notes.length })),
+        }),
+        app.defineApiGroup('account', {
+            login: defineApi({ input: z.object({ user: z.string(), role: z.enum(['admin', 'member']) }), output: z.object({ ok: z.boolean() }) },
+                async (ctx) => { await app.getSessionController(ctx).createSession(ctx.apiPayload.user, { userId: ctx.apiPayload.user, role: ctx.apiPayload.role }); return { ok: true }; }),
+            me: defineApi({ input: z.object({}), output: z.object({ userId: z.string() }), guards: 'signedIn' }, async (ctx) => ({ userId: ctx.session.data.userId })),
+            guarded: defineApi({ input: z.object({}), output: z.object({ role: z.string() }), guards: { role: true } }, async (ctx) => ({ role: ctx.guardData.role.role })),
+            limitedPerCaller: defineApi({ input: z.object({}), output: z.object({ n: z.number() }), guards: 'signedIn', rateLimit: 'perCaller' }, async (_ctx) => ({ n: 1 })),
+        }),
+    );
 };
 
 type Contract = ReturnType<typeof createServer>['ApiContract'];
@@ -111,6 +118,7 @@ const createMock = (gate: ReturnType<typeof makeGate>) => {
         rateLimits: { policies: { tight: { perMin: 1, per: 'ip' }, perCaller: { perMin: 1, per: 'session' } } },
         idempotency: { callerIdentity: (_ctx, request) => request.ip },
         guards: {
+            signedIn: mock.guard({ session: true, handler: async () => {} }),
             role: mock.guard({
                 guardInput: z.object({ wanted: z.enum(['admin', 'member']) }),
                 session: true,
@@ -126,30 +134,32 @@ const createMock = (gate: ReturnType<typeof makeGate>) => {
         // The entry's own input schema, restated: what it parses to is pinned
         // to the contract, and this is the cell that compares its 422 to the
         // server's rather than only to itself.
-        mockApp.publicApi('ok', { input: z.object({ n: z.number() }), handler: async ({ payload }) => ({ doubled: payload.n * 2 }) }),
-        mockApp.publicApi('refuse', async (ctx) => ctx.refuse('Nope.', { code: 'app/nope', title: 'No' })),
-        mockApp.publicApi('deny', async () => refuse('Denied.', { notAuthorized: true })),
-        mockApp.publicApi('login', async ({ payload, sessionController }) => { await sessionController.createSession(payload.user, { userId: payload.user, role: payload.role }); return { ok: true }; }),
-        mockApp.sessionApi('me', async ({ session }) => ({ userId: session.data.userId })),
-        mockApp.sessionApi('guarded', { guards: { role: true }, handler: async ({ guardData }) => ({ role: guardData.role.role }) }),
-        mockApp.publicApi('limited', { rateLimit: 'tight', handler: async () => ({ n: 1 }) }),
-        mockApp.sessionApi('limitedPerCaller', { rateLimit: 'perCaller', handler: async () => ({ n: 1 }) }),
-        mockApp.publicApi('noted', async ({ logList }) => {
+        mockApp.api('test.ok', { input: z.object({ n: z.number() }), handler: async ({ payload }) => ({ doubled: payload.n * 2 }) }),
+        mockApp.api('test.refuse', async (ctx) => ctx.refuse('Nope.', { code: 'app/nope', title: 'No' })),
+        mockApp.api('test.deny', async () => refuse('Denied.', { notAuthorized: true })),
+        mockApp.api('account.login', async ({ payload, sessionController }) => { await sessionController.createSession(payload.user, { userId: payload.user, role: payload.role }); return { ok: true }; }),
+        // A session endpoint restates the guard that makes it one: without
+        // the apiOptions table, that is how the mock knows its mode.
+        mockApp.api('account.me', { guards: 'signedIn', handler: async ({ session }) => ({ userId: session.data.userId }) }),
+        mockApp.api('account.guarded', { guards: { role: true }, handler: async ({ guardData }) => ({ role: guardData.role.role }) }),
+        mockApp.api('test.limited', { rateLimit: 'tight', handler: async () => ({ n: 1 }) }),
+        mockApp.api('account.limitedPerCaller', { guards: 'signedIn', rateLimit: 'perCaller', handler: async () => ({ n: 1 }) }),
+        mockApp.api('test.noted', async ({ logList }) => {
             logList.push('a line for the envelope');
             return { ok: true };
         }),
-        mockApp.publicApi('headed', async ({ responseHeaders }) => {
+        mockApp.api('test.headed', async ({ responseHeaders }) => {
             responseHeaders.set('X-Observed', 'from the handler');
             return { ok: true };
         }),
-        mockApp.publicApi('once', { idempotency: true, handler: async () => { counter += 1; return { counter }; } }),
-        mockApp.publicApi('slow', { idempotency: true, handler: async () => { gate.enter(); await gate.opened; return { done: true }; } }),
-        mockApp.publicApi('crash', async () => { throw new Error('boom'); }),
-        mockApp.publicApi('crashAfterLogin', async ({ sessionController }) => {
+        mockApp.api('test.once', { idempotency: true, handler: async () => { counter += 1; return { counter }; } }),
+        mockApp.api('test.slow', { idempotency: true, handler: async () => { gate.enter(); await gate.opened; return { done: true }; } }),
+        mockApp.api('test.crash', async () => { throw new Error('boom'); }),
+        mockApp.api('test.crashAfterLogin', async ({ sessionController }) => {
             await sessionController.createSession('ada', { userId: 'ada', role: 'admin' });
             throw new Error('boom');
         }),
-        mockApp.publicApi('echo', async ({ payload }) => ({ count: payload.notes.length })),
+        mockApp.api('test.echo', async ({ payload }) => ({ count: payload.notes.length })),
     ));
     return mockApp;
 };
@@ -231,60 +241,62 @@ const same = async <K extends keyof Contract & string>(
 
 describe('Adapter conformance: the server and the mock answer alike', () => {
     it('ok: the same envelope', async () => {
-        const { seen } = await same(createSides(), 'ok', { n: 21 });
+        const { seen } = await same(createSides(), 'test.ok', { n: 21 });
         expect(seen).toMatchObject({ status: 200, envelope: { apiVersion: '1', payload: { doubled: 42 } } });
     });
 
     it('a refusal with a code and a title, and a notAuthorized refusal', async () => {
         const sides = createSides();
-        const refused = await same(sides, 'refuse', {});
+        const refused = await same(sides, 'test.refuse', {});
         expect(refused.seen.envelope).toEqual({ apiVersion: '1', payload: null, refusal: { type: 'warning', code: 'app/nope', title: 'No', content: 'Nope.' } });
-        const denied = await same(sides, 'deny', {});
+        const denied = await same(sides, 'test.deny', {});
         expect(denied.seen.envelope).toMatchObject({ notAuthorized: true });
         expect(denied.mockOutcome.ok ? '' : denied.mockOutcome.reason).toBe('notAuthorized');
     });
 
     it('sessionExpired without a session, then login sets the same cookies and the session call reads them', async () => {
         const sides = createSides();
-        const expired = await same(sides, 'me', {});
+        const expired = await same(sides, 'account.me', {});
         expect(expired.seen.envelope).toEqual({ apiVersion: '1', payload: null, sessionExpired: true });
 
-        const login = await same(sides, 'login', { user: 'ada', role: 'admin' });
+        const login = await same(sides, 'account.login', { user: 'ada', role: 'admin' });
         expect(login.seen.setCookies).toBe(2);
-        const me = await same(sides, 'me', {});
+        const me = await same(sides, 'account.me', {});
         expect(me.seen.envelope).toEqual({ apiVersion: '1', payload: { userId: 'ada' } });
     });
 
     it('a guard with a client input: the same guardData, the same notAuthorized refusal, the same 422 for a missing input', async () => {
         const sides = createSides();
-        await same(sides, 'login', { user: 'ada', role: 'member' });
-        const allowed = await same(sides, 'guarded', {}, { guardInputs: { role: { wanted: 'member' } } });
+        await same(sides, 'account.login', { user: 'ada', role: 'member' });
+        const allowed = await same(sides, 'account.guarded', {}, { guardInputs: { role: { wanted: 'member' } } });
         expect(allowed.seen.envelope).toMatchObject({ payload: { role: 'member' } });
-        const refused = await same(sides, 'guarded', {}, { guardInputs: { role: { wanted: 'admin' } } });
+        const refused = await same(sides, 'account.guarded', {}, { guardInputs: { role: { wanted: 'admin' } } });
         expect(refused.seen.envelope).toMatchObject({ notAuthorized: true, refusal: { code: 'app/wrong-role' } });
-        const missing = await same(sides, 'guarded', {}, { guardInputs: { role: {} as never } });
+        const missing = await same(sides, 'account.guarded', {}, { guardInputs: { role: {} as never } });
         expect(missing.seen.status).toBe(422);
         expect(missing.mockOutcome.ok ? '' : missing.mockOutcome.reason).toBe('validation');
     });
 
     it('versionExpired for a caller built against another shape of the endpoint, and a pass for the current one', async () => {
-        const stale = { ...serverSignatures, [await apiNameKeyOf('ok')]: 'an-older-shape' };
-        const { seen } = await same(createSides({ apiSignatures: stale }), 'ok', { n: 1 });
+        const stale = { ...serverSignatures, [await apiNameKeyOf('test.ok')]: 'an-older-shape' };
+        const { seen } = await same(createSides({ apiSignatures: stale }), 'test.ok', { n: 1 });
         expect(seen.envelope).toEqual({ apiVersion: '1', payload: null, versionExpired: true });
-        const current = await same(createSides({ apiSignatures: serverSignatures }), 'ok', { n: 21 });
+        const current = await same(createSides({ apiSignatures: serverSignatures }), 'test.ok', { n: 21 });
         expect(current.seen.envelope).toEqual({ apiVersion: '1', payload: { doubled: 42 } });
     });
 
     it('a version below minApiVersion: versionExpired on both sides, whatever the signature says', async () => {
-        const server = initLambder().create({ files: testPublicFiles(), apiPath: '/api', apiVersion: '1.2.32', minApiVersion: '1.2.10' })
-            .addApi('ok', { input: z.object({ n: z.number() }), output: z.object({ doubled: z.number() }) }, async (ctx) => ({ doubled: ctx.apiPayload.n * 2 }));
+        const floorApp = initLambder().create({ files: testPublicFiles(), apiPath: '/api', apiVersion: '1.2.32', minApiVersion: '1.2.10' });
+        const server = floorApp.registerApiGroups(floorApp.defineApiGroup('test', {
+            ok: floorApp.defineApi({ input: z.object({ n: z.number() }), output: z.object({ doubled: z.number() }) }, async (ctx) => ({ doubled: ctx.apiPayload.n * 2 })),
+        }));
         type FloorContract = typeof server.ApiContract;
         const floorMock = initLambderMock<FloorContract>().create({ apiVersion: '1.2.32', minApiVersion: '1.2.10', apiSignatures: await server.apiSignatures() });
-        floorMock.register(floorMock.apiSlice(floorMock.publicApi('ok', async ({ payload }) => ({ doubled: payload.n * 2 }))));
+        floorMock.register(floorMock.apiSlice(floorMock.api('test.ok', async ({ payload }) => ({ doubled: payload.n * 2 }))));
         const signatures = await server.apiSignatures();
         const bothSides = async (version: string) => {
-            const onServer = await new LambderCaller<FloorContract>({ apiPath: '/api', isCorsEnabled: false, apiVersion: version, apiSignatures: signatures, transport: lambderHandlerTransport(server.getHandler()) }).apiOutcome('ok', { n: 2 });
-            const onMock = await new LambderCaller<FloorContract>({ apiPath: '/api', isCorsEnabled: false, apiVersion: version, apiSignatures: signatures, transport: floorMock.transport() }).apiOutcome('ok', { n: 2 });
+            const onServer = await new LambderCaller<FloorContract>({ apiPath: '/api', isCorsEnabled: false, apiVersion: version, apiSignatures: signatures, transport: lambderHandlerTransport(server.getHandler()) }).apiOutcome('test.ok', { n: 2 });
+            const onMock = await new LambderCaller<FloorContract>({ apiPath: '/api', isCorsEnabled: false, apiVersion: version, apiSignatures: signatures, transport: floorMock.transport() }).apiOutcome('test.ok', { n: 2 });
             return [onServer, onMock].map((outcome) => outcome.ok ? 'ok' : outcome.reason);
         };
         expect(await bothSides('1.2.9')).toEqual(['versionExpired', 'versionExpired']);
@@ -294,8 +306,8 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
 
     it('rate limited: the same 429 envelope with a Retry-After', async () => {
         const sides = createSides();
-        await same(sides, 'limited', {});
-        const blocked = await same(sides, 'limited', {});
+        await same(sides, 'test.limited', {});
+        const blocked = await same(sides, 'test.limited', {});
         expect(blocked.seen.status).toBe(429);
         expect(Number(blocked.seen.retryAfter)).toBeGreaterThanOrEqual(1);
         expect(blocked.seen.envelope).toMatchObject({ refusal: { code: 'lambder/rate-limited' } });
@@ -303,18 +315,18 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
 
     it('idempotent replay: the same stored answer, the handler run once on each side', async () => {
         const sides = createSides();
-        const first = await same(sides, 'once', {}, { idempotencyKey: IDEMPOTENCY_KEY });
-        const replay = await same(sides, 'once', {}, { idempotencyKey: IDEMPOTENCY_KEY });
+        const first = await same(sides, 'test.once', {}, { idempotencyKey: IDEMPOTENCY_KEY });
+        const replay = await same(sides, 'test.once', {}, { idempotencyKey: IDEMPOTENCY_KEY });
         expect(replay.seen.envelope).toEqual(first.seen.envelope);
         expect(replay.seen.envelope).toMatchObject({ payload: { counter: 1 } });
     });
 
     it('duplicate in flight: the same 409 while the original is still running', async () => {
         const sides = createSides();
-        const originals = [sides.serverCaller.apiOutcome('slow', {}, { idempotencyKey: IDEMPOTENCY_KEY }), sides.mockCaller.apiOutcome('slow', {}, { idempotencyKey: IDEMPOTENCY_KEY })];
+        const originals = [sides.serverCaller.apiOutcome('test.slow', {}, { idempotencyKey: IDEMPOTENCY_KEY }), sides.mockCaller.apiOutcome('test.slow', {}, { idempotencyKey: IDEMPOTENCY_KEY })];
         // Both originals hold their claim once their handler has entered the gate.
         await Promise.all([sides.serverGate.entered, sides.mockGate.entered]);
-        const duplicate = await same(sides, 'slow', {}, { idempotencyKey: IDEMPOTENCY_KEY });
+        const duplicate = await same(sides, 'test.slow', {}, { idempotencyKey: IDEMPOTENCY_KEY });
         expect(duplicate.seen.status).toBe(409);
         expect(duplicate.seen.envelope).toMatchObject({ refusal: { code: 'lambder/duplicate-in-flight' } });
         sides.serverGate.release();
@@ -327,7 +339,7 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
         // The mock's schema is the mock's, because the contract is a type and
         // the server's schemas do not exist on this side. Without this cell,
         // what it answers a bad payload with is only compared to itself.
-        const { seen, mockOutcome } = await same(createSides(), 'ok', { n: 'not a number' } as never);
+        const { seen, mockOutcome } = await same(createSides(), 'test.ok', { n: 'not a number' } as never);
         expect(seen.status).toBe(422);
         expect(mockOutcome.ok ? '' : mockOutcome.reason).toBe('validation');
     });
@@ -335,7 +347,7 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
     it('the envelope beside the payload: the same logList', async () => {
         // Both handlers return their payload, and what else the envelope
         // carries goes on the context: ctx.logList on either side.
-        const { seen } = await same(createSides(), 'noted', {});
+        const { seen } = await same(createSides(), 'test.noted', {});
         expect(seen.envelope).toEqual({
             apiVersion: '1', payload: { ok: true },
             logList: ['a line for the envelope'],
@@ -343,7 +355,7 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
     });
 
     it('a header a handler wrote: on the answer on both sides', async () => {
-        const { seen } = await same(createSides(), 'headed', {});
+        const { seen } = await same(createSides(), 'test.headed', {});
         expect(seen.handlerHeader).toBe('from the handler');
     });
 
@@ -351,7 +363,7 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
         // The key is client data, and only the engine judges it. A handler
         // never sees a non-string one; what matters here is that the mock
         // refuses it where the server does rather than running the handler.
-        const { seen } = await same(createSides(), 'once', {}, { idempotencyKey: 42 });
+        const { seen } = await same(createSides(), 'test.once', {}, { idempotencyKey: 42 });
         expect(seen.status).toBe(400);
     });
 
@@ -360,11 +372,11 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
         // alone, which makes that key a bearer token for its own stored
         // answer. Configured on both sides, the scope has to be the same one.
         const sides = createSides();
-        const first = await same(sides, 'once', {}, { idempotencyKey: IDEMPOTENCY_KEY });
-        const replay = await same(sides, 'once', {}, { idempotencyKey: IDEMPOTENCY_KEY });
+        const first = await same(sides, 'test.once', {}, { idempotencyKey: IDEMPOTENCY_KEY });
+        const replay = await same(sides, 'test.once', {}, { idempotencyKey: IDEMPOTENCY_KEY });
         expect(replay.seen.envelope).toEqual(first.seen.envelope);
 
-        const stranger = await same(sides, 'once', {}, { idempotencyKey: IDEMPOTENCY_KEY, from: 'stranger' });
+        const stranger = await same(sides, 'test.once', {}, { idempotencyKey: IDEMPOTENCY_KEY, from: 'stranger' });
         expect(stranger.seen.envelope).toMatchObject({ payload: { counter: 2 } });
     });
 
@@ -372,20 +384,20 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
         // The other key an endpoint can be limited by, and the one that needs
         // the session read to have happened first.
         const sides = createSides();
-        await same(sides, 'login', { user: 'ada', role: 'admin' });
-        await same(sides, 'limitedPerCaller', {});
-        const blocked = await same(sides, 'limitedPerCaller', {});
+        await same(sides, 'account.login', { user: 'ada', role: 'admin' });
+        await same(sides, 'account.limitedPerCaller', {});
+        const blocked = await same(sides, 'account.limitedPerCaller', {});
         expect(blocked.seen.status).toBe(429);
         expect(blocked.seen.envelope).toMatchObject({ refusal: { code: 'lambder/rate-limited' } });
 
         // Another session is another counter, on both sides.
-        await same(sides, 'login', { user: 'bob', role: 'member' }, { from: 'stranger' });
-        const other = await same(sides, 'limitedPerCaller', {}, { from: 'stranger' });
+        await same(sides, 'account.login', { user: 'bob', role: 'member' }, { from: 'stranger' });
+        const other = await same(sides, 'account.limitedPerCaller', {}, { from: 'stranger' });
         expect(other.seen.status).toBe(200);
     });
 
     it('an unknown api: the same apiNotFound refusal', async () => {
-        const { seen } = await same(createSides(), 'nope', {});
+        const { seen } = await same(createSides(), 'test.nope', {});
         expect(seen.envelope).toEqual({ apiVersion: '1', payload: null, refusal: { type: 'warning', code: 'lambder/api-not-found', content: 'API not found.' } });
     });
 
@@ -394,8 +406,8 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
         // against another contract, so both sides say versionExpired rather
         // than apiNotFound. A mock that resolved the name first would answer
         // apiNotFound where the server does not.
-        const withNope = { ...serverSignatures, [await apiNameKeyOf('nope')]: 'from-another-contract' };
-        const { seen } = await same(createSides({ apiSignatures: withNope }), 'nope', {});
+        const withNope = { ...serverSignatures, [await apiNameKeyOf('test.nope')]: 'from-another-contract' };
+        const { seen } = await same(createSides({ apiSignatures: withNope }), 'test.nope', {});
         expect(seen.envelope).toEqual({ apiVersion: '1', payload: null, versionExpired: true });
     });
 
@@ -405,7 +417,7 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
         // rejects as unreadable with a 200 and a refusal.
         const sides = createSides();
         const call = (transport: LambderApiTransport) => transport({
-            apiPath: '/api', apiName: 'nope', version: '1', token: '', siteHost: '',
+            apiPath: '/api', apiName: 'test.nope', version: '1', token: '', siteHost: '',
             compressed: { payloadGz: 'not-base64!!!', payloadBytes: 10 },
         });
 
@@ -418,7 +430,7 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
     });
 
     it('a crash: the same 500 envelope', async () => {
-        const { seen, mockOutcome } = await same(createSides(), 'crash', {});
+        const { seen, mockOutcome } = await same(createSides(), 'test.crash', {});
         expect(seen).toMatchObject({ status: 500, envelope: { apiVersion: '1', payload: null, refusal: { type: 'error', content: 'Internal server error.' } } });
         expect(mockOutcome.ok ? '' : mockOutcome.reason).toBe('server');
     });
@@ -429,7 +441,7 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
         // past that, so this is the exit where the two adapters can part: a
         // handler that signed a user in and then threw would leave the browser
         // with no session cookie and nothing to explain it.
-        const { seen, mockOutcome } = await same(createSides(), 'crashAfterLogin', {});
+        const { seen, mockOutcome } = await same(createSides(), 'test.crashAfterLogin', {});
         expect(seen.status).toBe(500);
         expect(seen.setCookies).toBe(2);
         expect(mockOutcome.ok ? '' : mockOutcome.reason).toBe('server');
@@ -437,7 +449,7 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
 
     it('a compressed request payload: restored on both sides', async () => {
         const notes = Array.from({ length: 300 }, (_, i) => `note-${i} on the main line`);
-        const { seen } = await same(createSides({ requestCompression: true }), 'echo', { notes });
+        const { seen } = await same(createSides({ requestCompression: true }), 'test.echo', { notes });
         expect(seen.envelope).toEqual({ apiVersion: '1', payload: { count: 300 } });
     });
 });

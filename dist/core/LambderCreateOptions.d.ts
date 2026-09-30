@@ -173,7 +173,7 @@ export type LambderGuardsMap<TSessionData = any> = Record<string, LambderApiGuar
 export type LambderRateLimitPoliciesMap = Record<string, LambderApiRateLimitPolicyConfig<LambderRenderContext>>;
 /** The `rateLimits` option of create(): the engine's config, with `policies` as one map or a list of maps. */
 export type LambderCreateRateLimitsOption = Omit<LambderApiRateLimitsConfig<LambderRateLimitPoliciesMap>, "policies"> & {
-    /** Named policies referenced (typed) from addApi/addSessionApi: one map, or a list of maps merged in order. */
+    /** Named policies referenced (typed) from defineApi: one map, or a list of maps merged in order. */
     policies: LambderNamedMapsOption<LambderRateLimitPoliciesMap>;
 };
 /** The options as the instance holds them: the guards and the rate-limit policies merged into one map each. */
@@ -276,7 +276,7 @@ export type LambderCreateOptions<TSessionData = any> = {
     trustedHostHeaders?: readonly string[];
     /** CORS: true allows any origin; or pass a LambderCorsConfig. Default: off. */
     cors?: boolean | LambderCorsConfig;
-    /** Sessions over a store of your choosing; required for addSessionApi/addSessionRoute. */
+    /** Sessions over a store of your choosing; required for a guard that needs a session, and for addSessionRoute. */
     session?: LambderSessionOptions<TSessionData>;
     /**
      * Declarative per-API rate limiting: your limiter plus named policies APIs
@@ -318,58 +318,50 @@ export type LambderCreateOptions<TSessionData = any> = {
      */
     requireRefusalCodes?: boolean;
     /**
-     * Make an authorization declaration part of registering a session API:
-     * every addSessionApi must declare `guards`, at the type level (a missing
-     * `guards` is a compile error) and at registration (a plain-JS caller
-     * throws). An API whose session is the whole authorization (the
-     * signed-in user's own account) declares a named no-op session guard, so
-     * every opt-out is explicit and one grep lists them all. Needs a guards
-     * map to pick from. Default: false.
-     */
-    requireSessionApiGuards?: boolean;
-    /**
-     * The same for public APIs: every addApi must declare `guards`, at the
-     * type level and at registration.
+     * Make an authorization declaration part of declaring an endpoint: every
+     * defineApi must declare `guards`, at the type level (a missing `guards`
+     * is a compile error) and at registration (a plain-JS caller throws).
      *
-     * Public APIs are open by default, which is the right default, so this is
-     * off unless an app decides otherwise. Turned on, a public endpoint's
-     * openness becomes a written decision rather than an omission: the ones
-     * anybody may call declare a named no-op guard carrying the reason, and
-     * the ones that authorize their caller some other way (a signature, a
-     * device secret, a one-shot token) name where that happens. One grep over
-     * the guard names then lists every public door and why it is open. Needs
-     * a guards map to pick from. Default: false.
+     * An endpoint is open by default, which is the right default, so this is
+     * off unless an app decides otherwise. Turned on, every endpoint's
+     * authorization becomes a written decision rather than an omission: one
+     * anybody may call declares a named no-op guard carrying the reason, one
+     * whose session is the whole authorization (the signed-in user's own
+     * account) a named no-op session guard, and one that authorizes its
+     * caller some other way (a signature, a device secret, a one-shot token)
+     * names where that happens. One grep over the guard names then lists
+     * every door and why it opens. Needs a guards map to pick from. Default:
+     * false.
      */
-    requirePublicApiGuards?: boolean;
+    requireApiGuards?: boolean;
     /** Declarative idempotency: your store plus replay defaults; APIs opt in via `idempotency: true | { ttlSeconds }`. */
     idempotency?: LambderApiIdempotencyConfig;
     /** Crash reporting on every path, and who may read a crash in the answer. See LambderCrashOptions. */
     crashes?: LambderCrashOptions;
 };
 /**
- * What the `guards` field asks for when an API on a require*ApiGuards
+ * What the `guards` field asks for when an API on a requireApiGuards
  * instance declares none. With nothing to infer from, the inference parameter
  * defaults to `never`, and "Property 'guards' is missing ... but required in
  * type { guards: never }" would read as though nothing could be written
  * there; the property name says what is wanted.
  */
 type LambderGuardsDeclarationRequired = {
-    readonly "lambder: this instance requires every API of this kind to declare guards. Name the guard that authorizes this API, or the named no-op guard that records why anyone may call it.": never;
+    readonly "lambder: this instance requires every API to declare guards. Name the guard that authorizes this API, or the named no-op guard that records why it needs nothing more.": never;
 };
 /**
- * What addSessionApi and addSessionRoute need of the instance they are called
- * on. Nothing satisfies it without the session option, so registering a
- * session API on an instance that has no sessions is a compile error rather
- * than only the registration-time throw.
+ * What addSessionRoute needs of the instance it is called on. Nothing
+ * satisfies it without the session option, so registering a session route
+ * on an instance that has no sessions is a compile error rather than only a
+ * throw when it is first requested.
  */
 type LambderSessionOptionRequired = {
-    readonly "lambder: sessions are not configured on this instance. Pass the session option to create() before registering a session API or a session route.": never;
+    readonly "lambder: sessions are not configured on this instance. Pass the session option to create() before registering a session route.": never;
 };
 /**
- * Intersected into what addSessionApi and addSessionRoute take, so an
- * instance created without the session option refuses the registration at
- * the call site. `unknown` once sessions are configured, which intersects
- * away to nothing.
+ * Intersected into what addSessionRoute takes, so an instance created
+ * without the session option refuses the registration at the call site.
+ * `unknown` once sessions are configured, which intersects away to nothing.
  */
 export type LambderSessionEnabledInstance<TSessionsEnabled extends boolean> = TSessionsEnabled extends true ? unknown : LambderSessionOptionRequired;
 /**
@@ -412,11 +404,8 @@ type LambderRateLimitSliceCheck<TLacking> = [TLacking] extends [never] ? unknown
 };
 /**
  * The `guards` field of an API's options: optional by default, required once
- * create() received the require*ApiGuards flag for that kind of API, so that
- * an authorization declaration cannot be forgotten at the type level.
- *
- * One type for both kinds: the requirement is the same shape either way, and
- * only which flag switches it on differs.
+ * create() received requireApiGuards, so that an authorization declaration
+ * cannot be forgotten at the type level.
  */
 export type LambderRequirableGuardsField<TRequired extends boolean, TGuardsOpt> = TRequired extends true ? {
     /** Named guards, run in declared order before input validation (after it for a guard declared runAt: "afterInputValidation"): a name, a non-empty list of names, or a non-empty { name: param } map for parameterized guards. Required on this instance: an API that needs no authorization declares a named no-op guard, so every opt-out is explicit and one grep lists them all. Their input requirements merge into this API's contract input; their return values land typed on ctx.guardData. */

@@ -20,7 +20,9 @@ export type { LambderApiSignatureMap } from "./shared/wire/LambderApiSignatureMa
 export { RELOAD_LOOP_WINDOW_MS } from "./client/LambderReloadLoopBreaker.js";
 export { compareDottedVersions, isDottedVersion } from "./shared/wire/LambderVersionOrder.js";
 export type { LambderApiAnswerOutcome, LambderApiSuccessOutcome, LambderApiCallFailure, LambderApiValidationFailure, LambderApiEnvelopeFailure, LambderApiHttpAnswer, } from "./shared/wire/LambderApiOutcome.js";
-export type { LambderApiOutcome, LambderApiFailureReason, LambderValidationError, LambderCallOptions, LambderCallerOptions, LambderGuardInputsProvider, LambderProvidedGuardInputs, LambderLogListHandler, } from "./client/LambderCaller.js";
+export type { LambderApiOutcome, LambderApiFailureReason, LambderValidationError, LambderCallOptions, LambderCallerOptions, LambderGuardInputsProvider, LambderProvidedGuardInputs, LambderLogListHandler, LambderCallerEndpoint, LambderCallerGroupCalls, LambderCallerMembers, } from "./client/LambderCaller.js";
+export { apiCallPath, splitApiName, LAMBDER_RESERVED_GROUP_NAMES, LAMBDER_RESERVED_ACTION_NAMES } from "./shared/wire/LambderApiNames.js";
+export type { LambderContractGroupsOf, LambderContractNamesInGroup, LambderContractActionOf } from "./shared/wire/LambderApiGroupCalls.js";
 export { createIdempotencyKey, createIdempotencyKeyScope } from "./shared/wire/LambderIdempotencyKeyScope.js";
 export type { LambderIdempotencyKeyScope } from "./shared/wire/LambderIdempotencyKeyScope.js";
 export { LambderApiRefusal, isLambderApiRefusal, isLambderRefusalCode, refuse, refusalMessageOf, LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";

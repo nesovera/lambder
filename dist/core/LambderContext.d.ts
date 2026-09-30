@@ -25,7 +25,7 @@ export declare const isV2HttpEvent: (event: unknown) => event is APIGatewayProxy
  * clearCookie) that write onto whatever answer the request ends with.
  *
  * TRateLimitPolicies is the app's policies map on a handler registered with
- * addApi, addSessionApi, addRoute or addSessionRoute, so a policy name is
+ * defineApi, addRoute or addSessionRoute, so a policy name is
  * checked where it is charged; anywhere else (a hook, a guard) the names are
  * any string.
  */

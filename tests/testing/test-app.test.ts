@@ -70,26 +70,41 @@ const createApp = () => {
                 guardInput: z.object({ tenantId: z.string() }),
                 handler: (_ctx, input, _param: true) => ({ tenantId: input.tenantId }),
             }),
+            signedIn: lambderGuard({ session: true, handler: async () => {} }),
         },
-    })
-        .addApi('echo', { input: z.object({ text: z.string() }), output: z.object({ text: z.string(), ip: z.string(), host: z.string(), country: z.string().nullable() }) },
-            async (ctx) => ({ text: ctx.apiPayload.text, ip: ctx.ip, host: ctx.host, country: ctx.headers['x-country'] ?? null }))
-        // The handler closes over the instance, as an app's login does.
-        .addApi('login', { input: z.object({ user: z.string() }), output: z.object({ ok: z.boolean() }) },
-            async (ctx) => { await app.getSessionController(ctx).createSession(ctx.apiPayload.user, { userId: ctx.apiPayload.user, role: 'member' }); return { ok: true }; })
-        .addSessionApi('me', { input: z.object({}), output: z.object({ userId: z.string(), refreshed: z.boolean() }) },
-            async (ctx) => ({ userId: ctx.session.data.userId, refreshed: ctx.session.data.refreshed === true }))
-        .addSessionApi('admin.only', { input: z.object({}), output: z.object({ ok: z.boolean() }), guards: { role: 'admin' } },
-            async (_ctx) => ({ ok: true }))
-        .addApi('tenant.name', { input: z.object({}), output: z.object({ tenantId: z.string() }), guards: { tenant: true } },
-            async (ctx) => ({ tenantId: ctx.guardData.tenant.tenantId }))
-        .addApi('limited', { input: z.object({}), output: z.object({ ok: z.boolean() }), rateLimit: 'oncePerMinute' },
-            async (_ctx) => ({ ok: true }))
-        .addApi('order.create', { input: z.object({ sku: z.string() }), output: z.object({ orderNumber: z.number() }), idempotency: true },
-            async (_ctx) => { ordersCreated += 1; return { orderNumber: ordersCreated }; })
-        .addApi('crash', { input: z.object({}), output: z.any() }, async () => { throw new Error('boom'); })
-        .addApi('slow.ok', { input: z.object({}), output: z.object({ ok: z.boolean() }) },
-            async (_ctx) => { await new Promise((resolve) => setTimeout(resolve, 20)); return { ok: true }; })
+    });
+    return app.registerApiGroups(
+        app.defineApiGroup('test', {
+            echo: app.defineApi({ input: z.object({ text: z.string() }), output: z.object({ text: z.string(), ip: z.string(), host: z.string(), country: z.string().nullable() }) },
+                async (ctx) => ({ text: ctx.apiPayload.text, ip: ctx.ip, host: ctx.host, country: ctx.headers['x-country'] ?? null })),
+            limited: app.defineApi({ input: z.object({}), output: z.object({ ok: z.boolean() }), rateLimit: 'oncePerMinute' },
+                async (_ctx) => ({ ok: true })),
+            crash: app.defineApi({ input: z.object({}), output: z.any() }, async () => { throw new Error('boom'); }),
+        }),
+        app.defineApiGroup('account', {
+            // The handler closes over the instance, as an app's login does.
+            login: app.defineApi({ input: z.object({ user: z.string() }), output: z.object({ ok: z.boolean() }) },
+                async (ctx) => { await app.getSessionController(ctx).createSession(ctx.apiPayload.user, { userId: ctx.apiPayload.user, role: 'member' }); return { ok: true }; }),
+            me: app.defineApi({ input: z.object({}), output: z.object({ userId: z.string(), refreshed: z.boolean() }), guards: 'signedIn' },
+                async (ctx) => ({ userId: ctx.session.data.userId, refreshed: ctx.session.data.refreshed === true })),
+        }),
+        app.defineApiGroup('admin', {
+            only: app.defineApi({ input: z.object({}), output: z.object({ ok: z.boolean() }), guards: { role: 'admin' } },
+                async (_ctx) => ({ ok: true })),
+        }),
+        app.defineApiGroup('tenant', {
+            current: app.defineApi({ input: z.object({}), output: z.object({ tenantId: z.string() }), guards: { tenant: true } },
+                async (ctx) => ({ tenantId: ctx.guardData.tenant.tenantId })),
+        }),
+        app.defineApiGroup('order', {
+            create: app.defineApi({ input: z.object({ sku: z.string() }), output: z.object({ orderNumber: z.number() }), idempotency: true },
+                async (_ctx) => { ordersCreated += 1; return { orderNumber: ordersCreated }; }),
+        }),
+        app.defineApiGroup('slow', {
+            ok: app.defineApi({ input: z.object({}), output: z.object({ ok: z.boolean() }) },
+                async (_ctx) => { await new Promise((resolve) => setTimeout(resolve, 20)); return { ok: true }; }),
+        }),
+    )
         .addRoute('/broken', () => { throw new Error('the page broke'); })
         .addRoute('/hello/:name', (ctx, res) => res.html(`<p>Hello ${ctx.pathParams.name}, q=${ctx.get.q ?? ''}, country=${ctx.headers['x-country'] ?? ''}</p>`))
         .addRoute('/old', (_ctx, res) => res.redirect('/hello/moved'))
@@ -102,7 +117,6 @@ const createApp = () => {
             return { ran: true, functionName: tools.lambdaContext.functionName };
         })
         .servePublicFiles();
-    return app;
 };
 
 const lambder = createApp();
@@ -115,17 +129,17 @@ describe('lambderTestApp: the stores under the instance', () => {
         const visitor = app.visitor();
         // Rate limits, idempotency and sessions each ran over a store that
         // throws on any use, with failOpen off.
-        expect(await visitor.api('limited', {})).toEqual({ ok: true });
+        expect(await visitor.api('test.limited', {})).toEqual({ ok: true });
         expect(await visitor.api('order.create', { sku: 'a' }, { idempotencyKey: 'key-0123456789abcdef' })).toEqual({ orderNumber: 1 });
-        expect(await visitor.api('login', { user: 'ada' })).toEqual({ ok: true });
-        expect(await visitor.api('me', {})).toEqual({ userId: 'ada', refreshed: false });
+        expect(await visitor.api('account.login', { user: 'ada' })).toEqual({ ok: true });
+        expect(await visitor.api('account.me', {})).toEqual({ userId: 'ada', refreshed: false });
     });
 
     it('is what stands between a test and those stores: the same instance, never put under test, reaches them', async () => {
         // The control for the test above. Without it, a production store that
         // silently did nothing would let that one pass and prove nothing.
         const untested = new LambderCaller<typeof lambder.ApiContract>({ apiPath: '/secure', isCorsEnabled: false, transport: lambderHandlerTransport(createApp().getHandler()) });
-        const crashed = await untested.apiOutcome('limited', {});
+        const crashed = await untested.apiOutcome('test.limited', {});
         assertApiFailure(crashed, 'server', { status: 500 });
     });
 
@@ -138,11 +152,14 @@ describe('lambderTestApp: the stores under the instance', () => {
     });
 
     it('reports null for a subsystem the app never configured, and refuses signIn without sessions', async () => {
-        const bare = lambderTestApp(initLambder().create({}).addApi('ping', { input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (_ctx) => ({ ok: true })));
+        const bareApp = initLambder().create({});
+        const bare = lambderTestApp(bareApp.registerApiGroups(bareApp.defineApiGroup('test', {
+            ping: bareApp.defineApi({ input: z.object({}), output: z.object({ ok: z.boolean() }) }, async (_ctx) => ({ ok: true })),
+        })));
         expect(bare.sessionStore).toBeNull();
         expect(bare.rateLimiter).toBeNull();
         expect(bare.idempotencyStore).toBeNull();
-        expect(await bare.visitor().api('ping', {})).toEqual({ ok: true });
+        expect(await bare.visitor().api('test.ping', {})).toEqual({ ok: true });
         await expect(bare.signIn('ada', {})).rejects.toThrow(/needs an app with sessions/);
     });
 
@@ -162,7 +179,7 @@ describe('lambderTestApp: the stores under the instance', () => {
 describe('lambderTestApp: visitors', () => {
     it('signs a visitor in without a login endpoint, under the app\'s own session model', async () => {
         const admin = await app.signIn('ada', { userId: 'ada', role: 'admin' });
-        expect(await admin.api('me', {})).toEqual({ userId: 'ada', refreshed: false });
+        expect(await admin.api('account.me', {})).toEqual({ userId: 'ada', refreshed: false });
         expect(await admin.api('admin.only', {})).toEqual({ ok: true });
     });
 
@@ -171,10 +188,10 @@ describe('lambderTestApp: visitors', () => {
         const member = await app.signIn('bob', { userId: 'bob', role: 'member' });
         const guest = app.visitor();
 
-        expect(await admin.api('me', {})).toMatchObject({ userId: 'ada' });
-        expect(await member.api('me', {})).toMatchObject({ userId: 'bob' });
+        expect(await admin.api('account.me', {})).toMatchObject({ userId: 'ada' });
+        expect(await member.api('account.me', {})).toMatchObject({ userId: 'bob' });
         assertApiFailure(await member.apiOutcome('admin.only', {}), 'notAuthorized', { code: 'app/wrong-role' });
-        assertApiFailure(await guest.apiOutcome('me', {}), 'sessionExpired');
+        assertApiFailure(await guest.apiOutcome('account.me', {}), 'sessionExpired');
     });
 
     it('posts the CSRF token of its own jar, not one a page\'s document.cookie holds', async () => {
@@ -182,7 +199,7 @@ describe('lambderTestApp: visitors', () => {
         // A test with a DOM: the caller would read this and post it over the jar's.
         (globalThis as { document?: unknown }).document = { cookie: 'LMDRSESSIONCSTK=a-token-of-the-page' };
         try {
-            assertApiSuccess(await ada.apiOutcome('me', {}));
+            assertApiSuccess(await ada.apiOutcome('account.me', {}));
         } finally {
             delete (globalThis as { document?: unknown }).document;
         }
@@ -193,31 +210,31 @@ describe('lambderTestApp: visitors', () => {
         const second = app.visitor();
         expect(first.clientIp).not.toBe(second.clientIp);
 
-        expect(await first.api('limited', {})).toEqual({ ok: true });
-        assertApiFailure(await first.apiOutcome('limited', {}), 'refusal', { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
-        expect(await second.api('limited', {})).toEqual({ ok: true });
+        expect(await first.api('test.limited', {})).toEqual({ ok: true });
+        assertApiFailure(await first.apiOutcome('test.limited', {}), 'refusal', { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
+        expect(await second.api('test.limited', {})).toEqual({ ok: true });
 
         // The same address is the same counter, which is how a shared one is tested.
         const sharing = app.visitor({ clientIp: second.clientIp });
-        assertApiFailure(await sharing.apiOutcome('limited', {}), 'refusal', { code: LAMBDER_REFUSAL_CODES.rateLimited });
+        assertApiFailure(await sharing.apiOutcome('test.limited', {}), 'refusal', { code: LAMBDER_REFUSAL_CODES.rateLimited });
     });
 
     it('shows the handler the visitor\'s host, address and headers', async () => {
         const visitor = app.visitor({ host: 'shop.test', clientIp: '198.51.100.9', headers: { 'x-country': 'US' } });
-        expect(await visitor.api('echo', { text: 'hi' })).toEqual({ text: 'hi', ip: '198.51.100.9', host: 'shop.test', country: 'US' });
+        expect(await visitor.api('test.echo', { text: 'hi' })).toEqual({ text: 'hi', ip: '198.51.100.9', host: 'shop.test', country: 'US' });
         // A call's own header wins over the visitor's.
-        expect(await visitor.api('echo', { text: 'hi' }, { headers: { 'x-country': 'CA' } })).toMatchObject({ country: 'CA' });
+        expect(await visitor.api('test.echo', { text: 'hi' }, { headers: { 'x-country': 'CA' } })).toMatchObject({ country: 'CA' });
     });
 
     it('supplies guard inputs from a provider, as LambderCaller does', async () => {
         const visitor = app.visitor<'tenant'>({ guardInputsProvider: () => ({ tenant: { tenantId: 'acme' } }) });
-        expect(await visitor.api('tenant.name', {})).toEqual({ tenantId: 'acme' });
+        expect(await visitor.api('tenant.current', {})).toEqual({ tenantId: 'acme' });
     });
 
     it('hands out its caller, for code under test that takes one', async () => {
         const visitor = await app.signIn('ada', { userId: 'ada', role: 'member' });
         expect(visitor.caller).toBeInstanceOf(LambderCaller);
-        const readUserId = async (caller: typeof visitor.caller) => (await caller.api('me', {}))?.userId;
+        const readUserId = async (caller: typeof visitor.caller) => (await caller.api('account.me', {}))?.userId;
         expect(await readUserId(visitor.caller)).toBe('ada');
     });
 
@@ -234,14 +251,14 @@ describe('lambderTestApp: sessions from outside a request', () => {
     it('signOut ends the subject\'s sessions, and the visitor finds out the way a browser does', async () => {
         const visitor = await app.signIn('ada', { userId: 'ada', role: 'member' });
         await app.signOut('ada');
-        assertApiFailure(await visitor.apiOutcome('me', {}), 'sessionExpired');
+        assertApiFailure(await visitor.apiOutcome('account.me', {}), 'sessionExpired');
     });
 
     it('expireSessionData makes the next read renew through the app\'s dataRefresh', async () => {
         const visitor = await app.signIn('ada', { userId: 'ada', role: 'member' });
-        expect(await visitor.api('me', {})).toEqual({ userId: 'ada', refreshed: false });
+        expect(await visitor.api('account.me', {})).toEqual({ userId: 'ada', refreshed: false });
         await app.expireSessionData('ada');
-        expect(await visitor.api('me', {})).toEqual({ userId: 'ada', refreshed: true });
+        expect(await visitor.api('account.me', {})).toEqual({ userId: 'ada', refreshed: true });
     });
 
     it('lets a faked Date move the framework, the stores and the app together', async () => {
@@ -249,14 +266,14 @@ describe('lambderTestApp: sessions from outside a request', () => {
         try {
             const visitor = await app.signIn('ada', { userId: 'ada', role: 'member' }, { ttlSeconds: 60 });
             const limited = app.visitor();
-            expect(await limited.api('limited', {})).toEqual({ ok: true });
-            assertApiFailure(await limited.apiOutcome('limited', {}), 'refusal');
+            expect(await limited.api('test.limited', {})).toEqual({ ok: true });
+            assertApiFailure(await limited.apiOutcome('test.limited', {}), 'refusal');
 
             vi.setSystemTime(Date.now() + 61_000);
 
             // The rate-limit window passed, and so did the session's TTL.
-            expect(await limited.api('limited', {})).toEqual({ ok: true });
-            assertApiFailure(await visitor.apiOutcome('me', {}), 'sessionExpired');
+            expect(await limited.api('test.limited', {})).toEqual({ ok: true });
+            assertApiFailure(await visitor.apiOutcome('account.me', {}), 'sessionExpired');
         } finally {
             vi.useRealTimers();
         }
@@ -265,7 +282,7 @@ describe('lambderTestApp: sessions from outside a request', () => {
 
 describe('lambderTestApp: what the app threw', () => {
     it('hands a crashed call the error the app threw, as the cause of the failure any client would get', async () => {
-        const crashed = await app.visitor().apiOutcome('crash', {});
+        const crashed = await app.visitor().apiOutcome('test.crash', {});
 
         // The answer is the app's own, untouched: a 500 that says nothing.
         assertApiFailure(crashed, 'server', { status: 500 });
@@ -278,7 +295,7 @@ describe('lambderTestApp: what the app threw', () => {
     });
 
     it('names the thrown error in a failed assertion, and chains it for the runner to print', async () => {
-        const crashed = await app.visitor().apiOutcome('crash', {});
+        const crashed = await app.visitor().apiOutcome('test.crash', {});
         let thrown: Error | undefined;
         try { assertApiSuccess(crashed); } catch(err){ thrown = err as Error; }
 
@@ -291,7 +308,7 @@ describe('lambderTestApp: what the app threw', () => {
         const visitor = app.visitor();
         const [fine, crashed, alsoFine] = await Promise.all([
             visitor.apiOutcome('slow.ok', {}),
-            visitor.apiOutcome('crash', {}),
+            visitor.apiOutcome('test.crash', {}),
             visitor.apiOutcome('slow.ok', {}),
         ]);
 
@@ -309,21 +326,24 @@ describe('lambderTestApp: what the app threw', () => {
     });
 
     it('leaves what the app\'s own error handler answers alone, and still says what was thrown', async () => {
-        const handled = lambderTestApp(initLambder().create({})
-            .addApi('crash', { input: z.object({}), output: z.any() }, async () => { throw new Error('boom'); })
+        const handledApp = initLambder().create({});
+        const handled = lambderTestApp(handledApp
+            .registerApiGroups(handledApp.defineApiGroup('test', {
+                crash: handledApp.defineApi({ input: z.object({}), output: z.any() }, async () => { throw new Error('boom'); }),
+            }))
             .setGlobalErrorHandler((_err, _ctx, res) => res.apiRefusal({ refusal: 'Something went wrong on our side.' })));
 
-        const outcome = await handled.visitor().apiOutcome('crash', {});
+        const outcome = await handled.visitor().apiOutcome('test.crash', {});
         assertApiFailure(outcome, 'refusal');
         expect(outcome.refusal).toEqual({ type: 'error', content: 'Something went wrong on our side.' });
         expect(handled.crashes.map((error) => error.message)).toEqual(['boom']);
     });
 
     it('counts a refusal as an answer rather than a crash, and forgets crashes on reset', async () => {
-        assertApiFailure(await app.visitor().apiOutcome('me', {}), 'sessionExpired');
+        assertApiFailure(await app.visitor().apiOutcome('account.me', {}), 'sessionExpired');
         expect(app.crashes).toEqual([]);
 
-        await app.visitor().apiOutcome('crash', {});
+        await app.visitor().apiOutcome('test.crash', {});
         app.reset();
         expect(app.crashes).toEqual([]);
     });
@@ -334,7 +354,7 @@ describe('lambderTestApp: reset', () => {
 
     it('rewinds sessions, counters, replay records and every visitor\'s cookies', async () => {
         const visitor = await app.signIn('ada', { userId: 'ada', role: 'member' });
-        expect(await visitor.api('limited', {})).toEqual({ ok: true });
+        expect(await visitor.api('test.limited', {})).toEqual({ ok: true });
         expect(await visitor.api('order.create', { sku: 'a' }, { idempotencyKey: 'key-0123456789abcdef' })).toEqual({ orderNumber: 1 });
         expect(visitor.jar.size).toBe(2);
 
@@ -342,17 +362,17 @@ describe('lambderTestApp: reset', () => {
 
         expect(visitor.jar.size).toBe(0);
         expect((app.sessionStore as LambderMemorySessionStore<SessionData>).size).toBe(0);
-        expect(await visitor.api('limited', {})).toEqual({ ok: true });
+        expect(await visitor.api('test.limited', {})).toEqual({ ok: true });
         // A new run rather than a replay: the record went with the reset.
         expect(await visitor.api('order.create', { sku: 'a' }, { idempotencyKey: 'key-0123456789abcdef' })).toEqual({ orderNumber: 2 });
-        assertApiFailure(await visitor.apiOutcome('me', {}), 'sessionExpired');
+        assertApiFailure(await visitor.apiOutcome('account.me', {}), 'sessionExpired');
     });
 
     it('lets a visitor made before a reset sign in again after it', async () => {
         const visitor = await app.signIn('ada', { userId: 'ada', role: 'member' });
         app.reset();
         await visitor.signIn('bob', { userId: 'bob', role: 'member' });
-        expect(await visitor.api('me', {})).toMatchObject({ userId: 'bob' });
+        expect(await visitor.api('account.me', {})).toMatchObject({ userId: 'bob' });
     });
 });
 
@@ -393,7 +413,7 @@ describe('LambderTestVisitor.request: everything that is not an API call', () =>
 
     it('shares one jar between api calls and requests', async () => {
         const visitor = app.visitor();
-        await visitor.api('login', { user: 'ada' });
+        await visitor.api('account.login', { user: 'ada' });
         expect((await visitor.request('GET', '/account')).text()).toBe('account of ada');
     });
 
@@ -424,15 +444,15 @@ describe.each(['v2', 'v1'] as const)('lambderTestApp on %s events', (eventFormat
 
     it('carries a session through api calls and session routes alike', async () => {
         const visitor = await formatted.signIn('ada', { userId: 'ada', role: 'admin' });
-        expect(await visitor.api('me', {})).toMatchObject({ userId: 'ada' });
+        expect(await visitor.api('account.me', {})).toMatchObject({ userId: 'ada' });
         expect(await visitor.api('admin.only', {})).toEqual({ ok: true });
         expect((await visitor.request('GET', '/account')).text()).toBe('account of ada');
-        assertApiFailure(await formatted.visitor().apiOutcome('me', {}), 'sessionExpired');
+        assertApiFailure(await formatted.visitor().apiOutcome('account.me', {}), 'sessionExpired');
     });
 
     it('keeps the cookies an answer sets, from a login api and from a route', async () => {
         const visitor = formatted.visitor();
-        await visitor.api('login', { user: 'bob' });
+        await visitor.api('account.login', { user: 'bob' });
         expect(visitor.jar.size).toBe(2);
         expect((await visitor.request('GET', '/account')).text()).toBe('account of bob');
 
@@ -444,15 +464,15 @@ describe.each(['v2', 'v1'] as const)('lambderTestApp on %s events', (eventFormat
         const visitor = formatted.visitor({ host: 'shop.test', clientIp: '198.51.100.9', headers: { 'x-country': 'US' } });
         expect((await visitor.request('GET', '/hello/ada?q=one')).text()).toBe('<p>Hello ada, q=one, country=US</p>');
         expect((await visitor.request('POST', '/form', { body: JSON.stringify({ name: 'Ada' }) })).json()).toEqual({ got: { name: 'Ada' } });
-        expect(await visitor.api('echo', { text: 'hi' })).toEqual({ text: 'hi', ip: '198.51.100.9', host: 'shop.test', country: 'US' });
+        expect(await visitor.api('test.echo', { text: 'hi' })).toEqual({ text: 'hi', ip: '198.51.100.9', host: 'shop.test', country: 'US' });
     });
 
     it('decodes what comes back: a redirect, a compressed file, a refusal with its status', async () => {
         const visitor = formatted.visitor();
         expect((await visitor.request('GET', '/old')).headers.location).toBe('/hello/moved');
         expect((await visitor.request('GET', '/main.css')).headers['content-type']).toContain('text/css');
-        await visitor.api('limited', {});
-        assertApiFailure(await visitor.apiOutcome('limited', {}), 'refusal', { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
+        await visitor.api('test.limited', {});
+        assertApiFailure(await visitor.apiOutcome('test.limited', {}), 'refusal', { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
     });
 
     it('decodes the path once whatever host the visitor browses, a Function URL\'s included', async () => {
@@ -494,16 +514,19 @@ describe('lambderTestApp: hosts, cookie domains and cookie names', () => {
                 tokenCookieKey: 'APPSESSION',
                 csrfCookieKey: 'APPCSRF',
             },
-        }).addSessionApi('me', { input: z.object({}), output: z.object({ userId: z.string() }) },
-            async (ctx) => ({ userId: ctx.session.data.userId }));
-        return scoped;
+            guards: { signedIn: lambderGuard({ session: true, handler: async () => {} }) },
+        });
+        return scoped.registerApiGroups(scoped.defineApiGroup('account', {
+            me: scoped.defineApi({ input: z.object({}), output: z.object({ userId: z.string() }), guards: 'signedIn' },
+                async (ctx) => ({ userId: ctx.session.data.userId })),
+        }));
     };
 
     it('signs in on a host the app\'s cookie domain covers, under the app\'s own cookie names', async () => {
         const scoped = lambderTestApp(createScopedApp(), { host: 'app.example.com' });
         const visitor = await scoped.signIn('ada', { userId: 'ada', role: 'member' });
         expect(visitor.jar.list().map((cookie) => cookie.name).sort()).toEqual(['APPCSRF', 'APPSESSION']);
-        expect(await visitor.api('me', {})).toEqual({ userId: 'ada' });
+        expect(await visitor.api('account.me', {})).toEqual({ userId: 'ada' });
         // One session across the app's subdomains, which is what the domain is for.
         expect(visitor.jar.cookiePairs({ host: 'admin.example.com' }).length).toBe(2);
     });
@@ -513,7 +536,7 @@ describe('lambderTestApp: hosts, cookie domains and cookie names', () => {
         await expect(scoped.signIn('ada', { userId: 'ada', role: 'member' })).rejects.toThrow(/did not stick for host "localhost"/);
         // A visitor may name the host itself.
         const visitor = await scoped.signIn('ada', { userId: 'ada', role: 'member' }, { host: 'app.example.com' });
-        expect(await visitor.api('me', {})).toEqual({ userId: 'ada' });
+        expect(await visitor.api('account.me', {})).toEqual({ userId: 'ada' });
     });
 });
 
@@ -539,19 +562,19 @@ describe('lambderTestApp: the files option', () => {
 describe('assertApiSuccess / assertApiFailure', () => {
     it('narrow the outcome, so what it carries reads on the next line', async () => {
         const visitor = app.visitor();
-        const echoed = await visitor.apiOutcome('echo', { text: 'hi' });
+        const echoed = await visitor.apiOutcome('test.echo', { text: 'hi' });
         assertApiSuccess(echoed);
         expect(echoed.payload?.text).toBe('hi');
 
-        const invalid = await visitor.apiOutcome('echo', { text: 42 as unknown as string });
+        const invalid = await visitor.apiOutcome('test.echo', { text: 42 as unknown as string });
         assertApiFailure(invalid, 'validation');
         expect(invalid.zodError.issues[0]?.path).toEqual(['text']);
 
-        const crashed = await visitor.apiOutcome('crash', {});
+        const crashed = await visitor.apiOutcome('test.crash', {});
         assertApiFailure(crashed, 'server', { status: 500 });
         expect(crashed.error).toBeInstanceOf(Error);
 
-        const refused = await visitor.apiOutcome('me', {});
+        const refused = await visitor.apiOutcome('account.me', {});
         assertApiFailure(refused);
         expect(refused.reason).toBe('sessionExpired');
     });
@@ -560,7 +583,7 @@ describe('assertApiSuccess / assertApiFailure', () => {
         const visitor = app.visitor();
         const member = await app.signIn('bob', { userId: 'bob', role: 'member' });
 
-        const success = await visitor.apiOutcome('echo', { text: 'hi' });
+        const success = await visitor.apiOutcome('test.echo', { text: 'hi' });
         expect(() => assertApiFailure(success, 'notAuthorized'))
             .toThrow('Expected the call to fail with reason "notAuthorized", but it was a success carrying {"text":"hi"');
 
@@ -575,7 +598,7 @@ describe('assertApiSuccess / assertApiFailure', () => {
         expect(() => assertApiRefusal(refused, 'app/other')).toThrow(/code "app\/other"/);
         expect(() => assertApiFailure(refused, 'notAuthorized', { status: 403 })).toThrow(/status 403/);
 
-        const crashed = await visitor.apiOutcome('crash', {});
+        const crashed = await visitor.apiOutcome('test.crash', {});
         expect(() => assertApiSuccess(crashed)).toThrow(/reason "server", status 500/);
     });
 });

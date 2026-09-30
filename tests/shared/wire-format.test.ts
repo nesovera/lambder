@@ -19,7 +19,9 @@ import { z } from 'zod';
 import Lambder, { initLambder } from '../../src/core/Lambder.js';
 import { LambderMemorySessionStore } from '../../src/stores/LambderMemorySessionStore.js';
 import { LambderWebCrypto } from '../../src/session/LambderSessionCrypto.js';
+import { lambderGuard } from '../../src/core/LambderPolicyBuilders.js';
 import { buildTransportEnvelope } from '../../src/shared/transport/LambderApiTransport.js';
+import { apiCallPath } from '../../src/shared/wire/LambderApiNames.js';
 import { DEFAULT_SESSION_TOKEN_COOKIE_KEY, DEFAULT_SESSION_CSRF_COOKIE_KEY } from '../../src/shared/wire/LambderSessionCookieNames.js';
 import { refuse } from '../../src/shared/wire/LambderApiRefusal.js';
 import { decodeBody, createApiEvent, createMockContext, testPublicFiles } from '../helpers.js';
@@ -38,9 +40,11 @@ describe('The request envelope', () => {
         });
 
         expect(JSON.stringify(envelope)).toBe(
-            '{"apiName":"user.get","version":"3","token":"csrf-token","siteHost":"app.example.com"'
+            '{"version":"3","token":"csrf-token","siteHost":"app.example.com"'
             + ',"payload":{"userId":"1"},"guardInputs":{"org":{"organizationId":"o-1"}},"idempotencyKey":"k-abcdefabcdefabcdef"}',
         );
+        // The endpoint is the path the envelope is posted to, not a field of it.
+        expect(apiCallPath('/api', 'user.get')).toBe('/api/user/get');
     });
 
     it('carries a compressed payload under its own field, in place of payload', () => {
@@ -50,15 +54,15 @@ describe('The request envelope', () => {
         });
 
         expect(JSON.stringify(envelope)).toBe(
-            '{"apiName":"thing.do","token":"","siteHost":"localhost","payloadGz":"H4sIA","payloadBytes":42}',
+            '{"token":"","siteHost":"localhost","payloadGz":"H4sIA","payloadBytes":42}',
         );
         expect(envelope).not.toHaveProperty('payload');
     });
 
     it('leaves out what the call did not carry, rather than sending nulls', () => {
-        const envelope = buildTransportEnvelope({ apiPath: '/api', apiName: 'ping', token: '', siteHost: '' });
+        const envelope = buildTransportEnvelope({ apiPath: '/api', apiName: 'test.ping', token: '', siteHost: '' });
 
-        expect(Object.keys(envelope)).toEqual(['apiName', 'version', 'token', 'siteHost', 'payload']);
+        expect(Object.keys(envelope)).toEqual(['version', 'token', 'siteHost', 'payload']);
         expect(envelope.version).toBeUndefined();
     });
 });
@@ -72,46 +76,54 @@ describe('The response envelope', () => {
         // versionExpired case below exercises.
         apiSignatures: {},
         session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
+        guards: { signedIn: lambderGuard({ session: true, handler: async () => {} }) },
     });
     const schema = { input: z.object({ value: z.string() }), output: z.any() };
     const bodyOf = async (lambder: Lambder<any, any>, apiName: string, body: Record<string, unknown> = { apiName, payload: { value: 'x' }, version: '3' }) =>
         decodeBody(await lambder.render(createApiEvent(body), createMockContext()));
 
     it('answers a success as apiVersion and payload, and nothing else', async () => {
-        const lambder = app().addApi('ok', schema, async (ctx) => ({ id: 1 }));
+        const created = app();
+        const lambder = created.registerApiGroups(created.defineApiGroup('test', { ok: created.defineApi(schema, async () => ({ id: 1 })) }));
 
-        expect(await bodyOf(lambder, 'ok')).toBe('{"apiVersion":"3","payload":{"id":1}}');
+        expect(await bodyOf(lambder, 'test.ok')).toBe('{"apiVersion":"3","payload":{"id":1}}');
     });
 
     it('carries the logList channel when the call wrote to it', async () => {
-        const lambder = app().addApi('logs', schema, async (ctx) => { ctx.logList.push('note'); return {}; });
+        const created = app();
+        const lambder = created.registerApiGroups(created.defineApiGroup('test', { logs: created.defineApi(schema, async (ctx) => { ctx.logList.push('note'); return {}; }) }));
 
-        expect(await bodyOf(lambder, 'logs')).toBe('{"apiVersion":"3","payload":{},"logList":["note"]}');
+        expect(await bodyOf(lambder, 'test.logs')).toBe('{"apiVersion":"3","payload":{},"logList":["note"]}');
     });
 
     it('answers a refusal as a null payload beside the refusal shape', async () => {
-        const lambder = app().addApi('no', { ...schema, refusals: 'app/no' }, async () => refuse('Not today.', { code: 'app/no', title: 'Refused' }));
+        const created = app();
+        const lambder = created.registerApiGroups(created.defineApiGroup('test', {
+            no: created.defineApi({ ...schema, refusals: 'app/no' }, async () => refuse('Not today.', { code: 'app/no', title: 'Refused' })),
+        }));
 
-        expect(await bodyOf(lambder, 'no')).toBe(
+        expect(await bodyOf(lambder, 'test.no')).toBe(
             '{"apiVersion":"3","payload":null,"refusal":{"type":"warning","code":"app/no","title":"Refused","content":"Not today."}}',
         );
     });
 
     it('answers the framework refusals with their own flags and codes', async () => {
-        const lambder = app().addSessionApi('secret', schema, async (ctx) => null);
+        const created = app();
+        const lambder = created.registerApiGroups(created.defineApiGroup('test', { secret: created.defineApi({ ...schema, guards: 'signedIn' }, async () => null) }));
 
-        expect(await bodyOf(lambder, 'secret')).toBe('{"apiVersion":"3","payload":null,"sessionExpired":true}');
-        expect(await bodyOf(lambder, 'nope')).toBe(
+        expect(await bodyOf(lambder, 'test.secret')).toBe('{"apiVersion":"3","payload":null,"sessionExpired":true}');
+        expect(await bodyOf(lambder, 'test.nope')).toBe(
             '{"apiVersion":"3","payload":null,"refusal":{"type":"warning","code":"lambder/api-not-found","content":"API not found."}}',
         );
-        expect(await bodyOf(lambder, 'secret', { apiName: 'secret', payload: { value: 'x' }, version: '3', signature: 'an-older-shape' }))
+        expect(await bodyOf(lambder, 'test.secret', { apiName: 'test.secret', payload: { value: 'x' }, version: '3', signature: 'an-older-shape' }))
             .toBe('{"apiVersion":"3","payload":null,"versionExpired":true}');
     });
 
     it('answers a crash as a 500 envelope that says nothing about the crash', async () => {
-        const lambder = app().addApi('boom', schema, async () => { throw new Error('the real reason'); });
+        const created = app();
+        const lambder = created.registerApiGroups(created.defineApiGroup('test', { boom: created.defineApi(schema, async () => { throw new Error('the real reason'); }) }));
 
-        const body = await bodyOf(lambder, 'boom');
+        const body = await bodyOf(lambder, 'test.boom');
         expect(body).toBe('{"apiVersion":"3","payload":null,"refusal":{"type":"error","content":"Internal server error."}}');
         expect(body).not.toContain('the real reason');
     });
@@ -146,16 +158,19 @@ describe('The session hash construction', () => {
 
     it('keeps the session cookie as the partition hash and the secret, joined by a colon', async () => {
         const store = new LambderMemorySessionStore();
-        const lambder = new Lambder({
+        const created = new Lambder({
             files: testPublicFiles(),
             apiPath: '/api',
             session: { store, sessionSalt: 'a-salt-value' },
-        }).addApi('login', { input: z.any(), output: z.any() }, async (ctx) => {
-            await lambder.getSessionController(ctx).createSession('user-123', { role: 'user' });
-            return { ok: true };
         });
+        const lambder = created.registerApiGroups(created.defineApiGroup('account', {
+            login: created.defineApi({ input: z.any(), output: z.any() }, async (ctx) => {
+                await created.getSessionController(ctx).createSession('user-123', { role: 'user' });
+                return { ok: true };
+            }),
+        }));
 
-        const result = await lambder.render(createApiEvent({ apiName: 'login', payload: {} }), createMockContext());
+        const result = await lambder.render(createApiEvent({ apiName: 'account.login', payload: {} }), createMockContext());
 
         const [tokenCookie, csrfCookie] = result.multiValueHeaders?.['Set-Cookie'] ?? [];
         // The NAMES are as much of the contract as the values: a browser holding

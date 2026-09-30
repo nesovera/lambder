@@ -101,7 +101,7 @@ export class LambderApiGuardsEngine {
                 throw new Error(`Lambder: API "${apiName}" references unknown guard "${name}". Declare it in the guards option at creation.`);
             }
             if (guardDef.session && mode !== "session") {
-                throw new Error(`Lambder: API "${apiName}" uses guard "${name}" (session: true), which requires addSessionApi.`);
+                throw new Error(`Lambder: API "${apiName}" uses guard "${name}" (session: true) but is registered as public. An endpoint declaring a session guard is a session endpoint.`);
             }
         }
     }

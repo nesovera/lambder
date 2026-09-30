@@ -19,7 +19,8 @@ import { writeFileAtomically } from "./writeFileAtomically.js";
 
 /** What the generators read the options from: a Lambder instance, or anything else that reports them the same way. */
 export type LambderApiOptionsSource = {
-    apiOptionEntries(): LambderApiOptionEntries;
+    /** Asynchronous, since a Lambder instance loads its lazy groups before it can report every endpoint. */
+    apiOptionEntries(): Promise<LambderApiOptionEntries> | LambderApiOptionEntries;
 };
 
 /** Which names of one table moved: entries that changed, entries the file did not have, entries the file had and the instance no longer reports. */
@@ -43,7 +44,7 @@ export const loadApiOptionEntries = async (location: { module: LambderModuleLoca
     if(typeof source?.apiOptionEntries !== "function"){
         throw new Error(`${moduleUrl} has no export "${exportName}" that reports API options: name the export holding the instance in exportName`);
     }
-    return source.apiOptionEntries();
+    return await source.apiOptionEntries();
 };
 
 /** One table of a generated file, read back as data, or null for a file that does not hold it as written. */

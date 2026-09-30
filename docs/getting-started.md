@@ -20,8 +20,7 @@ and uses no store needs neither. The
 
 ## 1. Create the instance
 
-The whole configuration is given at creation, in one declaration; only
-registration (routes, apis, hooks, `use()`) chains afterwards. `initLambder`
+The whole configuration is given at creation, in one declaration. `initLambder`
 is curried so the session data type is fixed first and everything else (policy
 names, guard metadata) is INFERRED from the options. TypeScript type arguments
 are all-or-nothing per call, so a plain `new Lambder<SessionData>({...})` would
@@ -29,14 +28,13 @@ silently widen the inferred policy types, which is why the curried creator is
 the canonical entry.
 
 ```typescript
-// handler.ts
-import { initLambder, LambderLocalFileSource, LambderDdbSessionStore, lambderGuard, refuse } from "lambder";
-import { z } from "zod";
+// app.ts
+import { initLambder, LambderLocalFileSource, LambderDdbSessionStore, lambderGuard } from "lambder";
 import * as path from "path";
 
-interface SessionData { userId: string; username: string; }
+export interface SessionData { userId: string; username: string; }
 
-const lambder = initLambder<SessionData>().create({
+export const lambderApp = initLambder<SessionData>().create({
     apiPath: "/api",
     files: new LambderLocalFileSource({ root: path.resolve("./public") }),
     session: {
@@ -45,17 +43,18 @@ const lambder = initLambder<SessionData>().create({
     },
     // true allows any origin; or { origins: ["https://app.example.com"], credentials: true }
     cors: true,
-    // Who may call what. Neither flag is on by default; both are worth
-    // turning on from the first endpoint, so an API's openness is always a
-    // written decision instead of an omission nobody notices later.
+    // Who may call what. requireApiGuards is off by default; it is worth
+    // turning on from the first endpoint, so an endpoint's openness is always
+    // a written decision instead of an omission nobody notices later.
     guards: {
-        sessionOnly: lambderGuard({ session: true, handler: () => {} }),
+        signedIn: lambderGuard({ session: true, handler: () => {} }),
         open: lambderGuard({ handler: (_ctx, _params, _reason: string) => {} }),
     },
-    requireSessionApiGuards: true,
-    requirePublicApiGuards: true,
-})
-// the declaration continues in step 2: registration chains onto create()
+    requireApiGuards: true,
+});
+
+// The instance's declaration builders, typed to it, for the files that declare endpoints.
+export const { defineApi, defineApiGroup, lazyApiGroup } = lambderApp;
 ```
 
 Sessions rest in a store of your choosing; `LambderDdbSessionStore` needs a
@@ -63,17 +62,17 @@ DynamoDB table, and [DynamoDB tables](./ddb-tables.md) has the Terraform,
 the TTL setting and the IAM policy. Drop the `session` option entirely if you
 do not need sessions yet.
 
-The two `require*ApiGuards` flags make `guards` a required field of every API
-you register, checked at compile time and at registration. They are off in the
-framework, because a no-op guard satisfies them and nothing should stand
-between a new app and its first endpoint, but they are on here: an app that
-declares them from the start never has to reconstruct later which of its
-endpoints are open and why. `sessionOnly` and `open` are the two no-op guards
-that record an opt-out, and `open` takes the reason as a parameter, so one
-grep lists every public door in the app. Drop both flags and the `guards` map
-if you would rather start without them. [APIs and
-refusals](./api-policies.md#requiresessionapiguards) covers real guards, the
-ones that authorize a caller rather than record a decision.
+`requireApiGuards` makes `guards` a required field of every endpoint, checked
+at compile time and at registration. It is off in the framework, because a
+no-op guard satisfies it and nothing should stand between a new app and its
+first endpoint, but it is on here: an app that declares it from the start
+never has to reconstruct later which of its endpoints are open and why.
+`signedIn` and `open` are the two no-op guards that record an opt-out, and
+`open` takes the reason as a parameter, so one grep lists every public door in
+the app. `signedIn` declares `session: true`, which is what makes an endpoint
+declaring it a session endpoint (see step 2). [API
+policies](./api-policies.md#requireapiguards) covers real guards, the ones
+that authorize a caller rather than record a decision.
 
 ## 2. Define APIs
 
@@ -83,22 +82,30 @@ is checked against the output schema, and the value is parsed through it
 before it is sent, so fields it does not declare are stripped. A handler that
 has to say no throws `refuse()` instead of returning.
 
-Every registration returns an instance carrying the contract so far, so the
-chain is not a matter of style: calling `lambder.addApi(...)` as its own
-statement discards the instance the contract accumulated onto and leaves
-`typeof lambder.ApiContract` empty.
+An endpoint is a value declared with `defineApi`, in a named group:
+`companies.getPage` below is the action `getPage` of the group `companies`,
+called at `/api/companies/getPage`.
 
 ```typescript
-// handler.ts, continuing the declaration from step 1
-    .addApi("getCompanyPage", {
+// companies.ts
+import { z } from "zod";
+import { refuse } from "lambder";
+import { defineApi, defineApiGroup } from "./app";
+
+export const companyApis = defineApiGroup("companies", {
+    getPage: defineApi({
         input: z.object({ companyName: z.string() }),
         output: z.object({ id: z.string(), name: z.string(), description: z.string() }),
         guards: { open: "public company pages" },
     }, async ({ apiPayload }) => {
         // apiPayload is typed { companyName: string } and already validated
         return await fetchCompany(apiPayload.companyName);
-    })
-    .addApi("loginUser", {
+    }),
+});
+
+// account.ts
+export const accountApis = defineApiGroup("account", {
+    login: defineApi({
         input: z.object({ email: z.email(), password: z.string() }),
         output: z.object({ username: z.string() }),
         guards: { open: "the password check here IS the control" },
@@ -110,25 +117,35 @@ statement discards the instance the contract accumulated onto and leaves
         // ctx.sessionController is this request's session controller, typed SessionData.
         await ctx.sessionController.createSession(user.id, { userId: user.id, username: user.name });
         return { username: user.name };
-    })
-    // Endpoints that require a session use addSessionApi; ctx.session is
-    // fetched, validated and typed for you.
-    .addSessionApi("getProfile", {
-        input: z.void(),
+    }),
+    // signedIn needs a session, so this is a session endpoint: ctx.session is
+    // fetched, validated and typed for you, and a call without one is
+    // answered sessionExpired.
+    profile: defineApi({
+        input: z.object({}),
         output: z.object({ userId: z.string(), username: z.string() }),
-        guards: "sessionOnly",
+        guards: "signedIn",
     }, async (ctx) => ({
         userId: ctx.session.data.userId,
         username: ctx.session.data.username,
-    }));
+    })),
+});
 ```
 
-[APIs and refusals](./apis.md) covers the rest: modular API files, guard data
-on the context, and how to refuse a call without it reading as a crash.
+[APIs and refusals](./apis.md) covers the rest: groups across files, lazy
+groups, guard data on the context, and how to refuse a call without it
+reading as a crash.
 
-## 3. Export the contract and the handler
+## 3. Register, and export the contract and the handler
 
 ```typescript
+// handler.ts
+import { lambderApp } from "./app";
+import { companyApis } from "./companies";
+import { accountApis } from "./account";
+
+export const lambder = lambderApp.registerApiGroups(companyApis, accountApis);
+
 // The type the frontend imports. Type-only: no runtime code crosses over. A
 // large app generates it into a file of its own instead; see apis.md.
 export type ApiContractType = typeof lambder.ApiContract;
@@ -153,13 +170,16 @@ const caller = new LambderCaller<ApiContractType>({
     sessionExpiredHandler: () => redirectToLogin(),
 });
 
-const company = await caller.api("getCompanyPage", { companyName: "Acme" });
+const company = await caller.companies.getPage({ companyName: "Acme" });
 ```
 
-TypeScript now knows the available API names, the required input shape and the
-result type for each one. `api()` collapses every failure to `undefined`; when
-a call site needs to know why a call failed, use `apiOutcome()`. Both are
-covered in [Frontend client](./client.md).
+TypeScript now knows every group, its endpoints, the required input shape and
+the result type for each one. A call collapses every failure to `undefined`;
+when a call site needs to know why a call failed, use
+`caller.companies.getPage.outcome(...)`. Code that has the endpoint's name as a
+value calls `caller.api("companies.getPage", input)` and
+`caller.apiOutcome(...)`. All of it is covered in
+[Frontend client](./client.md).
 
 ## 5. Serve the frontend build (optional)
 

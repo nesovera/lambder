@@ -47,13 +47,16 @@ bucket refuses to sign a ticket for one, which is the check that counts.
 ```typescript
 import { z } from "zod";
 import { LambderS3UploadBucket, LambderUploadFileFactsSchema, LambderUploadTicketSchema, refuse } from "lambder";
+import { defineApi, defineApiGroup } from "./app";
 
 export const invoiceFiles = new LambderS3UploadBucket({ bucket: "shop-invoices", clientConfig: { region: "us-east-1" } });
 
-lambder
-    .addSessionApi("invoices.requestUpload", {
+// signedIn is the app's guard declared session: true, so both are session endpoints.
+export const invoiceApis = defineApiGroup("invoices", {
+    requestUpload: defineApi({
         input: z.object({ storeId: z.uuid(), fileFacts: LambderUploadFileFactsSchema }),
         output: z.object({ ticket: LambderUploadTicketSchema, invoiceId: z.uuid() }),
+        guards: "signedIn",
     }, async ({ apiPayload }) => {
         const invoiceId = crypto.randomUUID();
         // The key is the app's, built from its own ids, never the browser's.
@@ -62,10 +65,11 @@ lambder
         const ticket = await invoiceFiles.issueUploadTicket({ objectKey, fileFacts: apiPayload.fileFacts, uploadRule: INVOICE_UPLOAD_RULE });
         await invoices.insert({ invoiceId, objectKey, ...apiPayload.fileFacts, uploadedAt: null });
         return { ticket, invoiceId };
-    })
-    .addSessionApi("invoices.confirmUpload", {
+    }),
+    confirmUpload: defineApi({
         input: z.object({ invoiceId: z.uuid() }),
         output: z.object({ invoiceId: z.uuid(), fileName: z.string() }),
+        guards: "signedIn",
     }, async ({ apiPayload }) => {
         const invoice = await invoices.find(apiPayload.invoiceId);
         if(!invoice) refuse("Invoice not found.");
@@ -73,7 +77,8 @@ lambder
         if(!verdict.verified) refuse("The upload did not arrive. Please try again.");
         await invoices.markUploaded(invoice.invoiceId);
         return { invoiceId: invoice.invoiceId, fileName: invoice.fileName };
-    });
+    }),
+});
 ```
 
 `LambderUploadFileFactsSchema` and `LambderUploadTicketSchema` are the zod
@@ -217,12 +222,12 @@ import { LambderUploadError, LambderUploadRunner } from "lambder/client";
 const runner = new LambderUploadRunner({
     uploadRule: INVOICE_UPLOAD_RULE,
     requestTicket: async (fileFacts, { signal }) => {
-        const answer = await caller.api("invoices.requestUpload", { storeId, fileFacts }, { signal });
+        const answer = await caller.invoices.requestUpload({ storeId, fileFacts }, { signal });
         if(!answer) throw new Error("The ticket was refused.");
         return { ticket: answer.ticket, reference: answer.invoiceId };
     },
     confirmUpload: async (invoiceId, { signal }) => {
-        const answer = await caller.api("invoices.confirmUpload", { invoiceId }, { signal });
+        const answer = await caller.invoices.confirmUpload({ invoiceId }, { signal });
         if(!answer) throw new Error("The upload was not confirmed.");
         return answer;
     },
@@ -305,10 +310,13 @@ import { LambderMemoryUploadBucket, lambderMockMswHandler, lambderMockUploadMswH
 const invoiceFiles = new LambderMemoryUploadBucket();
 
 export const invoiceMocks = mockApp.apiSlice(
-    mockApp.sessionApi("invoices.requestUpload", async ({ payload }) => {
-        const invoiceId = crypto.randomUUID();
-        const ticket = await invoiceFiles.issueUploadTicket({ objectKey: `mock/${invoiceId}.pdf`, fileFacts: payload.fileFacts, uploadRule: INVOICE_UPLOAD_RULE });
-        return { ticket, invoiceId };
+    mockApp.api("invoices.requestUpload", {
+        guards: "signedIn",   // restated; the mock's signedIn needs a session, as the server's does
+        handler: async ({ payload }) => {
+            const invoiceId = crypto.randomUUID();
+            const ticket = await invoiceFiles.issueUploadTicket({ objectKey: `mock/${invoiceId}.pdf`, fileFacts: payload.fileFacts, uploadRule: INVOICE_UPLOAD_RULE });
+            return { ticket, invoiceId };
+        },
     }),
     // ...confirmUpload verifies through invoiceFiles the same way
 );

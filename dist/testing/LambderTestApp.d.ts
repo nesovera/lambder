@@ -7,6 +7,7 @@ import type { LambderFileSource } from "../shared/contracts/LambderFileSource.js
 import type { LambderIdempotencyStore } from "../shared/contracts/LambderIdempotencyStore.js";
 import type { LambderRateLimiter } from "../shared/contracts/LambderRateLimiter.js";
 import type { LambderSessionStore } from "../shared/contracts/LambderSessionStore.js";
+import { LAMBDER_BACKEND_SWAP, LAMBDER_CRASH_WATCH } from "../shared/util/LambderTestingDoors.js";
 import type { LambderApiContractShape } from "../shared/wire/LambderApiContract.js";
 import { LambderTestVisitor, type LambderTestVisitorArgs, type LambderTestVisitorOptions } from "./LambderTestVisitor.js";
 /**
@@ -51,7 +52,10 @@ export type LambderTestAppOptions = {
  * (`lambderTestApp<SessionData, ApiContractType>(lambder)`), so the tests type
  * their calls against plain members rather than the chained intersection.
  */
-export type LambderTestedInstance<TSessionData, TContract> = Lambder<TSessionData, any, any, any, any, any, any, any, any, any> & {
+export type LambderTestedInstance<TSessionData, TContract> = Pick<Lambder<any, any>, "apiPath" | "getHandler" | "getSessionController" | "getSessionManager" | typeof LAMBDER_BACKEND_SWAP | typeof LAMBDER_CRASH_WATCH> & {
+    readonly AppTypes: {
+        session: TSessionData;
+    };
     readonly ApiContract: TContract;
 };
 /**

@@ -1,8 +1,10 @@
 # Sessions
 
 Sessions are configured once at creation over a store of your choosing. They
-are required for `addSessionApi` and `addSessionRoute`, and give `ctx.session`
-its type.
+are required for a guard that needs a session (`session: true`), which is what
+makes an endpoint declaring it a session endpoint (see
+[APIs](./apis.md#session-endpoints-the-guard-decides)), and for
+`addSessionRoute`, and they give `ctx.session` its type.
 
 ```typescript
 import { initLambder, LambderDdbSessionStore } from "lambder";
@@ -308,7 +310,7 @@ long-lived server holding real sessions.
 Everything a request does to its session goes through `ctx.sessionController`, the
 request's session controller, on every context the instance renders: an API
 or route handler's, a guard's, a hook's. It is typed to the app's session data
-on a handler registered with `addApi`, `addSessionApi`, a literal-path
+on an endpoint declared with the instance's `defineApi`, a literal-path
 `addRoute` or `addSessionRoute`, and in a guard built with
 `initLambder<SessionData>().guard()`; a RegExp route, a hook and a fallback read
 it untyped. A controller keeps no state of its own (it reads and writes the
@@ -332,12 +334,14 @@ without the `session` option, touching `ctx.sessionController` throws and says s
 | `reissueSession()` | The same, handing back the raw tokens, for a client that holds its CSRF token rather than reading `document.cookie` |
 
 ```typescript
-lambder.addApi("login", { input: LoginSchema, output: z.object({ ok: z.boolean() }) }, async (ctx) => {
-    const user = await authenticate(ctx.apiPayload);
-    if (!user) refuse("Wrong email or password.");
+export const accountApis = lambder.defineApiGroup("account", {
+    login: lambder.defineApi({ input: LoginSchema, output: z.object({ ok: z.boolean() }) }, async (ctx) => {
+        const user = await authenticate(ctx.apiPayload);
+        if (!user) refuse("Wrong email or password.");
 
-    await ctx.sessionController.createSession(user.id, { userId: user.id });
-    return { ok: true };
+        await ctx.sessionController.createSession(user.id, { userId: user.id });
+        return { ok: true };
+    }),
 });
 ```
 

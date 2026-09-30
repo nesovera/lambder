@@ -110,7 +110,7 @@ store, and a **Controller** the per-request API over a manager.
 
 ```typescript
 type LambderApiRequest = {
-    apiName: string;
+    apiName: string;                 // group.action, read off the path the call was posted to
     version: string | null;          // the caller's apiVersion, informational
     signature: string | null;        // the caller's signature for the endpoint, for the gate
     token: string;                   // the CSRF token the caller posted
@@ -137,8 +137,10 @@ type LambderApiAnswer = {
 };
 ```
 
-`readApiEnvelope(post, info)` reads the posted envelope into a request (null
-when the body names no API), and `restoreCompressedPayload(request, maxBytes)`
+`readApiEnvelope(post, info, apiName)` reads the posted envelope of a call to
+`apiName` into a request. The name comes from where the call was posted,
+`{apiPath}/{group}/{action}` (`apiNameOfCallPath` reads it off a path), and
+never from a field of the body. `restoreCompressedPayload(request, maxBytes)`
 restores a `payloadGz` or `payloadBr` pair under its declared length. The
 answer is the shape the idempotency store persists and replays;
 `toHttpAnswer(answer)` gives the accessor view `resolveApiOutcome()` reads.
@@ -206,9 +208,12 @@ with `console.error` naming the policy or the API. Set it to false where an
 unmetered or undeduplicated request is worse than a refused one.
 
 `definition` is a `LambderApiDefinition`: `{ name, mode, guards?, rateLimit?,
-idempotency?, input?, output?, refusals? }`. The schemas are optional because
-the mock has none. On the server, `output` is what every output a handler
-returns is parsed through before it is sent (the parse is the server
+idempotency?, input?, output?, refusals? }`. `mode` is `"session"` when one of
+the endpoint's guards needs a session and `"public"` otherwise, which the
+server reads off the guards at registration and the mock off the generated
+`apiOptions` table or the guards an entry restates. The schemas are optional
+because the mock has none. On the server, `output` is what every output a
+handler returns is parsed through before it is sent (the parse is the server
 adapter's, so the mock, which has no schemas, sends outputs as given once it
 has checked they are objects or arrays), and it is part of the endpoint's
 signature digest. `refusals` is every code the endpoint may refuse with, its
@@ -264,7 +269,7 @@ one place: a `LambderApiValidationRefusal` through `onInvalidInput` (the app's
 `setApiInputValidationErrorHandler` on the server, the standard 422 otherwise),
 any other refusal as the refusal envelope. Anything else propagates, because
 only the adapter knows what a crash means. `run` never sees a name it has no
-definition for; `answerUnknownApi(request, ctx?)` is what the adapters answer
+definition for; `answerUnknownApi(ctx?)` is what the adapters answer
 with. It carries the call's own headers and holds no signature gate: both
 adapters run `prepare(request)` on the way in, so a signed request for a name
 the map does not hold has already been answered by then.
@@ -336,7 +341,7 @@ type LambderApiTransport = (request: LambderApiTransportRequest) => Promise<Lamb
 
 | Transport | Where | What it does |
 | --- | --- | --- |
-| `lambderFetchTransport({ cors })` | `lambder/client` | The default: one POST to the API path over fetch |
+| `lambderFetchTransport({ cors })` | `lambder/client` | The default: one POST to `{apiPath}/{group}/{action}` over fetch |
 | `mockApp.transport(options)` | `lambder/mock` | The mock runtime, cookies carried by a jar |
 | `lambderHandlerTransport(handler, options)` | `lambder` | A real Lambder handler in this process, called through a browser-shaped event; with the memory stores, an integration test of the real app through the typed caller with no HTTP and no AWS. A test app's visitors run on it; see [Testing](./testing.md) |
 | `lambderCookieJarTransport(inner, { jar })` | both | Makes any transport carry a `LambderCookieJar` the way a browser carries cookies, so a session survives between calls where there is no browser |
@@ -350,11 +355,15 @@ the mock runtime stand in for a callee there.
 ## The server adapter
 
 `Lambder.ts` keeps routes, actions, hooks, files, index serving, CORS,
-templating, finalization and the global error handler. For an API call it
-parses the event into `ctx.api`, runs the pipeline with an `exec` that calls
-the handler, parses what it returned through the API's `output` and builds the
-envelope answer, and hands the pipeline's answer to hooks, CORS and
-finalization as a `LambderResponse` (`responseFromAnswer`), with the API's
-declared `compress` option on it. The signature gate and the payload restore
-also run before routing, so hooks see a plain payload and a stale client is
-answered before any of them, whether or not the name it asked for exists.
+templating, finalization and the global error handler. For an API call (a
+JSON POST to `{apiPath}/{group}/{action}`) it parses the event into
+`ctx.api`, loads the endpoint's group first when it is a lazy one no call has
+reached yet, runs the pipeline with an `exec` that calls the handler, parses
+what it returned through the API's `output` and builds the envelope answer,
+and hands the pipeline's answer to hooks, CORS and finalization as a
+`LambderResponse` (`responseFromAnswer`), with the API's declared `compress`
+option on it. The signature gate and the payload restore also run before
+routing, so hooks see a plain payload and a stale client is answered before
+any of them, whether or not the name it asked for exists. A JSON POST to
+`apiPath` itself that names an endpoint in its body is answered
+`versionExpired` before any of this runs, which reloads the page that sent it.

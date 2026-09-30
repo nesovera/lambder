@@ -1,4 +1,5 @@
 import { readApiEnvelope, cookieValuesByName, isApiCallContentType, lowercaseHeaderNames } from "../api/LambderApiRequest.js";
+import { apiNameOfCallPath } from "../shared/wire/LambderApiNames.js";
 import { resolveClientIp } from "../shared/util/LambderClientIp.js";
 import { base64ToText } from "../shared/util/LambderBase64.js";
 import { LambderAnswerHeaders } from "../shared/wire/LambderAnswerHeaders.js";
@@ -162,13 +163,20 @@ export const createContext = (event, lambdaContext, { apiPath = DEFAULT_API_PATH
             post[key] = value;
         }
     }
-    // A JSON POST to the API path whose body names an API is an API call;
+    // A JSON POST to `{apiPath}/{group}/{action}` is a call to that endpoint;
     // the core reads the envelope, and everything downstream reads ctx.api.
     // JSON only (isApiCallContentType): any site can submit a plain HTML form
-    // to this path, and enctype="text/plain" lays out a JSON body exactly.
-    const api = method === "POST" && !!apiPath && path === apiPath && isApiCallContentType(lowercasedHeaders)
-        ? readApiEnvelope(post, { headers: lowercasedHeaders, cookies: cookieList, ip, host })
-        : null;
+    // to this path, and enctype="text/plain" lays out a JSON body exactly. A
+    // JSON POST to apiPath itself whose body names an endpoint comes from a
+    // page built before endpoints had paths, and is read as a call on the
+    // retired path, which the core answers with versionExpired.
+    const isJsonPost = method === "POST" && !!apiPath && isApiCallContentType(lowercasedHeaders);
+    const calledName = isJsonPost ? apiNameOfCallPath(apiPath, path) : null;
+    const requestInfo = { headers: lowercasedHeaders, cookies: cookieList, ip, host };
+    const api = calledName !== null ? readApiEnvelope(post, requestInfo, calledName)
+        : isJsonPost && path === apiPath && typeof post.apiName === "string" && post.apiName !== ""
+            ? readApiEnvelope(post, requestInfo, post.apiName, { retiredPath: true })
+            : null;
     return bindContextTools({
         host, path, rawPath, pathParams: {}, method,
         get, post, cookie, cookieList, event,

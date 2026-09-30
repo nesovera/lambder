@@ -10,25 +10,30 @@ per-handler boilerplate.
 import { initLambder, LambderLocalFileSource, LambderDdbSessionStore } from "lambder";
 import { z } from "zod";
 
-const lambder = initLambder<SessionData>().create({
+const app = initLambder<SessionData>().create({
     apiPath: "/api",
     files: new LambderLocalFileSource({ root: "./public" }),
     session: { store: new LambderDdbSessionStore({ tableName: "app-session", region: "us-east-1" }), sessionSalt: process.env.SESSION_SALT! },
-}).addApi("getCompany", {
-    input: z.object({ slug: z.string() }),
-    output: z.object({ id: z.string(), name: z.string() }),
-}, async ({ apiPayload }) => await loadCompany(apiPayload.slug));
+});
 
+const companyApis = app.defineApiGroup("companies", {
+    get: app.defineApi({
+        input: z.object({ slug: z.string() }),
+        output: z.object({ id: z.string(), name: z.string() }),
+    }, async ({ apiPayload }) => await loadCompany(apiPayload.slug)),
+});
+
+export const lambder = app.registerApiGroups(companyApis);
 export type ApiContractType = typeof lambder.ApiContract;
 export const handler = lambder.getHandler();
 ```
 
-A handler returns its output, which is parsed through the output schema before
-it is sent, and says no by throwing a refusal: `ctx.refuse()`, typed to the
-codes the API declares, or `refuse()` from anywhere. Registration chains onto the
-creation call: every `addApi` returns an instance carrying the contract so
-far, so the whole backend is one declaration and `lambder.ApiContract` is the
-accumulated type.
+An endpoint is a value: declared with `defineApi`, gathered into a named
+group, registered with its groups in one call, and called at
+`/api/companies/get`. A handler returns its output, which is parsed through
+the output schema before it is sent, and says no by throwing a refusal:
+`ctx.refuse()`, typed to the codes the API declares, or `refuse()` from
+anywhere. Its guards say who may call it, and so whether it needs a session.
 
 The frontend imports that contract type and gets autocomplete, typed payloads
 and typed results with no hand-written client:
@@ -38,7 +43,7 @@ import { LambderCaller } from "lambder/client";
 import type { ApiContractType } from "./backend/handler";
 
 const caller = new LambderCaller<ApiContractType>({ apiPath: "/api" });
-const company = await caller.api("getCompany", { slug: "acme" });
+const company = await caller.companies.get({ slug: "acme" });
 ```
 
 ## Features
@@ -166,7 +171,7 @@ guide that matches what you are building. The full index lives in
 | [Getting started](./docs/getting-started.md) | The three-step path from a first API to a typed frontend call |
 | [Configuration](./docs/configuration.md) | Every `initLambder().create({...})` option, in one reference |
 | [Routing and actions](./docs/routing.md) | Routes, matchers, hooks, fallbacks, crash reporting, and non-HTTP invocations |
-| [APIs and refusals](./docs/apis.md) | `addApi`/`addSessionApi`, the inferred contract, `refuse()` and `LambderApiRefusal`, the signature file |
+| [APIs and refusals](./docs/apis.md) | `defineApi`, groups and lazy groups, the mode the guards decide, the inferred contract, `refuse()` and `LambderApiRefusal`, the signature file |
 | [Responses](./docs/responses.md) | The render context and its response tools (headers, cookies, log entries), the response builder routes and hooks use, compression, ETag and the size cap |
 | [Sessions](./docs/sessions.md) | Sessions over a store, cookie scope, secrets at rest, `dataRefresh`, the controller API |
 | [API policies](./docs/api-policies.md) | Declarative rate limits, guards and idempotency, and mandatory authorization declarations |

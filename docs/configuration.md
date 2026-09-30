@@ -33,12 +33,11 @@ policy types; the curried creator is the canonical entry.
 | `cors` | off | `true` allows any origin, or a `LambderCorsConfig` (below) |
 | `trustedClientIpHeaders` | none | Headers that may name the caller's own address, in order of preference. Empty means `ctx.ip` is the address the gateway observed (below) |
 | `trustedHostHeaders` | none | Headers that may name the host the viewer asked for, in order of preference. Empty means `ctx.host` is the Host the gateway received (below) |
-| `session` | none | Sessions over a store of your choosing; `addSessionApi` and `addSessionRoute` are compile errors without it. See [Sessions](./sessions.md) |
+| `session` | none | Sessions over a store of your choosing; a guard that needs a session (`session: true`) and `addSessionRoute` are compile errors without it. See [Sessions](./sessions.md) |
 | `rateLimits` | none | A limiter (`LambderRateLimiter`: DynamoDB, memory, or your own) plus named policies APIs reference by name, in one map or a list of maps (below). See [API policies](./api-policies.md#rate-limits) |
 | `guards` | none | Named guards APIs reference by name; build each with `initLambder<SessionData>().guard()` (typed to the app's session) or `lambderGuard()`. One map or a list of maps (below). See [API policies](./api-policies.md#guards) |
 | `idempotency` | none | An idempotency store (`LambderIdempotencyStore`: DynamoDB, memory, or your own) plus replay defaults. See [API policies](./api-policies.md#idempotency) |
-| `requireSessionApiGuards` | `false` | Make `guards` a required field of every `addSessionApi` |
-| `requirePublicApiGuards` | `false` | Make `guards` a required field of every `addApi` |
+| `requireApiGuards` | `false` | Make `guards` a required field of every endpoint (`defineApi`) |
 | `crashes` | none | `{ report, reportTimeoutMs, reveal }`: a reporter told every crash on every path (API, route, event, startup) and waited for up to `reportTimeoutMs` (default 3000, a positive integer), and who may read a crash in the framework's 500. Without a reporter, a crash nothing answered is logged to the console. See [Routing](./routing.md#crashes) |
 
 The app's refusal vocabulary is not a `create()` option. It is declared on the
@@ -92,7 +91,7 @@ const lambder = initLambder<SessionData>().create({
         defaultTtlSeconds: 24 * 3600,
         failOpen: true,
     },
-    requireSessionApiGuards: true,
+    requireApiGuards: true,
 });
 ```
 
@@ -244,16 +243,16 @@ guards: [coreGuards, ordersGuards],
 
 The maps have to exist before the instance does, because the instance's type
 is built from them, so a part keeps them in a file of their own that imports
-none of its API files; the part's API files import the instance's type, and
-the part registers them with `use()` after creation. The mock runtime's
-`create()` takes one map of each.
+none of its API files; the part's API files import the instance's declaration
+builders, and the entry registers the groups they build after creation. The
+mock runtime's `create()` takes one map of each.
 
-## Sharing the instance type across files
+## Declaring endpoints across files
 
-For api modules split across files, DERIVE the annotation type from the real
-instance instead of writing it by hand. The type can never drift from what
-actually runs, and modules import it without a cycle, because the app file
-imports no modules:
+The instance's declaration builders are typed to it, so a module declares its
+endpoints with the instance's own `defineApi` rather than an annotation
+written by hand. Nothing can drift from what actually runs, and modules
+import the builders without a cycle, because the app file imports no modules:
 
 ```typescript
 // app.ts: declarations plus the fully configured instance
@@ -264,33 +263,43 @@ export const lambderApp = initLambder<SessionData>().create({
     idempotency: { store: idempotencyStore },
     guards: apiGuards,
 });
+export const { defineApi, defineApiGroup, lazyApiGroup } = lambderApp;
 export type AppLambder = typeof lambderApp;
 
 // orders.ts: an api module
-export const orderApi = (lambder: AppLambder) => lambder.addSessionApi(/* ... */);
+export const orderApis = defineApiGroup("orders", {
+    place: defineApi({ /* input, output, guards, ... */ }, async (ctx) => { /* ... */ }),
+});
 
-// index.ts: registration only (hooks, routes, modules)
-const lambder = lambderApp.addHook(/* ... */).use(orderApi);
+// index.ts: registration only (endpoints, hooks, routes)
+const lambder = lambderApp.registerApiGroups(orderApis).addHook(/* ... */);
 export const handler = lambder.getHandler();
 ```
 
+`AppLambder` is for code that takes the configured instance, such as a
+function that registers routes on it (`use()`).
+
 ## Registration methods
 
-Everything below chains off the created instance and returns `this`.
+Endpoints are declared as values and registered in one call; everything
+after them chains off the created instance and returns `this`.
 
-| Method | Purpose |
+| Member | Purpose |
 | --- | --- |
-| `addApi(name, schemas, handler)` | Public API: the handler returns its output or throws `refuse()`. See [APIs](./apis.md) |
-| `addSessionApi(name, schemas, handler)` | Session-protected API |
+| `defineApi(options, handler)` | Declare an endpoint: the handler returns its output or throws `refuse()`. Its guards decide its mode. See [APIs](./apis.md) |
+| `defineApiGroup(name, apis)` | Gather endpoints into a group: `name.action`, called at `{apiPath}/{name}/{action}` |
+| `lazyApiGroup(name, load)` | A group loaded on the first call to one of its endpoints |
+| `registerApiGroups(...groups)` | Register groups; returns the instance typed with their contract |
+| `loadApiGroups()` | Load every lazy group now (a build step, a boot check) |
 | `addRoute(matcher, handler)` | HTTP route. See [Routing](./routing.md) |
 | `addSessionRoute(matcher, handler)` | Session-protected route |
 | `addAction(filter, handler)` | Non-HTTP invocations, and HTTP interception |
 | `addHook(event, handler, priority?)` | `created`, `beforeRender`, `afterRender`, `fallback` |
-| `use(module)` | Apply an api/route module, preserving inferred types |
+| `use(plugin)` | Hand the instance to a function that registers routes, hooks or actions on it |
 | `servePublicFiles(options?)` | Terminal slot serving real files |
 | `serveIndexHtml(handler?, options?)` | App shell slot for unmatched page requests |
 | `setRouteFallbackHandler(handler)` | Response for unmatched routes |
-| `setApiFallbackHandler(handler)` | Response for unmatched API names |
+| `setApiFallbackHandler(handler)` | Response for a call to a name no endpoint has |
 | `setApiInputValidationErrorHandler(handler)` | Response for a rejected Zod input |
 | `setSessionExpiredRouteHandler(handler)` | Response for session routes with no session, and for a route or hook that meets `LambderSessionNotFoundError`. Default 401 |
 | `setGlobalErrorHandler(handler)` | Last-resort error response |

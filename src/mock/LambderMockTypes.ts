@@ -18,6 +18,7 @@ import type {
     LambderContractKeysWithMode,
     LambderContractMode,
     LambderContractRateLimitOf,
+    LambderGuardNamesIn,
 } from "../shared/wire/LambderApiContract.js";
 import type { LambderApiGuard, LambderGuardDataOf, LambderGuardMetaMap } from "../api/LambderApiGuards.js";
 import type { LambderApiRateLimitPolicyConfig, LambderContextRateLimit, LambderContextRateLimitCheck } from "../api/LambderApiRateLimits.js";
@@ -135,8 +136,9 @@ export type LambderMockContext<C, K extends keyof C, S, G, TVocabulary = never, 
  * the contract declares, plus, for each guardInput-mode guard, a `guardInput`
  * schema whose input is what the contract says a client sends. A guard a
  * public endpoint names may not require a session. A missing name, a schema
- * that parses to something else, or such a session guard fails at the
- * `guards` option.
+ * that parses to something else, or a public endpoint's guard that requires
+ * a session fails at the `guards` option; LambderMockSessionGuardsCheck
+ * holds the session endpoints to the same rule from the other side.
  */
 export type LambderMockGuards<C, S = any> =
     // Pinned to the mock call contexts: a guard built with the server's
@@ -146,6 +148,29 @@ export type LambderMockGuards<C, S = any> =
     { [N in LambderContractGuardNames<C>]: LambderApiGuard<any, any, any, LambderMockCallContext<S>, LambderMockSessionCallContext<S>> }
     & { [N in LambderContractGuardInputNames<C>]: { guardInput: z.ZodType<unknown, LambderContractGuardInput<C, N>> } }
     & { [N in LambderContractGuardNames<C, "public">]: { session?: false } };
+
+/** The guards of a mock guard map that need a session. */
+type LambderMockSessionGuardNames<G> = { [N in keyof G]: G[N] extends { session: true } ? N : never }[keyof G];
+
+/** The contract's session endpoints none of whose guards the mock guard map declares `session: true`. */
+type LambderMockSessionEndpointsWithoutSessionGuard<C, G> = {
+    [K in LambderContractKeysWithMode<C, "session">]:
+        [Extract<LambderGuardNamesIn<LambderContractGuardsOf<C, K>>, LambderMockSessionGuardNames<G>>] extends [never] ? K : never
+}[LambderContractKeysWithMode<C, "session">];
+
+/**
+ * The mock guard map held to the server's rule for session endpoints: each
+ * names at least one guard that needs a session. The guards are what make
+ * an endpoint a session one, on the server and in the mock alike, and
+ * without the apiOptions table the mock reads an entry's mode off the guards
+ * it restates, so a session endpoint none of whose mock guards says
+ * `session: true` would run as public: a signed-out call would reach a
+ * handler typed with its session present. The property name is the message
+ * and its value the endpoints at fault.
+ */
+export type LambderMockSessionGuardsCheck<C, G> =
+    [LambderMockSessionEndpointsWithoutSessionGuard<C, G>] extends [never] ? unknown
+    : { readonly "lambder: these session endpoints name no mock guard declared session: true, so the mock would run them as public": LambderMockSessionEndpointsWithoutSessionGuard<C, G> };
 
 // ---------------------------------------------------------------------------
 // Entries, slices and the registry
@@ -262,7 +287,7 @@ export type LambderMockEntryOptions<C, K extends keyof C, S, G, TInputSchema ext
 };
 
 /**
- * What publicApi/sessionApi accept. On a mock created with the generated
+ * What api() accepts. On a mock created with the generated
  * `apiOptions` table (`TDerived`), a bare handler or the options without the
  * declarations, for every endpoint. Otherwise a bare handler only for an
  * endpoint the contract declares nothing for, the full options elsewhere, so
@@ -278,6 +303,19 @@ export type LambderMockEntryInput<C, K extends keyof C, S, G, TInputSchema exten
             ? LambderMockHandler<C, K, S, G, TVocabulary, TCodesRequired> | LambderMockEntryOptions<C, K, S, G, TInputSchema, false, TVocabulary, TCodesRequired>
             : LambderMockEntryOptions<C, K, S, G, TInputSchema, false, TVocabulary, TCodesRequired>;
 
+/**
+ * What notMocked() accepts: the reason, or, for a session endpoint on a mock
+ * created without the generated `apiOptions` table, the reason with the
+ * endpoint's guards restated. The entry answers before any guard runs, but
+ * its mode is still the server's (the session read before the notMocked
+ * refusal), and without the table only the guards can say it, as they do
+ * for api().
+ */
+export type LambderMockNotMockedInput<C, K extends keyof C, TDerived extends boolean = false> =
+    TDerived extends true ? string
+    : LambderContractMode<C, K> extends "session" ? { reason: string; guards: LambderContractGuardsOf<C, K> }
+    : string;
+
 /** One registry entry: the endpoint's definition as the pipeline runs it, and its handler (null when registered as not mocked). */
 export type LambderMockEntry<C, K extends keyof C & string> = {
     readonly name: K;
@@ -286,10 +324,6 @@ export type LambderMockEntry<C, K extends keyof C & string> = {
     readonly handler: ((ctx: any) => Promise<unknown>) | null;
     readonly notMockedReason: string | null;
 };
-
-/** The endpoint names a mock app may register under each mode. */
-export type LambderMockPublicNames<C> = LambderContractKeysWithMode<C, "public">;
-export type LambderMockSessionNames<C> = LambderContractKeysWithMode<C, "session">;
 
 /** A slice: the entries of one module, keyed by endpoint name. */
 export type LambderMockSlice<C, K extends keyof C & string> = { readonly [P in K]: LambderMockEntry<C, P> };

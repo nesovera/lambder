@@ -25,6 +25,7 @@ import { createApiCallContext } from '../../src/api/LambderApiCallContext.js';
 import { LambderLocalFileSource } from '../../src/stores/LambderLocalFileSource.js';
 import { lambderGuard } from '../../src/core/LambderPolicyBuilders.js';
 import Lambder, { initLambder } from '../../src/core/Lambder.js';
+import { apiCallPath } from '../../src/shared/wire/LambderApiNames.js';
 import type { LambderRenderContext, LambderSessionRenderContext } from '../../src/core/LambderContext.js';
 import { LambderAnswerHeaders } from '../../src/shared/wire/LambderAnswerHeaders.js';
 
@@ -771,18 +772,20 @@ describe('Session Endpoint Protection', () => {
         files: new LambderLocalFileSource({ root: '/public' }),
         apiPath: '/api',
         session: { store, sessionSalt: 'test-salt' },
+        guards: { signedIn: lambderGuard({ session: true, handler: () => {} }) },
     }).setGlobalErrorHandler((err, ctx, responseBuilder) => {
         if (ctx?.api) return responseBuilder.apiRefusal({ refusal: err.message });
         return responseBuilder.html(`<h1>Error: ${err.message}</h1>`);
     });
 
+    // With an apiName, `path` is the apiPath and the call goes to the endpoint's own path under it.
     const createMockEvent = (path: string, method: string, sessionToken?: string, apiName?: string, payload?: any, csrfToken?: string): APIGatewayProxyEvent => ({
-        body: apiName ? JSON.stringify({ apiName, payload: payload || {}, token: csrfToken ?? 'csrf-token' }) : null,
+        body: apiName ? JSON.stringify({ payload: payload || {}, token: csrfToken ?? 'csrf-token' }) : null,
         headers: { Host: 'localhost', 'Content-Type': 'application/json', Cookie: sessionToken ? `LMDRSESSIONTKID=${sessionToken}` : '' },
         multiValueHeaders: {},
         httpMethod: method,
         isBase64Encoded: false,
-        path,
+        path: apiName ? apiCallPath(path, apiName) : path,
         pathParameters: null,
         queryStringParameters: null,
         multiValueQueryStringParameters: null,
@@ -824,17 +827,26 @@ describe('Session Endpoint Protection', () => {
             const response = await lambder.render(createMockEvent('/protected', 'GET', token), createMockContext());
             expect(response.statusCode).toBe(401);
         });
-
-        it('a session API without the session option is refused at registration', () => {
-            const bare = new Lambder({ apiPath: '/api' });
-            expect(() => bare.addSessionApi('x', { input: z.any(), output: z.any() }, async (ctx) => null))
-                .toThrow(/needs the session option at creation/);
-        });
     });
 
-    describe('addSessionApi', () => {
-        const profileApi = () => lambder.addSessionApi('user.profile', { input: z.any(), output: z.any() },
-            async (ctx) => ({ userId: ctx.session.data.userId }));
+    describe('An API behind a session guard', () => {
+        const profileApi = () => lambder.registerApiGroups(lambder.defineApiGroup('user', {
+            profile: lambder.defineApi({ input: z.any(), output: z.any(), guards: 'signedIn' },
+                async (ctx) => ({ userId: ctx.session.data.userId })),
+        }));
+
+        it('is refused at registration on an instance without the session option', () => {
+            const bare = initLambder<UserSessionData>().create({
+                apiPath: '/api',
+                guards: { signedIn: lambderGuard({ session: true, handler: () => {} }) },
+            });
+            const userApis = bare.defineApiGroup('user', {
+                // @ts-expect-error a session guard needs sessions configured on the instance
+                profile: bare.defineApi({ input: z.any(), output: z.any(), guards: 'signedIn' }, async () => null),
+            });
+            expect(() => bare.registerApiGroups(userApis))
+                .toThrow(/a guard of API "user.profile" needs a session, and the instance was created without the session option/);
+        });
 
         it('answers the protocol\'s sessionExpired flag when no session exists', async () => {
             profileApi();
@@ -872,23 +884,29 @@ describe('Session Endpoint Protection', () => {
                         handler: (ctx, _payload, permission: string) => ({ subject: ctx.session.sessionKey, permission }),
                     }),
                 },
-            }).addSessionApi('org.action', { input: z.any(), output: z.any(), guards: { orgPermission: 'ORG.MANAGE' } },
-                async (ctx) => ctx.guardData.orgPermission);
+            });
+            guarded.registerApiGroups(guarded.defineApiGroup('org', {
+                action: guarded.defineApi({ input: z.any(), output: z.any(), guards: { orgPermission: 'ORG.MANAGE' } },
+                    async (ctx) => ctx.guardData.orgPermission),
+            }));
 
             const response = await guarded.render(createMockEvent('/api', 'POST', token, 'org.action'), createMockContext());
             expect(JSON.parse(decodeBody(response) || '{}').payload).toEqual({ subject: 'user-123', permission: 'ORG.MANAGE' });
         });
 
-        it('the named opt-out guard under requireSessionApiGuards lets the handler run on the session alone', async () => {
+        it('the named opt-out guard under requireApiGuards lets the handler run on the session alone', async () => {
             const { token } = await plantRecord(store);
             const strict = initLambder<UserSessionData>().create({
                 files: new LambderLocalFileSource({ root: '/public' }),
                 apiPath: '/api',
                 session: { store, sessionSalt: 'test-salt' },
                 guards: { sessionOnly: lambderGuard({ session: true, handler: () => {} }) },
-                requireSessionApiGuards: true,
-            }).addSessionApi('me.session', { input: z.any(), output: z.any(), guards: 'sessionOnly' },
-                async (ctx) => ({ userId: ctx.session.data.userId }));
+                requireApiGuards: true,
+            });
+            strict.registerApiGroups(strict.defineApiGroup('me', {
+                session: strict.defineApi({ input: z.any(), output: z.any(), guards: 'sessionOnly' },
+                    async (ctx) => ({ userId: ctx.session.data.userId })),
+            }));
 
             const response = await strict.render(createMockEvent('/api', 'POST', token, 'me.session'), createMockContext());
             expect(JSON.parse(decodeBody(response) || '{}').payload).toEqual({ userId: '123' });
@@ -896,21 +914,25 @@ describe('Session Endpoint Protection', () => {
 
         it('hands the handler typed session data', async () => {
             const { token } = await plantRecord(store, { data: { userId: '123', username: 'testuser', role: 'admin' } });
-            lambder.addSessionApi('user.profile', { input: z.any(), output: z.any() }, async (ctx) => {
-                const userId: string = ctx.session.data.userId;
-                const role: 'admin' | 'user' | 'guest' = ctx.session.data.role;
-                return { userId, role };
-            });
+            lambder.registerApiGroups(lambder.defineApiGroup('user', {
+                profile: lambder.defineApi({ input: z.any(), output: z.any(), guards: 'signedIn' }, async (ctx) => {
+                    const userId: string = ctx.session.data.userId;
+                    const role: 'admin' | 'user' | 'guest' = ctx.session.data.role;
+                    return { userId, role };
+                }),
+            }));
             const response = await lambder.render(createMockEvent('/api', 'POST', token, 'user.profile'), createMockContext());
             expect(JSON.parse(decodeBody(response) || '{}').payload).toEqual({ userId: '123', role: 'admin' });
         });
 
         it('a handler creates a session through the controller and the answer carries its cookies', async () => {
-            lambder.addApi('login', { input: z.object({ user: z.string() }), output: z.any() }, async (ctx) => {
-                const session = await lambder.getSessionController(ctx).createSession(ctx.apiPayload.user, { userId: '9', username: ctx.apiPayload.user, role: 'user' });
-                return { key: session.sessionKey };
-            });
-            const response = await lambder.render(createMockEvent('/api', 'POST', undefined, 'login', { user: 'ada' }), createMockContext());
+            lambder.registerApiGroups(lambder.defineApiGroup('account', {
+                login: lambder.defineApi({ input: z.object({ user: z.string() }), output: z.any() }, async (ctx) => {
+                    const session = await lambder.getSessionController(ctx).createSession(ctx.apiPayload.user, { userId: '9', username: ctx.apiPayload.user, role: 'user' });
+                    return { key: session.sessionKey };
+                }),
+            }));
+            const response = await lambder.render(createMockEvent('/api', 'POST', undefined, 'account.login', { user: 'ada' }), createMockContext());
             expect(JSON.parse(decodeBody(response) || '{}').payload).toEqual({ key: 'ada' });
             const cookies = response.multiValueHeaders?.['Set-Cookie'] ?? [];
             expect(cookies.length).toBe(2);
@@ -921,12 +943,14 @@ describe('Session Endpoint Protection', () => {
 
         it('answers sessionExpired, not a crash, when the session ends while the handler holds it', async () => {
             const { token } = await plantRecord(store);
-            lambder.addSessionApi('user.rename', { input: z.any(), output: z.any() }, async (ctx) => {
-                // A logout in another tab lands mid-request.
-                await store.delete(ctx.session.sessionKeyHash, ctx.session.secretHash);
-                await ctx.sessionController.updateSessionData({ ...ctx.session.data, username: 'renamed' });
-                return { renamed: true };
-            });
+            lambder.registerApiGroups(lambder.defineApiGroup('user', {
+                rename: lambder.defineApi({ input: z.any(), output: z.any(), guards: 'signedIn' }, async (ctx) => {
+                    // A logout in another tab lands mid-request.
+                    await store.delete(ctx.session.sessionKeyHash, ctx.session.secretHash);
+                    await ctx.sessionController.updateSessionData({ ...ctx.session.data, username: 'renamed' });
+                    return { renamed: true };
+                }),
+            }));
             const response = await lambder.render(createMockEvent('/api', 'POST', token, 'user.rename'), createMockContext());
             expect(JSON.parse(decodeBody(response) || '{}').sessionExpired).toBe(true);
             expect(response.multiValueHeaders?.['Set-Cookie'] ?? []).toEqual([]);
@@ -935,11 +959,13 @@ describe('Session Endpoint Protection', () => {
 
         it('a rotation after the session ended mints nothing and sets no cookies', async () => {
             const { token } = await plantRecord(store);
-            lambder.addSessionApi('org.switch', { input: z.any(), output: z.any() }, async (ctx) => {
-                await store.delete(ctx.session.sessionKeyHash, ctx.session.secretHash);
-                await ctx.sessionController.regenerateSession();
-                return { switched: true };
-            });
+            lambder.registerApiGroups(lambder.defineApiGroup('org', {
+                switch: lambder.defineApi({ input: z.any(), output: z.any(), guards: 'signedIn' }, async (ctx) => {
+                    await store.delete(ctx.session.sessionKeyHash, ctx.session.secretHash);
+                    await ctx.sessionController.regenerateSession();
+                    return { switched: true };
+                }),
+            }));
             const response = await lambder.render(createMockEvent('/api', 'POST', token, 'org.switch'), createMockContext());
             expect(JSON.parse(decodeBody(response) || '{}').sessionExpired).toBe(true);
             expect(response.multiValueHeaders?.['Set-Cookie'] ?? []).toEqual([]);
@@ -947,17 +973,21 @@ describe('Session Endpoint Protection', () => {
         });
     });
 
-    describe('addSessionApi with dataRefresh', () => {
-        const makeRefreshingLambder = (refresh: (session: LambderSessionRecord<UserSessionData>) => Promise<UserSessionData | null>) =>
-            initLambder<UserSessionData>().create({
+    describe('A session API with dataRefresh', () => {
+        const makeRefreshingLambder = (refresh: (session: LambderSessionRecord<UserSessionData>) => Promise<UserSessionData | null>) => {
+            const created = initLambder<UserSessionData>().create({
                 files: new LambderLocalFileSource({ root: '/public' }), apiPath: '/api',
                 session: { store, sessionSalt: 'test-salt', dataRefresh: { ttlSeconds: 600, refresh } },
+                guards: { signedIn: lambderGuard({ session: true, handler: () => {} }) },
             });
+            return created.registerApiGroups(created.defineApiGroup('user', {
+                profile: created.defineApi({ input: z.any(), output: z.any(), guards: 'signedIn' }, async (ctx) => ({ role: ctx.session.data.role })),
+            }));
+        };
 
         it('hands handlers renewed data when the session data is stale', async () => {
             const { token } = await plantRecord(store, { dataExpiresAt: nowSec() - 10 });
-            const app = makeRefreshingLambder(async (session) => ({ ...session.data, role: 'admin' as const }))
-                .addSessionApi('user.profile', { input: z.any(), output: z.any() }, async (ctx) => ({ role: ctx.session.data.role }));
+            const app = makeRefreshingLambder(async (session) => ({ ...session.data, role: 'admin' as const }));
             const response = await app.render(createMockEvent('/api', 'POST', token, 'user.profile'), createMockContext());
             expect(JSON.parse(decodeBody(response) || '{}').payload?.role).toBe('admin');
             expect(store.list()[0]!.data.role).toBe('admin');
@@ -965,8 +995,7 @@ describe('Session Endpoint Protection', () => {
 
         it('answers sessionExpired when the refresh callback ends the session', async () => {
             const { token } = await plantRecord(store, { dataExpiresAt: nowSec() - 10 });
-            const app = makeRefreshingLambder(async () => null)
-                .addSessionApi('user.profile', { input: z.any(), output: z.any() }, async (ctx) => ({ role: ctx.session.data.role }));
+            const app = makeRefreshingLambder(async () => null);
             const response = await app.render(createMockEvent('/api', 'POST', token, 'user.profile'), createMockContext());
             expect(JSON.parse(decodeBody(response) || '{}').sessionExpired).toBe(true);
             expect(store.size).toBe(0);

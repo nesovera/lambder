@@ -9,7 +9,7 @@
 export { LambderMockApp, initLambderMock } from "./mock/LambderMockApp.js";
 export { LambderMockTransportError } from "./mock/LambderMockFailureInjector.js";
 export type { LambderMockAppOptions, LambderMockSessionsOptions, LambderMockIdempotencyOptions, LambderMockInvalidInputAnswer, LambderMockTransport, LambderMockTransportOptions } from "./mock/LambderMockCreateOptions.js";
-export type { LambderMockCallContext, LambderMockSessionCallContext, LambderMockContext, LambderMockRefusalsOf, LambderMockGuards, LambderMockHandler, LambderMockEntry, LambderMockEntryOptions, LambderMockEntryInput, LambderMockSlice, LambderMockRestEntry, LambderMockRegistryCheck, LambderMockMissingNames, LambderMockStrayNames, LambderMockDuplicateNames, LambderMockPublicNames, LambderMockSessionNames, LambderMockLatency, LambderMockFailure, LambderMockFailureReason, LambderMockOutcome, LambderMockCallEvent, LambderMockRequestEvent, LambderMockResponseEvent, LambderMockCallRecord, LambderMockListener, LambderMockRateLimitPolicies, LambderMockInputOf, LambderMockOutputOf, LambderMockOverride, } from "./mock/LambderMockTypes.js";
+export type { LambderMockCallContext, LambderMockSessionCallContext, LambderMockContext, LambderMockRefusalsOf, LambderMockGuards, LambderMockHandler, LambderMockEntry, LambderMockEntryOptions, LambderMockEntryInput, LambderMockNotMockedInput, LambderMockSessionGuardsCheck, LambderMockSlice, LambderMockRestEntry, LambderMockRegistryCheck, LambderMockMissingNames, LambderMockStrayNames, LambderMockDuplicateNames, LambderMockLatency, LambderMockFailure, LambderMockFailureReason, LambderMockOutcome, LambderMockCallEvent, LambderMockRequestEvent, LambderMockResponseEvent, LambderMockCallRecord, LambderMockListener, LambderMockRateLimitPolicies, LambderMockInputOf, LambderMockOutputOf, LambderMockOverride, } from "./mock/LambderMockTypes.js";
 export { lambderMockPoliciesFrom } from "./mock/lambderMockPoliciesFrom.js";
 export type { LambderCustomKeyedPolicyNames, LambderMockPolicyKeys } from "./mock/lambderMockPoliciesFrom.js";
 export type { LambderMockGuardShapeOf } from "./mock/LambderMockCreateOptions.js";
@@ -21,7 +21,7 @@ export { LambderMemoryUploadBucket } from "./stores/LambderMemoryUploadBucket.js
 export type { LambderMemoryUploadBucketOptions, LambderMemoryUploadObject } from "./stores/LambderMemoryUploadBucket.js";
 export { lambderMockUploadMswHandler } from "./mock/lambderMockUploadMswHandler.js";
 export { lambderMockInvokeTransport } from "./mock/lambderMockInvokeTransport.js";
-export type { LambderMockInvokeEvent, LambderMockInvokeResult } from "./mock/lambderMockInvokeTransport.js";
+export type { LambderMockInvokeEvent, LambderMockInvokeResult, LambderMockInvokeTransportOptions } from "./mock/lambderMockInvokeTransport.js";
 export { LambderCookieJar } from "./shared/transport/LambderCookieJar.js";
 export { lambderCookieJarTransport } from "./shared/transport/lambderCookieJarTransport.js";
 export type { LambderApiTransport, LambderApiTransportRequest } from "./shared/transport/LambderApiTransport.js";

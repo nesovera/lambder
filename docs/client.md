@@ -28,9 +28,22 @@ const caller = new LambderCaller<ApiContractType>({
     sessionExpiredHandler: () => redirectToLogin(),
 });
 
-// Fully typed: API names autocomplete, the payload and result are inferred.
-const user = await caller.api("getCompanyPage", { companyName: "Acme" });
+// Fully typed: groups and endpoints autocomplete, the payload and result are inferred.
+const company = await caller.companies.getPage({ companyName: "Acme" });
 ```
+
+Every group of the contract is a property of the caller, and each of its
+endpoints a function: `caller.companies.getPage(input)` calls the endpoint
+`companies.getPage`, a POST to `{apiPath}/companies/getPage`, and
+`caller.companies.getPage.outcome(input)` resolves to its full outcome (see
+[Failure semantics](#failure-semantics)). Code that holds an endpoint's name as
+a value calls `caller.api("companies.getPage", input)` and
+`caller.apiOutcome("companies.getPage", input)`, the same two calls by name. No
+group may take the name of a public member a caller has
+(`LAMBDER_RESERVED_GROUP_NAMES`), and a caller keeps its own state in
+`#private` fields, which no group name reaches, so the two never collide. The
+groups need nothing at runtime: a caller over a type-only contract ships no
+endpoint list.
 
 Importing the contract from the server's entry compiles the server's sources
 in the frontend's type check. In a large app, import it instead from the file
@@ -119,8 +132,9 @@ recorded, as a reload does.
 
 ## Per-call options
 
-Every constructor handler can be overridden in the options of a single
-`api`/`apiOutcome` call, alongside these request extras:
+Every constructor handler can be overridden in the options of a single call
+(`caller.orders.place(input, options)`, its `.outcome`, `api` or
+`apiOutcome`), alongside these request extras:
 
 | Option | Description |
 | --- | --- |
@@ -133,16 +147,17 @@ Every constructor handler can be overridden in the options of a single
 
 ## Failure semantics
 
-`api()` resolves to the endpoint's output on success and to `undefined` on
-every failure, refusals included. An output is always an object or an array
+A call (`caller.companies.getPage(input)`, or `api()` by name) resolves to the
+endpoint's output on success and to `undefined` on every failure, refusals
+included. An output is always an object or an array
 (see [APIs](./apis.md#defining-apis)), so the result is truthy exactly when
 the call succeeded, and `if (!result) return` is a complete check once the
 constructor's handlers have told the user why. When the call site needs to
-know why, use `apiOutcome()`; it never throws and resolves to a discriminated
-union:
+know why, use the endpoint's `.outcome()` (or `apiOutcome()` by name); it
+never throws and resolves to a discriminated union:
 
 ```typescript
-const outcome = await caller.apiOutcome("getCompanyPage", { companyName: "Acme" });
+const outcome = await caller.companies.getPage.outcome({ companyName: "Acme" });
 if (outcome.ok) {
     render(outcome.payload);
 } else if (outcome.reason === "network" || outcome.reason === "timeout") {
@@ -256,7 +271,7 @@ The easy form is a key scope, one per component that performs the operation:
 ```typescript
 const submitKey = createIdempotencyKeyScope();
 
-await caller.api("order.create", payload, { idempotencyKey: submitKey });
+await caller.order.create(payload, { idempotencyKey: submitKey });
 ```
 
 Every attempt of one operation (a retry after a dropped connection, a
@@ -307,11 +322,11 @@ const caller = new LambderCaller<ApiContractType>({
 });
 
 // Nothing at the call sites changes; this one goes compressed, that one plain.
-await caller.api("importStops", { stops: bigArray });
-await caller.api("getStop", { id: "42" });
+await caller.stops.importAll({ stops: bigArray });
+await caller.stops.get({ id: "42" });
 
 // Per call, either way:
-await caller.api("importStops", huge, { compressRequest: false });
+await caller.stops.importAll(huge, { compressRequest: false });
 ```
 
 A compressed call sends `payloadGz` (gzip bytes, base64) beside `payloadBytes`
@@ -323,10 +338,10 @@ Brotli, which is what a Node caller
 ([`LambderInvokeCaller`](./invoke.md#compression)) sends; nothing changes for
 browsers, which keep sending `payloadGz`.
 
-Everything else in the envelope stays plain text, so `apiName` routing, request
-logs and MSW mocks are unaffected, and the request stays `application/json`: no
-`Content-Encoding` negotiation for a gateway, CDN or proxy to get wrong, and no
-new CORS preflight surface. Base64 inside the JSON rather than a binary body is
+The endpoint is the call's path and everything else in the envelope stays
+plain text, so routing, request logs and MSW mocks are unaffected, and the
+request stays `application/json`: no `Content-Encoding` negotiation for a
+gateway, CDN or proxy to get wrong, and no new CORS preflight surface. Base64 inside the JSON rather than a binary body is
 not a compromise for the size cap, because API Gateway hands a binary request
 body to Lambda base64-encoded anyway; base64's 4/3 overhead applies to bytes
 that already shrank several times over. Record-shaped JSON typically gzips
@@ -362,8 +377,8 @@ a better codec.
 
 Every call is one transport call: the envelope in, the answer out in the
 accessor form `resolveApiOutcome()` reads. The default is
-`lambderFetchTransport`, one POST to `apiPath` over fetch with the CORS
-behaviour `isCorsEnabled` selects (its `cors` option, when built by hand: left
+`lambderFetchTransport`, one POST to `{apiPath}/{group}/{action}` over fetch
+with the CORS behaviour `isCorsEnabled` selects (its `cors` option, when built by hand: left
 out, credentialed cross-origin mode applies exactly when the call's `apiPath`
 is on another origin than the page's). Pass `transport` at construction, or
 `setTransport()` later, to route calls elsewhere:

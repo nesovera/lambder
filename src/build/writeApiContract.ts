@@ -11,12 +11,12 @@ import { writeFileAtomically } from "./writeFileAtomically.js";
  * A client that imports `typeof lambder.ApiContract` from the server's
  * sources compiles the server to get it: every endpoint's schemas, the
  * libraries they infer through, and whatever the server's entry imports
- * besides. It also reads it as the intersection chaining built, one member
- * deep per endpoint. In a large app that is most of the client's type-check
- * time and memory, for one type. This reads the ApiContract property off the
- * exported instance and writes it out as the structure it resolves to, one
- * object type with plain members in a module that imports nothing, so the
- * client compiles the contract alone.
+ * besides, and it resolves every endpoint's entry out of the declarations
+ * registerApiGroups() mapped. In a large app that is most of the client's
+ * type-check time and memory, for one type. This reads the ApiContract
+ * property off the exported instance and writes it out as the structure it
+ * resolves to, one object type with plain members in a module that imports
+ * nothing, so the client compiles the contract alone.
  *
  * What can go wrong is the file: stale against the server, or printed as
  * something other than the type it stands for. A check compares it with what

@@ -24,35 +24,39 @@ import type { LambderSessionStore } from '../../src/shared/contracts/LambderSess
 import type { LambderApiTransport } from '../../src/shared/transport/LambderApiTransport.js';
 import { assertApiSuccess, assertApiFailure, assertApiRefusal } from '../../src/shared/wire/LambderOutcomeAssertions.js';
 import type { LambderApiOptionEntry, LambderGuardDeclarationEntry } from '../../src/shared/wire/LambderApiOptionEntries.js';
+import { apiCallPath } from '../../src/shared/wire/LambderApiNames.js';
 
 type SessionData = { userId: string; tenants: { tenantId: string; role: 'reader' | 'writer' }[] };
 
 /** The contract as a consuming app imports it: a type, nothing else. */
 type Contract = {
     'user.get': { input: { userId: string }; output: { id: string; name: string }; mode: 'public'; refusals: { 'app/user-archived': { data: { since: string; by: string; days: number } } } };
-    'login': { input: { user: string }; output: { ok: boolean }; mode: 'public' };
-    'logout': { input: {}; output: { ok: boolean }; mode: 'session' };
-    'me': { input: {}; output: { userId: string }; mode: 'session' };
+    'account.login': { input: { user: string }; output: { ok: boolean }; mode: 'public' };
+    'account.logout': { input: {}; output: { ok: boolean }; mode: 'session'; guards: 'signedIn' };
+    'account.me': { input: {}; output: { userId: string }; mode: 'session'; guards: 'signedIn' };
     'order.create': {
         input: { qty: number }; output: { orderId: string; qty: number }; mode: 'session';
         refusals: { 'app/not-a-member': {}; 'app/read-only': {} };
         guards: { tenant: 'writer' }; guardInputs: { tenant: { tenantId: string } }; idempotency: true;
     };
-    'limited': { input: {}; output: { n: number }; mode: 'public'; rateLimit: 'tight' };
+    'tools.limited': { input: {}; output: { n: number }; mode: 'public'; rateLimit: 'tight' };
     'ticket.buy': { input: { seat: string }; output: { ticketId: string }; mode: 'public'; idempotency: true };
-    'echo': { input: { notes: string[] }; output: { count: number }; mode: 'public' };
+    'tools.echo': { input: { notes: string[] }; output: { count: number }; mode: 'public' };
     'admin.run': { input: {}; output: {}; mode: 'public' };
-    'admin.audit': { input: {}; output: {}; mode: 'session' };
+    'admin.audit': { input: {}; output: {}; mode: 'session'; guards: 'signedIn' };
 };
 
 const mock = initLambderMock<Contract, SessionData>();
 
 /**
- * The guard map every app in this file declares. The contract names a guard,
+ * The guard map every app in this file declares. The contract names guards,
  * so the `guards` option is not optional: a mock that leaves it out cannot run
- * the guard the server runs, which is the whole point of restating it.
+ * the guard the server runs, which is the whole point of restating it. Both
+ * need a session, so an entry restating either is a session endpoint, as on
+ * the server.
  */
 const mockGuards = {
+    signedIn: mock.guard({ session: true, handler: () => {} }),
     tenant: mock.guard({
         guardInput: z.object({ tenantId: z.string() }),
         session: true,
@@ -79,13 +83,38 @@ const requiredOptions = {
 } as const;
 
 /**
+ * The table writeApiOptions would write for this file's contract: `as const`,
+ * as the generated module is. Given it, the mock reads every entry's mode off
+ * it, a notMocked entry's and a rest answer's included, which nothing else can
+ * tell the mock at runtime.
+ */
+const contractOptions = {
+    'user.get': { mode: 'public', refusals: 'app/user-archived' },
+    'account.login': { mode: 'public' },
+    'account.logout': { mode: 'session', guards: 'signedIn' },
+    'account.me': { mode: 'session', guards: 'signedIn' },
+    'order.create': { mode: 'session', guards: { tenant: 'writer' }, idempotency: true },
+    'tools.limited': { mode: 'public', rateLimit: 'tight' },
+    'ticket.buy': { mode: 'public', idempotency: true },
+    'tools.echo': { mode: 'public' },
+    'admin.run': { mode: 'public' },
+    'admin.audit': { mode: 'session', guards: 'signedIn' },
+} as const satisfies Record<string, LambderApiOptionEntry>;
+
+/** The guard declarations writeApiOptions would write beside the table: the two session guards, and the codes the tenant guard refuses with. */
+const contractGuardDeclarations = {
+    signedIn: { input: 'none', session: true, runAt: 'beforeInputValidation' },
+    tenant: { input: 'guardInput', session: true, runAt: 'beforeInputValidation', refusals: ['app/not-a-member', 'app/read-only'] },
+} as const satisfies Record<string, LambderGuardDeclarationEntry>;
+
+/**
  * The generated map the callers under test carry, filled once the names are
  * hashed. Three endpoints are enough to exercise the gate; a caller given
  * this map calls only these.
  */
 const mockSignatures: LambderApiSignatureMap = {};
 beforeAll(async () => {
-    for(const name of ['user.get', 'admin.run', 'limited']) mockSignatures[await apiNameKeyOf(name)] = `mock-signature-of-${name}`;
+    for(const name of ['user.get', 'admin.run', 'tools.limited']) mockSignatures[await apiNameKeyOf(name)] = `mock-signature-of-${name}`;
 });
 
 const createMockApp = (options: { apiVersion?: string; latency?: number } = {}) => {
@@ -101,14 +130,14 @@ const createMockApp = (options: { apiVersion?: string; latency?: number } = {}) 
     let orderRuns = 0;
     mockApp.register(
         mockApp.apiSlice(
-            mockApp.publicApi('user.get', async ({ payload }) => ({ id: payload.userId, name: 'Ada' })),
-            mockApp.publicApi('login', async ({ payload, sessionController }) => {
+            mockApp.api('user.get', async ({ payload }) => ({ id: payload.userId, name: 'Ada' })),
+            mockApp.api('account.login', async ({ payload, sessionController }) => {
                 await sessionController.createSession(payload.user, { userId: payload.user, tenants: [{ tenantId: 't1', role: payload.user === 'ada' ? 'writer' : 'reader' }] });
                 return { ok: true };
             }),
-            mockApp.sessionApi('logout', async ({ sessionController }) => { await sessionController.endSession(); return { ok: true }; }),
-            mockApp.sessionApi('me', async ({ session }) => ({ userId: session.data.userId })),
-            mockApp.sessionApi('order.create', {
+            mockApp.api('account.logout', { guards: 'signedIn', handler: async ({ sessionController }) => { await sessionController.endSession(); return { ok: true }; } }),
+            mockApp.api('account.me', { guards: 'signedIn', handler: async ({ session }) => ({ userId: session.data.userId }) }),
+            mockApp.api('order.create', {
                 guards: { tenant: 'writer' },
                 idempotency: true,
                 handler: async ({ payload, guardData }) => {
@@ -116,19 +145,19 @@ const createMockApp = (options: { apiVersion?: string; latency?: number } = {}) 
                     return { orderId: `o-${guardData.tenant.tenantId}-${orderRuns}`, qty: payload.qty };
                 },
             }),
-            mockApp.publicApi('limited', { rateLimit: 'tight', handler: async () => ({ n: 1 }) }),
-            mockApp.publicApi('ticket.buy', { idempotency: true, handler: async ({ payload }) => ({ ticketId: `t-${payload.seat}` }) }),
-            mockApp.publicApi('echo', async ({ payload }) => ({ count: payload.notes.length })),
+            mockApp.api('tools.limited', { rateLimit: 'tight', handler: async () => ({ n: 1 }) }),
+            mockApp.api('ticket.buy', { idempotency: true, handler: async ({ payload }) => ({ ticketId: `t-${payload.seat}` }) }),
+            mockApp.api('tools.echo', async ({ payload }) => ({ count: payload.notes.length })),
         ),
         mockApp.apiSlice(
             mockApp.notMocked('admin.run', 'operator endpoint, no client calls it'),
-            mockApp.sessionNotMocked('admin.audit', 'operator endpoint, no client calls it'),
+            mockApp.notMocked('admin.audit', { reason: 'operator endpoint, no client calls it', guards: 'signedIn' }),
         ),
     );
     return { mockApp, orderRuns: () => orderRuns };
 };
 
-const callerFor = (mockApp: ReturnType<typeof createMockApp>['mockApp'], options: { jar?: LambderCookieJar; apiVersion?: string; apiSignatures?: LambderApiSignatureMap; timeoutMs?: number } = {}) =>
+const callerFor = (mockApp: Pick<ReturnType<typeof createMockApp>['mockApp'], 'transport'>, options: { jar?: LambderCookieJar; apiVersion?: string; apiSignatures?: LambderApiSignatureMap; timeoutMs?: number } = {}) =>
     new LambderCaller<Contract>({
         apiPath: '/api', isCorsEnabled: false, apiVersion: options.apiVersion, apiSignatures: options.apiSignatures, timeoutMs: options.timeoutMs,
         transport: mockApp.transport(options.jar ? { cookies: options.jar } : {}),
@@ -146,7 +175,7 @@ describe('LambderMockApp - answers', () => {
 
     it('a name the registry does not know answers the apiNotFound refusal, as the server does', async () => {
         const { mockApp } = createMockApp();
-        const outcome = await (callerFor(mockApp) as LambderCaller<any>).apiOutcome('nope', {});
+        const outcome = await (callerFor(mockApp) as LambderCaller<any>).apiOutcome('user.unknown', {});
         expect(outcome.ok).toBe(false);
         if(outcome.ok) return;
         expect(outcome.reason).toBe('refusal');
@@ -169,30 +198,40 @@ describe('LambderMockApp - answers', () => {
         // its slices and called again would hit a duplicate-name error from
         // its own first attempt instead of the problem it fixed.
         const bare = mock.create({ ...requiredOptions });
-        const good = bare.apiSlice(bare.publicApi('echo', async ({ payload }) => ({ count: payload.notes.length })));
-        const clashing = bare.apiSlice(bare.publicApi('echo', async ({ payload }) => ({ count: payload.notes.length })));
+        const good = bare.apiSlice(bare.api('tools.echo', async ({ payload }) => ({ count: payload.notes.length })));
+        const clashing = bare.apiSlice(bare.api('tools.echo', async ({ payload }) => ({ count: payload.notes.length })));
 
         expect(() => bare.registerPartial(good, clashing)).toThrow(/more than one slice/);
         expect(bare.registeredNames).toEqual([]);
         // And the fixed call goes through, rather than tripping on the remains.
         expect(() => bare.registerPartial(good)).not.toThrow();
-        expect(bare.registeredNames).toEqual(['echo']);
+        expect(bare.registeredNames).toEqual(['tools.echo']);
     });
 
-    it('a session endpoint left unmocked is still refused for having no session', async () => {
+    it('a session endpoint left unmocked is still refused for having no session, its mode read off the apiOptions table or the guards it restates', async () => {
         // The refusal runs through the pipeline so the steps before dispatch
-        // still happen, and the session read is one of them. Declaring every
-        // not-mocked endpoint public would switch that step off, and this would
-        // answer "not mocked" where the server answers sessionExpired, a
-        // different bug to go looking for.
-        const { mockApp } = createMockApp();
+        // still happen, and the session read is one of them. With the table,
+        // the table is what makes it a session endpoint: read as public, this
+        // would answer "not mocked" where the server answers sessionExpired,
+        // a different bug to go looking for.
+        const app = mock.create({ ...requiredOptions, apiOptions: contractOptions, guardDeclarations: contractGuardDeclarations });
+        app.registerPartial(app.apiSlice(app.notMocked('admin.audit', 'operator endpoint, no client calls it')));
 
-        const outcome = await callerFor(mockApp).apiOutcome('admin.audit', {});
+        const outcome = await callerFor(app).apiOutcome('admin.audit', {});
 
         assertApiFailure(outcome, 'sessionExpired');
-        expect(mockApp.calls.at(-1)?.outcome).toBe('sessionExpired');
+        expect(app.calls.at(-1)?.outcome).toBe('sessionExpired');
         // And the mode it reports is the endpoint's own.
+        expect(app.calls.at(-1)?.mode).toBe('session');
+
+        // Without the table the entry restates its guards, which say it by
+        // the server's rule: signedIn needs a session.
+        const { mockApp } = createMockApp();
+        assertApiFailure(await callerFor(mockApp).apiOutcome('admin.audit', {}), 'sessionExpired');
         expect(mockApp.calls.at(-1)?.mode).toBe('session');
+        // Restated beside the table, the guards would be a second copy of the declaration.
+        expect(() => app.notMocked('admin.audit', { reason: 'operator endpoint', guards: 'signedIn' } as never))
+            .toThrow('LambderMockApp: "admin.audit" restates its guards option, which the apiOptions table given to create() already declares. Leave it out of the entry.');
     });
 
     it('a notMocked endpoint still meets the protocol steps that run before dispatch', async () => {
@@ -256,7 +295,7 @@ describe('LambderMockApp - answers', () => {
         const { mockApp } = createMockApp();
         const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false, requestCompression: true, transport: mockApp.transport() });
         const notes = Array.from({ length: 300 }, (_, i) => `note-${i} on the main line`);
-        expect(await caller.api('echo', { notes })).toEqual({ count: 300 });
+        expect(await caller.api('tools.echo', { notes })).toEqual({ count: 300 });
         expect(mockApp.calls.at(-1)?.payload).toEqual({ notes });
     });
 });
@@ -265,10 +304,10 @@ describe('LambderMockApp - sessions', () => {
     it('a login handler creates a session through ctx.sessionController and the jar carries it into the next call', async () => {
         const { mockApp } = createMockApp();
         const caller = callerFor(mockApp);
-        expect((await callerFor(mockApp).apiOutcome('me', {})).ok).toBe(false);
+        expect((await callerFor(mockApp).apiOutcome('account.me', {})).ok).toBe(false);
 
-        expect(await caller.api('login', { user: 'ada' })).toEqual({ ok: true });
-        expect(await caller.api('me', {})).toEqual({ userId: 'ada' });
+        expect(await caller.api('account.login', { user: 'ada' })).toEqual({ ok: true });
+        expect(await caller.api('account.me', {})).toEqual({ userId: 'ada' });
         expect(mockApp.sessionStore?.size).toBe(1);
     });
 
@@ -276,21 +315,21 @@ describe('LambderMockApp - sessions', () => {
         const { mockApp } = createMockApp();
         const ada = callerFor(mockApp);
         const bob = callerFor(mockApp);
-        await ada.api('login', { user: 'ada' });
-        await bob.api('login', { user: 'bob' });
-        expect(await ada.api('me', {})).toEqual({ userId: 'ada' });
-        expect(await bob.api('me', {})).toEqual({ userId: 'bob' });
+        await ada.api('account.login', { user: 'ada' });
+        await bob.api('account.login', { user: 'bob' });
+        expect(await ada.api('account.me', {})).toEqual({ userId: 'ada' });
+        expect(await bob.api('account.me', {})).toEqual({ userId: 'bob' });
 
-        const stranger = await callerFor(mockApp).apiOutcome('me', {});
+        const stranger = await callerFor(mockApp).apiOutcome('account.me', {});
         assertApiFailure(stranger, 'sessionExpired');
     });
 
     it('logout ends the session and clears the cookies, so the next call is signed out', async () => {
         const { mockApp } = createMockApp();
         const caller = callerFor(mockApp);
-        await caller.api('login', { user: 'ada' });
-        expect(await caller.api('logout', {})).toEqual({ ok: true });
-        const after = await caller.apiOutcome('me', {});
+        await caller.api('account.login', { user: 'ada' });
+        expect(await caller.api('account.logout', {})).toEqual({ ok: true });
+        const after = await caller.apiOutcome('account.me', {});
         assertApiFailure(after, 'sessionExpired');
         expect(mockApp.sessionStore?.size).toBe(0);
     });
@@ -305,10 +344,10 @@ describe('LambderMockApp - sessions', () => {
         expect(jar.get(mockApp.tokenCookieKey, { includeHttpOnly: true })).toBe(created.sessionToken);
 
         const caller = callerFor(mockApp, { jar });
-        expect(await caller.api('me', {})).toEqual({ userId: 'ada' });
+        expect(await caller.api('account.me', {})).toEqual({ userId: 'ada' });
 
         await mockApp.signOut('ada');
-        const after = await caller.apiOutcome('me', {});
+        const after = await caller.apiOutcome('account.me', {});
         expect(after.ok).toBe(false);
     });
 
@@ -318,7 +357,7 @@ describe('LambderMockApp - sessions', () => {
         // would be dropped and the session would never carry.
         const domained = mock.create({ ...requiredOptions, cookieHost: 'app.example.com', sessions: { cookieOptions: { domain: 'example.com' } } });
         domained.registerPartial(domained.apiSlice(
-            domained.sessionApi('me', async ({ session }) => ({ userId: session.data.userId })),
+            domained.api('account.me', { guards: 'signedIn', handler: async ({ session }) => ({ userId: session.data.userId }) }),
         ));
         const jar = new LambderCookieJar();
         await domained.signIn('ada', { userId: 'ada', tenants: [] }, { jar, host: 'app.example.com' });
@@ -327,7 +366,7 @@ describe('LambderMockApp - sessions', () => {
         const caller = new LambderCaller<Contract>({
             apiPath: '/api', isCorsEnabled: false, transport: domained.transport({ cookies: jar }),
         });
-        expect(await caller.api('me', {})).toEqual({ userId: 'ada' });
+        expect(await caller.api('account.me', {})).toEqual({ userId: 'ada' });
     });
 
     it('every session member names the mock\'s own sessions option when it is off', async () => {
@@ -375,18 +414,18 @@ describe('LambderMockApp - sessions', () => {
     it('a session endpoint on a mock without sessions is refused at registration', () => {
         // @ts-expect-error the contract has session endpoints; built without sessions on purpose, as a plain-JS caller could
         const bare = mock.create({ ...requiredOptions, sessions: false });
-        expect(() => bare.sessionApi('me', async () => ({ userId: 'x' }))).toThrow(/needs the sessions option at creation/);
+        expect(() => bare.api('account.me', { guards: 'signedIn', handler: async () => ({ userId: 'x' }) })).toThrow(/needs the sessions option at creation/);
     });
 
     it('runs on the plain crypto stand-in where asked to', async () => {
         const plain = mock.create({ ...requiredOptions, sessions: { crypto: new LambderPlainSessionCrypto() } });
         plain.registerPartial(plain.apiSlice(
-            plain.publicApi('login', async ({ payload, sessionController }) => { await sessionController.createSession(payload.user, { userId: payload.user, tenants: [] }); return { ok: true }; }),
-            plain.sessionApi('me', async ({ session }) => ({ userId: session.data.userId })),
+            plain.api('account.login', async ({ payload, sessionController }) => { await sessionController.createSession(payload.user, { userId: payload.user, tenants: [] }); return { ok: true }; }),
+            plain.api('account.me', { guards: 'signedIn', handler: async ({ session }) => ({ userId: session.data.userId }) }),
         ));
         const caller = callerFor(plain);
-        await caller.api('login', { user: 'ada' });
-        expect(await caller.api('me', {})).toEqual({ userId: 'ada' });
+        await caller.api('account.login', { user: 'ada' });
+        expect(await caller.api('account.me', {})).toEqual({ userId: 'ada' });
     });
 });
 
@@ -394,7 +433,7 @@ describe('LambderMockApp - guards, rate limits, idempotency, version', () => {
     it('runs the mock guard with the restated param: guardData lands typed, a refusal is rendered, a missing input is a 422', async () => {
         const { mockApp, orderRuns } = createMockApp();
         const ada = callerFor(mockApp);
-        await ada.api('login', { user: 'ada' });
+        await ada.api('account.login', { user: 'ada' });
 
         const ok = await ada.apiOutcome('order.create', { qty: 2 }, { guardInputs: { tenant: { tenantId: 't1' } }, idempotencyKey: 'k-order-one-abcdefabcdef' });
         expect(ok.ok).toBe(true);
@@ -413,7 +452,7 @@ describe('LambderMockApp - guards, rate limits, idempotency, version', () => {
         expect(mockApp.calls.at(-1)?.outcome).toBe('validation');
 
         const bob = callerFor(mockApp);
-        await bob.api('login', { user: 'bob' });
+        await bob.api('account.login', { user: 'bob' });
         const readOnly = await bob.apiOutcome('order.create', { qty: 1 }, { guardInputs: { tenant: { tenantId: 't1' } }, idempotencyKey: 'k-order-four-abcdefabcdef' });
         assertApiFailure(readOnly);
         expect(readOnly.refusal).toMatchObject({ code: 'app/read-only' });
@@ -423,7 +462,7 @@ describe('LambderMockApp - guards, rate limits, idempotency, version', () => {
     it('charges a policy from a handler through ctx.rateLimit, as a server handler does', async () => {
         const mockApp = mock.create({ ...requiredOptions, rateLimits: { policies: { tight: { perMin: 2, per: 'ip' }, perUser: { perMin: 1 } } } });
         mockApp.registerPartial(mockApp.apiSlice(
-            mockApp.publicApi('user.get', async (ctx) => {
+            mockApp.api('user.get', async (ctx) => {
                 await ctx.rateLimit('perUser', ctx.payload.userId);
                 return { id: ctx.payload.userId, name: 'Ada' };
             }),
@@ -437,22 +476,22 @@ describe('LambderMockApp - guards, rate limits, idempotency, version', () => {
     it('rate limits through the memory limiter, with Retry-After on the refusal', async () => {
         const { mockApp } = createMockApp();
         const caller = callerFor(mockApp);
-        expect(await caller.api('limited', {})).toEqual({ n: 1 });
-        expect(await caller.api('limited', {})).toEqual({ n: 1 });
-        const third = await caller.apiOutcome('limited', {});
+        expect(await caller.api('tools.limited', {})).toEqual({ n: 1 });
+        expect(await caller.api('tools.limited', {})).toEqual({ n: 1 });
+        const third = await caller.apiOutcome('tools.limited', {});
         expect(third.ok).toBe(false);
         if(third.ok) return;
         expect(third.status).toBe(429);
         expect(third.refusal).toMatchObject({ code: LAMBDER_REFUSAL_CODES.rateLimited });
         expect(third.retryAfterSeconds).toBeGreaterThanOrEqual(1);
         expect(mockApp.calls.at(-1)?.outcome).toBe('rateLimited');
-        expect(mockApp.rateLimiter?.countOf('api|limited|tight|ip:127.0.0.1', 'perMin')).toBe(2);
+        expect(mockApp.rateLimiter?.countOf('api|tools.limited|tight|ip:127.0.0.1', 'perMin')).toBe(2);
     });
 
     it('replays an idempotent answer for a repeated key without running the handler again', async () => {
         const { mockApp, orderRuns } = createMockApp();
         const caller = callerFor(mockApp);
-        await caller.api('login', { user: 'ada' });
+        await caller.api('account.login', { user: 'ada' });
         const key = createIdempotencyKey();
         const first = await caller.api('order.create', { qty: 5 }, { guardInputs: { tenant: { tenantId: 't1' } }, idempotencyKey: key });
         const second = await caller.api('order.create', { qty: 5 }, { guardInputs: { tenant: { tenantId: 't1' } }, idempotencyKey: key });
@@ -494,13 +533,13 @@ describe('LambderMockApp - guards, rate limits, idempotency, version', () => {
                 ...requiredOptions,
                 rateLimits: { limiter: failingLimiter, failOpen, policies: { tight: { perMin: 2, per: 'ip' } } },
             });
-            app.registerPartial(app.apiSlice(app.publicApi('limited', { rateLimit: 'tight', handler: async () => ({ n: 1 }) })));
+            app.registerPartial(app.apiSlice(app.api('tools.limited', { rateLimit: 'tight', handler: async () => ({ n: 1 }) })));
             return callerFor(app);
         };
         const error = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-        expect(await build().api('limited', {})).toEqual({ n: 1 });
-        const refused = await build(false).apiOutcome('limited', {});
+        expect(await build().api('tools.limited', {})).toEqual({ n: 1 });
+        const refused = await build(false).apiOutcome('tools.limited', {});
 
         assertApiFailure(refused, 'server');
         error.mockRestore();
@@ -516,7 +555,7 @@ describe('LambderMockApp - guards, rate limits, idempotency, version', () => {
         // A runtime given no map passes every signature: it holds no server
         // schema to judge one by.
         const ungated = mock.create({ ...requiredOptions });
-        ungated.registerPartial(ungated.apiSlice(ungated.publicApi('user.get', async ({ payload }) => ({ id: payload.userId, name: 'Ada' }))));
+        ungated.registerPartial(ungated.apiSlice(ungated.api('user.get', async ({ payload }) => ({ id: payload.userId, name: 'Ada' }))));
         expect((await callerFor(ungated, { apiSignatures: { [await apiNameKeyOf('user.get')]: 'whatever' } }).apiOutcome('user.get', { userId: '1' })).ok).toBe(true);
     });
 });
@@ -678,9 +717,9 @@ describe('LambderMockApp - overrides, reset, observation', () => {
         // registers one endpoint under another's name and leaves a third
         // unanswered. Only apiSlice keys entries for you.
         const app = mock.create({ ...requiredOptions });
-        const entry = app.publicApi('user.get', async ({ payload }) => ({ id: payload.userId, name: 'Ada' }));
-        expect(() => app.registerPartial({ echo: entry }))
-            .toThrow(/slice key "echo" holds the mock for "user.get"/);
+        const entry = app.api('user.get', async ({ payload }) => ({ id: payload.userId, name: 'Ada' }));
+        expect(() => app.registerPartial({ 'tools.echo': entry }))
+            .toThrow(/slice key "tools\.echo" holds the mock for "user\.get"/);
         expect(app.registeredNames).toEqual([]);
     });
 
@@ -690,8 +729,8 @@ describe('LambderMockApp - overrides, reset, observation', () => {
         const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false, transport });
         const ownJar = new LambderCookieJar();
         const brought = callerFor(mockApp, { jar: ownJar });
-        await caller.api('login', { user: 'ada' });
-        await brought.api('login', { user: 'bob' });
+        await caller.api('account.login', { user: 'ada' });
+        await brought.api('account.login', { user: 'bob' });
         expect(transport.cookieJar?.size).toBeGreaterThan(0);
 
         mockApp.reset();
@@ -699,7 +738,7 @@ describe('LambderMockApp - overrides, reset, observation', () => {
         // Rewinding sessions without their cookies would make the next call
         // look signed in until the answer said otherwise.
         expect(transport.cookieJar?.size).toBe(0);
-        const after = await caller.apiOutcome('me', {});
+        const after = await caller.apiOutcome('account.me', {});
         assertApiFailure(after, 'sessionExpired');
         // The caller's own jar is the caller's, as an app-supplied store is.
         expect(ownJar.size).toBeGreaterThan(0);
@@ -709,23 +748,23 @@ describe('LambderMockApp - overrides, reset, observation', () => {
         const onReset = vi.fn();
         const mockApp = mock.create({ ...requiredOptions, sessions: true, rateLimits: { policies: { tight: { perMin: 1, per: 'ip' } } }, onReset });
         mockApp.registerPartial(mockApp.apiSlice(
-            mockApp.publicApi('limited', { rateLimit: 'tight', handler: async () => ({ n: 1 }) }),
-            mockApp.publicApi('login', async ({ payload, sessionController }) => { await sessionController.createSession(payload.user, { userId: payload.user, tenants: [] }); return { ok: true }; }),
+            mockApp.api('tools.limited', { rateLimit: 'tight', handler: async () => ({ n: 1 }) }),
+            mockApp.api('account.login', async ({ payload, sessionController }) => { await sessionController.createSession(payload.user, { userId: payload.user, tenants: [] }); return { ok: true }; }),
         ));
         const caller = callerFor(mockApp);
-        await caller.api('login', { user: 'ada' });
-        await caller.api('limited', {});
-        expect((await caller.apiOutcome('limited', {})).ok).toBe(false);
-        mockApp.override('limited', async () => ({ n: 9 }));
-        mockApp.setFailure('login', 'server');
+        await caller.api('account.login', { user: 'ada' });
+        await caller.api('tools.limited', {});
+        expect((await caller.apiOutcome('tools.limited', {})).ok).toBe(false);
+        mockApp.override('tools.limited', async () => ({ n: 9 }));
+        mockApp.setFailure('account.login', 'server');
 
         mockApp.reset();
 
         expect(onReset).toHaveBeenCalledOnce();
         expect(mockApp.sessionStore?.size).toBe(0);
         expect(mockApp.calls.length).toBe(0);
-        expect(await caller.api('limited', {})).toEqual({ n: 1 });
-        expect((await caller.apiOutcome('login', { user: 'ada' })).ok).toBe(true);
+        expect(await caller.api('tools.limited', {})).toEqual({ n: 1 });
+        expect((await caller.apiOutcome('account.login', { user: 'ada' })).ok).toBe(true);
     });
 
     it('validates the payload against an entry\'s own schema, answering 422 as the server does', async () => {
@@ -734,8 +773,8 @@ describe('LambderMockApp - overrides, reset, observation', () => {
         // path a test needs, and endpoints without one take whatever arrives.
         const mockApp = mock.create({ ...requiredOptions });
         mockApp.registerPartial(mockApp.apiSlice(
-            mockApp.publicApi('user.get', { input: z.object({ userId: z.string() }), handler: async ({ payload }) => ({ id: payload.userId, name: 'Ada' }) }),
-            mockApp.publicApi('echo', async ({ payload }) => ({ count: payload.notes.length })),
+            mockApp.api('user.get', { input: z.object({ userId: z.string() }), handler: async ({ payload }) => ({ id: payload.userId, name: 'Ada' }) }),
+            mockApp.api('tools.echo', async ({ payload }) => ({ count: payload.notes.length })),
         ));
         const caller = callerFor(mockApp);
 
@@ -744,7 +783,7 @@ describe('LambderMockApp - overrides, reset, observation', () => {
         const refused = await caller.apiOutcome('user.get', { userId: 42 } as never);
         assertApiFailure(refused, 'validation');
         // An endpoint with no schema still takes whatever arrives.
-        expect(await caller.api('echo', { notes: ['a', 'b'] })).toEqual({ count: 2 });
+        expect(await caller.api('tools.echo', { notes: ['a', 'b'] })).toEqual({ count: 2 });
     });
 
     it('answers a bad input as the server app\'s own validation handler does, once the mock states it', async () => {
@@ -756,7 +795,7 @@ describe('LambderMockApp - overrides, reset, observation', () => {
             onInvalidInput: (zodError) => ({ payload: null, config: { refusal: `Check ${zodError.issues[0]?.path.join('.')}.` } }),
         });
         mockApp.registerPartial(mockApp.apiSlice(
-            mockApp.publicApi('user.get', { input: z.object({ userId: z.string() }), handler: async ({ payload }) => ({ id: payload.userId, name: 'Ada' }) }),
+            mockApp.api('user.get', { input: z.object({ userId: z.string() }), handler: async ({ payload }) => ({ id: payload.userId, name: 'Ada' }) }),
         ));
         const outcome = await callerFor(mockApp).apiOutcome('user.get', { userId: 42 } as never);
 
@@ -767,7 +806,7 @@ describe('LambderMockApp - overrides, reset, observation', () => {
         // null asks for the standard answer.
         const standard = mock.create({ ...requiredOptions, onInvalidInput: () => null });
         standard.registerPartial(standard.apiSlice(
-            standard.publicApi('user.get', { input: z.object({ userId: z.string() }), handler: async ({ payload }) => ({ id: payload.userId, name: 'Ada' }) }),
+            standard.api('user.get', { input: z.object({ userId: z.string() }), handler: async ({ payload }) => ({ id: payload.userId, name: 'Ada' }) }),
         ));
         assertApiFailure(await callerFor(standard).apiOutcome('user.get', { userId: 42 } as never), 'validation');
     });
@@ -779,10 +818,10 @@ describe('LambderMockApp - overrides, reset, observation', () => {
         const mockApp = mock.create({ ...requiredOptions });
         const seen: unknown[] = [];
         mockApp.registerPartial(mockApp.apiSlice(
-            mockApp.publicApi('echo', async ({ payload }) => { seen.push(payload); return { count: payload.notes.length }; }),
+            mockApp.api('tools.echo', async ({ payload }) => { seen.push(payload); return { count: payload.notes.length }; }),
         ));
         const form = { notes: ['a'], at: new Date('2026-01-02T03:04:05.000Z'), draft: undefined };
-        await callerFor(mockApp).api('echo', form as never);
+        await callerFor(mockApp).api('tools.echo', form as never);
 
         expect(seen[0]).not.toBe(form);
         expect(seen[0]).toEqual({ notes: ['a'], at: '2026-01-02T03:04:05.000Z' });
@@ -794,7 +833,7 @@ describe('LambderMockApp - overrides, reset, observation', () => {
     it('carries the logList and the headers and cookies a handler wrote, beside its payload', async () => {
         const mockApp = mock.create({ ...requiredOptions });
         mockApp.registerPartial(mockApp.apiSlice(
-            mockApp.publicApi('echo', async ({ payload, logList, setResponseHeader, setCookie }) => {
+            mockApp.api('tools.echo', async ({ payload, logList, setResponseHeader, setCookie }) => {
                 logList.push('note');
                 setResponseHeader('X-Served-By', 'the mock');
                 setCookie('lastEcho', String(payload.notes.length));
@@ -803,7 +842,7 @@ describe('LambderMockApp - overrides, reset, observation', () => {
         ));
 
         const answer = await mockApp.handleRequest({
-            apiName: 'echo', version: null, signature: null, token: '', siteHost: 'localhost', payload: { notes: ['hi'] },
+            apiName: 'tools.echo', version: null, signature: null, token: '', siteHost: 'localhost', payload: { notes: ['hi'] },
             compressedPayload: null, guardInputs: undefined, idempotencyKey: undefined,
             headers: {}, cookies: {}, ip: '1.2.3.4', host: 'localhost',
         });
@@ -817,16 +856,16 @@ describe('LambderMockApp - overrides, reset, observation', () => {
         const build = (revealHandlerErrors?: boolean) => {
             const mockApp = mock.create(revealHandlerErrors === undefined ? requiredOptions : { ...requiredOptions, revealHandlerErrors });
             mockApp.registerPartial(mockApp.apiSlice(
-                mockApp.publicApi('echo', async () => { throw new Error('Translations not found for "checkout"'); }),
+                mockApp.api('tools.echo', async () => { throw new Error('Translations not found for "checkout"'); }),
             ));
             return callerFor(mockApp);
         };
 
-        const revealed = await build().apiOutcome('echo', { notes: [] });
+        const revealed = await build().apiOutcome('tools.echo', { notes: [] });
         assertApiFailure(revealed);
         expect(revealed.refusal?.content).toBe('Translations not found for "checkout"');
 
-        const hidden = await build(false).apiOutcome('echo', { notes: [] });
+        const hidden = await build(false).apiOutcome('tools.echo', { notes: [] });
         assertApiFailure(hidden);
         expect(hidden.refusal?.content).toBe('Internal server error.');
     });
@@ -834,7 +873,7 @@ describe('LambderMockApp - overrides, reset, observation', () => {
     it('reset also puts back the configured latency and restarts the call numbering', async () => {
         const mockApp = mock.create({ ...requiredOptions, latency: 0, rateLimits: { policies: { tight: { perMin: 2, per: 'ip' } } } });
         mockApp.registerPartial(mockApp.apiSlice(
-            mockApp.publicApi('limited', { rateLimit: 'tight', handler: async () => ({ n: 1 }) }),
+            mockApp.api('tools.limited', { rateLimit: 'tight', handler: async () => ({ n: 1 }) }),
         ));
         const caller = callerFor(mockApp);
         mockApp.setLatency(120);
@@ -847,7 +886,7 @@ describe('LambderMockApp - overrides, reset, observation', () => {
         vi.useFakeTimers();
         try {
             let settled = false;
-            const pending = caller.api('limited', {});
+            const pending = caller.api('tools.limited', {});
             void pending.then(() => { settled = true; });
             await vi.advanceTimersByTimeAsync(0);
             expect(settled).toBe(true);
@@ -861,13 +900,13 @@ describe('LambderMockApp - overrides, reset, observation', () => {
     it('refuses to override an endpoint that was never registered, rather than inventing a public one', () => {
         const mockApp = mock.create({ ...requiredOptions, sessions: true, rateLimits: { policies: { tight: { perMin: 2, per: 'ip' } } } });
         mockApp.registerPartial(mockApp.apiSlice(
-            mockApp.publicApi('limited', { rateLimit: 'tight', handler: async () => ({ n: 1 }) }),
+            mockApp.api('tools.limited', { rateLimit: 'tight', handler: async () => ({ n: 1 }) }),
         ));
 
-        // 'me' is a session endpoint in the contract. Inventing a public
+        // 'account.me' is a session endpoint in the contract. Inventing a public
         // entry for it would answer with no session and no guards, so a test
         // would read a pass where the server refuses.
-        expect(() => mockApp.override('me', async () => ({ userId: 'x' })))
+        expect(() => mockApp.override('account.me', async () => ({ userId: 'x' })))
             .toThrow(/has nothing to override/);
     });
 
@@ -900,7 +939,7 @@ describe('LambderMockApp - overrides, reset, observation', () => {
         const { mockApp } = createMockApp();
         const transport = mockApp.transport();
         const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false, transport });
-        await caller.api('login', { user: 'ada' });
+        await caller.api('account.login', { user: 'ada' });
         const sessionToken = transport.cookieJar!.get(mockApp.tokenCookieKey, { includeHttpOnly: true })!;
 
         const record = mockApp.calls.at(-1)!;
@@ -941,7 +980,7 @@ describe('LambderMockApp - overrides, reset, observation', () => {
 
     it('the call log is a bounded ring of completed calls', async () => {
         const mockApp = mock.create({ ...requiredOptions, callLogSize: 2 });
-        mockApp.registerPartial(mockApp.apiSlice(mockApp.publicApi('user.get', async ({ payload }) => ({ id: payload.userId, name: 'Ada' }))));
+        mockApp.registerPartial(mockApp.apiSlice(mockApp.api('user.get', async ({ payload }) => ({ id: payload.userId, name: 'Ada' }))));
         const caller = callerFor(mockApp);
         for(const userId of ['1', '2', '3']) await caller.api('user.get', { userId });
         expect(mockApp.calls.map((call) => (call.payload as { userId: string }).userId)).toEqual(['2', '3']);
@@ -973,9 +1012,9 @@ const fakeMswModule = () => {
         http: { post: (_path: string, given: typeof resolver) => { resolver = given; return null; }, all: () => null },
         HttpResponse: Response,
     };
-    // JSON, as every Lambder caller posts it; a test passes its own Content-Type to see another.
-    const post = async (body: unknown, headers: Record<string, string> = {}) => await resolver!({
-        request: new Request('http://localhost/api', { method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json', ...headers } }),
+    // JSON to the endpoint's own path, as every Lambder caller posts it; a test passes its own Content-Type to see another.
+    const post = async (apiName: string, body: unknown, headers: Record<string, string> = {}) => await resolver!({
+        request: new Request(apiCallPath('http://localhost/api', apiName), { method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json', ...headers } }),
     });
     return { msw, post };
 };
@@ -1024,14 +1063,14 @@ describe('LambderMockApp - the MSW adapter and the document mirror', () => {
         const { msw, post } = fakeMswModule();
         lambderMockMswHandler(mockApp, { msw, apiPath: '/api', cookieJar: jar });
 
-        const login = await post({ apiName: 'login', payload: { user: 'ada' }, token: '', siteHost: 'localhost' }) as Response;
+        const login = await post('account.login', { payload: { user: 'ada' }, token: '', siteHost: 'localhost' }) as Response;
         expect(login.status).toBe(200);
         expect(jar.get(mockApp.tokenCookieKey, { includeHttpOnly: true })).toBeTruthy();
 
         // The jar answers for the host and path this call is going to, the
         // way a browser decides what to send, rather than emptying itself
         // into every request.
-        const me = await post({ apiName: 'me', payload: {}, token: jar.get(mockApp.csrfCookieKey) ?? '', siteHost: 'localhost' }) as Response;
+        const me = await post('account.me', { payload: {}, token: jar.get(mockApp.csrfCookieKey) ?? '', siteHost: 'localhost' }) as Response;
         expect(await me.json()).toMatchObject({ payload: { userId: 'ada' } });
     });
 
@@ -1044,7 +1083,7 @@ describe('LambderMockApp - the MSW adapter and the document mirror', () => {
         const { msw, post } = fakeMswModule();
         lambderMockMswHandler(mockApp, { msw, apiPath: '/api', onUnmocked: 'passthrough' });
 
-        const answer = await post({ apiName: 'user.gett', payload: { userId: '1' }, token: '', siteHost: 'localhost' });
+        const answer = await post('user.gett', { payload: { userId: '1' }, token: '', siteHost: 'localhost' });
         expect(answer).toBeUndefined();
         expect(mockApp.calls.at(-1)).toMatchObject({ apiName: 'user.gett', outcome: 'passthrough', statusCode: null, mode: null });
         expect(events.map((event) => event.phase)).toEqual(['request', 'response']);
@@ -1064,7 +1103,7 @@ describe('LambderMockApp - the MSW adapter and the document mirror', () => {
         try {
             const { mockApp } = createMockApp();
             const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false, transport: mockApp.transport({ cookies: 'document' }) });
-            await caller.api('login', { user: 'ada' });
+            await caller.api('account.login', { user: 'ada' });
 
             expect(page.written.some((header) => header.startsWith(`${mockApp.csrfCookieKey}=`))).toBe(true);
             expect(page.written.some((header) => /;\s*Secure\b/i.test(header))).toBe(false);
@@ -1073,7 +1112,7 @@ describe('LambderMockApp - the MSW adapter and the document mirror', () => {
             expect(page.written.some((header) => header.startsWith(`${mockApp.tokenCookieKey}=`))).toBe(false);
             // The page reads its CSRF token back, which is what the caller
             // posts on the envelope: the session call it carries works.
-            expect(await caller.api('me', {})).toEqual({ userId: 'ada' });
+            expect(await caller.api('account.me', {})).toEqual({ userId: 'ada' });
 
             page.written.length = 0;
             mockApp.reset();
@@ -1095,7 +1134,7 @@ describe('LambderMockApp - the MSW adapter and the document mirror', () => {
         const page = fakeDocumentCookies();
         await withFakePage(page, async () => {
             const app = mock.create({ ...requiredOptions, sessions: true, cookieHost: 'api.example.com' });
-            app.registerPartial(app.apiSlice(app.sessionApi('me', async ({ session }) => ({ userId: session.data.userId }))));
+            app.registerPartial(app.apiSlice(app.api('account.me', { guards: 'signedIn', handler: async ({ session }) => ({ userId: session.data.userId }) })));
             const jar = new LambderCookieJar();
             const { msw, post } = fakeMswModule();
             lambderMockMswHandler(app, { msw, apiPath: '/api', cookieJar: jar });
@@ -1106,7 +1145,7 @@ describe('LambderMockApp - the MSW adapter and the document mirror', () => {
             // script reads it.
             const token = page.read(app.csrfCookieKey);
             expect(token).toBeTruthy();
-            const me = await post({ apiName: 'me', payload: {}, token, siteHost: 'api.example.com' }) as Response;
+            const me = await post('account.me', { payload: {}, token, siteHost: 'api.example.com' }) as Response;
             expect(await me.json()).toMatchObject({ payload: { userId: 'ada' } });
 
             await app.signOut('ada', { jar });
@@ -1115,7 +1154,7 @@ describe('LambderMockApp - the MSW adapter and the document mirror', () => {
             // cookies naming them, in the jar and on the page.
             expect(jar.get(app.tokenCookieKey, { includeHttpOnly: true })).toBeUndefined();
             expect(page.read(app.csrfCookieKey)).toBeUndefined();
-            const after = await post({ apiName: 'me', payload: {}, token, siteHost: 'api.example.com' }) as Response;
+            const after = await post('account.me', { payload: {}, token, siteHost: 'api.example.com' }) as Response;
             expect(await after.json()).toMatchObject({ sessionExpired: true });
         });
     });
@@ -1133,11 +1172,11 @@ describe('LambderMockApp - the MSW adapter and the document mirror', () => {
             await mockApp.signIn('demo', { userId: 'demo', tenants: [] }, { jar });
             expect(page.read(mockApp.csrfCookieKey)).toBeTruthy();
             const caller = callerFor(mockApp, { jar });
-            expect(await caller.api('me', {})).toEqual({ userId: 'demo' });
+            expect(await caller.api('account.me', {})).toEqual({ userId: 'demo' });
 
-            await caller.api('logout', {});
-            await caller.api('login', { user: 'bea' });
-            expect(await caller.api('me', {})).toEqual({ userId: 'bea' });
+            await caller.api('account.logout', {});
+            await caller.api('account.login', { user: 'bea' });
+            expect(await caller.api('account.me', {})).toEqual({ userId: 'bea' });
         });
     });
 
@@ -1151,31 +1190,31 @@ describe('LambderMockApp - the MSW adapter and the document mirror', () => {
         const pollAnswerHeld = new Promise<void>((resolve) => { releasePollAnswer = resolve; });
         const answerInTransit: LambderApiTransport = async (request) => {
             const answer = await memory(request);
-            if(request.apiName === 'me') await pollAnswerHeld;
+            if(request.apiName === 'account.me') await pollAnswerHeld;
             return answer;
         };
         const sessionExpiredHandler = vi.fn();
         const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false, sessionExpiredHandler, transport: answerInTransit });
-        await caller.api('login', { user: 'ada' });
-        await caller.api('logout', {});
+        await caller.api('account.login', { user: 'ada' });
+        await caller.api('account.logout', {});
 
-        const poll = caller.apiOutcome('me', {});
-        await caller.api('login', { user: 'bea' });
+        const poll = caller.apiOutcome('account.me', {});
+        await caller.api('account.login', { user: 'bea' });
         releasePollAnswer();
 
         assertApiFailure(await poll, 'sessionExpired');
         expect(sessionExpiredHandler).not.toHaveBeenCalled();
-        expect(await caller.api('me', {})).toEqual({ userId: 'bea' });
+        expect(await caller.api('account.me', {})).toEqual({ userId: 'bea' });
     });
 
     it('still calls the sessionExpired handler in memory mode when the answer is about the session the jar holds', async () => {
         const { mockApp } = createMockApp();
         const sessionExpiredHandler = vi.fn();
         const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false, sessionExpiredHandler, transport: mockApp.transport() });
-        await caller.api('login', { user: 'ada' });
+        await caller.api('account.login', { user: 'ada' });
         await mockApp.signOut('ada');
 
-        assertApiFailure(await caller.apiOutcome('me', {}), 'sessionExpired');
+        assertApiFailure(await caller.apiOutcome('account.me', {}), 'sessionExpired');
         expect(sessionExpiredHandler).toHaveBeenCalledOnce();
     });
 
@@ -1186,7 +1225,7 @@ describe('LambderMockApp - the MSW adapter and the document mirror', () => {
         // one, and a per-IP rate limit counting them apart.
         const app = mock.create({ ...requiredOptions, defaultClientIp: '10.1.2.3' });
         app.registerPartial(app.apiSlice(
-            app.publicApi('user.get', async ({ request }) => ({ id: request.ip, name: 'ip' })),
+            app.api('user.get', async ({ request }) => ({ id: request.ip, name: 'ip' })),
         ));
         const { msw, post } = fakeMswModule();
         lambderMockMswHandler(app, { msw, apiPath: '/api' });
@@ -1194,7 +1233,7 @@ describe('LambderMockApp - the MSW adapter and the document mirror', () => {
         const direct = await new LambderCaller<Contract>({
             apiPath: '/api', isCorsEnabled: false, transport: app.transport(),
         }).api('user.get', { userId: 'x' });
-        const through = await post({ apiName: 'user.get', payload: { userId: 'x' }, token: '', siteHost: 'localhost' }) as Response;
+        const through = await post('user.get', { payload: { userId: 'x' }, token: '', siteHost: 'localhost' }) as Response;
 
         expect(direct?.id).toBe('10.1.2.3');
         expect(await through.json()).toMatchObject({ payload: { id: '10.1.2.3' } });
@@ -1215,7 +1254,7 @@ describe('LambderMockApp - the rest entry', () => {
             sessions: options.sessionStore ? { store: options.sessionStore } : true,
         });
         app.register(
-            app.apiSlice(app.publicApi('user.get', async ({ payload }) => ({ id: payload.userId, name: 'Ada' }))),
+            app.apiSlice(app.api('user.get', async ({ payload }) => ({ id: payload.userId, name: 'Ada' }))),
             app.restNotMocked('not mocked yet'),
         );
         return app;
@@ -1238,13 +1277,13 @@ describe('LambderMockApp - the rest entry', () => {
 
     it('answers an endpoint nothing registered with the notMocked refusal, carrying the rest reason', async () => {
         const app = createRestApp();
-        const outcome = await callerFor(app).apiOutcome('limited', {});
+        const outcome = await callerFor(app).apiOutcome('tools.limited', {});
 
         expect(outcome.ok).toBe(false);
         if(outcome.ok) return;
         expect(outcome.refusal).toMatchObject({
             code: LAMBDER_REFUSAL_CODES.notMocked,
-            content: expect.stringContaining('"limited" is not mocked: not mocked yet'),
+            content: expect.stringContaining('"tools.limited" is not mocked: not mocked yet'),
         });
         expect(app.calls.at(-1)?.outcome).toBe('notMocked');
         // The mode of a name nothing registered is not knowable at runtime,
@@ -1254,7 +1293,7 @@ describe('LambderMockApp - the rest entry', () => {
 
         // A registration like any other, so reset() keeps it.
         app.reset();
-        expect((await callerFor(app).apiOutcome('limited', {})).ok).toBe(false);
+        expect((await callerFor(app).apiOutcome('tools.limited', {})).ok).toBe(false);
         expect(app.calls.at(-1)?.outcome).toBe('notMocked');
     });
 
@@ -1265,16 +1304,17 @@ describe('LambderMockApp - the rest entry', () => {
         // Explicit entries win over the rest however late they arrive, which
         // is what lets a test register the three endpoints it cares about
         // over an app that declared the rest not mocked at boot.
-        app.registerPartial(app.apiSlice(app.publicApi('echo', async ({ payload }) => ({ count: payload.notes.length }))));
-        expect(await callerFor(app).api('echo', { notes: ['a', 'b'] })).toEqual({ count: 2 });
+        app.registerPartial(app.apiSlice(app.api('tools.echo', async ({ payload }) => ({ count: payload.notes.length }))));
+        expect(await callerFor(app).api('tools.echo', { notes: ['a', 'b'] })).toEqual({ count: 2 });
         expect(app.calls.at(-1)?.outcome).toBe('ok');
     });
 
     it('answers as a public endpoint: no session read, and a signed-out session endpoint says not mocked', async () => {
-        // The one fidelity limit. 'me' is a session endpoint of the contract,
-        // so the server and a sessionNotMocked entry both read the session
-        // store before answering; the rest entry cannot, because the contract
-        // is a type and the mode of an unregistered name is not recoverable at
+        // The one fidelity limit of a mock given no apiOptions table.
+        // 'account.me' is a session endpoint of the contract, so the server
+        // and a mock given the table both read the session store before
+        // answering; the rest entry here cannot, because the contract is a
+        // type and the mode of an unregistered name is not recoverable at
         // runtime.
         const recording = recordingSessionStore();
         const app = createRestApp({ sessionStore: recording.store });
@@ -1282,14 +1322,14 @@ describe('LambderMockApp - the rest entry', () => {
         await app.signIn('ada', { userId: 'ada', tenants: [] }, { jar });
         recording.forgetReads();
 
-        const signedIn = await callerFor(app, { jar }).apiOutcome('me', {});
+        const signedIn = await callerFor(app, { jar }).apiOutcome('account.me', {});
         assertApiFailure(signedIn);
         expect(signedIn.refusal).toMatchObject({ code: LAMBDER_REFUSAL_CODES.notMocked });
         expect(recording.reads()).toBe(0);
 
         // And with no session at all it is still "not mocked" rather than the
         // sessionExpired the server answers.
-        const signedOut = await callerFor(app).apiOutcome('me', {});
+        const signedOut = await callerFor(app).apiOutcome('account.me', {});
         assertApiFailure(signedOut, 'refusal');
         expect(app.calls.at(-1)?.outcome).toBe('notMocked');
         expect(recording.reads()).toBe(0);
@@ -1298,11 +1338,11 @@ describe('LambderMockApp - the rest entry', () => {
     it('still runs the protocol steps that precede dispatch, so a stale client hears versionExpired first', async () => {
         const app = createRestApp({ apiVersion: '2' });
 
-        const stale = await callerFor(app, { apiSignatures: { ...mockSignatures, [await apiNameKeyOf('limited')]: 'an-older-shape' } }).apiOutcome('limited', {});
+        const stale = await callerFor(app, { apiSignatures: { ...mockSignatures, [await apiNameKeyOf('tools.limited')]: 'an-older-shape' } }).apiOutcome('tools.limited', {});
         assertApiFailure(stale, 'versionExpired');
         expect(app.calls.at(-1)?.outcome).toBe('versionExpired');
 
-        const current = await callerFor(app, { apiSignatures: mockSignatures }).apiOutcome('limited', {});
+        const current = await callerFor(app, { apiSignatures: mockSignatures }).apiOutcome('tools.limited', {});
         assertApiFailure(current);
         expect(current.refusal).toMatchObject({ code: LAMBDER_REFUSAL_CODES.notMocked });
     });
@@ -1310,7 +1350,7 @@ describe('LambderMockApp - the rest entry', () => {
     it('a second rest entry is refused the way a duplicate name is, and leaves the registry as it was', () => {
         const twice = mock.create({ ...requiredOptions });
         expect(() => twice.register(
-            twice.apiSlice(twice.publicApi('user.get', async ({ payload }) => ({ id: payload.userId, name: 'Ada' }))),
+            twice.apiSlice(twice.api('user.get', async ({ payload }) => ({ id: payload.userId, name: 'Ada' }))),
             twice.restNotMocked('not mocked yet'),
             twice.restNotMocked('also not mocked'),
         )).toThrow(/already registered as not mocked/);
@@ -1321,7 +1361,7 @@ describe('LambderMockApp - the rest entry', () => {
         // a duplicate name is refused for.
         const app = createRestApp();
         expect(() => app.register(
-            app.apiSlice(app.publicApi('echo', async ({ payload }) => ({ count: payload.notes.length }))),
+            app.apiSlice(app.api('tools.echo', async ({ payload }) => ({ count: payload.notes.length }))),
             app.restNotMocked('also not mocked'),
         )).toThrow(/already registered as not mocked \("not mocked yet"\)/);
         // The entries of the refused call are not registered either.
@@ -1336,10 +1376,10 @@ describe('LambderMockApp - the rest entry', () => {
         const { msw, post } = fakeMswModule();
         lambderMockMswHandler(app, { msw, apiPath: '/api', onUnmocked: 'passthrough' });
 
-        const answer = await post({ apiName: 'limited', payload: {}, token: '', siteHost: 'localhost' });
+        const answer = await post('tools.limited', { payload: {}, token: '', siteHost: 'localhost' });
         expect(answer).toBeDefined();
         expect(await (answer as Response).json()).toMatchObject({ refusal: { code: LAMBDER_REFUSAL_CODES.notMocked } });
-        expect(app.calls.at(-1)).toMatchObject({ apiName: 'limited', outcome: 'notMocked' });
+        expect(app.calls.at(-1)).toMatchObject({ apiName: 'tools.limited', outcome: 'notMocked' });
     });
 });
 
@@ -1351,14 +1391,15 @@ describe('LambderMockApp - the invoke transport', () => {
         // caller the value a `per: "ip"` limit counts on.
         const app = mock.create({ ...requiredOptions });
         app.registerPartial(app.apiSlice(
-            app.publicApi('user.get', async ({ request }) => ({ id: request.ip, name: 'ip' })),
+            app.api('user.get', async ({ request }) => ({ id: request.ip, name: 'ip' })),
         ));
         const transport = lambderMockInvokeTransport(app);
 
         const answer = await transport({
-            body: JSON.stringify({ apiName: 'user.get', payload: { userId: 'x' }, token: '', siteHost: '' }),
+            rawPath: '/api/user/get',
+            body: JSON.stringify({ payload: { userId: 'x' }, token: '', siteHost: '' }),
             headers: { 'x-forwarded-for': '9.9.9.9', 'content-type': 'application/json' },
-            requestContext: { http: { sourceIp: '10.0.0.7' } },
+            requestContext: { http: { method: 'POST', sourceIp: '10.0.0.7' } },
         }, {});
 
         expect(JSON.parse(answer.result.body)).toMatchObject({ payload: { id: '10.0.0.7' } });
@@ -1367,30 +1408,56 @@ describe('LambderMockApp - the invoke transport', () => {
     it('answers a POST of another type as no API call, as the server does', async () => {
         const app = mock.create({ ...requiredOptions });
         app.registerPartial(app.apiSlice(
-            app.publicApi('user.get', async () => ({ id: 'u1', name: 'Ada' })),
+            app.api('user.get', async () => ({ id: 'u1', name: 'Ada' })),
         ));
         const answer = await lambderMockInvokeTransport(app)({
-            body: JSON.stringify({ apiName: 'user.get', payload: { userId: 'x' }, token: '', siteHost: '' }),
+            rawPath: '/api/user/get',
+            body: JSON.stringify({ payload: { userId: 'x' }, token: '', siteHost: '' }),
             headers: { 'content-type': 'text/plain' },
-            requestContext: { http: { sourceIp: '10.0.0.7' } },
+            requestContext: { http: { method: 'POST', sourceIp: '10.0.0.7' } },
         }, {});
         expect(answer.result.statusCode).toBe(404);
 
         const { msw, post } = fakeMswModule();
         lambderMockMswHandler(app, { apiPath: '/api', msw });
-        expect(await post({ apiName: 'user.get', payload: { userId: 'x' }, token: '', siteHost: '' }, { 'Content-Type': 'text/plain' })).toBeUndefined();
+        expect(await post('user.get', { payload: { userId: 'x' }, token: '', siteHost: '' }, { 'Content-Type': 'text/plain' })).toBeUndefined();
+    });
+
+    it('answers only a JSON POST to a call path under the apiPath it was given, as the server does', async () => {
+        const app = mock.create({ ...requiredOptions });
+        app.registerPartial(app.apiSlice(
+            app.api('user.get', async () => ({ id: 'u1', name: 'Ada' })),
+        ));
+        const send = (transport: ReturnType<typeof lambderMockInvokeTransport>, rawPath: string, method = 'POST') => transport({
+            rawPath,
+            body: JSON.stringify({ payload: { userId: 'x' }, token: '', siteHost: '' }),
+            headers: { 'content-type': 'application/json' },
+            requestContext: { http: { method, sourceIp: '10.0.0.7' } },
+        }, {});
+
+        const atDefault = lambderMockInvokeTransport(app);
+        expect(JSON.parse((await send(atDefault, '/api/user/get')).result.body)).toMatchObject({ payload: { id: 'u1' } });
+        // A route of the mocked function, which a mock does not serve: two
+        // segments of identifiers outside apiPath are no call.
+        expect((await send(atDefault, '/webhooks/user/get')).result.statusCode).toBe(404);
+        expect((await send(atDefault, '/api/user/get', 'GET')).result.statusCode).toBe(404);
+
+        const atRpc = lambderMockInvokeTransport(app, { apiPath: '/rpc' });
+        expect(JSON.parse((await send(atRpc, '/rpc/user/get')).result.body)).toMatchObject({ payload: { id: 'u1' } });
+        expect((await send(atRpc, '/api/user/get')).result.statusCode).toBe(404);
     });
 });
 
 describe('LambderMockApp - registration, cookies and the call log', () => {
-    it('refuses a not-mocked SESSION endpoint on a mock without sessions, where sessionApi already refused one', async () => {
-        // Unchecked, sessionNotMocked would register in silence and the first
-        // call to it would answer 500 from inside the pipeline with a message
+    it('refuses a not-mocked session endpoint on a mock without sessions, as it refuses a mocked one', async () => {
+        // Unchecked, the entry would register in silence and the first call
+        // to it would answer 500 from inside the pipeline with a message
         // naming the server's option, for a mistake whose fix is one option
-        // at create().
+        // at create(). The apiOptions table is what says it is a session
+        // endpoint here.
         // @ts-expect-error the contract has session endpoints; built without sessions on purpose, as a plain-JS caller could
-        const bare = mock.create({ ...requiredOptions, sessions: false });
-        expect(() => bare.sessionNotMocked('admin.audit', 'operator endpoint, no client calls it'))
+        const bare = mock.create({ ...requiredOptions, sessions: false, apiOptions: contractOptions });
+        expect(() => bare.notMocked('admin.audit', 'operator endpoint, no client calls it'))
             .toThrow(/session endpoint "admin.audit" needs the sessions option at creation/);
         // The public twin still registers: it is the session read that needs the option.
         expect(() => bare.notMocked('admin.run', 'operator endpoint, no client calls it')).not.toThrow();
@@ -1402,24 +1469,24 @@ describe('LambderMockApp - registration, cookies and the call log', () => {
         // answer with nothing and every session call would come back
         // sessionExpired with a full jar and no explanation.
         const app = mock.create({ ...requiredOptions, sessions: true, cookieHost: 'shop.localhost:5173' });
-        app.registerPartial(app.apiSlice(app.sessionApi('me', async ({ session }) => ({ userId: session.data.userId }))));
+        app.registerPartial(app.apiSlice(app.api('account.me', { guards: 'signedIn', handler: async ({ session }) => ({ userId: session.data.userId }) })));
         const jar = new LambderCookieJar();
         await app.signIn('ada', { userId: 'ada', tenants: [] }, { jar });
 
         const answer = await app.transport({ cookies: jar })({
-            apiPath: '/api', apiName: 'me', token: '', siteHost: 'shop.localhost:5173', payload: {},
+            apiPath: '/api', apiName: 'account.me', token: '', siteHost: 'shop.localhost:5173', payload: {},
         });
         expect(await answer.json()).toMatchObject({ payload: { userId: 'ada' } });
     });
 
     it('still signs in the Node caller, which names no site host at all', async () => {
         const app = mock.create({ ...requiredOptions, sessions: true });
-        app.registerPartial(app.apiSlice(app.sessionApi('me', async ({ session }) => ({ userId: session.data.userId }))));
+        app.registerPartial(app.apiSlice(app.api('account.me', { guards: 'signedIn', handler: async ({ session }) => ({ userId: session.data.userId }) })));
         const jar = new LambderCookieJar();
         await app.signIn('ada', { userId: 'ada', tenants: [] }, { jar });
 
         const answer = await app.transport({ cookies: jar })({
-            apiPath: '/api', apiName: 'me', token: '', siteHost: '', payload: {},
+            apiPath: '/api', apiName: 'account.me', token: '', siteHost: '', payload: {},
         });
         expect(await answer.json()).toMatchObject({ payload: { userId: 'ada' } });
     });
@@ -1431,7 +1498,7 @@ describe('LambderMockApp - registration, cookies and the call log', () => {
         // the throw.
         const { mockApp } = createMockApp();
         const caller = callerFor(mockApp);
-        await caller.api('login', { user: 'ada' });
+        await caller.api('account.login', { user: 'ada' });
         mockApp.override('order.create', async () => { throw new Error('boom'); });
 
         const outcome = await caller.apiOutcome('order.create', { qty: 1 }, { guardInputs: { tenant: { tenantId: 't1' } }, idempotencyKey: 'k-order-crash-abcdefabcdef' });
@@ -1457,7 +1524,7 @@ describe('LambderMockApp - idempotency carries the server\'s own options', () =>
             idempotency: { callerIdentity: (ctx) => ctx.request.ip },
         });
         app.registerPartial(app.apiSlice(
-            app.publicApi('ticket.buy', { idempotency: true, handler: async () => { runs += 1; return { ticketId: `t-${runs}` }; } }),
+            app.api('ticket.buy', { idempotency: true, handler: async () => { runs += 1; return { ticketId: `t-${runs}` }; } }),
         ));
         const callerFrom = (clientIp: string) => new LambderCaller<Contract>({
             apiPath: '/api', isCorsEnabled: false, transport: app.transport({ clientIp }),
@@ -1485,25 +1552,6 @@ describe('LambderMockApp - idempotency carries the server\'s own options', () =>
 });
 
 describe('LambderMockApp - declarations read off the apiOptions table', () => {
-    /** The table writeApiOptions would write for this file's contract: `as const`, as the generated module is. */
-    const contractOptions = {
-        'user.get': { mode: 'public', refusals: 'app/user-archived' },
-        'login': { mode: 'public' },
-        'logout': { mode: 'session' },
-        'me': { mode: 'session' },
-        'order.create': { mode: 'session', guards: { tenant: 'writer' }, idempotency: true },
-        'limited': { mode: 'public', rateLimit: 'tight' },
-        'ticket.buy': { mode: 'public', idempotency: true },
-        'echo': { mode: 'public' },
-        'admin.run': { mode: 'public' },
-        'admin.audit': { mode: 'session' },
-    } as const satisfies Record<string, LambderApiOptionEntry>;
-
-    /** The guard declarations writeApiOptions would write beside the table: the tenant guard, and the codes it refuses with. */
-    const contractGuardDeclarations = {
-        tenant: { input: 'guardInput', session: true, runAt: 'beforeInputValidation', refusals: ['app/not-a-member', 'app/read-only'] },
-    } as const satisfies Record<string, LambderGuardDeclarationEntry>;
-
     /** The server's vocabulary, the same object its init declares, which the mock imports from shared code. */
     const contractVocabulary = {
         'app/not-a-member': { notAuthorized: true, status: 403 },
@@ -1518,6 +1566,7 @@ describe('LambderMockApp - declarations read off the apiOptions table', () => {
      * for a mock given no tables, has to set the flag itself.
      */
     const declaredGuards = {
+        signedIn: mockGuards.signedIn,
         tenant: mock.guard({
             guardInput: z.object({ tenantId: z.string() }),
             session: true,
@@ -1535,15 +1584,15 @@ describe('LambderMockApp - declarations read off the apiOptions table', () => {
         let ticketRuns = 0;
         app.register(
             app.apiSlice(
-                app.publicApi('user.get', async ({ payload }) => ({ id: payload.userId, name: 'Ada' })),
-                app.publicApi('login', async () => ({ ok: true })),
-                app.sessionApi('logout', async () => ({ ok: true })),
-                app.sessionApi('me', async ({ session }) => ({ userId: session.data.userId })),
+                app.api('user.get', async ({ payload }) => ({ id: payload.userId, name: 'Ada' })),
+                app.api('account.login', async () => ({ ok: true })),
+                app.api('account.logout', async () => ({ ok: true })),
+                app.api('account.me', async ({ session }) => ({ userId: session.data.userId })),
                 // Its handler alone, and guardData is still typed from the contract's guards.
-                app.sessionApi('order.create', async ({ payload, guardData }) => ({ orderId: `o-${guardData.tenant.tenantId}`, qty: payload.qty })),
-                app.publicApi('limited', async () => ({ n: 1 })),
-                app.publicApi('ticket.buy', { handler: async ({ payload }) => { ticketRuns += 1; return { ticketId: `t-${payload.seat}-${ticketRuns}` }; } }),
-                app.publicApi('echo', { input: z.object({ notes: z.array(z.string()) }), handler: async ({ payload }) => ({ count: payload.notes.length }) }),
+                app.api('order.create', async ({ payload, guardData }) => ({ orderId: `o-${guardData.tenant.tenantId}`, qty: payload.qty })),
+                app.api('tools.limited', async () => ({ n: 1 })),
+                app.api('ticket.buy', { handler: async ({ payload }) => { ticketRuns += 1; return { ticketId: `t-${payload.seat}-${ticketRuns}` }; } }),
+                app.api('tools.echo', { input: z.object({ notes: z.array(z.string()) }), handler: async ({ payload }) => ({ count: payload.notes.length }) }),
             ),
             app.restNotMocked('not mocked yet'),
         );
@@ -1557,9 +1606,9 @@ describe('LambderMockApp - declarations read off the apiOptions table', () => {
         const app = createDerivedApp();
 
         // The rate limit: tight allows two a minute.
-        expect((await callerOf(app).apiOutcome('limited', {})).ok).toBe(true);
-        expect((await callerOf(app).apiOutcome('limited', {})).ok).toBe(true);
-        assertApiFailure(await callerOf(app).apiOutcome('limited', {}), 'refusal', { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
+        expect((await callerOf(app).apiOutcome('tools.limited', {})).ok).toBe(true);
+        expect((await callerOf(app).apiOutcome('tools.limited', {})).ok).toBe(true);
+        assertApiFailure(await callerOf(app).apiOutcome('tools.limited', {}), 'refusal', { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
 
         // The idempotency: a retry with the same key replays the first answer.
         const key = createIdempotencyKey();
@@ -1623,10 +1672,10 @@ describe('LambderMockApp - declarations read off the apiOptions table', () => {
 
     it('needs the vocabulary declared on the init when the tables name a code, and refuses a table naming one the vocabulary does not hold', () => {
         const undeclared = mock.create({ ...requiredOptions, apiOptions: contractOptions, guardDeclarations: contractGuardDeclarations });
-        expect(() => undeclared.publicApi('user.get', async () => ({ id: '1', name: 'Ada' })))
+        expect(() => undeclared.api('user.get', async () => ({ id: '1', name: 'Ada' })))
             .toThrow(/"user\.get" can refuse with declared codes by the apiOptions table, and the mock init declared no refusal vocabulary/);
         const missingOne = mock.declareRefusals({ 'app/not-a-member': {} }).create({ ...requiredOptions, apiOptions: contractOptions, guardDeclarations: contractGuardDeclarations });
-        expect(() => missingOne.sessionApi('order.create', async () => ({ orderId: 'o', qty: 1 })))
+        expect(() => missingOne.api('order.create', async () => ({ orderId: 'o', qty: 1 })))
             .toThrow(/"order\.create" can refuse with "app\/read-only" by the apiOptions and guardDeclarations tables, which the vocabulary declared on the mock init does not hold/);
     });
 
@@ -1634,7 +1683,7 @@ describe('LambderMockApp - declarations read off the apiOptions table', () => {
         vi.spyOn(console, 'error').mockImplementation(() => {});
         const strict = mock.declareRefusals(contractVocabulary, { requireCodes: true })
             .create({ ...requiredOptions, guards: declaredGuards, apiOptions: contractOptions, guardDeclarations: contractGuardDeclarations });
-        strict.register(strict.apiSlice(strict.publicApi('user.get', async (ctx) => {
+        strict.register(strict.apiSlice(strict.api('user.get', async (ctx) => {
             // @ts-expect-error a refusal names a code here
             if(Math.random() > 2) ctx.refuse('Plain.');
             // The free refuse() still compiles; the render check is what catches it.
@@ -1649,33 +1698,34 @@ describe('LambderMockApp - declarations read off the apiOptions table', () => {
 
     it('needs the guard declarations beside a table whose entries declare guards, since they hold the guards\' codes', () => {
         const app = mock.create({ ...requiredOptions, apiOptions: contractOptions });
-        expect(() => app.sessionApi('order.create', async () => ({ orderId: 'o', qty: 1 })))
+        expect(() => app.api('order.create', async () => ({ orderId: 'o', qty: 1 })))
             .toThrow(/"order\.create" declares guards in the apiOptions table, and create\(\) was not given the guardDeclarations table/);
     });
 
     it('refuses an entry that restates an option the table declares, at compile time and at runtime', () => {
         const app = mock.create({ ...requiredOptions, apiOptions: contractOptions });
         // @ts-expect-error the table declares the guards: a restatement is a second copy of the server's declaration.
-        expect(() => app.sessionApi('order.create', { guards: { tenant: 'writer' }, handler: async () => ({ orderId: 'o', qty: 1 }) }))
+        expect(() => app.api('order.create', { guards: { tenant: 'writer' }, handler: async () => ({ orderId: 'o', qty: 1 }) }))
             .toThrow('LambderMockApp: "order.create" restates its guards option, which the apiOptions table given to create() already declares. Leave it out of the entry.');
         // @ts-expect-error nor the rate limit.
-        expect(() => app.publicApi('limited', { rateLimit: 'tight', handler: async () => ({ n: 1 }) })).toThrow(/restates its rateLimit option/);
+        expect(() => app.api('tools.limited', { rateLimit: 'tight', handler: async () => ({ n: 1 }) })).toThrow(/restates its rateLimit option/);
     });
 
     it('holds the table to the contract: every endpoint, each under its mode', () => {
-        const { me: _me, ...missingMe } = contractOptions;
-        // @ts-expect-error the table has no entry for me, so it predates the contract.
+        const { 'account.me': _me, ...missingMe } = contractOptions;
+        // @ts-expect-error the table has no entry for account.me, so it predates the contract.
         mock.create({ ...requiredOptions, apiOptions: missingMe });
-        // @ts-expect-error the table calls me public where the contract says session.
-        mock.create({ ...requiredOptions, apiOptions: { ...contractOptions, me: { mode: 'public' } } as const });
+        // @ts-expect-error the table calls account.me public where the contract says session.
+        mock.create({ ...requiredOptions, apiOptions: { ...contractOptions, 'account.me': { mode: 'public' } } as const });
 
         // What a stale table meets at runtime, for a caller the compiler did not see.
         const stale = mock.create({ ...requiredOptions, apiOptions: missingMe as typeof contractOptions });
-        expect(() => stale.sessionApi('me', async () => ({ userId: 'x' })))
-            .toThrow('LambderMockApp: "me" has no entry in the apiOptions table given to create(). The table predates this endpoint: regenerate it with writeApiOptions.');
-        const swapped = mock.create({ ...requiredOptions, apiOptions: { ...contractOptions, me: { mode: 'public' } } as unknown as typeof contractOptions });
-        expect(() => swapped.sessionApi('me', async () => ({ userId: 'x' })))
-            .toThrow('LambderMockApp: "me" is a public endpoint in the apiOptions table, registered here as a session one.');
+        expect(() => stale.api('account.me', async () => ({ userId: 'x' })))
+            .toThrow('LambderMockApp: "account.me" has no entry in the apiOptions table given to create(). The table predates this endpoint: regenerate it with writeApiOptions.');
+        // An entry states no mode of its own, so it runs under the table's:
+        // a table stale on a mode is the compiler's to refuse, above.
+        const swapped = mock.create({ ...requiredOptions, apiOptions: { ...contractOptions, 'account.me': { mode: 'public' } } as unknown as typeof contractOptions });
+        expect(swapped.api('account.me', async () => ({ userId: 'x' })).mode).toBe('public');
     });
 
     it('answers a rest entry under the mode the table gives the name, so an unmocked session endpoint reads the session first', async () => {

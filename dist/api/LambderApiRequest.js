@@ -43,20 +43,19 @@ export const lowercaseHeaderNames = (headers) => {
  */
 export const isApiCallContentType = (lowercasedHeaders) => (lowercasedHeaders["content-type"] ?? "").split(";")[0].trim().toLowerCase() === "application/json";
 /**
- * Reads the posted envelope into a request. Null when the body carries no
- * apiName, which is how the server tells an API call from a route with a
- * JSON body. Everything is taken as posted: a malformed idempotencyKey or
- * guardInputs value is the engines' to refuse, with the client-facing
- * message they already give.
+ * Reads the posted envelope of a call to `apiName` into a request; the name
+ * comes from where the call was posted, never from the body. Everything is
+ * taken as posted: a malformed idempotencyKey or guardInputs value is the
+ * engines' to refuse, with the client-facing message they already give.
  */
-export const readApiEnvelope = (post, info) => {
-    if (!post || typeof post.apiName !== "string" || !post.apiName)
-        return null;
+export const readApiEnvelope = (post, info, apiName, flags = {}) => {
+    post ??= {};
     const hasGzip = post[COMPRESSED_PAYLOAD_GZ_FIELD] !== undefined;
     const hasBrotli = post[COMPRESSED_PAYLOAD_BR_FIELD] !== undefined;
     const guardInputs = post.guardInputs;
     return {
-        apiName: post.apiName,
+        apiName,
+        ...(flags.retiredPath ? { retiredPath: true } : {}),
         version: typeof post.version === "string" ? post.version : null,
         signature: typeof post.signature === "string" ? post.signature : null,
         token: typeof post.token === "string" ? post.token : "",

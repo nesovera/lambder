@@ -57,7 +57,7 @@ describe('Rate limits and the session read', () => {
         // first, every request would be answered sessionExpired after its
         // store reads, and the limiter would never refuse one.
         const store = new CountingSessionStore();
-        const lambder = initLambder<{ role: string }>().create({
+        const app = initLambder<{ role: string }>().create({
             files: testPublicFiles(),
             apiPath: '/api',
             session: { store, sessionSalt: 'salt' },
@@ -65,7 +65,11 @@ describe('Rate limits and the session read', () => {
                 limiter: new LambderMemoryRateLimiter(),
                 policies: { perIp: { perMin: 1, per: 'ip' } },
             },
-        }).addSessionApi('secure.read', { ...testSchema, rateLimit: 'perIp' }, async (_ctx) => ({ result: 'ok' }));
+            guards: { signedIn: lambderGuard({ session: true, handler: () => {} }) },
+        });
+        const lambder = app.registerApiGroups(app.defineApiGroup('secure', {
+            read: app.defineApi({ ...testSchema, guards: 'signedIn', rateLimit: 'perIp' }, async (_ctx) => ({ result: 'ok' })),
+        }));
 
         const bogusCookie = `${'a'.repeat(64)}:${'b'.repeat(64)}.${'c'.repeat(64)}`;
         const call = () => lambder.render(createApiEvent(
@@ -82,7 +86,7 @@ describe('Rate limits and the session read', () => {
 
     it('still runs a session-keyed policy, which needs the session the read produced', async () => {
         const store = new LambderMemorySessionStore();
-        const lambder = initLambder<{ role: string }>().create({
+        const app = initLambder<{ role: string }>().create({
             files: testPublicFiles(),
             apiPath: '/api',
             session: { store, sessionSalt: 'salt' },
@@ -90,7 +94,11 @@ describe('Rate limits and the session read', () => {
                 limiter: new LambderMemoryRateLimiter(),
                 policies: { perUser: { perMin: 1, per: 'session' } },
             },
-        }).addSessionApi('secure.write', { ...testSchema, rateLimit: 'perUser' }, async (_ctx) => ({ result: 'ok' }));
+            guards: { signedIn: lambderGuard({ session: true, handler: () => {} }) },
+        });
+        const lambder = app.registerApiGroups(app.defineApiGroup('secure', {
+            write: app.defineApi({ ...testSchema, guards: 'signedIn', rateLimit: 'perUser' }, async (_ctx) => ({ result: 'ok' })),
+        }));
 
         const { sessionToken, csrfToken } = await lambder.getSessionManager().createSession('u1', { role: 'admin' });
         const call = () => lambder.render(createApiEvent(
@@ -106,14 +114,17 @@ describe('Rate limits and the session read', () => {
         // Two distinct source IPs: callers with no source IP would all share
         // the empty-string counter, and a per-caller limit would look the
         // same as a global one.
-        const lambder = initLambder().create({
+        const app = initLambder().create({
             files: testPublicFiles(),
             apiPath: '/api',
             rateLimits: {
                 limiter: new LambderMemoryRateLimiter(),
                 policies: { perIp: { perMin: 1, per: 'ip' } },
             },
-        }).addApi('public.ping', { ...testSchema, rateLimit: 'perIp' }, async (_ctx) => ({ result: 'ok' }));
+        });
+        const lambder = app.registerApiGroups(app.defineApiGroup('public', {
+            ping: app.defineApi({ ...testSchema, rateLimit: 'perIp' }, async (_ctx) => ({ result: 'ok' })),
+        }));
 
         const call = (sourceIp: string) => lambder.render(
             createApiEvent({ apiName: 'public.ping', payload: { value: 'x' } }, { sourceIp }),
@@ -130,7 +141,7 @@ describe('Rate limits and the session read', () => {
     it('a custom key handler runs after the session read, so it may read the session', async () => {
         const store = new LambderMemorySessionStore();
         const seen: (string | null)[] = [];
-        const lambder = initLambder<{ role: string }>().create({
+        const app = initLambder<{ role: string }>().create({
             files: testPublicFiles(),
             apiPath: '/api',
             session: { store, sessionSalt: 'salt' },
@@ -147,7 +158,11 @@ describe('Rate limits and the session read', () => {
                     },
                 },
             },
-        }).addSessionApi('secure.role', { ...testSchema, rateLimit: 'perRole' }, async (_ctx) => ({ result: 'ok' }));
+            guards: { signedIn: lambderGuard({ session: true, handler: () => {} }) },
+        });
+        const lambder = app.registerApiGroups(app.defineApiGroup('secure', {
+            role: app.defineApi({ ...testSchema, guards: 'signedIn', rateLimit: 'perRole' }, async (_ctx) => ({ result: 'ok' })),
+        }));
 
         const { sessionToken, csrfToken } = await lambder.getSessionManager().createSession('u1', { role: 'admin' });
         const result = await lambder.render(createApiEvent(
@@ -165,7 +180,7 @@ describe('Custom keys and the guards', () => {
         // The documented shape: a per-email budget shared by send, register
         // and reset, behind a captcha. Charged before the guards, it would
         // let a caller who never solves a captcha lock the victim out forever.
-        const app = lambderTestApp(initLambder().create({
+        const created = initLambder().create({
             apiPath: '/api',
             rateLimits: {
                 limiter: new LambderMemoryRateLimiter(),
@@ -179,8 +194,11 @@ describe('Custom keys and the guards', () => {
             guards: {
                 captcha: lambderGuard({ guardInput: z.object({ token: z.string() }), handler: async (_ctx, { token }) => { if(token !== 'solved') refuse('Verification failed.'); } }),
             },
-        }).addApi('code.send', { input: z.object({ email: z.string() }), output: z.object({ sent: z.boolean() }), rateLimit: 'codePerEmail', guards: 'captcha' },
-            async (_ctx) => ({ sent: true })));
+        });
+        const app = lambderTestApp(created.registerApiGroups(created.defineApiGroup('code', {
+            send: created.defineApi({ input: z.object({ email: z.string() }), output: z.object({ sent: z.boolean() }), rateLimit: 'codePerEmail', guards: 'captcha' },
+                async (_ctx) => ({ sent: true })),
+        })));
 
         const attacker = app.visitor({ clientIp: '198.51.100.1' });
         for(let attempt = 0; attempt < 5; attempt += 1){
@@ -195,7 +213,7 @@ describe('Custom keys and the guards', () => {
         // A one-time code checked by a guard, limited per email: charged
         // after the guard, every wrong guess would be refused before it was
         // ever counted, and the code could be guessed without limit.
-        const app = lambderTestApp(initLambder().create({
+        const created = initLambder().create({
             apiPath: '/api',
             rateLimits: {
                 limiter: new LambderMemoryRateLimiter(),
@@ -209,8 +227,11 @@ describe('Custom keys and the guards', () => {
             guards: {
                 emailCode: lambderGuard({ apiInput: z.object({ code: z.string() }), handler: async (_ctx, { code }) => { if(code !== '424242') refuse('Wrong code.'); } }),
             },
-        }).addApi('code.verify', { input: z.object({ email: z.string(), code: z.string() }), output: z.object({ verified: z.boolean() }), rateLimit: 'guessPerEmail', guards: 'emailCode' },
-            async (_ctx) => ({ verified: true })));
+        });
+        const app = lambderTestApp(created.registerApiGroups(created.defineApiGroup('code', {
+            verify: created.defineApi({ input: z.object({ email: z.string(), code: z.string() }), output: z.object({ verified: z.boolean() }), rateLimit: 'guessPerEmail', guards: 'emailCode' },
+                async (_ctx) => ({ verified: true })),
+        })));
 
         const guesser = app.visitor({ clientIp: '198.51.100.1' });
         const statuses: Array<number | undefined> = [];
@@ -238,7 +259,7 @@ describe('Guards placed after input validation', () => {
     const captchaApp = (placement: { runAt?: 'beforeInputValidation' | 'afterInputValidation' }) => {
         const spent: string[] = [];
         const order: string[] = [];
-        const app = lambderTestApp(initLambder().create({
+        const created = initLambder().create({
             apiPath: '/api',
             rateLimits: {
                 limiter: new LambderMemoryRateLimiter(),
@@ -261,12 +282,15 @@ describe('Guards placed after input validation', () => {
                     },
                 }),
             },
-        }).addApi('code.send', {
-            input: z.object({ email: z.string().email() }),
-            output: z.object({ sent: z.boolean() }),
-            rateLimit: 'codePerEmail',
-            guards: ['session', 'captcha'],
-        }, async (_ctx) => ({ sent: true })));
+        });
+        const app = lambderTestApp(created.registerApiGroups(created.defineApiGroup('code', {
+            send: created.defineApi({
+                input: z.object({ email: z.string().email() }),
+                output: z.object({ sent: z.boolean() }),
+                rateLimit: 'codePerEmail',
+                guards: ['session', 'captcha'],
+            }, async (_ctx) => ({ sent: true })),
+        })));
         return { app, spent, order };
     };
 
@@ -294,7 +318,7 @@ describe('Guards placed after input validation', () => {
 
     it('reads a guard\'s own slice of the payload as it was sent, not as the input schema transformed it', async () => {
         const seen: unknown[] = [];
-        const app = lambderTestApp(initLambder().create({
+        const created = initLambder().create({
             apiPath: '/api',
             guards: {
                 amountCheck: lambderGuard({
@@ -303,13 +327,16 @@ describe('Guards placed after input validation', () => {
                     handler: (_ctx, { amount }) => { seen.push(amount); },
                 }),
             },
-        }).addApi('pay', {
-            input: z.object({ amount: z.string().transform(Number) }),
-            output: z.object({ amount: z.number() }),
-            guards: 'amountCheck',
-        }, async (ctx) => ({ amount: ctx.apiPayload.amount })));
+        });
+        const app = lambderTestApp(created.registerApiGroups(created.defineApiGroup('orders', {
+            pay: created.defineApi({
+                input: z.object({ amount: z.string().transform(Number) }),
+                output: z.object({ amount: z.number() }),
+                guards: 'amountCheck',
+            }, async (ctx) => ({ amount: ctx.apiPayload.amount })),
+        })));
 
-        const outcome = await app.visitor().apiOutcome('pay', { amount: '12' });
+        const outcome = await app.visitor().apiOutcome('orders.pay', { amount: '12' });
         assertApiSuccess(outcome);
         expect(outcome.payload).toEqual({ amount: 12 });
         expect(seen).toEqual(['12']);
@@ -351,15 +378,18 @@ describe('Per-IP counters and IPv6', () => {
     });
 
     it('counts every address in one /64 as one caller', async () => {
-        const app = lambderTestApp(initLambder().create({
+        const created = initLambder().create({
             apiPath: '/api',
             rateLimits: { limiter: new LambderMemoryRateLimiter(), policies: { perIp: { perMin: 2, per: 'ip' } } },
-        }).addApi('ping', { input: z.object({}), output: z.object({ ok: z.boolean() }), rateLimit: 'perIp' }, async (_ctx) => ({ ok: true })));
+        });
+        const app = lambderTestApp(created.registerApiGroups(created.defineApiGroup('health', {
+            ping: created.defineApi({ input: z.object({}), output: z.object({ ok: z.boolean() }), rateLimit: 'perIp' }, async (_ctx) => ({ ok: true })),
+        })));
 
-        assertApiSuccess(await app.visitor({ clientIp: '2001:db8:1:2::a' }).apiOutcome('ping', {}));
-        assertApiSuccess(await app.visitor({ clientIp: '2001:db8:1:2::b' }).apiOutcome('ping', {}));
-        assertApiFailure(await app.visitor({ clientIp: '2001:db8:1:2::c' }).apiOutcome('ping', {}), 'refusal', { status: 429 });
-        assertApiSuccess(await app.visitor({ clientIp: '2001:db8:1:3::a' }).apiOutcome('ping', {}));
+        assertApiSuccess(await app.visitor({ clientIp: '2001:db8:1:2::a' }).apiOutcome('health.ping', {}));
+        assertApiSuccess(await app.visitor({ clientIp: '2001:db8:1:2::b' }).apiOutcome('health.ping', {}));
+        assertApiFailure(await app.visitor({ clientIp: '2001:db8:1:2::c' }).apiOutcome('health.ping', {}), 'refusal', { status: 429 });
+        assertApiSuccess(await app.visitor({ clientIp: '2001:db8:1:3::a' }).apiOutcome('health.ping', {}));
     });
 
     it('refuses an ipv6PrefixLength that is not a prefix', () => {

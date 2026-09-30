@@ -188,18 +188,25 @@ const createServer = (apiSignatures?: LambderApiSignatureMap) => {
         apiVersion: '7',
         apiSignatures,
         session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
-        guards,
+        guards: { ...guards, signedIn: lambderGuard({ session: true, handler: async () => {} }) },
     });
-    return app
-        .addApi('user.get', { input: userInput, output: userOutput }, async (ctx) => ({ id: ctx.apiPayload.id, name: 'Ada' }))
-        .addApi('org.get', { input: z.object({}), output: z.object({ ok: z.boolean() }), guards: 'org' }, async (_ctx) => ({ ok: true }))
-        .addSessionApi('me', { input: z.void(), output: z.object({ userId: z.string() }) }, async (ctx) => ({ userId: ctx.session.data.userId }));
+    return app.registerApiGroups(
+        app.defineApiGroup('user', {
+            get: app.defineApi({ input: userInput, output: userOutput }, async (ctx) => ({ id: ctx.apiPayload.id, name: 'Ada' })),
+        }),
+        app.defineApiGroup('org', {
+            get: app.defineApi({ input: z.object({}), output: z.object({ ok: z.boolean() }), guards: 'org' }, async (_ctx) => ({ ok: true })),
+        }),
+        app.defineApiGroup('account', {
+            me: app.defineApi({ input: z.void(), output: z.object({ userId: z.string() }), guards: 'signedIn' }, async (ctx) => ({ userId: ctx.session.data.userId })),
+        }),
+    );
 };
 
 describe('The server and its map', () => {
     it('apiSignatures() lists every registered endpoint under its hashed name, sorted, with the digest the gate compares against', async () => {
         const map = await createServer().apiSignatures();
-        const keys = await Promise.all(['user.get', 'org.get', 'me'].map(apiNameKeyOf));
+        const keys = await Promise.all(['user.get', 'org.get', 'account.me'].map(apiNameKeyOf));
         expect(Object.keys(map).sort()).toEqual([...keys].sort());
         expect(Object.keys(map)).toEqual([...Object.keys(map)].sort());
         expect(map[keys[0]!]).toBe(await apiSignatureOf({ name: 'user.get', mode: 'public', input: userInput, output: userOutput }, guards));
@@ -214,7 +221,7 @@ describe('The server and its map', () => {
         const entries = await server.apiSignatureEntries();
 
         // The names the map does not carry, which is the whole point of this.
-        expect(entries.map((entry) => entry.name).sort()).toEqual(['me', 'org.get', 'user.get']);
+        expect(entries.map((entry) => entry.name).sort()).toEqual(['account.me', 'org.get', 'user.get']);
         // Same data, same order: the map is these entries with the names dropped.
         expect(Object.fromEntries(entries.map(({ key, signature }) => [key, signature]))).toEqual(map);
         expect(entries.map((entry) => entry.key)).toEqual(Object.keys(map));
@@ -232,10 +239,10 @@ describe('The server and its map', () => {
         expect(await bodyOf({ apiName: 'user.get', payload: { id: '1' } })).toEqual({ apiVersion: '7', payload: { id: '1', name: 'Ada' } });
         // With no minApiVersion set, the version the caller names decides nothing.
         expect(await bodyOf({ apiName: 'user.get', payload: { id: '1' }, version: '1', signature })).toMatchObject({ payload: { id: '1', name: 'Ada' } });
-        expect(await bodyOf({ apiName: 'gone', payload: {}, signature: 'from-another-contract' })).toEqual({ apiVersion: '7', payload: null, versionExpired: true });
-        expect((await bodyOf({ apiName: 'gone', payload: {} })).refusal.code).toBe('lambder/api-not-found');
+        expect(await bodyOf({ apiName: 'user.gone', payload: {}, signature: 'from-another-contract' })).toEqual({ apiVersion: '7', payload: null, versionExpired: true });
+        expect((await bodyOf({ apiName: 'user.gone', payload: {} })).refusal.code).toBe('lambder/api-not-found');
         // Ahead of the session read: a stale signed-out client hears "reload", not "log in".
-        expect(await bodyOf({ apiName: 'me', signature: 'an-older-shape' })).toEqual({ apiVersion: '7', payload: null, versionExpired: true });
+        expect(await bodyOf({ apiName: 'account.me', signature: 'an-older-shape' })).toEqual({ apiVersion: '7', payload: null, versionExpired: true });
     });
 });
 
@@ -430,16 +437,20 @@ describe('LambderInvokeCaller with a signature map', () => {
     it('sends the callee\'s signature for the endpoint, and fails a name the map lacks before invoking', async () => {
         const map = { [await apiNameKeyOf('user.get')]: 'callee-shape' };
         const bodies: Record<string, unknown>[] = [];
+        const paths: string[] = [];
         const caller = new LambderInvokeCaller({
             functionName: 'callee', apiSignatures: map,
             transport: async (event) => {
                 bodies.push(JSON.parse(event.body ?? '{}'));
+                paths.push(event.rawPath);
                 return { functionError: null, result: { statusCode: 200, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ apiVersion: '1', payload: { ok: true } }), isBase64Encoded: false } };
             },
         });
 
         expect(await caller.api('user.get', { id: '1' })).toEqual({ ok: true });
-        expect(bodies[0]).toMatchObject({ apiName: 'user.get', signature: 'callee-shape' });
+        expect(paths[0]).toBe('/api/user/get');
+        expect(bodies[0]).toMatchObject({ signature: 'callee-shape' });
+        expect(bodies[0]).not.toHaveProperty('apiName');
 
         const missing = await caller.apiOutcome('user.list', {});
         assertApiFailure(missing, 'unknown');
@@ -448,6 +459,7 @@ describe('LambderInvokeCaller with a signature map', () => {
 
         // createEvent carries it too, for a boot check that hands a package an event file.
         const event = LambderInvokeCaller.createEvent({ apiName: 'user.get', signature: 'callee-shape' });
-        expect(JSON.parse(event.body ?? '{}')).toMatchObject({ apiName: 'user.get', signature: 'callee-shape' });
+        expect(event.rawPath).toBe('/api/user/get');
+        expect(JSON.parse(event.body ?? '{}')).toMatchObject({ signature: 'callee-shape' });
     });
 });

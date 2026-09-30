@@ -205,16 +205,19 @@ describe('The envelope', () => {
 describe('Reading and restoring a request', () => {
     const info = { headers: { host: 'h' }, cookies: {}, ip: '9.9.9.9', host: 'h' };
 
-    it('readApiEnvelope takes the envelope fields as posted and answers null without an apiName', () => {
-        expect(readApiEnvelope({}, info)).toBeNull();
-        expect(readApiEnvelope({ apiName: 7 }, info)).toBeNull();
-        const parsed = readApiEnvelope({ apiName: 'a', version: '2', token: 't', siteHost: 's', payload: { p: 1 }, guardInputs: { g: 1 }, idempotencyKey: 'k' }, info)!;
-        expect(parsed).toMatchObject({ apiName: 'a', version: '2', token: 't', siteHost: 's', payload: { p: 1 }, guardInputs: { g: 1 }, idempotencyKey: 'k', ip: '9.9.9.9', host: 'h', compressedPayload: null });
-        expect(readApiEnvelope({ apiName: 'a', guardInputs: 'nope', version: 3 }, info)).toMatchObject({ guardInputs: undefined, version: null, token: '' });
+    it('readApiEnvelope takes the envelope fields as posted, and the name from where the call was posted, never from the body', () => {
+        expect(readApiEnvelope({ apiName: 'other.name' }, info, 'thing.do').apiName).toBe('thing.do');
+        expect(readApiEnvelope(null, info, 'thing.do')).toMatchObject({ apiName: 'thing.do', payload: undefined, version: null, token: '', compressedPayload: null });
+        const parsed = readApiEnvelope({ version: '2', token: 't', siteHost: 's', payload: { p: 1 }, guardInputs: { g: 1 }, idempotencyKey: 'k' }, info, 'thing.do');
+        expect(parsed).toMatchObject({ apiName: 'thing.do', version: '2', token: 't', siteHost: 's', payload: { p: 1 }, guardInputs: { g: 1 }, idempotencyKey: 'k', ip: '9.9.9.9', host: 'h', compressedPayload: null });
+        // Only a call posted to apiPath itself, with the name in the body, is marked as one on the retired path.
+        expect(parsed.retiredPath).toBeUndefined();
+        expect(readApiEnvelope({}, info, 'thing.do', { retiredPath: true }).retiredPath).toBe(true);
+        expect(readApiEnvelope({ guardInputs: 'nope', version: 3 }, info, 'thing.do')).toMatchObject({ guardInputs: undefined, version: null, token: '' });
         // An array is an object, and it answers for its own properties, so a
         // guards map it is not: see the guard named "length" below.
-        expect(readApiEnvelope({ apiName: 'a', guardInputs: ['nope'] }, info)).toMatchObject({ guardInputs: undefined });
-        expect(readApiEnvelope({ apiName: 'a', payloadGz: 'zz', payloadBytes: 3 }, info)?.compressedPayload).toEqual({ gzip: 'zz', brotli: undefined, declaredBytes: 3 });
+        expect(readApiEnvelope({ guardInputs: ['nope'] }, info, 'thing.do')).toMatchObject({ guardInputs: undefined });
+        expect(readApiEnvelope({ payloadGz: 'zz', payloadBytes: 3 }, info, 'thing.do').compressedPayload).toEqual({ gzip: 'zz', brotli: undefined, declaredBytes: 3 });
     });
 
     it('restoreCompressedPayload restores gzip and Brotli under the declared length, and refuses what it cannot vouch for', async () => {
@@ -510,7 +513,7 @@ describe('LambderApiPipeline', () => {
         // guard named "length" the array's length, a valid z.number() input:
         // the guard would pass on data nobody sent.
         const envelopeInfo = { headers: {}, cookies: {}, ip: '1.2.3.4', host: 'localhost' };
-        const posted = readApiEnvelope({ apiName: 'thing.do', payload: { value: 'x' }, guardInputs: [7, 8] }, envelopeInfo)!;
+        const posted = readApiEnvelope({ payload: { value: 'x' }, guardInputs: [7, 8] }, envelopeInfo, 'thing.do');
         expect(posted.guardInputs).toBeUndefined();
 
         let seen: unknown = 'unset';

@@ -18,10 +18,12 @@ import { refuse } from "../shared/wire/LambderApiRefusal.js";
 import { apiSignatureOf } from "../api/LambderApiSignature.js";
 import { apiNameKeyOf } from "../shared/wire/LambderApiSignatureMap.js";
 import { assertPlainData } from "../shared/util/assertPlainData.js";
-import { apiNotFoundAnswer, envelopeAnswer, refusalAnswer, sessionExpiredAnswer, successEnvelope, } from "../api/LambderApiEnvelope.js";
+import { apiNotFoundAnswer, envelopeAnswer, refusalAnswer, sessionExpiredAnswer, successEnvelope, versionExpiredAnswer, } from "../api/LambderApiEnvelope.js";
 import { describePayloadKind, isObjectPayload } from "../shared/wire/LambderObjectPayload.js";
 import { LambderApiOutputValidationError } from "../api/LambderApiOutputValidationError.js";
 import { toGuardEntries } from "../api/LambderApiGuards.js";
+import { buildApiGroup, buildLazyApiGroup, isRegistrableApiGroup, } from "../api/LambderApiDeclarations.js";
+import { splitApiName } from "../shared/wire/LambderApiNames.js";
 import { bindContextTools, createContext, isV2HttpEvent, } from "./LambderContext.js";
 import { COMPRESSED_PAYLOAD_GZ_FIELD, COMPRESSED_PAYLOAD_BR_FIELD, COMPRESSED_PAYLOAD_BYTES_FIELD } from "../shared/wire/LambderRequestPayload.js";
 import { coerceToError } from "../shared/wire/LambderCrashDetail.js";
@@ -34,26 +36,22 @@ const NO_DECLARED_REFUSALS = { codes: new Map(), codeRequired: false };
  * Main Lambder class for building type-safe serverless APIs. Create
  * instances with initLambder<SessionData>().create({...}) (see below): the
  * whole configuration, including the typed policy layer, is given at
- * construction, and only registration (routes, apis, hooks, use) chains.
+ * construction. Endpoints are declared as values on the instance
+ * (defineApi, defineApiGroup) and registered in one registerApiGroups()
+ * call; routes, hooks and actions chain.
  *
- * @typeParam TSessionData - Type of session data stored in DynamoDB
- * @typeParam _TContract - @internal Accumulates API contract during chaining (do not pass manually)
- * @typeParam _TRateLimitPolicies - @internal Inferred from create()'s rateLimits.policies (do not pass manually)
- * @typeParam _TGuards - @internal Guard metadata map inferred from create()'s guards (do not pass manually)
- * @typeParam _TIdempotencyEnabled - @internal True when create() received idempotency (do not pass manually)
- * @typeParam _TSessionGuardsRequired - @internal True when create() received requireSessionApiGuards (do not pass manually)
- * @typeParam _TPublicGuardsRequired - @internal True when create() received requirePublicApiGuards (do not pass manually)
- * @typeParam _TSessionsEnabled - @internal True when create() received the session option (do not pass manually). Defaults to true, unlike its siblings, so a plugin annotating its parameter as the bare Lambder<SessionData> can still register session APIs. create() knows the option and supplies the false; `new Lambder(...)` relies on the registration-time throw alone.
- * @typeParam _TRefusals - @internal The refusal vocabulary declareRefusals() gave the init (do not pass manually)
- * @typeParam _TRefusalCodesRequired - @internal True when declareRefusals() received requireCodes (do not pass manually)
+ * @typeParam TApp - @internal What create() configured, as LambderAppTypes: the session data, policies, guards, idempotency, the guard requirement, sessions and the refusal vocabulary (do not pass manually)
+ * @typeParam _TContract - @internal The contract of the groups registered so far (do not pass manually)
  *
  * @example
  * ```typescript
  * interface SessionData { userId: string; role: string; }
  *
- * const lambder = initLambder<SessionData>().create({ apiPath: '/api' })
- *   .addApi('getUser', { input: z.object({...}), output: z.object({...}) }, handler)
- *   .addApi('createUser', { input: z.object({...}), output: z.object({...}) }, handler);
+ * const app = initLambder<SessionData>().create({ apiPath: '/api', session, guards });
+ * const userApis = app.defineApiGroup("users", {
+ *     get: app.defineApi({ input: z.object({...}), output: z.object({...}), guards: "signedIn" }, handler),
+ * });
+ * const lambder = app.registerApiGroups(userApis);
  * ```
  */
 export default class Lambder {
@@ -70,24 +68,35 @@ export default class Lambder {
      * Type property for extracting the API contract: every registered API's
      * input, output, mode and declared options, as a client calls it.
      *
-     * A small app's client imports it as it is. It is an intersection one
-     * member deep per endpoint, so reading it generically costs a large app's
-     * client most of its type check; writeApiContract (lambder/build) reads
-     * this property off the exported instance and writes the contract out as
-     * plain types for such a client to import instead.
+     * A small app's client imports it as it is. A large app's client reads
+     * the plain types writeApiContract (lambder/build) prints from this
+     * property instead, which cost it nothing to resolve.
      *
      * @example
      * ```typescript
-     * export const lambder = initLambder().create({ ... }).addApi(...).addApi(...);
+     * export const lambder = lambderApp.registerApiGroups(userApis, orderApis);
      * export type ApiContractType = typeof lambder.ApiContract;
      * ```
      */
     ApiContract;
+    /**
+     * Type property for what create() configured (LambderAppTypes): the
+     * session data, policies, guards and the rest, for code that takes any
+     * instance and needs one of them (lambderTestApp reads the session data
+     * type here). Like ApiContract, it has no value.
+     */
+    AppTypes;
     actionList = [];
     /** The API core: the pipeline every API call runs through, shared in shape with the mock runtime. */
     pipeline;
-    /** Every registered API by name: the duplicate-name check, and what apiSignatures() digests. */
+    /** Every registered API by name: what dispatch, apiSignatures() and apiOptionEntries() read. */
     apiDefinitions = new Map();
+    /** What answers each registered API: its output schema, compression setting and handler. */
+    apiHandlers = new Map();
+    /** Every group name registered, lazy or not: the duplicate-group check. */
+    apiGroupNames = new Set();
+    /** The lazy groups not loaded yet, each with its load in progress, if one is. */
+    lazyApiGroups = new Map();
     /** The guards given at creation, merged into one map, kept for apiSignatures(): a guard's schema is part of the signature of every endpoint declaring it. */
     guards;
     /** The rate-limit policies given at creation, kept for apiOptionEntries(), which records each one less its key handler. */
@@ -109,7 +118,8 @@ export default class Lambder {
     eventActionList = [];
     corsConfig = null;
     finalizeOptions;
-    requireSessionApiGuards;
+    /** Whether every endpoint has to declare guards (create()'s requireApiGuards). */
+    requireApiGuards;
     /** Whether every refusal an API answers with has to name a code (declareRefusals's requireCodes). */
     requireRefusalCodes;
     /** Told what a request threw, beside whatever answers it; null outside a test. See LAMBDER_CRASH_WATCH. */
@@ -120,7 +130,6 @@ export default class Lambder {
     contextTools;
     trustedClientIpHeaders;
     trustedHostHeaders;
-    requirePublicApiGuards;
     constructor(given = {}) {
         // The guards and the rate-limit policies as one map each, whether
         // they were given as one or as a list; a name two maps declare
@@ -179,19 +188,19 @@ export default class Lambder {
         });
         this.trustedClientIpHeaders = options.trustedClientIpHeaders ?? [];
         this.trustedHostHeaders = options.trustedHostHeaders ?? [];
-        this.requireSessionApiGuards = options.requireSessionApiGuards ?? false;
+        this.requireApiGuards = options.requireApiGuards ?? false;
         this.requireRefusalCodes = options.requireRefusalCodes ?? false;
-        this.requirePublicApiGuards = options.requirePublicApiGuards ?? false;
         this.crashHandling = new LambderCrashHandling(options.crashes ?? {}, this.apiVersion);
         this.contextTools = {
             sessionControllerFor: (ctx) => this.getSessionController(ctx),
             chargeRateLimit: async (ctx, policy, key, refuse) => {
+                // A per-API budget counts per registered API. The posted name
+                // of a call no API matched (a hook or the fallback charging
+                // it) is the caller's choice, and a fresh name per request
+                // would be a fresh counter.
+                const apiName = ctx.api && await this.registeredDefinitionOf(ctx.api.apiName) ? ctx.api.apiName : null;
                 const { checkResult, refusal: refusalToThrow } = await this.pipeline.chargeRateLimit(policy, {
-                    // A per-API budget counts per registered API. The posted
-                    // name of a call no API matched (a hook or the fallback
-                    // charging it) is the caller's choice, and a fresh name
-                    // per request would be a fresh counter.
-                    apiName: ctx.api && this.apiDefinitions.has(ctx.api.apiName) ? ctx.api.apiName : null,
+                    apiName,
                     ip: ctx.ip,
                     session: ctx.session,
                     key,
@@ -287,45 +296,196 @@ export default class Lambder {
         });
         return this;
     }
-    // Typed API with Zod
-    addApi(name, schema, 
+    // =====================================================================
+    // Endpoints
+    // Declared as values, gathered into named groups, registered in one call.
+    // =====================================================================
+    /**
+     * Declares one endpoint, typed on this instance's types: its input and
+     * output schemas, its guards, rate limits, idempotency and refusals, and
+     * its handler. Nothing is registered until the declaration is put in a
+     * group (defineApiGroup) and the group is registered (registerApiGroups).
+     *
+     * The guards say who may call it, and so its mode: an endpoint whose
+     * guards include one that needs a session (`session: true`) is a session
+     * endpoint, its session read before the guards run and a call without
+     * one answered sessionExpired, and its handler's ctx.session is typed
+     * present. Any other endpoint is public.
+     *
+     * An arrow property rather than a method, so an app can hand it out
+     * detached: `export const { defineApi, defineApiGroup } = lambderApp;`.
+     */
+    defineApi = (options, 
     /** Answers the call by returning its output (parsed through `output` before it is sent), or refuses it with ctx.refuse() or refuse(). */
-    handler) {
-        this.registerApi(name, "public", schema, handler);
-        return this;
-    }
-    // Typed Session API with Zod
-    addSessionApi(name, schema, 
-    /** Answers the call by returning its output (parsed through `output` before it is sent), or refuses it with ctx.refuse() or refuse(). */
-    handler) {
-        this.registerApi(name, "session", schema, handler);
-        return this;
+    handler) => ({ kind: "lambderApi", options: options, handler: handler });
+    /**
+     * Gathers endpoints into a named group: each is registered as
+     * `name.action` and called at `{apiPath}/{name}/{action}`, and every
+     * Lambder caller reaches it as `caller.name.action(input)`. A group's
+     * name and its actions are identifiers, and a group may not take a name
+     * a caller already answers for (see LAMBDER_RESERVED_GROUP_NAMES).
+     *
+     * A group declared across files takes each file's part:
+     * `defineApiGroup("orders", orderReadApis, orderWriteApis)`. An action
+     * two parts declare is refused, at compile time and at startup, rather
+     * than one silently replacing the other as an object spread would.
+     */
+    defineApiGroup = (name, ...parts) => buildApiGroup(name, parts);
+    /**
+     * A group loaded on the first call to one of its endpoints:
+     * `lazyApiGroup("orders", () => import("./orders.js").then((m) => m.orderApis))`.
+     * A cold start then parses none of it, nor anything only it imports,
+     * until a request calls it; the contract is the loaded group's, read off
+     * its type. The group loaded must carry the same name, which the type
+     * checks and loading checks again. `loadApiGroups()` loads every group,
+     * for a build step or a boot check that has to see them all.
+     */
+    lazyApiGroup = (name, load) => buildLazyApiGroup(name, load);
+    /**
+     * Registers groups of endpoints, as one contract: `typeof
+     * lambder.ApiContract` then maps every `group.action` to its entry, one
+     * flat object type the api-contract generator prints as it is. Register
+     * every group in one call where you can: the contract of one call is one
+     * mapped type, and a second call intersects it with the first.
+     *
+     * The call's groups take their place in the first-match chain here, as
+     * a route does: a route or action registered before them sees their calls
+     * first, one registered after them never does. The beforeRender hooks run
+     * before a lazy group loads, so a hook that answers a request spares it
+     * the import; one that throws a refusal or charges a per-API budget loads
+     * it (see registeredDefinitionOf).
+     *
+     * Refused at compile time: a group typed `any`, or a lazy one loading a
+     * group typed `any`, or a group whose endpoints are (its endpoints would
+     * be `any` to every client), and a group name given twice. Refused at
+     * registration, which is at startup for a group and at its first call for
+     * a lazy one: everything registration refuses of one endpoint (an unknown
+     * guard or policy, a missing guard where requireApiGuards is on, a
+     * refusal code outside the vocabulary).
+     */
+    registerApiGroups(...groups) {
+        const instance = this;
+        // Every group and every endpoint is checked before anything is
+        // claimed, so a registration refused anywhere leaves the instance as
+        // it was: no group name taken, no endpoint half registered, and a
+        // caller that catches the error and fixes the declaration is told the
+        // real problem on its next try.
+        const names = new Set();
+        const prepared = [];
+        for (const group of groups) {
+            if (!isRegistrableApiGroup(group)) {
+                throw new Error("Lambder: registerApiGroups takes groups built by defineApiGroup() or lazyApiGroup().");
+            }
+            if (instance.apiGroupNames.has(group.name) || names.has(group.name)) {
+                throw new Error(`Lambder: group "${group.name}" is registered twice. A group is one namespace, so its endpoints belong in one defineApiGroup().`);
+            }
+            names.add(group.name);
+            if (group.kind === "lambderApiGroup")
+                prepared.push(...instance.prepareApiGroup(group));
+        }
+        for (const group of groups) {
+            instance.apiGroupNames.add(group.name);
+            if (group.kind === "lambderLazyApiGroup")
+                instance.lazyApiGroups.set(group.name, { group, loading: null });
+        }
+        for (const api of prepared)
+            instance.commitApi(api);
+        instance.actionList.push({
+            match: (ctx) => {
+                const group = ctx.api ? splitApiName(ctx.api.apiName)?.group : undefined;
+                return group !== undefined && names.has(group) ? {} : false;
+            },
+            actionFn: (ctx, resolver) => instance.dispatchApiCall(ctx, resolver),
+        });
+        return instance;
     }
     /**
-     * What registering an API is, for addApi and addSessionApi alike: the
-     * checks that can refuse it, then its definition recorded (what
-     * apiSignatures() digests) and its action appended to the first-match
-     * chain. The two public methods differ only in the mode and in the types
-     * they give the handler.
+     * Loads every lazy group not loaded yet, registering its endpoints: what
+     * a build step digesting the signatures, a generator writing the options
+     * or a boot check has to do before it sees every endpoint. A group whose
+     * registration fails rejects here, which is the point of calling it.
      */
-    registerApi(name, mode, schema, handler) {
-        if (this.apiDefinitions.has(name)) {
-            throw new Error(`Lambder: duplicate API name "${name}". Dispatch is first-match, so the second registration would be silently dead code.`);
+    async loadApiGroups() {
+        for (const name of [...this.lazyApiGroups.keys()])
+            await this.loadLazyApiGroup(name);
+    }
+    /**
+     * An API call to a registered group, its hooks run: its group loaded
+     * first when it is a lazy one no call has reached yet, then its endpoint
+     * run. An action the group does not have is answered as any unmatched API
+     * call is, fallback hooks first.
+     */
+    async dispatchApiCall(ctx, resolver) {
+        const apiName = ctx.api.apiName;
+        const definition = await this.registeredDefinitionOf(apiName);
+        const endpoint = this.apiHandlers.get(apiName);
+        if (!definition || !endpoint)
+            return await this.answerUnmatched(ctx, resolver);
+        return await this.runApi(ctx, definition, endpoint.output, endpoint.compress, endpoint.handler);
+    }
+    /**
+     * The definition of the endpoint a call names, its group loaded first
+     * when it is a lazy one no call has reached yet; undefined for a name no
+     * registered group declares. Everything that reads an endpoint's
+     * declarations for a call asks here (its dispatch, a refusal a hook
+     * throws on the way to it, a per-API budget a hook charges), so a lazy
+     * group answers each of them as an eager one does.
+     */
+    async registeredDefinitionOf(apiName) {
+        const group = splitApiName(apiName)?.group;
+        if (group !== undefined && this.lazyApiGroups.has(group))
+            await this.loadLazyApiGroup(group);
+        return this.apiDefinitions.get(apiName);
+    }
+    /** The endpoints of one group, each checked as `group.action`; nothing is registered until they are committed. */
+    prepareApiGroup(group) {
+        return Object.entries(group.apis).map(([action, declaration]) => this.prepareApi(`${group.name}.${action}`, declaration.options, declaration.handler));
+    }
+    /**
+     * A lazy group, loaded once: its import, checked to be the group it was
+     * registered as, then registered. Concurrent first calls share one load;
+     * a failed load is forgotten, so the next call tries again rather than
+     * answering every later call with the first failure.
+     */
+    async loadLazyApiGroup(name) {
+        const lazy = this.lazyApiGroups.get(name);
+        if (!lazy)
+            return;
+        if (!lazy.loading) {
+            const loading = (async () => {
+                const loaded = await lazy.group.load();
+                if (!isRegistrableApiGroup(loaded) || loaded.kind !== "lambderApiGroup") {
+                    throw new Error(`Lambder: the loader of lazy group "${name}" resolved to something that is not a group. Resolve to the value defineApiGroup() built.`);
+                }
+                if (loaded.name !== name) {
+                    throw new Error(`Lambder: lazy group "${name}" loaded the group "${loaded.name}". The loader must resolve to the group of the name it was registered under.`);
+                }
+                for (const api of this.prepareApiGroup(loaded))
+                    this.commitApi(api);
+                this.lazyApiGroups.delete(name);
+            })();
+            lazy.loading = loading;
+            loading.catch(() => { if (lazy.loading === loading)
+                lazy.loading = null; });
         }
-        // Everything that can refuse the registration runs before the name is
-        // claimed below: a refusal the app catches and fixes would otherwise
-        // leave the name taken, and the retry would report a duplicate
-        // instead of the problem it was fixing.
+        await lazy.loading;
+    }
+    /**
+     * What registering an endpoint takes: the checks that can refuse it and
+     * its mode read off its guards, into the definition apiSignatures()
+     * digests, beside its handler. Nothing is recorded here (commitApi does
+     * that), so a refusal anywhere in a registration leaves nothing behind.
+     */
+    prepareApi(name, schema, handler) {
+        const guardEntries = toGuardEntries(schema.guards);
+        const guardNeedsSession = (guard) => !!this.guards && Object.prototype.hasOwnProperty.call(this.guards, guard) && this.guards[guard]?.session === true;
+        const mode = guardEntries.some(({ name: guard }) => guardNeedsSession(guard)) ? "session" : "public";
         if (mode === "session" && !this.pipeline.hasSessions) {
-            throw new Error(`Lambder: session API "${name}" needs the session option at creation.`);
+            throw new Error(`Lambder: a guard of API "${name}" needs a session, and the instance was created without the session option.`);
         }
-        const guardsRequired = mode === "session" ? this.requireSessionApiGuards : this.requirePublicApiGuards;
-        if (guardsRequired && schema.guards === undefined) {
-            const optOut = mode === "session"
-                ? "the named no-op guard that marks the session itself as the whole authorization"
-                : "the named no-op guard that records why anyone may call it";
-            throw new Error(`Lambder: ${mode} API "${name}" declares no guards, and require${mode === "session" ? "Session" : "Public"}ApiGuards is on. ` +
-                `Declare the guard that authorizes it, or ${optOut}.`);
+        if (this.requireApiGuards && schema.guards === undefined) {
+            throw new Error(`Lambder: API "${name}" declares no guards, and requireApiGuards is on. ` +
+                `Declare the guard that authorizes it, or the named no-op guard that records why it needs nothing more.`);
         }
         // The option, like guards and rateLimit, is a declaration or absent:
         // an empty list would read as declaring codes while declaring none.
@@ -333,20 +493,22 @@ export default class Lambder {
         if (schema.refusals !== undefined && ownRefusals.length === 0) {
             throw new Error(`Lambder: API "${name}" declares an empty refusals option, which declares no code. Name the codes it refuses with, or omit the option entirely.`);
         }
-        const allowedCodes = resolveAllowedRefusals(name, this.refusalVocabulary, ownRefusals, toGuardEntries(schema.guards).map(({ name: guard }) => ({
+        const allowedCodes = resolveAllowedRefusals(name, this.refusalVocabulary, ownRefusals, guardEntries.map(({ name: guard }) => ({
             guard,
             codes: (this.guards && Object.prototype.hasOwnProperty.call(this.guards, guard) ? this.guards[guard]?.refusals : undefined) ?? [],
         })));
         const refusals = { codes: allowedCodes, codeRequired: this.requireRefusalCodes };
         const definition = { name, mode, guards: schema.guards, rateLimit: schema.rateLimit, idempotency: schema.idempotency, input: schema.input, output: schema.output, refusals };
         this.pipeline.assertRegistration(definition);
-        this.apiDefinitions.set(name, definition);
-        if (schema.refusals !== undefined)
-            this.refusalOptions.set(name, schema.refusals);
-        this.actionList.push({
-            match: (ctx) => ctx.apiName === name ? {} : false,
-            actionFn: (ctx) => this.runApi(ctx, definition, schema.output, schema.compress ?? "auto", handler),
-        });
+        return { definition, refusalsOption: schema.refusals, output: schema.output, compress: schema.compress ?? "auto", handler };
+    }
+    /** Records a checked endpoint: its definition, its refusals option as written, and what answers it. */
+    commitApi(api) {
+        const { name } = api.definition;
+        this.apiDefinitions.set(name, api.definition);
+        if (api.refusalsOption !== undefined)
+            this.refusalOptions.set(name, api.refusalsOption);
+        this.apiHandlers.set(name, { output: api.output, compress: api.compress, handler: api.handler });
     }
     addHook(hookEvent, hookFn, priority = 0) {
         if (hookEvent === "created") {
@@ -378,16 +540,15 @@ export default class Lambder {
         });
         return this;
     }
-    // Plugin system
-    // The policy generics are `any` in the plugin signature on purpose: a
-    // module may annotate its parameter as the bare Lambder<SessionData> or
-    // as the app's narrowed alias, and both must chain. Registration-time
-    // assertions still check every referenced policy/guard name. Every
-    // policy generic must be listed: a missing one falls back to its default,
-    // making an instance with a non-default value unassignable to its own
-    // plugins.
+    /**
+     * Hands the instance to a function that registers on it (routes, hooks,
+     * actions) and continues the chain with what it returns. Endpoints are
+     * not registered this way: they are values, registered by
+     * registerApiGroups(), so a plugin adds nothing to the contract.
+     */
     use(plugin) {
-        return plugin(this);
+        plugin(this);
+        return this;
     }
     // =====================================================================
     // Accessors
@@ -451,6 +612,7 @@ export default class Lambder {
      * unless the generator writes it there.
      */
     async apiSignatureEntries() {
+        await this.loadApiGroups();
         const entries = await Promise.all([...this.apiDefinitions.values()].map(async (definition) => ({
             name: definition.name,
             key: await apiNameKeyOf(definition.name),
@@ -478,7 +640,8 @@ export default class Lambder {
      * same object. Every table is sorted by name, so the module diffs by
      * endpoint and never moves when registrations are reordered.
      */
-    apiOptionEntries() {
+    async apiOptionEntries() {
+        await this.loadApiGroups();
         const apis = {};
         for (const name of [...this.apiDefinitions.keys()].sort()) {
             const { mode, guards, rateLimit, idempotency } = this.apiDefinitions.get(name);
@@ -624,11 +787,22 @@ export default class Lambder {
         const beforeRenderResult = await this.runBeforeRenderHooks(ctx, resolver, onContextReplaced);
         if (beforeRenderResult instanceof LambderResponse)
             return beforeRenderResult;
-        const currentCtx = beforeRenderResult;
+        return await this.answerUnmatched(beforeRenderResult, resolver);
+    }
+    /**
+     * What answers a request nothing matched, its beforeRender hooks run:
+     * the fallback hooks, then the API fallback for an API call, and
+     * otherwise the public files, the shell and the route fallback in turn.
+     */
+    async answerUnmatched(currentCtx, resolver) {
         for (const hook of this.hookList["fallback"]) {
             await hook.hookFn(currentCtx, resolver);
         }
-        const isAPI = currentCtx.api !== null || currentCtx.path === this.apiPath;
+        // A request under apiPath is the API's to answer, whatever it asked
+        // for. A root apiPath shares every path with the site, so there only
+        // apiPath itself and the calls are.
+        const apiArea = this.apiPath.replace(/\/+$/, "");
+        const isAPI = currentCtx.api !== null || currentCtx.path === this.apiPath || (apiArea !== "" && currentCtx.path.startsWith(`${apiArea}/`));
         if (isAPI) {
             if (this.apiFallbackHandler)
                 return await this.apiFallbackHandler(currentCtx, resolver);
@@ -661,6 +835,10 @@ export default class Lambder {
         if (this.isCorsPreflight(ctx))
             return new LambderResponse({ statusCode: 204, body: null });
         if (ctx.api) {
+            // A page built before endpoints had paths: its call cannot be
+            // answered, and telling it its version expired is what reloads it.
+            if (ctx.api.retiredPath)
+                return responseFromAnswer(versionExpiredAnswer(this.apiVersion));
             // The protocol's own pre-pass, run here rather than left to the
             // pipeline so that hooks and route matching see a plain payload,
             // and so a stale client is answered before any of them, whether or
@@ -781,7 +959,7 @@ export default class Lambder {
         if (thrown instanceof LambderResponse)
             return thrown;
         if (isLambderApiRefusal(thrown) && ctx.api)
-            return this.apiErrorResponse(thrown, ctx);
+            return await this.apiErrorResponse(thrown, ctx);
         if (thrown instanceof LambderSessionNotFoundError)
             return await this.sessionMissingResponse(ctx, resolver);
         throw thrown;
@@ -985,13 +1163,14 @@ export default class Lambder {
     /**
      * A thrown LambderApiRefusal (from a hook, say) as the structured API
      * envelope: the core's one mapping, after the same check the pipeline
-     * applies, against the endpoint the call names. A name no API is
+     * applies, against the endpoint the call names, its lazy group loaded if
+     * the refusal came before the call reached it. A name no API is
      * registered under declares no code, so only an uncoded or a framework
      * refusal goes out for it.
      */
-    apiErrorResponse(err, ctx) {
+    async apiErrorResponse(err, ctx) {
         const apiName = ctx.apiName ?? "";
-        const refusal = checkedRefusal(apiName, this.apiDefinitions.get(apiName)?.refusals ?? NO_DECLARED_REFUSALS, err);
+        const refusal = checkedRefusal(apiName, (await this.registeredDefinitionOf(apiName))?.refusals ?? NO_DECLARED_REFUSALS, err);
         return responseFromAnswer(refusalAnswer(refusal, this.apiVersion, ctx.logList));
     }
 }

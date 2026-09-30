@@ -59,51 +59,55 @@ const bigPayload = (size = 400) => ({ notes: Array.from({ length: size }, (_, i)
  * The callee: an ordinary app with the shapes the caller has to handle. The
  * invokeOnly guard is an app's own convention: a marker check, not security.
  */
-const createCallee = () => initLambder().declareRefusals({ 'app/no': { status: 403 } }).create({
-    apiPath: '/api',
-    guards: {
-        invokeOnly: lambderGuard({ handler: async (ctx) => {
-            if(ctx.header(LAMBDER_INVOKE_HEADER) !== '1') refuse('Not an invoke.');
-        } }),
-        captcha: lambderGuard({ guardInput: z.object({ token: z.string().min(3) }), handler: async () => {} }),
-    },
-})
-    .addApi('echo', {
-        input: z.object({ text: z.string() }),
-        output: z.object({ text: z.string(), ip: z.string(), host: z.string(), invokedBy: z.string().nullable() }),
-        guards: 'invokeOnly',
-    }, (ctx) => ({
-        text: ctx.apiPayload.text, ip: ctx.ip, host: ctx.host,
-        invokedBy: ctx.header(LAMBDER_INVOKED_BY_HEADER) ?? null,
+const createCallee = () => {
+    const app = initLambder().declareRefusals({ 'app/no': { status: 403 } }).create({
+        apiPath: '/api',
+        guards: {
+            invokeOnly: lambderGuard({ handler: async (ctx) => {
+                if(ctx.header(LAMBDER_INVOKE_HEADER) !== '1') refuse('Not an invoke.');
+            } }),
+            captcha: lambderGuard({ guardInput: z.object({ token: z.string().min(3) }), handler: async () => {} }),
+        },
+    });
+    return app.registerApiGroups(app.defineApiGroup('test', {
+        echo: app.defineApi({
+            input: z.object({ text: z.string() }),
+            output: z.object({ text: z.string(), ip: z.string(), host: z.string(), invokedBy: z.string().nullable() }),
+            guards: 'invokeOnly',
+        }, (ctx) => ({
+            text: ctx.apiPayload.text, ip: ctx.ip, host: ctx.host,
+            invokedBy: ctx.header(LAMBDER_INVOKED_BY_HEADER) ?? null,
+        })),
+        big: app.defineApi({
+            input: z.object({ notes: z.array(z.string()) }),
+            output: z.object({ notes: z.array(z.string()), count: z.number() }),
+        }, (ctx) => ({ notes: ctx.apiPayload.notes, count: ctx.apiPayload.notes.length })),
+        plain: app.defineApi({
+            input: z.object({ notes: z.array(z.string()) }),
+            output: z.object({ count: z.number(), filler: z.string() }),
+            compress: false,
+        }, (ctx) => ({ count: ctx.apiPayload.notes.length, filler: 'x'.repeat(2000) })),
+        refuse: app.defineApi({ input: z.object({}), output: z.object({}), refusals: 'app/no' }, () => refuse('No.', { code: 'app/no' })),
+        logs: app.defineApi({ input: z.object({}), output: z.object({ ok: z.boolean() }) }, (_ctx) => {
+            _ctx.logList.push({ step: 1 });
+            _ctx.logList.push({ step: 2 });
+            return { ok: true };
+        }),
+        crash: app.defineApi({ input: z.object({}), output: z.object({}) }, (_ctx) => {
+            _ctx.logList.push({ before: 'the throw' });
+            throw new Error('boom', { cause: new Error('root cause') });
+        }),
+        captchaed: app.defineApi({ input: z.object({}), output: z.object({ ok: z.boolean() }), guards: 'captcha' }, (_ctx) => ({ ok: true })),
+        nullAnswer: app.defineApi({ input: z.object({}), output: z.object({ n: z.number().nullable() }) }, (_ctx) => ({ n: null })),
+        whoami: app.defineApi({
+            input: z.object({}),
+            output: z.object({ cookie: z.record(z.string(), z.string()), token: z.string() }),
+        }, (ctx) => ({ cookie: ctx.cookie, token: String(ctx.post.token ?? '') })),
     }))
-    .addApi('big', {
-        input: z.object({ notes: z.array(z.string()) }),
-        output: z.object({ notes: z.array(z.string()), count: z.number() }),
-    }, (ctx) => ({ notes: ctx.apiPayload.notes, count: ctx.apiPayload.notes.length }))
-    .addApi('plain', {
-        input: z.object({ notes: z.array(z.string()) }),
-        output: z.object({ count: z.number(), filler: z.string() }),
-        compress: false,
-    }, (ctx) => ({ count: ctx.apiPayload.notes.length, filler: 'x'.repeat(2000) }))
-    .addApi('refuse', { input: z.object({}), output: z.object({}), refusals: 'app/no' }, () => refuse('No.', { code: 'app/no' }))
-    .addApi('logs', { input: z.object({}), output: z.object({ ok: z.boolean() }) }, (_ctx) => {
-        _ctx.logList.push({ step: 1 });
-        _ctx.logList.push({ step: 2 });
-        return { ok: true };
-    })
-    .addApi('crash', { input: z.object({}), output: z.object({}) }, (_ctx) => {
-        _ctx.logList.push({ before: 'the throw' });
-        throw new Error('boom', { cause: new Error('root cause') });
-    })
-    .addApi('captchaed', { input: z.object({}), output: z.object({ ok: z.boolean() }), guards: 'captcha' }, (_ctx) => ({ ok: true }))
-    .addApi('nullAnswer', { input: z.object({}), output: z.object({ n: z.number().nullable() }) }, (_ctx) => ({ n: null }))
-    .addApi('whoami', {
-        input: z.object({}),
-        output: z.object({ cookie: z.record(z.string(), z.string()), token: z.string() }),
-    }, (ctx) => ({ cookie: ctx.cookie, token: String(ctx.post.token ?? '') }))
-    .addRoute('/hello', (ctx, res) => res.text(`hi ${ctx.get.name ?? 'nobody'}`, { headers: { 'X-Seen-Cookie': ctx.cookie.session ?? '' } }))
-    .setGlobalErrorHandler((err, ctx, res) =>
-        res.apiRefusal({ refusal: 'Internal server error.', crash: describeCrash(err, ctx), logList: ctx?.logList }, { statusCode: 500 }));
+        .addRoute('/hello', (ctx, res) => res.text(`hi ${ctx.get.name ?? 'nobody'}`, { headers: { 'X-Seen-Cookie': ctx.cookie.session ?? '' } }))
+        .setGlobalErrorHandler((err, ctx, res) =>
+            res.apiRefusal({ refusal: 'Internal server error.', crash: describeCrash(err, ctx), logList: ctx?.logList }, { statusCode: 500 }));
+};
 
 type Callee = ReturnType<typeof createCallee>;
 type Contract = Callee['ApiContract'];
@@ -130,13 +134,14 @@ const callerFor = (callee: Callee, options: Partial<ConstructorParameters<typeof
 describe('LambderInvokeCaller - the synthesized event', () => {
     it('createEvent builds the API Gateway v2 shape createContext expects', () => {
         const event = LambderInvokeCaller.createEvent({
-            apiPath: '/api', apiName: 'echo', payload: { text: 'x' }, host: 'callee-host',
+            apiPath: '/api', apiName: 'test.echo', payload: { text: 'x' }, host: 'callee-host',
             apiVersion: '7', guardInputs: { captcha: { token: 'abc' } }, idempotencyKey: 'abcdefghijklmnop',
             clientIp: '203.0.113.7', headers: { 'X-Custom': 'yes', 'Content-Type': 'application/x-www-form-urlencoded' },
         });
 
         expect(event.version).toBe('2.0');
-        expect(event.rawPath).toBe('/api');
+        // The endpoint is the path; the body carries no name.
+        expect(event.rawPath).toBe('/api/test/echo');
         expect(event.requestContext.http.method).toBe('POST');
         expect(event.requestContext.http.sourceIp).toBe('203.0.113.7');
         expect(event.requestContext.domainName).toBe('callee-host');
@@ -155,19 +160,19 @@ describe('LambderInvokeCaller - the synthesized event', () => {
         // The body is LambderCaller's envelope.
         const body = JSON.parse(event.body!);
         expect(body).toEqual({
-            apiName: 'echo', version: '7', token: '', siteHost: 'callee-host',
+            version: '7', token: '', siteHost: 'callee-host',
             payload: { text: 'x' }, guardInputs: { captcha: { token: 'abc' } }, idempotencyKey: 'abcdefghijklmnop',
         });
         expect(event.cookies).toBeUndefined();
     });
 
     it('a session becomes the token cookie and the CSRF token in the body', () => {
-        const event = LambderInvokeCaller.createEvent({ apiName: 'whoami', session: { token: 'tok-1', csrf: 'csrf-1' } });
+        const event = LambderInvokeCaller.createEvent({ apiName: 'test.whoami', session: { token: 'tok-1', csrf: 'csrf-1' } });
         expect(event.cookies).toEqual(['LMDRSESSIONTKID=tok-1']);
         expect(JSON.parse(event.body!).token).toBe('csrf-1');
 
         const custom = LambderInvokeCaller.createEvent({
-            apiName: 'whoami', session: { token: 'tok-2', csrf: 'csrf-2' }, sessionTokenCookieKey: 'SID',
+            apiName: 'test.whoami', session: { token: 'tok-2', csrf: 'csrf-2' }, sessionTokenCookieKey: 'SID',
         });
         expect(custom.cookies).toEqual(['SID=tok-2']);
     });
@@ -178,7 +183,7 @@ describe('LambderInvokeCaller - the synthesized event', () => {
         // is, so the caller's copies go, and an invoke's address is its
         // clientIp alone, so a forwarded one goes too.
         const event = LambderInvokeCaller.createEvent({
-            apiName: 'echo',
+            apiName: 'test.echo',
             clientIp: '203.0.113.7',
             headers: {
                 'X-Forwarded-For': '198.51.100.9',
@@ -211,7 +216,7 @@ describe('LambderInvokeCaller - the synthesized event', () => {
         const caller = new LambderInvokeCaller<Contract>({ functionName: 'old-callee', transport: LambderInvokeCaller.localTransport(readsForwardedFor) });
         const browserHeaders = { 'X-Forwarded-For': '6.6.6.6', 'User-Agent': 'a browser' };
 
-        await caller.apiOutcome('nullAnswer', {}, { clientIp: '198.51.100.9', headers: browserHeaders });
+        await caller.apiOutcome('test.nullAnswer', {}, { clientIp: '198.51.100.9', headers: browserHeaders });
         await caller.request({ path: '/hello', clientIp: '198.51.100.9', headers: browserHeaders });
 
         expect(forwardedSeen).toEqual([undefined, undefined]);
@@ -266,21 +271,56 @@ describe('LambderInvokeCaller - the synthesized event', () => {
         // A gateway lambda forwarding a form post's headers: the envelope is
         // still JSON, and a server reads a POST to its API path as an API
         // call only when it says so.
-        const app = initLambder().create({ apiPath: '/api' })
-            .addApi('echo', { input: z.object({ text: z.string() }), output: z.object({ text: z.string() }) }, async (ctx) => ({ text: ctx.apiPayload.text }));
+        const created = initLambder().create({ apiPath: '/api' });
+        const app = created.registerApiGroups(created.defineApiGroup('test', {
+            echo: created.defineApi({ input: z.object({ text: z.string() }), output: z.object({ text: z.string() }) }, async (ctx) => ({ text: ctx.apiPayload.text })),
+        }));
         const caller = new LambderInvokeCaller<typeof app.ApiContract>({ functionName: 'callee', transport: LambderInvokeCaller.localTransport(app.getHandler()) });
-        expect(await caller.api('echo', { text: 'hi' }, { headers: { 'content-type': 'application/x-www-form-urlencoded' } })).toEqual({ text: 'hi' });
+        expect(await caller.api('test.echo', { text: 'hi' }, { headers: { 'content-type': 'application/x-www-form-urlencoded' } })).toEqual({ text: 'hi' });
     });
 
     it('names the invoking function when it runs in Lambda', () => {
         vi.stubEnv('AWS_LAMBDA_FUNCTION_NAME', 'caller-fn');
         try {
-            const event = LambderInvokeCaller.createEvent({ apiName: 'echo' });
+            const event = LambderInvokeCaller.createEvent({ apiName: 'test.echo' });
             expect(event.headers[LAMBDER_INVOKED_BY_HEADER]).toBe('caller-fn');
         } finally {
             vi.unstubAllEnvs();
         }
-        expect(LambderInvokeCaller.createEvent({ apiName: 'echo' }).headers[LAMBDER_INVOKED_BY_HEADER]).toBeUndefined();
+        expect(LambderInvokeCaller.createEvent({ apiName: 'test.echo' }).headers[LAMBDER_INVOKED_BY_HEADER]).toBeUndefined();
+    });
+});
+
+describe('LambderInvokeCaller - an endpoint called through its group', () => {
+    it('invokes caller.test.echo(input) at /api/test/echo with the event caller.api("test.echo", input) sends', async () => {
+        const { transport, seen } = capturing(createCallee());
+        const caller = new LambderInvokeCaller<Contract>({ functionName: 'callee-fn', transport });
+
+        const byGroup = await caller.test.echo({ text: 'hi' }, { clientIp: '198.51.100.9' });
+        const byName = await caller.api('test.echo', { text: 'hi' }, { clientIp: '198.51.100.9' });
+        const outcome = await caller.test.echo.outcome({ text: 'hi' }, { clientIp: '198.51.100.9' });
+
+        expect(byGroup).toEqual({ text: 'hi', ip: '198.51.100.9', host: 'callee-fn', invokedBy: null });
+        expect(byName).toEqual(byGroup);
+        expect(outcome).toMatchObject({ ok: true, payload: byGroup });
+        expectTypeOf(byGroup).toEqualTypeOf<{ text: string; ip: string; host: string; invokedBy: string | null }>();
+
+        const [groupEvent, nameEvent, outcomeEvent] = seen.map(({ event }) => event);
+        for(const event of [groupEvent, nameEvent, outcomeEvent]) expect(event!.rawPath).toBe('/api/test/echo');
+        expect(groupEvent!.body).toBe(nameEvent!.body);
+        expect(groupEvent!.headers).toEqual(nameEvent!.headers);
+        expect(outcomeEvent!.body).toBe(nameEvent!.body);
+    });
+
+    it('throws from the group call where api() throws, and resolves the outcome where apiOutcome() does', async () => {
+        const caller = callerFor(createCallee());
+
+        const thrown = await caller.test.refuse({}).then(() => null, (err: unknown) => err);
+        expect(isLambderInvokeError(thrown)).toBe(true);
+        expect((thrown as LambderInvokeError).apiName).toBe('test.refuse');
+        assertApiFailure(await caller.test.refuse.outcome({}), 'refusal', { code: 'app/no' });
+        // @ts-expect-error captcha is a guardInput-mode guard: its value cannot be omitted here either
+        void caller.test.captchaed({}).catch(() => {});
     });
 });
 
@@ -289,7 +329,7 @@ describe('LambderInvokeCaller - round trips through a real Lambder app', () => {
         const callee = createCallee();
         const caller = callerFor(callee);
 
-        const answer = await caller.api('echo', { text: 'hello' }, { clientIp: '198.51.100.9' });
+        const answer = await caller.api('test.echo', { text: 'hello' }, { clientIp: '198.51.100.9' });
 
         expect(answer).toEqual({ text: 'hello', ip: '198.51.100.9', host: 'callee-fn', invokedBy: null });
         // The declared output, not `| null`: the resolver only lets a handler answer null for an output that allows it.
@@ -298,8 +338,8 @@ describe('LambderInvokeCaller - round trips through a real Lambder app', () => {
 
     it('the host option is what the callee sees as ctx.host; the function name is the default', async () => {
         const callee = createCallee();
-        expect((await callerFor(callee, { host: 'ig.internal' }).api('echo', { text: 'x' }))?.host).toBe('ig.internal');
-        expect((await callerFor(callee).api('echo', { text: 'x' }))?.host).toBe('callee-fn');
+        expect((await callerFor(callee, { host: 'ig.internal' }).api('test.echo', { text: 'x' }))?.host).toBe('ig.internal');
+        expect((await callerFor(callee).api('test.echo', { text: 'x' }))?.host).toBe('callee-fn');
     });
 
     it('reads ctx.ip and ctx.host from clientIp and host alone, whatever forwarding headers the callee trusts', async () => {
@@ -309,11 +349,14 @@ describe('LambderInvokeCaller - round trips through a real Lambder app', () => {
         // per-IP limit, an IP allowlist, the cookie domain and host routing
         // all became the end user's to pick. A header is trusted because a
         // proxy in front of the function writes it, and an invoke has none.
-        const callee = initLambder().create({
+        const calleeApp = initLambder().create({
             trustedClientIpHeaders: ['x-real-ip'],
             trustedHostHeaders: ['x-forwarded-host'],
-        }).addApi('whereFrom', { input: z.object({}), output: z.object({ ip: z.string(), host: z.string() }) },
-            (ctx) => ({ ip: ctx.ip, host: ctx.host }))
+        });
+        const callee = calleeApp.registerApiGroups(calleeApp.defineApiGroup('test', {
+            whereFrom: calleeApp.defineApi({ input: z.object({}), output: z.object({ ip: z.string(), host: z.string() }) },
+                (ctx) => ({ ip: ctx.ip, host: ctx.host })),
+        }))
             .addRoute('/where-from', (ctx, res) => res.json({ ip: ctx.ip, host: ctx.host }));
         const caller = new LambderInvokeCaller<typeof callee.ApiContract>({
             functionName: 'callee-fn',
@@ -322,7 +365,7 @@ describe('LambderInvokeCaller - round trips through a real Lambder app', () => {
         });
         const forwarded = { 'X-Real-IP': '6.6.6.6', 'X-Forwarded-Host': 'evil.example', 'X-Forwarded-For': '6.6.6.6' };
 
-        expect(await caller.api('whereFrom', {}, { clientIp: '198.51.100.9', headers: forwarded }))
+        expect(await caller.api('test.whereFrom', {}, { clientIp: '198.51.100.9', headers: forwarded }))
             .toEqual({ ip: '198.51.100.9', host: 'shop.internal' });
         const route = await caller.request({ path: '/where-from', clientIp: '198.51.100.9', headers: forwarded });
         expect(route.json()).toEqual({ ip: '198.51.100.9', host: 'shop.internal' });
@@ -357,12 +400,12 @@ describe('LambderInvokeCaller - round trips through a real Lambder app', () => {
     it('the contract makes a wrong name or payload a compile error', async () => {
         const caller = callerFor(createCallee());
         // @ts-expect-error no API by this name
-        void caller.api('nope', {}).catch(() => {});
+        void caller.api('test.nope', {}).catch(() => {});
         // @ts-expect-error text must be a string
-        void caller.api('echo', { text: 1 }).catch(() => {});
+        void caller.api('test.echo', { text: 1 }).catch(() => {});
         // @ts-expect-error captcha is a guardInput-mode guard: its value cannot be omitted
-        void caller.api('captchaed', {}).catch(() => {});
-        await expect(caller.api('captchaed', {}, { guardInputs: { captcha: { token: 'abc' } } })).resolves.toEqual({ ok: true });
+        void caller.api('test.captchaed', {}).catch(() => {});
+        await expect(caller.api('test.captchaed', {}, { guardInputs: { captcha: { token: 'abc' } } })).resolves.toEqual({ ok: true });
     });
 
     it('a guardInputsProvider covers a guard for every call, per-call values on top', async () => {
@@ -374,10 +417,10 @@ describe('LambderInvokeCaller - round trips through a real Lambder app', () => {
             guardInputsProvider: provider,
         });
 
-        await expect(caller.api('captchaed', {})).resolves.toEqual({ ok: true });
-        expect(provider).toHaveBeenCalledWith('captchaed');
+        await expect(caller.api('test.captchaed', {})).resolves.toEqual({ ok: true });
+        expect(provider).toHaveBeenCalledWith('test.captchaed');
         // A short per-call token overrides the provider's and the guard refuses it: validation, not a crash.
-        const outcome = await caller.apiOutcome('captchaed', {}, { guardInputs: { captcha: { token: 'x' } } });
+        const outcome = await caller.apiOutcome('test.captchaed', {}, { guardInputs: { captcha: { token: 'x' } } });
         assertApiFailure(outcome, 'validation');
     });
 
@@ -386,22 +429,22 @@ describe('LambderInvokeCaller - round trips through a real Lambder app', () => {
         const onLogList = vi.fn();
         const caller = callerFor(callee, { onLogList });
 
-        const outcome = await caller.apiOutcome('logs', {});
+        const outcome = await caller.apiOutcome('test.logs', {});
 
         expect(outcome.ok).toBe(true);
         if(outcome.ok){
             expect(outcome.payload).toEqual({ ok: true });
             expect(outcome.logList).toEqual([{ step: 1 }, { step: 2 }]);
         }
-        expect(onLogList).toHaveBeenCalledWith('logs', [{ step: 1 }, { step: 2 }]);
+        expect(onLogList).toHaveBeenCalledWith('test.logs', [{ step: 1 }, { step: 2 }]);
     });
 
     it('without onLogList the entries are printed with the function and API name', async () => {
         const log = vi.spyOn(console, 'log').mockImplementation(() => {});
         try {
-            await callerFor(createCallee()).api('logs', {});
-            expect(log).toHaveBeenCalledWith('[lambder invoke] callee-fn logs', { step: 1 });
-            expect(log).toHaveBeenCalledWith('[lambder invoke] callee-fn logs', { step: 2 });
+            await callerFor(createCallee()).api('test.logs', {});
+            expect(log).toHaveBeenCalledWith('[lambder invoke] callee-fn test.logs', { step: 1 });
+            expect(log).toHaveBeenCalledWith('[lambder invoke] callee-fn test.logs', { step: 2 });
         } finally {
             log.mockRestore();
         }
@@ -411,7 +454,7 @@ describe('LambderInvokeCaller - round trips through a real Lambder app', () => {
         const callee = createCallee();
         const caller = callerFor(callee);
 
-        const outcome = await caller.apiOutcome('refuse', {});
+        const outcome = await caller.apiOutcome('test.refuse', {});
         expect(outcome.ok).toBe(false);
         if(outcome.ok) throw new Error('unreachable');
         expect(outcome.reason).toBe('refusal');
@@ -422,29 +465,29 @@ describe('LambderInvokeCaller - round trips through a real Lambder app', () => {
         expect(outcome.error).toBeInstanceOf(LambderInvokeError);
         expect(outcome.error.outcome).toBe(outcome);
 
-        const thrown = await caller.api('refuse', {}).then(() => null, (err: unknown) => err);
+        const thrown = await caller.api('test.refuse', {}).then(() => null, (err: unknown) => err);
         expect(isLambderInvokeError(thrown)).toBe(true);
         if(!isLambderInvokeError(thrown)) throw new Error('unreachable');
-        expect(thrown.message).toBe('callee-fn refuse failed (refusal): No.');
+        expect(thrown.message).toBe('callee-fn test.refuse failed (refusal): No.');
         expect(thrown.reason).toBe('refusal');
-        expect(thrown.apiName).toBe('refuse');
+        expect(thrown.apiName).toBe('test.refuse');
         expect(thrown.functionName).toBe('callee-fn');
         expect(thrown.refusal?.code).toBe('app/no');
     });
 
     it('a rejected input is reason validation with the zod issues', async () => {
-        const outcome = await callerFor(createCallee()).apiOutcome('echo', { text: 42 as unknown as string });
+        const outcome = await callerFor(createCallee()).apiOutcome('test.echo', { text: 42 as unknown as string });
         expect(outcome.ok).toBe(false);
         if(outcome.ok || outcome.reason !== 'validation') throw new Error('unreachable');
         expect(outcome.status).toBe(422);
         // No optional read: the validation arm carries the issues.
         expect(outcome.zodError.issues[0]?.path).toEqual(['text']);
-        expect(outcome.error.message).toBe('callee-fn echo failed (validation): the callee rejected the input');
+        expect(outcome.error.message).toBe('callee-fn test.echo failed (validation): the callee rejected the input');
     });
 
     it('a crash inside the callee arrives as reason server with the crash detail, the logs, and a rebuilt cause', async () => {
         const callee = createCallee();
-        const outcome = await callerFor(callee).apiOutcome('crash', {});
+        const outcome = await callerFor(callee).apiOutcome('test.crash', {});
 
         expect(outcome.ok).toBe(false);
         if(outcome.ok || outcome.reason !== 'server') throw new Error('unreachable');
@@ -460,7 +503,7 @@ describe('LambderInvokeCaller - round trips through a real Lambder app', () => {
         // What the handler logged before it threw.
         expect(outcome.logList).toEqual([{ before: 'the throw' }]);
         // The thrown error names everything and carries the callee's error as its cause.
-        expect(outcome.error.message).toBe('callee-fn crash failed (server): boom');
+        expect(outcome.error.message).toBe('callee-fn test.crash failed (server): boom');
         const cause = outcome.error.cause as Error;
         expect(cause).toBeInstanceOf(Error);
         expect(cause.message).toBe('boom');
@@ -470,20 +513,20 @@ describe('LambderInvokeCaller - round trips through a real Lambder app', () => {
 
     it('a success is the handler\'s output exactly: a nullable member arrives as null, typed as declared', async () => {
         const caller = callerFor(createCallee());
-        const answer = await caller.api('nullAnswer', {});
+        const answer = await caller.api('test.nullAnswer', {});
         expectTypeOf(answer).toEqualTypeOf<{ n: number | null }>();
         expect(answer).toEqual({ n: null });
-        const outcome = await caller.apiOutcome('nullAnswer', {});
+        const outcome = await caller.apiOutcome('test.nullAnswer', {});
         expect(outcome).toMatchObject({ ok: true, payload: { n: null }, logList: [] });
     });
 
     it('a session rides as the token cookie and the CSRF token', async () => {
-        const answer = await callerFor(createCallee()).api('whoami', {}, { session: { token: 'tok-1', csrf: 'csrf-1' } });
+        const answer = await callerFor(createCallee()).api('test.whoami', {}, { session: { token: 'tok-1', csrf: 'csrf-1' } });
         expect(answer).toEqual({ cookie: { LMDRSESSIONTKID: 'tok-1' }, token: 'csrf-1' });
     });
 
     it('an unknown API name is the callee\'s apiNotFound refusal', async () => {
-        const outcome = await (callerFor(createCallee()) as LambderInvokeCaller).apiOutcome('nope', {});
+        const outcome = await (callerFor(createCallee()) as LambderInvokeCaller).apiOutcome('test.nope', {});
         expect(outcome.ok).toBe(false);
         if(outcome.ok) throw new Error('unreachable');
         expect(outcome.reason).toBe('refusal');
@@ -491,12 +534,12 @@ describe('LambderInvokeCaller - round trips through a real Lambder app', () => {
     });
 
     it('an apiPath mismatch names the likely cause', async () => {
-        const outcome = await callerFor(createCallee(), { apiPath: '/secure' }).apiOutcome('echo', { text: 'x' });
+        const outcome = await callerFor(createCallee(), { apiPath: '/secure' }).apiOutcome('test.echo', { text: 'x' });
         expect(outcome.ok).toBe(false);
         if(outcome.ok) throw new Error('unreachable');
         expect(outcome.reason).toBe('server');
         expect(outcome.status).toBe(404);
-        expect(outcome.error.message).toBe('callee-fn echo failed (server): no API at /secure on callee-fn (HTTP 404): does apiPath match the callee\'s?');
+        expect(outcome.error.message).toBe('callee-fn test.echo failed (server): no API at /secure on callee-fn (HTTP 404): does apiPath match the callee\'s?');
     });
 });
 
@@ -518,10 +561,10 @@ describe('LambderInvokeCaller - the logs of an answer that failed', () => {
             onLogList: (apiName, logList) => { seen.push([apiName, logList]); },
         });
 
-        const outcome = await caller.apiOutcome('echo', { text: 'hi' });
+        const outcome = await caller.apiOutcome('test.echo', { text: 'hi' });
 
         assertApiFailure(outcome);
-        expect(seen).toEqual([['echo', [{ step: 'before the crash' }]]]);
+        expect(seen).toEqual([['test.echo', [{ step: 'before the crash' }]]]);
         expect(outcome.logList).toEqual([{ step: 'before the crash' }]);
     });
 });
@@ -532,7 +575,7 @@ describe('LambderInvokeCaller - compression', () => {
         const { transport, seen } = capturing(callee);
         const caller = new LambderInvokeCaller<Contract>({ functionName: 'callee-fn', transport });
 
-        const answer = await caller.api('big', bigPayload());
+        const answer = await caller.api('test.big', bigPayload());
 
         expect(answer?.count).toBe(400);
         expect(answer?.notes[399]).toBe('stop-399 on the main line');
@@ -547,7 +590,7 @@ describe('LambderInvokeCaller - compression', () => {
         const { transport, seen } = capturing(callee);
         const caller = new LambderInvokeCaller<Contract>({ functionName: 'callee-fn', transport });
 
-        await caller.api('plain', bigPayload(5));
+        await caller.api('test.plain', bigPayload(5));
 
         expect(seen[0]!.result.headers['Content-Encoding']).toBeUndefined();
         expect(seen[0]!.result.isBase64Encoded).toBe(false);
@@ -559,7 +602,7 @@ describe('LambderInvokeCaller - compression', () => {
         const caller = new LambderInvokeCaller<Contract>({ functionName: 'callee-fn', transport, requestCompression: true });
         const payload = bigPayload();
 
-        const answer = await caller.api('big', payload);
+        const answer = await caller.api('test.big', payload);
 
         expect(answer?.count).toBe(400);
         const body = JSON.parse(seen[0]!.event.body!);
@@ -567,8 +610,8 @@ describe('LambderInvokeCaller - compression', () => {
         expect(typeof body.payloadBr).toBe('string');
         expect(body.payloadBytes).toBe(Buffer.byteLength(JSON.stringify(payload)));
         expect(JSON.parse(brotliDecompressSync(Buffer.from(body.payloadBr, 'base64')).toString('utf8'))).toEqual(payload);
-        // The routing fields stay plain.
-        expect(body.apiName).toBe('big');
+        // The endpoint rides in the path, never in the compressed part.
+        expect(seen[0]!.event.rawPath).toBe('/api/test/big');
     });
 
     it('small payloads go plainly; compressRequest overrides the threshold both ways', async () => {
@@ -577,10 +620,10 @@ describe('LambderInvokeCaller - compression', () => {
         const on = new LambderInvokeCaller<Contract>({ functionName: 'callee-fn', transport, requestCompression: true });
         const off = new LambderInvokeCaller<Contract>({ functionName: 'callee-fn', transport });
 
-        await on.api('big', bigPayload(3));
-        await on.api('big', bigPayload(), { compressRequest: false });
-        await off.api('big', bigPayload(20), { compressRequest: true });
-        await off.api('big', bigPayload());
+        await on.api('test.big', bigPayload(3));
+        await on.api('test.big', bigPayload(), { compressRequest: false });
+        await off.api('test.big', bigPayload(20), { compressRequest: true });
+        await off.api('test.big', bigPayload());
 
         const bodies = seen.map((s) => JSON.parse(s.event.body!));
         expect(bodies[0].payloadBr).toBeUndefined();
@@ -609,7 +652,7 @@ describe('LambderInvokeCaller - compression', () => {
     });
 
     it('an answer that would restore past maxResponsePayloadBytes is a protocol failure, not an allocation', async () => {
-        const outcome = await callerFor(createCallee(), { maxResponsePayloadBytes: 200 }).apiOutcome('big', bigPayload());
+        const outcome = await callerFor(createCallee(), { maxResponsePayloadBytes: 200 }).apiOutcome('test.big', bigPayload());
         expect(outcome.ok).toBe(false);
         if(outcome.ok) throw new Error('unreachable');
         expect(outcome.reason).toBe('protocol');
@@ -621,7 +664,7 @@ describe('LambderInvokeCaller - compression', () => {
         const { transport, seen } = capturing(callee);
         const caller = new LambderInvokeCaller<Contract>({ functionName: 'callee-fn', transport });
 
-        const outcome = await caller.apiOutcome('big', { notes: ['x'.repeat(LAMBDER_INVOKE_MAX_EVENT_BYTES)] }, { compressRequest: false });
+        const outcome = await caller.apiOutcome('test.big', { notes: ['x'.repeat(LAMBDER_INVOKE_MAX_EVENT_BYTES)] }, { compressRequest: false });
 
         expect(outcome.ok).toBe(false);
         if(outcome.ok || outcome.reason !== 'payloadTooLarge') throw new Error('unreachable');
@@ -640,17 +683,50 @@ describe('LambderInvokeCaller - onFailure is the single reporting point', () => 
         });
         const caller = callerFor(callee, { onFailure });
 
-        await caller.api('echo', { text: 'fine' });
+        await caller.api('test.echo', { text: 'fine' });
         expect(onFailure).not.toHaveBeenCalled();
 
-        await caller.apiOutcome('refuse', {});
-        await caller.api('crash', {}).catch(() => order.push('thrown'));
+        await caller.apiOutcome('test.refuse', {});
+        await caller.api('test.crash', {}).catch(() => order.push('thrown'));
 
         expect(onFailure).toHaveBeenCalledTimes(2);
-        expect(order).toEqual(['reported callee-fn:refuse:refusal', 'reported callee-fn:crash:server', 'thrown']);
+        expect(order).toEqual(['reported callee-fn:test.refuse:refusal', 'reported callee-fn:test.crash:server', 'thrown']);
         const [failure] = onFailure.mock.calls[1]!;
         expect(failure.reason === 'server' && failure.crash?.message).toBe('boom');
         expect(failure.error).toBeInstanceOf(LambderInvokeError);
+    });
+});
+
+describe('LambderInvokeCaller - beforeCall checks every call before it is sent', () => {
+    it('sees every call by name, and what it throws reaches the caller from apiOutcome() too, with nothing sent or reported', async () => {
+        const callee = createCallee();
+        const seen: string[] = [];
+        let refusing = false;
+        let sent = 0;
+        const onFailure = vi.fn();
+        const inner = LambderInvokeCaller.localTransport(callee.getHandler());
+        const caller = new LambderInvokeCaller<Contract>({
+            functionName: 'callee-fn',
+            onFailure,
+            transport: (event, options) => { sent += 1; return inner(event, options); },
+            beforeCall: (name, { functionName }) => {
+                seen.push(`${functionName}:${name}`);
+                if(refusing) throw new Error(`${name} inside a transaction`);
+            },
+        });
+
+        await caller.api('test.echo', { text: 'fine' });
+        await caller.test.echo({ text: 'fine' });
+        await caller.request({ path: '/hello' });
+        expect(seen).toEqual(['callee-fn:test.echo', 'callee-fn:test.echo', 'callee-fn:GET /hello']);
+        expect(sent).toBe(3);
+
+        refusing = true;
+        await expect(caller.apiOutcome('test.echo', { text: 'fine' })).rejects.toThrow('test.echo inside a transaction');
+        await expect(caller.test.echo.outcome({ text: 'fine' })).rejects.toThrow('test.echo inside a transaction');
+        await expect(caller.request({ path: '/hello' })).rejects.toThrow('GET /hello inside a transaction');
+        expect(sent).toBe(3);
+        expect(onFailure).not.toHaveBeenCalled();
     });
 });
 
@@ -737,14 +813,14 @@ describe('LambderInvokeCaller - the transport\'s own failures', () => {
         lambdaMock.on(InvokeCommand).resolves({ StatusCode: 200, Payload: httpPayload({ apiVersion: null, payload: { text: 'sdk' } }) as any });
         const caller = new LambderInvokeCaller({ functionName: 'remote-fn', clientConfig: { region: 'eu-west-1' } });
 
-        await expect(caller.api('echo', { text: 'x' })).resolves.toEqual({ text: 'sdk' });
+        await expect(caller.api('test.echo', { text: 'x' })).resolves.toEqual({ text: 'sdk' });
 
         const command = lambdaMock.commandCalls(InvokeCommand)[0]!.args[0].input;
         expect(command.FunctionName).toBe('remote-fn');
         expect(command.InvocationType).toBe('RequestResponse');
         const event = JSON.parse(Buffer.from(command.Payload as Uint8Array).toString('utf8'));
-        expect(event.rawPath).toBe('/api');
-        expect(JSON.parse(event.body).apiName).toBe('echo');
+        expect(event.rawPath).toBe('/api/test/echo');
+        expect(JSON.parse(event.body)).not.toHaveProperty('apiName');
     });
 
     it('a FunctionError is reason crash, with Lambda\'s error payload as the cause', async () => {
@@ -754,12 +830,12 @@ describe('LambderInvokeCaller - the transport\'s own failures', () => {
         });
         const caller = new LambderInvokeCaller({ functionName: 'remote-fn' });
 
-        const outcome = await caller.apiOutcome('echo', {});
+        const outcome = await caller.apiOutcome('test.echo', {});
         expect(outcome.ok).toBe(false);
         if(outcome.ok || outcome.reason !== 'crash') throw new Error('unreachable');
         // No optional read: the crash arm carries Lambda's error payload.
         expect(outcome.functionError).toEqual({ errorType: 'RangeError', errorMessage: 'out of memory', trace: ['RangeError: out of memory', '    at handler'] });
-        expect(outcome.error.message).toBe('remote-fn echo failed (crash): RangeError: out of memory');
+        expect(outcome.error.message).toBe('remote-fn test.echo failed (crash): RangeError: out of memory');
         const cause = outcome.error.cause as Error;
         expect(cause.name).toBe('RangeError');
         expect(cause.stack).toBe('RangeError: out of memory\n    at handler');
@@ -772,12 +848,12 @@ describe('LambderInvokeCaller - the transport\'s own failures', () => {
         lambdaMock.on(InvokeCommand).rejects(offline);
         const caller = new LambderInvokeCaller({ functionName: 'remote-fn' });
 
-        const outcome = await caller.apiOutcome('echo', {});
+        const outcome = await caller.apiOutcome('test.echo', {});
         expect(outcome.ok).toBe(false);
         if(outcome.ok) throw new Error('unreachable');
         expect(outcome.reason).toBe('network');
         expect(outcome.error.cause).toBe(offline);
-        expect(outcome.error.message).toBe('remote-fn echo failed (network): fetch failed');
+        expect(outcome.error.message).toBe('remote-fn test.echo failed (network): fetch failed');
     });
 
     it('a service exception is reason protocol, not network: the invoke was answered, by the service', async () => {
@@ -795,7 +871,7 @@ describe('LambderInvokeCaller - the transport\'s own failures', () => {
             lambdaMock.reset();
             lambdaMock.on(InvokeCommand).rejects(refused);
 
-            const outcome = await new LambderInvokeCaller({ functionName: 'remote-fn' }).apiOutcome('echo', {});
+            const outcome = await new LambderInvokeCaller({ functionName: 'remote-fn' }).apiOutcome('test.echo', {});
 
             expect(outcome.ok).toBe(false);
             if(outcome.ok) throw new Error('unreachable');
@@ -809,7 +885,7 @@ describe('LambderInvokeCaller - the transport\'s own failures', () => {
             async () => { throw new LambderTransportFailure(reason, `the transport says ${reason}`, { cause: new Error('underneath') }); };
 
         for(const reason of ['network', 'protocol'] as const){
-            const outcome = await new LambderInvokeCaller({ functionName: 'remote-fn', transport: failing(reason) }).apiOutcome('echo', {});
+            const outcome = await new LambderInvokeCaller({ functionName: 'remote-fn', transport: failing(reason) }).apiOutcome('test.echo', {});
             expect(outcome.ok).toBe(false);
             if(outcome.ok) throw new Error('unreachable');
             expect(outcome.reason).toBe(reason);
@@ -821,7 +897,7 @@ describe('LambderInvokeCaller - the transport\'s own failures', () => {
         lambdaMock.on(InvokeCommand).resolves({ StatusCode: 200, Payload: new TextEncoder().encode(JSON.stringify({ hello: 'world' })) as any });
         const caller = new LambderInvokeCaller({ functionName: 'remote-fn' });
 
-        const outcome = await caller.apiOutcome('echo', {});
+        const outcome = await caller.apiOutcome('test.echo', {});
         expect(outcome.ok).toBe(false);
         if(outcome.ok) throw new Error('unreachable');
         expect(outcome.reason).toBe('protocol');
@@ -835,12 +911,12 @@ describe('LambderInvokeCaller - the transport\'s own failures', () => {
         });
         const caller = new LambderInvokeCaller({ functionName: 'slow-fn', transport: hanging, timeoutMs: 20 });
 
-        const timedOut = await caller.apiOutcome('echo', {});
+        const timedOut = await caller.apiOutcome('test.echo', {});
         assertApiFailure(timedOut, 'timeout');
 
         const controller = new AbortController();
         controller.abort();
-        const external = await caller.apiOutcome('echo', {}, { signal: controller.signal });
+        const external = await caller.apiOutcome('test.echo', {}, { signal: controller.signal });
         assertApiFailure(external, 'network');
     });
 
@@ -899,8 +975,9 @@ describe('LambderCaller and LambderInvokeCaller read the same envelope the same 
     /** fetch, answered by the callee itself: the browser path to the same app. */
     const stubFetchWith = (callee: Callee) => {
         vi.stubGlobal('location', { hostname: 'localhost' });
-        vi.stubGlobal('fetch', vi.fn(async (_url: string, init: { body: string }) => {
+        vi.stubGlobal('fetch', vi.fn(async (url: string, init: { body: string }) => {
             const result = await callee.render(createApiEvent(JSON.parse(init.body), {
+                path: url,
                 headers: { Host: 'localhost', [LAMBDER_INVOKE_HEADER]: '1' },
             }), createMockContext());
             const encoding = result.multiValueHeaders?.['Content-Encoding']?.[0];
@@ -916,21 +993,21 @@ describe('LambderCaller and LambderInvokeCaller read the same envelope the same 
     afterEach(() => { vi.unstubAllGlobals(); });
 
     it.each([
-        ['a success', 'echo', { text: 'same' }],
-        ['a refusal', 'refuse', {}],
-        ['a rejected input', 'echo', { text: 5 }],
-        ['a crash', 'crash', {}],
-        ['an unknown API', 'nope', {}],
+        ['a success', 'test.echo', { text: 'same' }],
+        ['a refusal', 'test.refuse', {}],
+        ['a rejected input', 'test.echo', { text: 5 }],
+        ['a crash', 'test.crash', {}],
+        ['an unknown API', 'test.nope', {}],
     ] as const)('%s', async (_label, apiName, payload) => {
         const callee = createCallee();
         stubFetchWith(callee);
         const browser = new LambderCaller({ apiPath: '/api', isCorsEnabled: false });
-        // The same Host as the browser path, so `echo` answers identically.
+        // The same Host as the browser path, so `test.echo` answers identically.
         const server = new LambderInvokeCaller({ functionName: 'callee-fn', host: 'localhost', transport: LambderInvokeCaller.localTransport(callee.getHandler()) });
 
         const fromBrowser = await browser.apiOutcome(apiName, payload);
         // The same address the browser path's gateway event reports, so
-        // `echo`, which answers with ctx.ip, answers identically too.
+        // `test.echo`, which answers with ctx.ip, answers identically too.
         const fromServer = await server.apiOutcome(apiName, payload, { clientIp: DEFAULT_GATEWAY_SOURCE_IP });
 
         expect(fromServer.ok).toBe(fromBrowser.ok);
@@ -956,14 +1033,14 @@ describe('LambderInvokeCaller - hooks cannot break the call', () => {
         try {
             const caller = callerFor(createCallee(), { onFailure: async () => { throw new Error('reporter down'); } });
 
-            const outcome = await caller.apiOutcome('refuse', {});
+            const outcome = await caller.apiOutcome('test.refuse', {});
             assertApiFailure(outcome, 'refusal');
 
-            const thrown = await caller.api('refuse', {}).then(() => null, (err: unknown) => err);
+            const thrown = await caller.api('test.refuse', {}).then(() => null, (err: unknown) => err);
             expect(isLambderInvokeError(thrown)).toBe(true);
             if(isLambderInvokeError(thrown)) expect(thrown.reason).toBe('refusal');
             expect(consoleError).toHaveBeenCalledTimes(2);
-            expect(String(consoleError.mock.calls[0]![0])).toContain('onFailure threw for callee-fn refuse');
+            expect(String(consoleError.mock.calls[0]![0])).toContain('onFailure threw for callee-fn test.refuse');
         } finally {
             consoleError.mockRestore();
         }
@@ -973,7 +1050,7 @@ describe('LambderInvokeCaller - hooks cannot break the call', () => {
         const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
         try {
             const caller = callerFor(createCallee(), { onLogList: () => { throw new Error('log sink down'); } });
-            await expect(caller.api('logs', {})).resolves.toEqual({ ok: true });
+            await expect(caller.api('test.logs', {})).resolves.toEqual({ ok: true });
             expect(consoleError).toHaveBeenCalledOnce();
         } finally {
             consoleError.mockRestore();
@@ -992,7 +1069,7 @@ describe('LambderInvokeCaller - the event is serialized once', () => {
         };
         const caller = new LambderInvokeCaller<Contract>({ functionName: 'callee-fn', transport });
 
-        await caller.api('echo', { text: 'x' });
+        await caller.api('test.echo', { text: 'x' });
 
         expect(seen).toHaveLength(1);
         expect(seen[0]!.eventJson).toBe(JSON.stringify(seen[0]!.event));
@@ -1005,12 +1082,12 @@ describe('LambderInvokeCaller - the event is serialized once', () => {
         // Characters that would break a naive splice: quotes, braces, escapes, multi-byte text.
         const payload = { text: 'say "hi" } \\ { ünïcödé 🚌 \n end' };
 
-        const answer = await caller.api('echo', payload);
+        const answer = await caller.api('test.echo', payload);
 
         expect(answer?.text).toBe(payload.text);
         const body = JSON.parse(seen[0]!.event.body!);
         expect(body.payload).toEqual(payload);
-        expect(body.apiName).toBe('echo');
+        expect(body.siteHost).toBe('callee-fn');
         expect(body.token).toBe('');
     });
 
@@ -1022,7 +1099,7 @@ describe('LambderInvokeCaller - the event is serialized once', () => {
             })) as any });
             const caller = new LambderInvokeCaller({ functionName: 'remote-fn' });
 
-            await caller.api('echo', { text: 'x' });
+            await caller.api('test.echo', { text: 'x' });
 
             const command = lambdaMock.commandCalls(InvokeCommand)[0]!.args[0].input;
             const sentJson = Buffer.from(command.Payload as Uint8Array).toString('utf8');
@@ -1038,7 +1115,7 @@ describe('LambderInvokeCaller - the event is serialized once', () => {
 
 describe('LambderInvokeCaller - validation issues are typed as what crosses the wire', () => {
     it('zodError is the plain name, message and issues, not a ZodError instance', async () => {
-        const outcome = await callerFor(createCallee()).apiOutcome('echo', { text: 42 as unknown as string });
+        const outcome = await callerFor(createCallee()).apiOutcome('test.echo', { text: 42 as unknown as string });
         expect(outcome.ok).toBe(false);
         if(outcome.ok || outcome.reason !== 'validation') throw new Error('unreachable');
         expectTypeOf(outcome.zodError).toEqualTypeOf<LambderValidationError>();
@@ -1049,8 +1126,9 @@ describe('LambderInvokeCaller - validation issues are typed as what crosses the 
     it('the browser caller hands its validation handler the same shape', async () => {
         const callee = createCallee();
         vi.stubGlobal('location', { hostname: 'localhost' });
-        vi.stubGlobal('fetch', vi.fn(async (_url: string, init: { body: string }) => {
+        vi.stubGlobal('fetch', vi.fn(async (url: string, init: { body: string }) => {
             const result = await callee.render(createApiEvent(JSON.parse(init.body), {
+                path: url,
                 headers: { Host: 'localhost', [LAMBDER_INVOKE_HEADER]: '1' },
             }), createMockContext());
             const text = decodeBody(result);
@@ -1059,7 +1137,7 @@ describe('LambderInvokeCaller - validation issues are typed as what crosses the 
         try {
             const handler = vi.fn();
             const browser = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, apiInputValidationErrorHandler: handler });
-            const outcome = await browser.apiOutcome('echo', { text: 42 });
+            const outcome = await browser.apiOutcome('test.echo', { text: 42 });
             assertApiFailure(outcome, 'validation');
             expect(handler).toHaveBeenCalledOnce();
             const [received] = handler.mock.calls[0] as [LambderValidationError];
@@ -1085,15 +1163,15 @@ describe('LambderInvokeCaller - a call that cannot be built is a failure, not a 
         const reported: LambderInvokeFailure[] = [];
         const caller = callerFor(createCallee(), { onFailure: (failure) => { reported.push(failure); } });
 
-        const outcome = await caller.apiOutcome('echo', build() as any);
+        const outcome = await caller.apiOutcome('test.echo', build() as any);
         expect(outcome.ok).toBe(false);
         if(outcome.ok) throw new Error('unreachable');
         expect(outcome.reason).toBe('unknown');
         expect(outcome.error).toBeInstanceOf(LambderInvokeError);
-        expect(outcome.error.message).toContain('callee-fn echo failed (unknown)');
+        expect(outcome.error.message).toContain('callee-fn test.echo failed (unknown)');
         expect(outcome.logList).toEqual([]);
 
-        const thrown = await caller.api('echo', build() as any).catch((err: unknown) => err);
+        const thrown = await caller.api('test.echo', build() as any).catch((err: unknown) => err);
         expect(isLambderInvokeError(thrown)).toBe(true);
         expect((thrown as LambderInvokeError).reason).toBe('unknown');
 
@@ -1106,7 +1184,7 @@ describe('LambderInvokeCaller - a call that cannot be built is a failure, not a 
             transport: LambderInvokeCaller.localTransport(createCallee().getHandler()),
             guardInputsProvider: () => { throw new Error('no captcha service'); },
         });
-        const outcome = await caller.apiOutcome('captchaed', {});
+        const outcome = await caller.apiOutcome('test.captchaed', {});
         expect(outcome.ok).toBe(false);
         if(outcome.ok) throw new Error('unreachable');
         expect(outcome.reason).toBe('unknown');
@@ -1121,7 +1199,7 @@ describe('LambderInvokeCaller - an external abort signal is not accumulated on',
         const caller = callerFor(createCallee(), { timeoutMs: 5000 });
 
         for(let i = 0; i < 20; i += 1){
-            await caller.apiOutcome('echo', { text: `call ${i}` }, { signal: controller.signal });
+            await caller.apiOutcome('test.echo', { text: `call ${i}` }, { signal: controller.signal });
         }
         expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
     });
@@ -1140,7 +1218,7 @@ describe('LambderInvokeCaller - an external abort signal is not accumulated on',
                 }),
             });
 
-            const outcome = await caller.apiOutcome('echo', { text: 'hi' });
+            const outcome = await caller.apiOutcome('test.echo', { text: 'hi' });
 
             expect(outcome.ok).toBe(true);
             expect(vi.getTimerCount()).toBe(0);
@@ -1159,7 +1237,7 @@ describe('LambderInvokeCaller - an external abort signal is not accumulated on',
             }),
         });
 
-        const pending = caller.apiOutcome('echo', { text: 'hi' }, { signal: controller.signal });
+        const pending = caller.apiOutcome('test.echo', { text: 'hi' }, { signal: controller.signal });
         controller.abort();
         const outcome = await pending;
         expect(outcome.ok).toBe(false);
@@ -1178,19 +1256,21 @@ describe('LambderInvokeCaller - an answer that arrives after the call was given 
         // Set when the 300ms handler finishes: the caller must have answered
         // before that.
         let slowHandlerFinished = false;
-        const slowCallee = initLambder().create({ apiPath: '/api' })
-            .addApi('slow', { input: z.object({}), output: z.object({ ok: z.boolean() }) },
+        const slowApp = initLambder().create({ apiPath: '/api' });
+        const slowCallee = slowApp.registerApiGroups(slowApp.defineApiGroup('test', {
+            slow: slowApp.defineApi({ input: z.object({}), output: z.object({ ok: z.boolean() }) },
                 async (_ctx) => {
                     await new Promise((resolve) => setTimeout(resolve, 300));
                     slowHandlerFinished = true;
                     return { ok: true };
-                });
+                }),
+        }));
 
         const local = new LambderInvokeCaller<typeof slowCallee.ApiContract>({
             functionName: 'callee-fn', timeoutMs: 20,
             transport: LambderInvokeCaller.localTransport(slowCallee.getHandler()),
         });
-        const fromLocal = await local.apiOutcome('slow', {});
+        const fromLocal = await local.apiOutcome('test.slow', {});
         assertApiFailure(fromLocal, 'timeout');
         // And the wait ended with the timeout rather than with the handler:
         // the handler is still running, which is what a timeout buys here. An
@@ -1205,7 +1285,7 @@ describe('LambderInvokeCaller - an answer that arrives after the call was given 
             return { functionError: null, result: { statusCode: 200, headers: {}, body: JSON.stringify({ apiVersion: null, payload: { ok: true } }) } };
         };
         const custom = new LambderInvokeCaller<typeof slowCallee.ApiContract>({ functionName: 'callee-fn', timeoutMs: 10, transport: deafToAbort });
-        const fromCustom = await custom.apiOutcome('slow', {});
+        const fromCustom = await custom.apiOutcome('test.slow', {});
         assertApiFailure(fromCustom, 'timeout');
     });
 
@@ -1225,7 +1305,7 @@ describe('LambderInvokeCaller - an answer that arrives after the call was given 
             },
         });
 
-        const outcome = await caller.apiOutcome('echo', { text: 'hi' }, { signal: controller.signal });
+        const outcome = await caller.apiOutcome('test.echo', { text: 'hi' }, { signal: controller.signal });
 
         assertApiFailure(outcome, 'network');
         expect(transportCalls).toBe(0);
@@ -1242,7 +1322,7 @@ describe('LambderInvokeCaller - an answer that arrives after the call was given 
             transport: LambderInvokeCaller.localTransport(async (event, context) => { handlerRan = true; return handler(event, context); }),
         });
 
-        const outcome = await caller.apiOutcome('echo', { text: 'hi' }, { signal: controller.signal });
+        const outcome = await caller.apiOutcome('test.echo', { text: 'hi' }, { signal: controller.signal });
 
         assertApiFailure(outcome, 'network');
         expect(handlerRan).toBe(false);
@@ -1251,24 +1331,27 @@ describe('LambderInvokeCaller - an answer that arrives after the call was given 
 
 describe('LambderInvokeCaller - the answer\'s cookies', () => {
     it('surfaces them on a success and on a failure, so a rotated or cleared session is visible', async () => {
-        const callee = initLambder<{ userId: string }>().create({
+        const calleeApp = initLambder<{ userId: string }>().create({
             apiPath: '/api',
             session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
-        })
-            .addApi('login', { input: z.object({ user: z.string() }), output: z.object({ ok: z.boolean() }) },
-                async (ctx) => { await callee.getSessionController(ctx).createSession(ctx.apiPayload.user, { userId: ctx.apiPayload.user }); return { ok: true }; })
-            .addSessionApi('me', { input: z.object({}), output: z.object({ userId: z.string() }) },
-                async (ctx) => ({ userId: ctx.session.data.userId }))
-            .addSessionApi('signOut', { input: z.object({}), output: z.object({}) }, async (ctx) => {
-                await callee.getSessionController(ctx).endSession();
+            guards: { signedIn: lambderGuard({ session: true, handler: async () => {} }) },
+        });
+        const callee = calleeApp.registerApiGroups(calleeApp.defineApiGroup('account', {
+            login: calleeApp.defineApi({ input: z.object({ user: z.string() }), output: z.object({ ok: z.boolean() }) },
+                async (ctx) => { await calleeApp.getSessionController(ctx).createSession(ctx.apiPayload.user, { userId: ctx.apiPayload.user }); return { ok: true }; }),
+            me: calleeApp.defineApi({ input: z.object({}), output: z.object({ userId: z.string() }), guards: 'signedIn' },
+                async (ctx) => ({ userId: ctx.session.data.userId })),
+            signOut: calleeApp.defineApi({ input: z.object({}), output: z.object({}), guards: 'signedIn' }, async (ctx) => {
+                await calleeApp.getSessionController(ctx).endSession();
                 refuse('Signed out.', { type: 'info' });
-            });
+            }),
+        }));
         const caller = new LambderInvokeCaller<typeof callee.ApiContract>({
             functionName: 'callee-fn',
             transport: LambderInvokeCaller.localTransport(callee.getHandler()),
         });
 
-        const signedIn = await caller.apiOutcome('login', { user: 'ada' });
+        const signedIn = await caller.apiOutcome('account.login', { user: 'ada' });
         expect(signedIn.ok).toBe(true);
         // The two session cookies the callee set: a caller carrying a user's
         // session is the browser for that call, and nothing else is.
@@ -1283,12 +1366,12 @@ describe('LambderInvokeCaller - the answer\'s cookies', () => {
             token: cookieValue(signedIn.cookies, 'LMDRSESSIONTKID'),
             csrf: cookieValue(signedIn.cookies, 'LMDRSESSIONCSTK'),
         };
-        expect(await caller.api('me', {}, { session })).toEqual({ userId: 'ada' });
+        expect(await caller.api('account.me', {}, { session })).toEqual({ userId: 'ada' });
 
         // A failure carries them too, which is the case that matters: the
         // answer that CLEARS a session is a refusal, and a caller that cannot
         // see its Set-Cookie keeps sending a token the callee has dropped.
-        const signedOut = await caller.apiOutcome('signOut', {}, { session });
+        const signedOut = await caller.apiOutcome('account.signOut', {}, { session });
         expect(signedOut.ok).toBe(false);
         if(signedOut.ok) throw new Error('unreachable');
         expect(signedOut.reason).toBe('refusal');
@@ -1299,7 +1382,7 @@ describe('LambderInvokeCaller - the answer\'s cookies', () => {
         const noAnswer = await new LambderInvokeCaller({
             functionName: 'callee-fn',
             transport: async () => { throw new Error('offline'); },
-        }).apiOutcome('login', { user: 'ada' });
+        }).apiOutcome('account.login', { user: 'ada' });
         assertApiFailure(noAnswer);
         expect(noAnswer.cookies).toEqual([]);
     });
@@ -1381,18 +1464,18 @@ describe('LambderInvokeCaller - what the contract decides at the call site', () 
     it('computes the output from the contract, and requires the payload the input demands', async () => {
         const caller = callerFor(createCallee());
 
-        const answer = await caller.api('echo', { text: 'hi' });
+        const answer = await caller.api('test.echo', { text: 'hi' });
         expectTypeOf(answer).toEqualTypeOf<{ text: string; ip: string; host: string; invokedBy: string | null }>();
 
         // @ts-expect-error the contract's output is not { madeUp: number }
-        const wrong: { madeUp: number } = await caller.api('echo', { text: 'hi' });
+        const wrong: { madeUp: number } = await caller.api('test.echo', { text: 'hi' });
         void wrong;
         // @ts-expect-error a required input cannot be omitted
-        void caller.api('echo').catch(() => {});
+        void caller.api('test.echo').catch(() => {});
         // @ts-expect-error nor on the outcome form
-        void caller.apiOutcome('echo').catch(() => {});
+        void caller.apiOutcome('test.echo').catch(() => {});
         // @ts-expect-error a header value is a string
-        void caller.api('echo', { text: 'hi' }, { headers: { count: 123 } }).catch(() => {});
+        void caller.api('test.echo', { text: 'hi' }, { headers: { count: 123 } }).catch(() => {});
     });
 });
 

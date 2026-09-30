@@ -39,11 +39,11 @@ describe('create(): surplus keys at the top level', () => {
             files: testPublicFiles(),
             apiPath: '/api',
             maxResponseBytes: 1_000,
-            requirePublicApiGuards: false,
+            requireApiGuards: false,
         });
 
-        // @ts-expect-error requireSessionApiGuard, no trailing "s"
-        initLambder().create({ apiPath: '/api', requireSessionApiGuard: true });
+        // @ts-expect-error requireApiGuard, no trailing "s"
+        initLambder().create({ apiPath: '/api', requireApiGuard: true });
         // @ts-expect-error maxResponseByte, no trailing "s"
         initLambder().create({ apiPath: '/api', maxResponseByte: 1000 });
     });
@@ -158,15 +158,21 @@ describe('create(): guards and rate-limit policies as a list of maps', () => {
     const catalogPolicies = { searchPerIp: { perMin: 60, per: 'ip' } } as const;
 
     it('declares every name in the list, so an API names a guard or a policy from any map', async () => {
-        const lambder = initLambder().create({
+        const app = initLambder().create({
             apiPath: '/api',
             rateLimits: { limiter, policies: [ordersPolicies, catalogPolicies] },
             guards: [ordersGuards, catalogGuards],
-        })
-            .addApi('orders.checkout', { input: z.object({}), output: z.object({ by: z.string() }), guards: 'orderOwner', rateLimit: 'checkoutPerIp' },
-                async (ctx) => ({ by: ctx.guardData.orderOwner }))
-            .addApi('catalog.edit', { input: z.object({}), output: z.object({ by: z.string() }), guards: 'catalogEditor', rateLimit: 'searchPerIp' },
-                async (ctx) => ({ by: ctx.guardData.catalogEditor }));
+        });
+        const lambder = app.registerApiGroups(
+            app.defineApiGroup('orders', {
+                checkout: app.defineApi({ input: z.object({}), output: z.object({ by: z.string() }), guards: 'orderOwner', rateLimit: 'checkoutPerIp' },
+                    async (ctx) => ({ by: ctx.guardData.orderOwner })),
+            }),
+            app.defineApiGroup('catalog', {
+                edit: app.defineApi({ input: z.object({}), output: z.object({ by: z.string() }), guards: 'catalogEditor', rateLimit: 'searchPerIp' },
+                    async (ctx) => ({ by: ctx.guardData.catalogEditor })),
+            }),
+        );
 
         const visitor = lambderTestApp(lambder).visitor();
         const checkout = await visitor.apiOutcome('orders.checkout', {});
@@ -175,10 +181,12 @@ describe('create(): guards and rate-limit policies as a list of maps', () => {
         const edit = await visitor.apiOutcome('catalog.edit', {});
         assertApiSuccess(edit);
         expect(edit.payload).toEqual({ by: 'editor' });
-        expect(Object.keys(lambder.apiOptionEntries().guards).sort()).toEqual(['catalogEditor', 'orderOwner']);
-        // @ts-expect-error a guard no map declares
-        expect(() => lambder.addApi('orders.refund', { input: z.object({}), output: z.object({}), guards: 'refundClerk' }, async () => ({})))
-            .toThrow(/unknown guard "refundClerk"/);
+        expect(Object.keys((await lambder.apiOptionEntries()).guards).sort()).toEqual(['catalogEditor', 'orderOwner']);
+        const refunds = app.defineApiGroup('refunds', {
+            // @ts-expect-error a guard no map declares
+            refund: app.defineApi({ input: z.object({}), output: z.object({}), guards: 'refundClerk' }, async () => ({})),
+        });
+        expect(() => app.registerApiGroups(refunds)).toThrow(/unknown guard "refundClerk"/);
     });
 
     it('refuses a name two maps declare, at compile time and at creation', () => {
@@ -238,45 +246,61 @@ describe('create(): guards and rate-limit policies as a list of maps', () => {
     });
 });
 
-describe('create(): the require*ApiGuards flags outside a fresh literal', () => {
+describe('create(): the requireApiGuards flag outside a fresh literal', () => {
     it('keeps the compile-time half when the options are spread from a typed object', () => {
         // create()'s options: the constructor's less the vocabulary, which declareRefusals() supplies.
         const baseOptions: LambderInitCreateOptions<any> = {
             apiPath: '/api',
             guards: { g: { handler: () => true } },
-            requirePublicApiGuards: true,
+            requireApiGuards: true,
         };
         const app = initLambder().create({ ...baseOptions });
 
         // The flag survived the spread: guards is still required here, even
         // though the spread widened `true` to `boolean`.
-        // @ts-expect-error guards is required on this instance
-        const missing = () => app.addApi('open', { input: z.object({}), output: z.object({}) }, async (ctx) => ({}));
+        const tools = app.defineApiGroup('tools', {
+            // @ts-expect-error guards is required on this instance
+            open: app.defineApi({ input: z.object({}), output: z.object({}) }, async (ctx) => ({})),
+        });
+        const missing = () => app.registerApiGroups(tools);
         expect(missing).toThrow(/declares no guards/);
     });
 
-    it('an instance that names neither flag keeps guards optional', () => {
+    it('an instance that does not name the flag keeps guards optional', () => {
         const app = initLambder().create({ apiPath: '/api', guards: { g: { handler: () => true } } });
-        expect(() => app.addApi('open', { input: z.object({}), output: z.object({}) }, async (ctx) => ({}))).not.toThrow();
+        const tools = app.defineApiGroup('tools', {
+            open: app.defineApi({ input: z.object({}), output: z.object({}) }, async (ctx) => ({})),
+        });
+        expect(() => app.registerApiGroups(tools)).not.toThrow();
     });
 });
 
 describe('create(): session registrations need the session option', () => {
-    it('refuses a session API at compile time and at registration', () => {
-        const app = initLambder().create({ apiPath: '/api' });
+    it('refuses a session endpoint at compile time and at registration', () => {
+        const app = initLambder().create({ apiPath: '/api', guards: { signedIn: lambderGuard({ session: true, handler: async () => {} }) } });
 
-        // @ts-expect-error sessions are not configured on this instance
-        expect(() => app.addSessionApi('me', { input: z.any(), output: z.any() }, async (ctx) => null))
-            .toThrow(/needs the session option at creation/);
+        const account = app.defineApiGroup('account', {
+            // @ts-expect-error sessions are not configured on this instance
+            me: app.defineApi({ input: z.any(), output: z.any(), guards: 'signedIn' }, async (ctx) => null),
+        });
+        expect(() => app.registerApiGroups(account))
+            .toThrow(/needs a session, and the instance was created without the session option/);
 
         // @ts-expect-error sessions are not configured on this instance
         app.addSessionRoute('/me', async (ctx, res) => res.text('never reached'));
     });
 
     it('accepts both once the session option is there', () => {
-        const app = initLambder<{ userId: string }>().create({ apiPath: '/api', session: { store, sessionSalt } });
+        const app = initLambder<{ userId: string }>().create({
+            apiPath: '/api',
+            session: { store, sessionSalt },
+            guards: { signedIn: initLambder<{ userId: string }>().guard({ session: true, handler: async () => {} }) },
+        });
+        const account = app.defineApiGroup('account', {
+            me: app.defineApi({ input: z.any(), output: z.any(), guards: 'signedIn' }, async (ctx) => ({ userId: ctx.session.data.userId })),
+        });
         expect(() => app
-            .addSessionApi('me', { input: z.any(), output: z.any() }, async (ctx) => ({ userId: ctx.session.data.userId }))
+            .registerApiGroups(account)
             .addSessionRoute('/me', async (ctx, res) => res.text(ctx.session.data.userId))).not.toThrow();
     });
 });
@@ -319,20 +343,24 @@ describe('create(): option values checked at construction', () => {
 
 describe('API registration does not burn the name it refused', () => {
     it('reports the same reason on the second attempt', () => {
-        const app = new Lambder({ apiPath: '/api' });
-        const register = () => app.addSessionApi('user.profile', { input: z.any(), output: z.any() }, async (ctx) => null);
+        const app = initLambder().create({ apiPath: '/api', guards: { signedIn: lambderGuard({ session: true, handler: async () => {} }) } });
+        const register = () => app.registerApiGroups(app.defineApiGroup('user', {
+            // @ts-expect-error sessions are not configured on this instance
+            profile: app.defineApi({ input: z.any(), output: z.any(), guards: 'signedIn' }, async (ctx) => null),
+        }));
 
-        expect(register).toThrow(/needs the session option at creation/);
-        // Not "duplicate API name": the first attempt registered nothing, so
-        // the retry has to report the problem the app is trying to fix.
-        expect(register).toThrow(/needs the session option at creation/);
+        expect(register).toThrow(/needs a session, and the instance was created without the session option/);
+        // Not a duplicate: the first attempt registered nothing, so the retry
+        // has to report the problem the app is trying to fix.
+        expect(register).toThrow(/needs a session, and the instance was created without the session option/);
     });
 
     it('still refuses a genuine duplicate', () => {
-        const app = new Lambder({ apiPath: '/api' })
-            .addApi('thing', { input: z.any(), output: z.any() }, async (ctx) => null);
+        const app = new Lambder({ apiPath: '/api' });
+        const tools = () => app.defineApiGroup('tools', { thing: app.defineApi({ input: z.any(), output: z.any() }, async (ctx) => null) });
+        app.registerApiGroups(tools());
 
-        expect(() => app.addApi('thing', { input: z.any(), output: z.any() }, async (ctx) => null))
-            .toThrow(/duplicate API name/);
+        expect(() => app.registerApiGroups(tools()))
+            .toThrow(/group "tools" is registered twice/);
     });
 });

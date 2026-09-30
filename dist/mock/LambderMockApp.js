@@ -93,6 +93,8 @@ export class LambderMockApp {
     registry = new LambderMockEntryRegistry();
     /** The server's declared options per API, when create() was given the generated table; the entries' declarations come from here. */
     apiOptions;
+    /** The mock's own guards as create() was given them: which of them need a session, for an entry's mode without the apiOptions table. */
+    mockGuards;
     /** The server's guard declarations, when create() was given the generated table: the refusal codes a declared guard adds to an entry. */
     guardDeclarations;
     /** The server's refusal vocabulary, when create() was given the generated table: whether each code an entry may refuse with carries data. */
@@ -106,6 +108,7 @@ export class LambderMockApp {
     declared = null) {
         this.apiVersion = options.apiVersion ?? null;
         this.apiOptions = options.apiOptions ?? null;
+        this.mockGuards = options.guards ?? null;
         this.guardDeclarations = options.guardDeclarations ?? null;
         this.refusalVocabulary = declared?.vocabulary ?? null;
         this.requireRefusalCodes = declared?.requireCodes ?? false;
@@ -220,22 +223,32 @@ export class LambderMockApp {
     }
     /**
      * The table's entry for an endpoint, when create() was given one: null
-     * without a table, and a throw for a name the table does not hold or an
-     * entry registered under the other mode. The compiler already refuses
-     * both against the contract; this is where a stale table meets a caller
-     * the compiler did not see.
+     * without a table, and a throw for a name the table does not hold. The
+     * compiler already refuses it against the contract; this is where a
+     * stale table meets a caller the compiler did not see.
      */
-    declaredOptionsOf(name, mode) {
+    declaredOptionsOf(name) {
         if (!this.apiOptions)
             return null;
         const declared = Object.prototype.hasOwnProperty.call(this.apiOptions, name) ? this.apiOptions[name] : undefined;
         if (!declared) {
             throw new Error(`LambderMockApp: "${name}" has no entry in the apiOptions table given to create(). The table predates this endpoint: regenerate it with writeApiOptions.`);
         }
-        if (declared.mode !== mode) {
-            throw new Error(`LambderMockApp: "${name}" is a ${declared.mode} endpoint in the apiOptions table, registered here as a ${mode} one.`);
-        }
         return declared;
+    }
+    /**
+     * An entry's mode, by the server's rule: a session endpoint when one of
+     * its guards needs a session. The guards are the apiOptions table's when
+     * create() was given one (which records the mode it came to as well), and
+     * otherwise the ones the entry restates, each read off the guardDeclarations
+     * table or the mock's own guards.
+     */
+    modeOf(declared, restatedGuards) {
+        if (declared)
+            return declared.mode;
+        const needsSession = (guard) => (this.guardDeclarations && Object.prototype.hasOwnProperty.call(this.guardDeclarations, guard) && this.guardDeclarations[guard].session === true)
+            || (this.mockGuards && Object.prototype.hasOwnProperty.call(this.mockGuards, guard) && this.mockGuards[guard].session === true);
+        return toGuardEntries(restatedGuards).some(({ name: guard }) => needsSession(guard)) ? "session" : "public";
     }
     /**
      * The codes an entry may refuse with, read off the generated tables (its
@@ -276,9 +289,10 @@ export class LambderMockApp {
             return null;
         return this.apiOptions[name].mode;
     }
-    buildEntry(name, mode, input) {
+    buildEntry(name, input) {
         const options = (typeof input === "function" ? { handler: input } : input);
-        const declared = this.declaredOptionsOf(name, mode);
+        const declared = this.declaredOptionsOf(name);
+        const mode = this.modeOf(declared, options.guards);
         if (declared) {
             // A caller the compiler did not see (a JavaScript slice, a cast)
             // would otherwise have its restatement silently lose to the table.
@@ -306,32 +320,34 @@ export class LambderMockApp {
         const handler = options.handler;
         return { name, mode, definition, handler: async (ctx) => await handler(ctx), notMockedReason: null };
     }
-    /** A mock for a public endpoint: a handler, or the handler with the endpoint's declarations restated. */
-    publicApi(name, entry) {
-        return this.buildEntry(name, "public", entry);
-    }
-    /** A mock for a session endpoint: the pipeline fetches the session before the handler runs, and refuses without one. */
-    sessionApi(name, entry) {
-        return this.buildEntry(name, "session", entry);
+    /**
+     * A mock for an endpoint: a handler, or the handler with the endpoint's
+     * declarations restated. Its mode is the server's (see modeOf): a
+     * session endpoint's session is fetched before the handler runs, and a
+     * call without one is refused as on the server.
+     */
+    api(name, entry) {
+        return this.buildEntry(name, entry);
     }
     /**
-     * A public endpoint deliberately left without a mock; a call answers the
-     * notMocked refusal carrying the reason.
-     *
-     * Public and session get separate builders, as publicApi and sessionApi
-     * do, because the refusal runs through the pipeline so the steps BEFORE
-     * dispatch still happen, and the session read is one of them. Were every
-     * not-mocked endpoint public, a session endpoint with no session would
-     * answer "not mocked" where the server answers sessionExpired, and its
-     * events and call log would carry the wrong mode. The contract is a type,
-     * so the mode cannot be recovered at runtime: the builder has to say it.
+     * An endpoint deliberately left without a mock; a call answers the
+     * notMocked refusal carrying the reason. The refusal runs through the
+     * pipeline, so the steps before dispatch still happen, the session read
+     * among them, under the server's mode (see modeOf): a signed-out call to
+     * a session endpoint answers sessionExpired as on the server. Without the
+     * apiOptions table a session endpoint restates its guards to say so,
+     * `notMocked(name, { reason, guards })`; no guard runs.
      */
-    notMocked(name, reason) {
-        return this.buildNotMockedEntry(name, "public", reason);
-    }
-    /** A session endpoint deliberately left without a mock: the session is still read, and refused before the notMocked refusal. */
-    sessionNotMocked(name, reason) {
-        return this.buildNotMockedEntry(name, "session", reason);
+    notMocked(name, input) {
+        const { reason, guards } = (typeof input === "string" ? { reason: input } : input);
+        const declared = this.declaredOptionsOf(name);
+        if (declared && guards !== undefined) {
+            throw new Error(`LambderMockApp: "${name}" restates its guards option, which the apiOptions table given to create() already declares. Leave it out of the entry.`);
+        }
+        const mode = this.modeOf(declared, guards);
+        const definition = { name, mode };
+        this.assertEntryRegistration(definition);
+        return { name, mode, definition, handler: null, notMockedReason: reason };
     }
     /**
      * "Everything I did not register is not mocked, for this reason", as an
@@ -356,17 +372,11 @@ export class LambderMockApp {
      * a type), and a call it answers is processed as public: the protocol's
      * pre-pass still runs, so a stale client still hears versionExpired, but
      * a signed-out call to an unmocked session endpoint answers "not mocked"
-     * where the server answers sessionExpired. Declare an endpoint whose
-     * signed-out path a test cares about with sessionNotMocked there.
+     * where the server answers sessionExpired. Give create() the table where
+     * a test cares about that path.
      */
     restNotMocked(reason) {
         return { restNotMockedReason: reason };
-    }
-    buildNotMockedEntry(name, mode, reason) {
-        this.declaredOptionsOf(name, mode);
-        const definition = { name, mode };
-        this.assertEntryRegistration(definition);
-        return { name, mode, definition, handler: null, notMockedReason: reason };
     }
     /** The entries of one module as a slice, keyed by name. Two entries for one endpoint is an error here. */
     apiSlice(...entries) {
@@ -809,10 +819,7 @@ export class LambderMockApp {
         // the "saved" record with no call), a Date would stay a Date and a
         // key set to undefined keep its place, none of which a server sees.
         const envelope = JSON.parse(JSON.stringify(buildTransportEnvelope(transportRequest)));
-        const request = readApiEnvelope(envelope, info);
-        if (!request)
-            throw new Error("LambderMockApp: the transport request names no api.");
-        return request;
+        return readApiEnvelope(envelope, info, transportRequest.apiName);
     }
     /** One call from a transport request to its answer: what the mock transport and the adapters call. */
     async handle(transportRequest) {
