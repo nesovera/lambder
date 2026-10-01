@@ -13,12 +13,12 @@ import { LambderFiles } from "./LambderFiles.js";
 import { isLambderApiRefusal } from "../shared/wire/LambderApiRefusal.js";
 import { LambderApiPipeline } from "../api/LambderApiPipeline.js";
 import { LAMBDER_BACKEND_SWAP, LAMBDER_CRASH_WATCH } from "../shared/util/LambderTestingDoors.js";
-import { checkedRefusal, declaredRefusalVocabulary, readRefusalVocabulary, resolveAllowedRefusals, toRefusalCodes, } from "../api/LambderApiRefusals.js";
+import { declaredRefusalVocabulary, readRefusalVocabulary, resolveAllowedRefusals, toRefusalCodes, } from "../api/LambderApiRefusals.js";
 import { refuse } from "../shared/wire/LambderApiRefusal.js";
 import { apiSignatureOf } from "../api/LambderApiSignature.js";
 import { apiNameKeyOf } from "../shared/wire/LambderApiSignatureMap.js";
 import { assertPlainData } from "../shared/util/assertPlainData.js";
-import { apiNotFoundAnswer, envelopeAnswer, refusalAnswer, sessionExpiredAnswer, successEnvelope, versionExpiredAnswer, } from "../api/LambderApiEnvelope.js";
+import { apiNotFoundAnswer, envelopeAnswer, sessionExpiredAnswer, successEnvelope, versionExpiredAnswer, } from "../api/LambderApiEnvelope.js";
 import { describePayloadKind, isObjectPayload } from "../shared/wire/LambderObjectPayload.js";
 import { LambderApiOutputValidationError } from "../api/LambderApiOutputValidationError.js";
 import { toGuardEntries } from "../api/LambderApiGuards.js";
@@ -1275,16 +1275,17 @@ export default class Lambder {
     }
     /**
      * A thrown LambderApiRefusal (from a hook, say) as the structured API
-     * envelope: the core's one mapping, after the same check the pipeline
-     * applies, against the endpoint the call names, its lazy group loaded if
-     * the refusal came before the call reached it. A name no API is
-     * registered under declares no code, so only an uncoded or a framework
-     * refusal goes out for it.
+     * envelope: the pipeline's own answer to a refusal (answerRefusal), so
+     * it is checked against the endpoint the call names, its lazy group
+     * loaded if the refusal came before the call reached it, and one saying
+     * the session is over ends it. A name no API is registered under
+     * declares no code, so only an uncoded or a framework refusal goes out
+     * for it.
      */
     async apiErrorResponse(err, ctx) {
         const apiName = ctx.apiName ?? "";
-        const refusal = checkedRefusal(apiName, (await this.registeredDefinitionOf(apiName))?.refusals ?? NO_DECLARED_REFUSALS, err);
-        return responseFromAnswer(refusalAnswer(refusal, this.apiVersion, ctx.logList));
+        const refusals = (await this.registeredDefinitionOf(apiName))?.refusals ?? NO_DECLARED_REFUSALS;
+        return responseFromAnswer(await this.pipeline.answerRefusal(apiName, refusals, err, ctx));
     }
 }
 /** The init bound to one vocabulary (or none): the policy builders, refuse and create() that share it. */

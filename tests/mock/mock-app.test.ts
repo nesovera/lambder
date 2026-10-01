@@ -1628,6 +1628,30 @@ describe('LambderMockApp - declarations read off the apiOptions table', () => {
         expect(app.calls.at(-1)?.guardsRun).toEqual(['tenant']);
     });
 
+    it('sends a code declared sessionExpired under that flag, as the server does', async () => {
+        // The same code, declared as a session that is gone: the declaration, not the raise site, sets the flag.
+        const expiring = mock.declareRefusals({ ...contractVocabulary, 'app/read-only': { sessionExpired: true } })
+            .create({ ...requiredOptions, guards: declaredGuards, apiOptions: contractOptions, guardDeclarations: contractGuardDeclarations });
+        expiring.register(
+            expiring.apiSlice(
+                expiring.api('user.get', async ({ payload }) => ({ id: payload.userId, name: 'Ada' })),
+                expiring.api('account.login', async () => ({ ok: true })),
+                expiring.api('account.logout', async () => ({ ok: true })),
+                expiring.api('account.me', async ({ session }) => ({ userId: session.data.userId })),
+                expiring.api('order.create', async ({ payload, guardData }) => ({ orderId: `o-${guardData.tenant.tenantId}`, qty: payload.qty })),
+                expiring.api('tools.limited', async () => ({ n: 1 })),
+                expiring.api('ticket.buy', async ({ payload }) => ({ ticketId: `t-${payload.seat}` })),
+                expiring.api('tools.echo', { input: z.object({ notes: z.array(z.string()) }), handler: async ({ payload }) => ({ count: payload.notes.length }) }),
+            ),
+            expiring.restNotMocked('not mocked yet'),
+        );
+        const jar = new LambderCookieJar();
+        await expiring.signIn('lin', { userId: 'lin', tenants: [{ tenantId: 't1', role: 'reader' }] }, { jar });
+        const reader = await callerOf(expiring, jar).apiOutcome('order.create', { qty: 1 }, { guardInputs: { tenant: { tenantId: 't1' } }, idempotencyKey: createIdempotencyKey() });
+        assertApiFailure(reader, 'sessionExpired');
+        expect(reader.refusal).toMatchObject({ code: 'app/read-only', content: 'Read-only member.' });
+    });
+
     it('holds a refusal to the codes the tables declare for the entry, its guards\' included', async () => {
         vi.spyOn(console, 'error').mockImplementation(() => {});
         const app = createDerivedApp();

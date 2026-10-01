@@ -267,8 +267,13 @@ The steps, in the order `run` executes them:
 A `LambderApiRefusal` thrown by any step, guard or handler is rendered here, in
 one place: a `LambderApiValidationRefusal` through `onInvalidInput` (the app's
 `setApiInputValidationErrorHandler` on the server, the standard 422 otherwise),
-any other refusal as the refusal envelope. Anything else propagates, because
-only the adapter knows what a crash means. `run` never sees a name it has no
+any other refusal through `answerRefusal(apiName, refusals, thrown, ctx)`:
+checked against the endpoint's declared codes, then rendered as the refusal
+envelope, and when it leaves with the `sessionExpired` flag the session the
+call held is deleted (the cookies are left alone, as a read that finds no
+session leaves them). The server answers a refusal a hook throws on an API
+call with the same method. Anything else propagates, because only the
+adapter knows what a crash means. `run` never sees a name it has no
 definition for; `answerUnknownApi(ctx?)` is what the adapters answer
 with. It carries the call's own headers and holds no signature gate: both
 adapters run `prepare(request)` on the way in, so a signed request for a name

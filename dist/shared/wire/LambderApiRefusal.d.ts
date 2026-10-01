@@ -10,7 +10,7 @@ export type LambderApiRefusalOptions = {
     refusal?: LambderUncheckedRefusalMessage | string;
     /** Sets the envelope's `notAuthorized` flag (routed to the caller's notAuthorizedHandler). */
     notAuthorized?: boolean;
-    /** Sets the envelope's `sessionExpired` flag (the caller clears session cookies and calls sessionExpiredHandler). */
+    /** Sets the envelope's `sessionExpired` flag (the caller clears session cookies and calls sessionExpiredHandler); on an API call, the server also ends the session the call held. */
     sessionExpired?: boolean;
     /**
      * HTTP status of the refusal response. Default 200: the envelope is the
@@ -178,7 +178,7 @@ export type LambderRefuseOptions = {
     title?: string;
     /** Sets the envelope's notAuthorized flag (routed to the caller's notAuthorizedHandler). A declared code's flag is its declaration's, and a refusal with such a code that sets it here is a crash. */
     notAuthorized?: boolean;
-    /** Sets the envelope's sessionExpired flag. Not for a refusal with a declared code, whose flags are its declaration's. */
+    /** Sets the envelope's sessionExpired flag, and the server ends the session the call held. Not for a refusal with a declared code, whose flags are its declaration's. */
     sessionExpired?: boolean;
     /** HTTP status of the refusal. Default 200; avoid 5xx (caller treats as crash) and 422 (reserved for validation). A declared code's status is its declaration's, and a refusal with such a code that sets one here is a crash. */
     statusCode?: LambderHttpStatusCode;

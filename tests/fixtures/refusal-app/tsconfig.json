@@ -1,0 +1,7 @@
+{
+  // The project refusal-check.test.ts reads: the package's own options,
+  // over this directory rather than src.
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": { "noEmit": true, "rootDir": "../../.." },
+  "include": ["*.ts"]
+}

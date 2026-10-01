@@ -18,6 +18,7 @@ export const allowedRefusalOf = (declaration) => {
     const leaves = {
         ...(declaration.status !== undefined ? { status: declaration.status } : {}),
         ...(declaration.notAuthorized ? { notAuthorized: true } : {}),
+        ...(declaration.sessionExpired ? { sessionExpired: true } : {}),
     };
     return declaration.data === undefined ? { ...leaves, data: false } : { ...leaves, data: true, schema: declaration.data };
 };
@@ -63,7 +64,7 @@ export class LambderApiRefusalValidationError extends Error {
         }
         else if ("ownStatusOrFlag" in violation) {
             message = `Lambder: API "${apiName}" refused with the declared code "${String(code)}" and a status or flag of its own, so the refusal was not sent. `
-                + "A declared code's status and notAuthorized flag are its declaration's: set them in the refusals vocabulary, and leave them off the refuse() call.";
+                + "A declared code's status and its notAuthorized and sessionExpired flags are its declaration's: set them in the refusals vocabulary, and leave them off the refuse() call.";
         }
         else if ("zodError" in violation) {
             // Paths and messages only, never the values: they may be the
@@ -95,8 +96,8 @@ export class LambderApiRefusalValidationError extends Error {
  * - An uncoded refusal, or one carrying a framework code, goes out as it is,
  *   provided it carries no data. Where the app requires codes, an uncoded
  *   refusal is refused too; a framework code still passes.
- * - A declared code leaves with its declaration's status and notAuthorized
- *   flag, and with data exactly when the code carries data, parsed through
+ * - A declared code leaves with its declaration's status and flags, and
+ *   with data exactly when the code carries data, parsed through
  *   the code's schema as an output is: undeclared fields stripped, defaults
  *   filled, transforms run. The parse is synchronous, so a data schema cannot
  *   be async.
@@ -145,11 +146,12 @@ export const checkedRefusal = (apiName, endpoint, thrown) => {
             throw new LambderApiRefusalValidationError(apiName, thrown, { notObject: describePayloadKind(parsed.data) });
         sent = parsed.data;
     }
-    // The declaration's status and flag, and the data as parsed: how every
+    // The declaration's status and flags, and the data as parsed: how every
     // refusal with this code leaves, wherever it was raised.
     return new LambderApiRefusal(thrown.message, {
         refusal: { ...thrown.refusal, ...(sent !== undefined ? { data: sent } : {}) },
         notAuthorized: declaration.notAuthorized,
+        sessionExpired: declaration.sessionExpired,
         statusCode: declaration.status,
         headers: thrown.headers,
         cause: thrown.cause,
@@ -195,8 +197,8 @@ export const toRefusalCodes = (value) => value === undefined ? [] : typeof value
  * The vocabulary, checked: every code a non-empty string outside the
  * framework's `lambder/` prefix, every declaration an object whose `data`,
  * when present, is a zod schema, whose `status`, when present, is one a
- * reader files as a refusal, and whose `notAuthorized`, when present, is
- * true. A Map, so a code named for something Object.prototype carries
+ * reader files as a refusal, and whose `notAuthorized` and `sessionExpired`,
+ * when present, are true. A Map, so a code named for something Object.prototype carries
  * ("toString") is still an ordinary code.
  */
 export const readRefusalVocabulary = (refusals) => {
@@ -215,9 +217,9 @@ export const readRefusalVocabulary = (refusals) => {
         if (declaration === null || typeof declaration !== "object") {
             throw new Error(`Lambder: the refusal "${code}" is not declared as an object: write {} for a code with no data, or { data: schema }.`);
         }
-        const extra = Object.keys(declaration).filter((key) => key !== "data" && key !== "status" && key !== "notAuthorized");
+        const extra = Object.keys(declaration).filter((key) => key !== "data" && key !== "status" && key !== "notAuthorized" && key !== "sessionExpired");
         if (extra.length) {
-            throw new Error(`Lambder: the refusal "${code}" has ${extra.map((key) => `"${key}"`).join(", ")} beside data, status and notAuthorized, which a refusal declaration does not take.`);
+            throw new Error(`Lambder: the refusal "${code}" has ${extra.map((key) => `"${key}"`).join(", ")} beside data, status, notAuthorized and sessionExpired, which a refusal declaration does not take.`);
         }
         // Read for what it is used as rather than by class, so a schema from
         // a second copy of zod in the bundle still counts.
@@ -228,8 +230,13 @@ export const readRefusalVocabulary = (refusals) => {
         if (status !== undefined && (typeof status !== "number" || !Number.isInteger(status) || status < 200 || status >= 500 || status === 422)) {
             throw new Error(`Lambder: the refusal "${code}" declares the status ${String(status)}. A declared refusal leaves with a status from 200 to 499 other than 422: a reader files a 5xx as a server failure and a 422 as an input validation failure.`);
         }
-        if (declaration.notAuthorized !== undefined && declaration.notAuthorized !== true) {
-            throw new Error(`Lambder: the refusal "${code}" declares notAuthorized as ${String(declaration.notAuthorized)}; write true, or leave it off.`);
+        for (const flag of ["notAuthorized", "sessionExpired"]) {
+            if (declaration[flag] !== undefined && declaration[flag] !== true) {
+                throw new Error(`Lambder: the refusal "${code}" declares ${flag} as ${String(declaration[flag])}; write true, or leave it off.`);
+            }
+        }
+        if (declaration.notAuthorized && declaration.sessionExpired) {
+            throw new Error(`Lambder: the refusal "${code}" declares both notAuthorized and sessionExpired. A caller routes a refusal one way: a session that is gone is not also a session that is not allowed.`);
         }
     }
     return new Map(entries);

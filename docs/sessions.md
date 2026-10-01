@@ -607,6 +607,14 @@ refreshing.
   poll, another tab) can answer sessionExpired after it, and acting on that
   would delete the cookie the new session just set, so such an answer is
   returned with nothing touched.
+- **A refusal with the flag** (`refuse(content, { sessionExpired: true })`,
+  or a declared code with `sessionExpired: true`) answers an API call the
+  same way, for a session the handler finds no longer good though the read
+  found it (its login deleted, say). The server deletes that session as the
+  refusal leaves, so it is not left alive behind a caller told it is over.
+  It leaves the cookies alone, as a read that finds no session does: a
+  deletion matches a cookie by name, so it would also delete a session
+  another response has just set.
 - **Routes** answer `setSessionExpiredRouteHandler`'s response, or a plain 401
   when none is set.
 

@@ -15,8 +15,8 @@ import {
     versionExpiredAnswer,
 } from "./LambderApiEnvelope.js";
 import { LambderApiValidationRefusal, isLambderApiValidationRefusal } from "./LambderApiValidationRefusal.js";
-import { isLambderApiRefusal } from "../shared/wire/LambderApiRefusal.js";
-import { checkedRefusal } from "./LambderApiRefusals.js";
+import { isLambderApiRefusal, type LambderApiRefusal } from "../shared/wire/LambderApiRefusal.js";
+import { checkedRefusal, type LambderEndpointRefusals } from "./LambderApiRefusals.js";
 import { DEFAULT_MAX_RESTORED_PAYLOAD_BYTES } from "../shared/wire/LambderRequestPayload.js";
 import { assertPositiveInteger } from "../shared/util/LambderOptionChecks.js";
 import { compareDottedVersions, isDottedVersion } from "../shared/wire/LambderVersionOrder.js";
@@ -152,8 +152,12 @@ const usesIdempotency = (definition: LambderApiDefinition): definition is Lambde
  * validation error through onInvalidInput, any other refusal as the refusal
  * envelope once checked against the endpoint's declared codes
  * (checkedRefusal), and a session ended while the handler held it
- * (LambderSessionNotFoundError) as sessionExpired. Anything else propagates, because only the adapter knows what a
- * crash means (a global error handler, a mock event).
+ * (LambderSessionNotFoundError) as sessionExpired. A refusal that leaves
+ * with the sessionExpired flag ends the session the call held
+ * (answerRefusal), so the server keeps no session its caller has been told
+ * is over. Anything else
+ * propagates, because only the adapter knows what a crash means (a global
+ * error handler, a mock event).
  *
  * `run` never sees a name it has no definition for; resolving a name to a
  * definition is the one thing the adapters legitimately do differently (an
@@ -304,6 +308,28 @@ export class LambderApiPipeline<TCtx extends LambderApiCallContext<TSessionData>
     }
 
     /**
+     * A thrown refusal as the answer to a call of `apiName`: checked against
+     * the codes the endpoint declares (checkedRefusal, which throws for one it
+     * may not send), then rendered. run() answers a step's, a guard's or a
+     * handler's refusal with it, and the server a hook's.
+     *
+     * A refusal telling the caller its session is over (a declared code's
+     * flag, or a raise site's own) ends the session the call held: the caller
+     * stops sending it, and nothing else would delete it before it expires.
+     * The record is deleted and the cookies left alone, which is what the
+     * pipeline's own sessionExpired leaves behind (endWithNoSession in the
+     * session controller says why the cookies stay).
+     */
+    async answerRefusal(apiName: string, refusals: LambderEndpointRefusals | undefined, thrown: LambderApiRefusal, ctx: TCtx): Promise<LambderApiAnswer> {
+        const checked = checkedRefusal(apiName, refusals, thrown);
+        if(checked.sessionExpired && ctx.session && this.sessions){
+            await this.sessions.manager.deleteSession(ctx.session);
+            ctx.session = null;
+        }
+        return refusalAnswer(checked, this.apiVersion, ctx.logList);
+    }
+
+    /**
      * The steps that come before anything may read the request: the version
      * floor, the signature gate, then the compressed-payload restore that
      * every later reader (a rate-limit key slice, a guard, the input schema)
@@ -365,7 +391,7 @@ export class LambderApiPipeline<TCtx extends LambderApiCallContext<TSessionData>
                 // idempotency engine has already released the claim, as it
                 // does for every thrown refusal: a retry runs the handler
                 // again and decides afresh.
-                answer = refusalAnswer(checkedRefusal(definition.name, definition.refusals, err), this.apiVersion, ctx.logList);
+                answer = await this.answerRefusal(definition.name, definition.refusals, err, ctx);
             } else if(err instanceof LambderSessionNotFoundError){
                 // No usable session: it ended while the handler held it (a
                 // logout or a password change landed mid-request), or a read
