@@ -79,17 +79,17 @@ export type LambderApiSignatureEntry = {
  * schema that guard validates (the guardInput the client sends separately,
  * or the apiInput slice of the payload), whether it demands an idempotency
  * key, and every refusal code it may send with its data's schema, its status
- * and its notAuthorized flag. Anything
- * else (rate limits, a guard's parameter, the handler) changes nothing for a
- * client and is left out, so changing it never forces a reload.
+ * and its flags. Anything else (rate limits, a guard's parameter, the
+ * handler) changes nothing for a client and is left out, so changing it
+ * never forces a reload.
  *
  * The refusal codes count in full: a client's refusal type lists exactly the
  * codes the endpoint declares, so one built before a code was added would be
  * handed a code its types say cannot arrive. Adding a code, or changing a
  * code's data, reloads that endpoint's clients. A code's data is received,
  * so it is digested in the output position, where an extensibleEnum's values
- * leave the digest. Its status and flag count too: a caller reads the one
- * and routes on the other.
+ * leave the digest. Its status and flags count too: a caller reads the one
+ * and routes on the others.
  *
  * Schemas are hashed as built, descriptions and titles included, so a client
  * built against a different one reloads once. The exception is an output
@@ -115,6 +115,8 @@ export const apiSignatureOf = async (
             data: jsonSchemaOf(declaration.data ? declaration.schema : undefined, "output"),
             status: declaration.status ?? 200,
             notAuthorized: declaration.notAuthorized === true,
+            // Written only when set, so a vocabulary with no such code digests as it did before the flag existed.
+            ...(declaration.sessionExpired ? { sessionExpired: true } : {}),
         }]);
     refusalShapes.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
     const description = {

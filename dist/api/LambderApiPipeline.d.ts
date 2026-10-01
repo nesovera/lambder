@@ -5,6 +5,8 @@ import type { LambderApiCallContext } from "./LambderApiCallContext.js";
 import type { LambderApiCallTrace } from "./LambderApiCallContext.js";
 import type { LambderApiDefinition } from "./LambderApiDefinition.js";
 import { type LambderApiSignatureMap } from "../shared/wire/LambderApiSignatureMap.js";
+import { type LambderApiRefusal } from "../shared/wire/LambderApiRefusal.js";
+import { type LambderEndpointRefusals } from "./LambderApiRefusals.js";
 import { type LambderApiGuard } from "./LambderApiGuards.js";
 import { type LambderApiRateLimitPolicyConfig, type LambderApiRateLimitsConfig, type LambderRateLimitChargeResult, type LambderRateLimitChargeSubject } from "./LambderApiRateLimits.js";
 import { type LambderApiIdempotencyConfig } from "./LambderApiIdempotency.js";
@@ -107,8 +109,12 @@ export type LambderApiExec<TCtx> = (ctx: TCtx) => Promise<LambderApiAnswer>;
  * validation error through onInvalidInput, any other refusal as the refusal
  * envelope once checked against the endpoint's declared codes
  * (checkedRefusal), and a session ended while the handler held it
- * (LambderSessionNotFoundError) as sessionExpired. Anything else propagates, because only the adapter knows what a
- * crash means (a global error handler, a mock event).
+ * (LambderSessionNotFoundError) as sessionExpired. A refusal that leaves
+ * with the sessionExpired flag ends the session the call held
+ * (answerRefusal), so the server keeps no session its caller has been told
+ * is over. Anything else
+ * propagates, because only the adapter knows what a crash means (a global
+ * error handler, a mock event).
  *
  * `run` never sees a name it has no definition for; resolving a name to a
  * definition is the one thing the adapters legitimately do differently (an
@@ -161,6 +167,20 @@ export declare class LambderApiPipeline<TCtx extends LambderApiCallContext<TSess
      * versionExpired by the time anything asks for an unknown name.
      */
     answerUnknownApi(ctx?: TCtx): LambderApiAnswer;
+    /**
+     * A thrown refusal as the answer to a call of `apiName`: checked against
+     * the codes the endpoint declares (checkedRefusal, which throws for one it
+     * may not send), then rendered. run() answers a step's, a guard's or a
+     * handler's refusal with it, and the server a hook's.
+     *
+     * A refusal telling the caller its session is over (a declared code's
+     * flag, or a raise site's own) ends the session the call held: the caller
+     * stops sending it, and nothing else would delete it before it expires.
+     * The record is deleted and the cookies left alone, which is what the
+     * pipeline's own sessionExpired leaves behind (endWithNoSession in the
+     * session controller says why the cookies stay).
+     */
+    answerRefusal(apiName: string, refusals: LambderEndpointRefusals | undefined, thrown: LambderApiRefusal, ctx: TCtx): Promise<LambderApiAnswer>;
     /**
      * The steps that come before anything may read the request: the version
      * floor, the signature gate, then the compressed-payload restore that

@@ -13,7 +13,8 @@ not listed here is internal and may change without a major version.
 - `lambder/testing` puts a real app under test in this process. Server-only,
   and reached by nothing else in the package, so no deployment carries it.
 - `lambder/build` is what a generator script runs at build time: the
-  signature file, the declared options as data, and the generated contract.
+  signature file, the declared options as data, the generated contract, and
+  the check of every refusal a handler can reach.
   Node-only, and reached by nothing else in the package.
 
 The **Client** column marks what `lambder/client` also exports; `client only`
@@ -559,6 +560,7 @@ See [Testing](./testing.md).
 | `writeApiOptions` | Writes the declared options of every API, every rate-limit policy less its key handler and every guard's input mode and refusal codes as three `as const` tables of plain data (`apiOptions`, `rateLimitPolicies`, `guardDeclarations`), from the instance a module exports, or checks the one on disk, naming what moved per table. See [the options as a generated file](./apis.md#the-options-as-a-generated-file) |
 | `writeApiGuardParams` | Writes one guard's parameters as one export per API that declares it (`orders.list` exports `ordersListGuardParam`), each typed `LambderApiGuardParam`, and nothing else about any API: a browser gating on the guard imports the ones its screens use, and its bundle carries those alone. See [one guard's parameters, for a browser](./apis.md#one-guards-parameters-for-a-browser) |
 | `generateApiFiles` | Writes, or with `check` verifies, every file a script names for each of its apps (the contract, the signatures, the options, the guard parameters), in one call that names everything stale or broken. See [Generating every file at once](./apis.md#generating-every-file-at-once) |
+| `checkApiRefusals` | Reads a project through the compiler and holds every refusal a handler can reach (an endpoint's, a guard's, a mock entry's, through any helper it calls) to the codes it may send, naming each code it may not send, each declared code nothing reaches, each refusal with no code and each handler it cannot follow, and failing a project in which it finds none to check. See [Checking what a handler can reach](./apis.md#checking-what-a-handler-can-reach) |
 
 Types: `LambderApiSignatureSource` (what it reads: anything with
 `apiSignatureEntries()`), `LambderApiSignatureFileOptions`,
@@ -569,7 +571,10 @@ module that exports the instance),
 `LambderApiOptionsFileResult`, `LambderApiGuardParamsFileOptions`,
 `LambderApiGuardParamsFileResult`, `LambderNameChanges`, and what
 `generateApiFiles` takes and answers: `LambderApiFilesConfig`,
-`LambderApiFilesApp` (one app's module and files), `LambderApiFilesResult`.
+`LambderApiFilesApp` (one app's module and files), `LambderApiFilesResult`,
+and what `checkApiRefusals` takes and answers:
+`LambderApiRefusalCheckOptions`, `LambderApiRefusalCheckResult`,
+`LambderRefusalCheckFinding`.
 
 See [APIs](./apis.md#signatures-when-a-client-must-update) and
 [the contract as a generated file](./apis.md#the-contract-as-a-generated-file).

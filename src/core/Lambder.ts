@@ -30,7 +30,6 @@ import type { LambderFileSource } from "../shared/contracts/LambderFileSource.js
 import { LAMBDER_BACKEND_SWAP, LAMBDER_CRASH_WATCH } from "../shared/util/LambderTestingDoors.js";
 import type { LambderApiDefinition } from "../api/LambderApiDefinition.js";
 import {
-    checkedRefusal,
     declaredRefusalVocabulary,
     readRefusalVocabulary,
     resolveAllowedRefusals,
@@ -61,7 +60,6 @@ import type { LambderApiAnswer } from "../api/LambderApiAnswer.js";
 import {
     apiNotFoundAnswer,
     envelopeAnswer,
-    refusalAnswer,
     sessionExpiredAnswer,
     successEnvelope,
     versionExpiredAnswer,
@@ -1611,16 +1609,17 @@ export default class Lambder<
 
     /**
      * A thrown LambderApiRefusal (from a hook, say) as the structured API
-     * envelope: the core's one mapping, after the same check the pipeline
-     * applies, against the endpoint the call names, its lazy group loaded if
-     * the refusal came before the call reached it. A name no API is
-     * registered under declares no code, so only an uncoded or a framework
-     * refusal goes out for it.
+     * envelope: the pipeline's own answer to a refusal (answerRefusal), so
+     * it is checked against the endpoint the call names, its lazy group
+     * loaded if the refusal came before the call reached it, and one saying
+     * the session is over ends it. A name no API is registered under
+     * declares no code, so only an uncoded or a framework refusal goes out
+     * for it.
      */
     private async apiErrorResponse(err: LambderApiRefusal, ctx: LambderRenderContext): Promise<LambderResponse> {
         const apiName = ctx.apiName ?? "";
-        const refusal = checkedRefusal(apiName, (await this.registeredDefinitionOf(apiName))?.refusals ?? NO_DECLARED_REFUSALS, err);
-        return responseFromAnswer(refusalAnswer(refusal, this.apiVersion, ctx.logList));
+        const refusals = (await this.registeredDefinitionOf(apiName))?.refusals ?? NO_DECLARED_REFUSALS;
+        return responseFromAnswer(await this.pipeline.answerRefusal(apiName, refusals, err, ctx));
     }
 }
 

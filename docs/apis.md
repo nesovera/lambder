@@ -872,7 +872,11 @@ below), `title`, the envelope flags `notAuthorized` and `sessionExpired`,
 `statusCode` (200 by default: the envelope is the channel, so avoid 5xx,
 which a caller reads as a crash, and 422, which is input validation's),
 `headers` for the refusal's answer (a `Retry-After`, say) and `cause`, kept
-on the thrown error.
+on the thrown error. A refusal that leaves with `sessionExpired`, set here or
+by its declared code, also ends the session the call held: the server
+deletes it, so it is over on both ends, and leaves the cookies alone, as it
+does when its own session read finds none (see
+[Sessions](./sessions.md#session-expired-responses)).
 
 ### Declared refusals
 
@@ -881,14 +885,15 @@ it (a translated client never displays `content`, it looks the code up), and
 `content` stays the human-readable fallback. An app declares its codes once,
 as a vocabulary on the init, each with the schema of the data it carries or
 none, the status every refusal with it leaves with and whether it sets the
-`notAuthorized` flag; every API names the codes it may refuse with, and so
-does every guard:
+`notAuthorized` or the `sessionExpired` flag; every API names the codes it
+may refuse with, and so does every guard:
 
 ```typescript
 const lambderInit = initLambder<SessionData>().declareRefusals({
     "order-closed": { status: 409 },
     "wallet-short": { data: z.object({ available: z.number(), currency: z.string().default("USD") }) },
     "not-a-manager": { notAuthorized: true, status: 403 },
+    "login-gone": { sessionExpired: true },
 });
 
 const managerOnly = lambderInit.guard({
@@ -921,12 +926,17 @@ export const orderApis = lambderApp.defineApiGroup("order", {
 - **The vocabulary** (`declareRefusals` on the init) holds every code once, so
   a code means one thing wherever it is raised: one data shape, one status
   (200 unless the declaration says otherwise, never 422 or a 5xx, which a
-  reader files as something else) and one answer to whether it sets
-  `notAuthorized`. A code is the string that goes on the wire, anything
-  outside the framework's `lambder/` prefix; its data, when it declares any,
-  is an object or an array, as an output is. A misspelled declaration key, a
-  `lambder/` code, a 422 or 5xx status and a `notAuthorized` other than
-  `true` are compile errors and errors at the call. An app made of parts
+  reader files as something else) and one answer to whether it sets a flag:
+  `notAuthorized` for a caller that is not allowed, or `sessionExpired` for a
+  session the handler found no longer good (its login deleted, say), which a
+  caller answers as it does the pipeline's own and which ends that session on
+  the server. A code is the string that
+  goes on the wire, anything outside the framework's `lambder/` prefix; its
+  data, when it declares any, is an object or an array, as an output is. A
+  misspelled declaration key, a `lambder/` code, a 422 or 5xx status and a
+  flag other than `true` are compile errors and errors at the call, and a
+  code declaring both flags is an error at the call, since a caller routes a
+  refusal one way. An app made of parts
   declares one map of codes per part and hands `declareRefusals` the list,
   `declareRefusals([orderRefusals, walletRefusals])`, as it hands `create()`
   its guards and policies; a code two maps declare is a compile error and a
@@ -997,6 +1007,54 @@ the code rather than the wording, with `assertApiRefusal(outcome,
 (see [Testing](./testing.md#asserting-on-outcomes)). The declared codes are
 part of the endpoint's signature (see
 [Signatures](#signatures-when-a-client-must-update)).
+
+### Checking what a handler can reach
+
+A handler's `ctx.refuse` is typed to its endpoint's codes, so a wrong code
+written in the handler does not compile. A shared helper's refusal cannot
+be held that way: it raises with the init's `refuse` or the free `refuse()`
+because it serves many endpoints, and a code it raises for one that does
+not declare it compiles, and crashes only when a call reaches that line.
+`checkApiRefusals` from `lambder/build` closes the gap. It reads the project
+through the TypeScript compiler, and for every handler Lambder hands a typed
+`refuse` (an endpoint's, a guard's, a mock entry's) follows the handler into
+every function it can reach: what it calls, a method of what it constructs,
+a function it hands along, a module it loads with `import()`. A handler need
+not be written in place: one the app wraps or holds in an object is followed
+through the wrapper's argument or the property. Every code raised there is
+held to the codes the handler's `ctx.refuse` takes, the ones the type system
+computed from the endpoint's declaration and its guards'. A refusal class of
+the app's own counts where it is constructed, whether it declares a
+constructor or inherits `LambderApiRefusal`'s.
+
+```typescript
+import { checkApiRefusals } from "lambder/build";
+
+const result = await checkApiRefusals({ tsconfig: "server/tsconfig.json" });
+console.log(result.lines.join("\n"));
+process.exit(result.ok ? 0 : 1);
+```
+
+It names five things: a code a handler can reach and may not send, with the
+line that raises it; a code a handler's own `refusals` option names that
+nothing it reaches raises, which a caller would be told to handle for
+nothing; a refusal with no code, where `requireCodes` (the default) says
+codes are required; a refusal whose code is typed as any string, since
+nothing can say which code it will send; and a handler whose function it
+cannot find, such as the parameter of an app's own wrapper around
+`defineApi`, since nothing it reaches was checked. A project in which it
+finds no handler to check fails too, rather than passing with nothing
+checked. A handler that is handed no typed `refuse` (a mock guard, which the
+mock holds to its server guard's codes as it runs) is listed, not checked.
+
+A code held in a constant reads as its literal. A code a helper takes as a
+parameter reads as every code the parameter's type allows, at every call of
+the helper: the check does not follow which one each caller passes, so such
+a helper is best split into one per code. It follows the project's own code
+alone: a dependency's functions are not read, and a call through an
+interface with nothing behind it reaches nothing. Run it where the app runs
+its other build checks, or from a test; it compiles the project, so it
+takes as long as a type check.
 
 ### Framework codes
 

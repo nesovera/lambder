@@ -8,7 +8,7 @@ import { type LambderMergedNamedMaps, type LambderNamedMapsOption, type LambderN
  * One code of an app's refusal vocabulary: the schema of the data it carries,
  * when it carries data, and how every refusal with the code leaves the
  * server. A code's data is an object or an array, as an API's output is. The
- * status and the flag are declared once here rather than at each raise site,
+ * status and the flags are declared once here rather than at each raise site,
  * so a code always reaches a caller the same way.
  */
 export type LambderRefusalDeclaration = {
@@ -18,6 +18,14 @@ export type LambderRefusalDeclaration = {
     status?: LambderRefusalStatusCode;
     /** Whether every refusal with this code sets the envelope's notAuthorized flag, which a caller routes to its notAuthorizedHandler. */
     notAuthorized?: true;
+    /**
+     * Whether every refusal with this code sets the envelope's sessionExpired
+     * flag, which a caller answers by clearing its session and routing to its
+     * sessionExpiredHandler: for a session the handler found no longer good
+     * (its login deleted, say), which the pipeline's own check could not know.
+     * The server ends the session the call held as the refusal leaves.
+     */
+    sessionExpired?: true;
 };
 /**
  * One code as its endpoint may send it: the status and flag its declaration
@@ -30,6 +38,8 @@ export type LambderApiAllowedRefusal = {
     status?: LambderRefusalStatusCode;
     /** Present when every refusal with the code sets the envelope's notAuthorized flag. */
     notAuthorized?: true;
+    /** Present when every refusal with the code sets the envelope's sessionExpired flag. */
+    sessionExpired?: true;
 } & ({
     data: false;
 } | {
@@ -61,7 +71,7 @@ type LambderRefusalDataRefusal = {
 };
 /**
  * The vocabulary as declareRefusals() checks it, code by code: no `lambder/`
- * prefix, no key beside data, status and notAuthorized (a `dat:` would leave
+ * prefix, no key beside data, status and the two flags (a `dat:` would leave
  * a code that carries data declared as one that does not), and data that is
  * an object or an array.
  */
@@ -154,8 +164,8 @@ export declare class LambderApiRefusalValidationError extends Error {
  * - An uncoded refusal, or one carrying a framework code, goes out as it is,
  *   provided it carries no data. Where the app requires codes, an uncoded
  *   refusal is refused too; a framework code still passes.
- * - A declared code leaves with its declaration's status and notAuthorized
- *   flag, and with data exactly when the code carries data, parsed through
+ * - A declared code leaves with its declaration's status and flags, and
+ *   with data exactly when the code carries data, parsed through
  *   the code's schema as an output is: undeclared fields stripped, defaults
  *   filled, transforms run. The parse is synchronous, so a data schema cannot
  *   be async.
@@ -187,8 +197,8 @@ export declare const toRefusalCodes: (value: string | readonly string[] | undefi
  * The vocabulary, checked: every code a non-empty string outside the
  * framework's `lambder/` prefix, every declaration an object whose `data`,
  * when present, is a zod schema, whose `status`, when present, is one a
- * reader files as a refusal, and whose `notAuthorized`, when present, is
- * true. A Map, so a code named for something Object.prototype carries
+ * reader files as a refusal, and whose `notAuthorized` and `sessionExpired`,
+ * when present, are true. A Map, so a code named for something Object.prototype carries
  * ("toString") is still an ordinary code.
  */
 export declare const readRefusalVocabulary: (refusals: Record<string, LambderRefusalDeclaration> | undefined) => Map<string, LambderRefusalDeclaration> | null;

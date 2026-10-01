@@ -9,6 +9,49 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [14.1.1] - 2026-09-30
+
+A minor: a refusal code can declare the `sessionExpired` flag, and
+`checkApiRefusals` holds every refusal a handler can reach to the codes its
+endpoint may send, which is what an app that requires codes needs to know
+before a call finds out.
+
+### Added
+
+- **A code declared `sessionExpired: true`** leaves with the envelope's
+  `sessionExpired` flag, as one declared `notAuthorized: true` leaves with
+  that one: for a session the pipeline found good that the handler then
+  finds gone (its login deleted, say). With `requireCodes`, a refusal that
+  meant "your session is over" had no way to carry both a code and the
+  flag. The declaration owns the flag, so a raise site that sets it on a
+  declared code is still a crash; a code may set one flag at most, since a
+  caller routes a refusal one way; and the flag counts in an endpoint's
+  signature only where a code sets it, so every existing digest stays as it
+  was. The mock sends it the same way.
+- **`checkApiRefusals`** (`lambder/build`): reads a project through the
+  TypeScript compiler and, for every handler Lambder hands a typed `refuse`
+  (an endpoint's, a guard's, a mock entry's), follows it into every function
+  it can reach (a call, a method of what it constructs, a function handed
+  along, a module loaded with `import()`, a handler the app wraps or holds
+  in an object) and holds each code raised there to the codes its
+  `ctx.refuse` takes. It names a code a handler may not send, a declared
+  code nothing reaches, a refusal with no code where codes are required, a
+  refusal whose code is any string, and a handler whose function it cannot
+  find; a project in which it finds no handler to check fails rather than
+  passes. Before it, a shared helper's code for an endpoint that did not
+  declare it compiled, and crashed only when a call reached it.
+
+### Changed
+
+- **A refusal that leaves an API call with the `sessionExpired` flag ends
+  the session the call held**, whether a declared code or the raise site set
+  the flag, and whether a handler, a guard or a hook threw it. The caller
+  stops sending a session it is told is over, and before this nothing
+  deleted it on the server until it expired. The record is deleted and the
+  cookies are left alone, as when the session read finds no session, since a
+  cookie deletion would also delete a session another response has just
+  set.
+
 ## [14.0.1] - 2026-09-30
 
 A major: `writeApiGuardParams` writes one export per API in place of one

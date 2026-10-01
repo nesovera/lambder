@@ -215,6 +215,44 @@ describe('Declared refusals: raising one', () => {
         assertApiRefusal(await manager.apiOutcome('order.refund', { orderId: 'closed' }), 'order-closed');
         assertApiSuccess(await manager.apiOutcome('order.refund', { orderId: 'o1' }));
     });
+
+    it('sends a code declared sessionExpired under that flag, the code riding beside it, wherever it was raised', async () => {
+        const init = initLambder<SessionData>().declareRefusals({ 'login-gone': { sessionExpired: true } }, { requireCodes: true });
+        const signedIn = init.guard({ session: true, handler: () => {} });
+        const created = init.create({ apiPath: '/api', session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' }, guards: { signedIn } });
+        // A session the pipeline found good whose login the handler then finds gone: only the handler can know.
+        const requireLogin = (): never => init.refuse('This login no longer exists.', { code: 'login-gone' });
+        const store = created.registerApiGroups(created.defineApiGroup('account', {
+            me: created.defineApi({ input: z.object({}), output: z.object({}), guards: 'signedIn', refusals: 'login-gone' }, async () => requireLogin()),
+        }));
+        const sessions = new LambderMemorySessionStore<SessionData>();
+        const app = lambderTestApp(store, { session: { store: sessions } });
+        const member = await app.signIn('u1', { userId: 'u1', role: 'clerk' });
+        expect(sessions.list()).toHaveLength(1);
+        const outcome = await member.apiOutcome('account.me', {});
+        assertApiFailure(outcome, 'sessionExpired');
+        assertApiRefusal(outcome, 'login-gone');
+        expect(outcome.refusal.content).toBe('This login no longer exists.');
+        // The session the caller was told is over is over on the server too.
+        expect(sessions.list()).toEqual([]);
+        // Its own flag at the raise site is the declaration's to set, as for notAuthorized.
+        // @ts-expect-error a declared code takes no flag of its own
+        expect(() => init.refuse('Gone.', { code: 'login-gone', sessionExpired: true })).toThrow();
+    });
+
+    it('ends the session behind a refusal whose own flag says it is over, as it does behind a declared code', async () => {
+        const init = initLambder<SessionData>();
+        const signedIn = init.guard({ session: true, handler: () => {} });
+        const created = init.create({ apiPath: '/api', session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' }, guards: { signedIn } });
+        const store = created.registerApiGroups(created.defineApiGroup('account', {
+            me: created.defineApi({ input: z.object({}), output: z.object({}), guards: 'signedIn' }, async () => refuse('This login no longer exists.', { sessionExpired: true })),
+        }));
+        const sessions = new LambderMemorySessionStore<SessionData>();
+        const member = await lambderTestApp(store, { session: { store: sessions } }).signIn('u1', { userId: 'u1', role: 'clerk' });
+        expect(sessions.list()).toHaveLength(1);
+        assertApiFailure(await member.apiOutcome('account.me', {}), 'sessionExpired');
+        expect(sessions.list()).toEqual([]);
+    });
 });
 
 describe('Declared refusals: what is never sent', () => {
@@ -340,6 +378,10 @@ describe('Declared refusals: creation', () => {
         expect(() => initLambder().declareRefusals({ 'order-closed': { status: 503 } }).create({ apiPath: '/api' })).toThrow(/declares the status 503/);
         // @ts-expect-error the flag is declared as true or not at all
         expect(() => initLambder().declareRefusals({ 'order-closed': { notAuthorized: false } }).create({ apiPath: '/api' })).toThrow(/declares notAuthorized as false/);
+        // @ts-expect-error and so is the other one
+        expect(() => initLambder().declareRefusals({ 'login-gone': { sessionExpired: false } }).create({ apiPath: '/api' })).toThrow(/declares sessionExpired as false/);
+        // A caller routes a refusal one way, so a code sets one flag at most.
+        expect(() => initLambder().declareRefusals({ 'login-gone': { sessionExpired: true, notAuthorized: true } }).create({ apiPath: '/api' })).toThrow(/declares both notAuthorized and sessionExpired/);
         expect(() => initLambder().declareRefusals({}).create({ apiPath: '/api' })).toThrow(/declared with no codes/);
         expect(() => initLambder().declareRefusals({ closed: { data: 'no' as never } }).create({ apiPath: '/api' })).toThrow(/not a zod schema/);
     });

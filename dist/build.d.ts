@@ -5,8 +5,9 @@
  * ships: the signature file both sides read, the declared options as plain
  * data, and one guard's parameters as the least a browser needs of them, all
  * from the app's own instance; and the contract a client compiles against,
- * from the server's sources; and generateApiFiles, every one of them for
- * every app a script names, in one call. Node-only and imported by nothing else
+ * from the server's sources; generateApiFiles, every one of them for
+ * every app a script names, in one call; and checkApiRefusals, every
+ * refusal a handler can reach held to the codes it may send. Node-only and imported by nothing else
  * in the package, so no deployment or bundle carries it.
  */
 export { writeApiSignatures } from "./build/writeApiSignatures.js";
@@ -18,6 +19,8 @@ export type { LambderApiOptionsFileOptions, LambderApiOptionsFileResult, } from 
 export { writeApiGuardParams } from "./build/writeApiGuardParams.js";
 export type { LambderApiGuardParamsFileOptions, LambderApiGuardParamsFileResult, } from "./build/writeApiGuardParams.js";
 export type { LambderApiOptionsSource, LambderNameChanges } from "./build/generatedTables.js";
+export { checkApiRefusals } from "./build/checkApiRefusals.js";
+export type { LambderApiRefusalCheckOptions, LambderApiRefusalCheckResult, LambderRefusalCheckFinding, } from "./build/checkApiRefusals.js";
 export { generateApiFiles } from "./build/generateApiFiles.js";
 export type { LambderApiFilesConfig, LambderApiFilesApp, LambderApiFilesResult } from "./build/generateApiFiles.js";
 export type { LambderModuleLocation } from "./build/moduleLocation.js";

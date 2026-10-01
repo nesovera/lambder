@@ -10,7 +10,7 @@ import { mergeNamedMaps, type LambderMergedNamedMaps, type LambderNamedMapsOptio
  * One code of an app's refusal vocabulary: the schema of the data it carries,
  * when it carries data, and how every refusal with the code leaves the
  * server. A code's data is an object or an array, as an API's output is. The
- * status and the flag are declared once here rather than at each raise site,
+ * status and the flags are declared once here rather than at each raise site,
  * so a code always reaches a caller the same way.
  */
 export type LambderRefusalDeclaration = {
@@ -20,6 +20,14 @@ export type LambderRefusalDeclaration = {
     status?: LambderRefusalStatusCode;
     /** Whether every refusal with this code sets the envelope's notAuthorized flag, which a caller routes to its notAuthorizedHandler. */
     notAuthorized?: true;
+    /**
+     * Whether every refusal with this code sets the envelope's sessionExpired
+     * flag, which a caller answers by clearing its session and routing to its
+     * sessionExpiredHandler: for a session the handler found no longer good
+     * (its login deleted, say), which the pipeline's own check could not know.
+     * The server ends the session the call held as the refusal leaves.
+     */
+    sessionExpired?: true;
 };
 
 /**
@@ -33,6 +41,8 @@ export type LambderApiAllowedRefusal = {
     status?: LambderRefusalStatusCode;
     /** Present when every refusal with the code sets the envelope's notAuthorized flag. */
     notAuthorized?: true;
+    /** Present when every refusal with the code sets the envelope's sessionExpired flag. */
+    sessionExpired?: true;
 } & ({ data: false } | { data: true; schema: z.ZodType });
 
 /** The codes one endpoint may refuse with: its own `refusals` option and those of the guards it declares. */
@@ -65,7 +75,7 @@ type LambderRefusalDataRefusal = { data: { readonly "lambder: a refusal's data i
 
 /**
  * The vocabulary as declareRefusals() checks it, code by code: no `lambder/`
- * prefix, no key beside data, status and notAuthorized (a `dat:` would leave
+ * prefix, no key beside data, status and the two flags (a `dat:` would leave
  * a code that carries data declared as one that does not), and data that is
  * an object or an array.
  */
@@ -110,6 +120,7 @@ export const allowedRefusalOf = (declaration: LambderRefusalDeclaration): Lambde
     const leaves = {
         ...(declaration.status !== undefined ? { status: declaration.status } : {}),
         ...(declaration.notAuthorized ? { notAuthorized: true as const } : {}),
+        ...(declaration.sessionExpired ? { sessionExpired: true as const } : {}),
     };
     return declaration.data === undefined ? { ...leaves, data: false } : { ...leaves, data: true, schema: declaration.data };
 };
@@ -175,7 +186,7 @@ export class LambderApiRefusalValidationError extends Error {
             message = `Lambder: API "${apiName}" refused with the code "${violation.missingData}", which carries data, and no data, so the refusal was not sent.`;
         } else if("ownStatusOrFlag" in violation){
             message = `Lambder: API "${apiName}" refused with the declared code "${String(code)}" and a status or flag of its own, so the refusal was not sent. `
-                + "A declared code's status and notAuthorized flag are its declaration's: set them in the refusals vocabulary, and leave them off the refuse() call.";
+                + "A declared code's status and its notAuthorized and sessionExpired flags are its declaration's: set them in the refusals vocabulary, and leave them off the refuse() call.";
         } else if("zodError" in violation){
             // Paths and messages only, never the values: they may be the
             // user's data.
@@ -205,8 +216,8 @@ export class LambderApiRefusalValidationError extends Error {
  * - An uncoded refusal, or one carrying a framework code, goes out as it is,
  *   provided it carries no data. Where the app requires codes, an uncoded
  *   refusal is refused too; a framework code still passes.
- * - A declared code leaves with its declaration's status and notAuthorized
- *   flag, and with data exactly when the code carries data, parsed through
+ * - A declared code leaves with its declaration's status and flags, and
+ *   with data exactly when the code carries data, parsed through
  *   the code's schema as an output is: undeclared fields stripped, defaults
  *   filled, transforms run. The parse is synchronous, so a data schema cannot
  *   be async.
@@ -245,11 +256,12 @@ export const checkedRefusal = (apiName: string, endpoint: LambderEndpointRefusal
         if(!isObjectPayload(parsed.data)) throw new LambderApiRefusalValidationError(apiName, thrown, { notObject: describePayloadKind(parsed.data) });
         sent = parsed.data;
     }
-    // The declaration's status and flag, and the data as parsed: how every
+    // The declaration's status and flags, and the data as parsed: how every
     // refusal with this code leaves, wherever it was raised.
     return new LambderApiRefusal(thrown.message, {
         refusal: { ...thrown.refusal, ...(sent !== undefined ? { data: sent } : {}) },
         notAuthorized: declaration.notAuthorized,
+        sessionExpired: declaration.sessionExpired,
         statusCode: declaration.status,
         headers: thrown.headers,
         cause: thrown.cause,
@@ -303,8 +315,8 @@ export const toRefusalCodes = (value: string | readonly string[] | undefined): r
  * The vocabulary, checked: every code a non-empty string outside the
  * framework's `lambder/` prefix, every declaration an object whose `data`,
  * when present, is a zod schema, whose `status`, when present, is one a
- * reader files as a refusal, and whose `notAuthorized`, when present, is
- * true. A Map, so a code named for something Object.prototype carries
+ * reader files as a refusal, and whose `notAuthorized` and `sessionExpired`,
+ * when present, are true. A Map, so a code named for something Object.prototype carries
  * ("toString") is still an ordinary code.
  */
 export const readRefusalVocabulary = (refusals: Record<string, LambderRefusalDeclaration> | undefined): Map<string, LambderRefusalDeclaration> | null => {
@@ -321,9 +333,9 @@ export const readRefusalVocabulary = (refusals: Record<string, LambderRefusalDec
         if(declaration === null || typeof declaration !== "object"){
             throw new Error(`Lambder: the refusal "${code}" is not declared as an object: write {} for a code with no data, or { data: schema }.`);
         }
-        const extra = Object.keys(declaration).filter((key) => key !== "data" && key !== "status" && key !== "notAuthorized");
+        const extra = Object.keys(declaration).filter((key) => key !== "data" && key !== "status" && key !== "notAuthorized" && key !== "sessionExpired");
         if(extra.length){
-            throw new Error(`Lambder: the refusal "${code}" has ${extra.map((key) => `"${key}"`).join(", ")} beside data, status and notAuthorized, which a refusal declaration does not take.`);
+            throw new Error(`Lambder: the refusal "${code}" has ${extra.map((key) => `"${key}"`).join(", ")} beside data, status, notAuthorized and sessionExpired, which a refusal declaration does not take.`);
         }
         // Read for what it is used as rather than by class, so a schema from
         // a second copy of zod in the bundle still counts.
@@ -334,8 +346,13 @@ export const readRefusalVocabulary = (refusals: Record<string, LambderRefusalDec
         if(status !== undefined && (typeof status !== "number" || !Number.isInteger(status) || status < 200 || status >= 500 || status === 422)){
             throw new Error(`Lambder: the refusal "${code}" declares the status ${String(status)}. A declared refusal leaves with a status from 200 to 499 other than 422: a reader files a 5xx as a server failure and a 422 as an input validation failure.`);
         }
-        if(declaration.notAuthorized !== undefined && declaration.notAuthorized !== true){
-            throw new Error(`Lambder: the refusal "${code}" declares notAuthorized as ${String(declaration.notAuthorized)}; write true, or leave it off.`);
+        for(const flag of ["notAuthorized", "sessionExpired"] as const){
+            if(declaration[flag] !== undefined && declaration[flag] !== true){
+                throw new Error(`Lambder: the refusal "${code}" declares ${flag} as ${String(declaration[flag])}; write true, or leave it off.`);
+            }
+        }
+        if(declaration.notAuthorized && declaration.sessionExpired){
+            throw new Error(`Lambder: the refusal "${code}" declares both notAuthorized and sessionExpired. A caller routes a refusal one way: a session that is gone is not also a session that is not allowed.`);
         }
     }
     return new Map(entries);
