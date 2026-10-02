@@ -1,4 +1,4 @@
-import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import type { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { type LambderCompressionOption } from "../shared/wire/LambderCompressionOption.js";
 import type { LambderSessionChanges, LambderSessionRecord, LambderSessionStore, LambderSessionUpdateResult } from "../shared/contracts/LambderSessionStore.js";
 export type LambderDdbSessionStoreOptions = {
@@ -16,8 +16,8 @@ export type LambderDdbSessionStoreOptions = {
      * it can be switched on or off on a live table.
      */
     compression?: LambderCompressionOption;
-    /** A ready document client, e.g. one shared with the rest of the app. */
-    client?: DynamoDBDocumentClient;
+    /** A ready client, e.g. one shared with the rest of the app; the stores' shared one for the region otherwise. */
+    client?: DynamoDBClient;
 };
 /**
  * Sessions at rest in DynamoDB: one item per session under the two hashes,
@@ -46,19 +46,34 @@ export declare class LambderDdbSessionStore<SessionData = unknown> implements La
     private keyOf;
     /**
      * session.data as the attributes that hold it: `dataBr` and `dataBytes`
-     * when compressed, a plain `data` otherwise. Either way it goes through
-     * its JSON first, so a plain record holds exactly what a compressed one
-     * restores to: an `undefined` inside the data is dropped rather than
-     * handed to the document client, which refuses one and would fail the
-     * write (a login answering 500) only when compression is off.
+     * when compressed, a plain `data` attribute otherwise. Either way it goes
+     * through its JSON first, so a plain record holds exactly what a
+     * compressed one restores to: an `undefined` inside the data is dropped,
+     * as JSON drops it, rather than handed to marshallJsonValue, which
+     * refuses one and would fail the write (a login answering 500) only when
+     * compression is off.
+     *
+     * Data too large for a record is refused here, before anything is
+     * written, with the size and the limit it passed: DynamoDB would refuse
+     * the item with a ValidationException that names neither, and data past
+     * the restore ceiling would be written only to read back as no session.
+     * Create and update measure the same attributes, so data one accepts the
+     * other does too.
      */
     private dataAttributes;
-    /** The item for a record: the two hashes under the table's key names, the data plain or compressed. */
+    /**
+     * The item for a record: the two hashes under the table's key names, the
+     * record's other fields under their own names (strings and numbers, an
+     * absent dataExpiresAt left out), the data plain or compressed. The
+     * attribute names and types are the ones items have always carried, so
+     * records written before and after read alike.
+     */
     private toItem;
     /**
      * The record for an item. A compressed record decodes back into `data`;
-     * one whose data cannot be decoded is malformed and reads as no session,
-     * like a record missing its csrfTokenHash.
+     * one whose data cannot be decoded, or declares more of it than the store
+     * ever writes, is malformed and reads as no session, like a record
+     * missing its csrfTokenHash.
      *
      * This is where read failures and malformed records separate. A read
      * failure is infrastructure and must surface as a 500: signing somebody

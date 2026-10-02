@@ -12,7 +12,6 @@
 import { describe, it, expect, vi } from 'vitest';
 
 vi.mock('@aws-sdk/client-dynamodb', () => { throw new Error('Cannot find module @aws-sdk/client-dynamodb'); });
-vi.mock('@aws-sdk/lib-dynamodb', () => { throw new Error('Cannot find module @aws-sdk/lib-dynamodb'); });
 
 describe('DynamoDB SDK absent', () => {
     it('lambder\'s root entry still imports, and an app with sessions and every store still constructs', async () => {
@@ -42,7 +41,7 @@ describe('DynamoDB SDK absent', () => {
         // A call that must query the table (getSession answers null for a token it cannot parse without one).
         const failure = await sessions.deleteSessionAllByKey('key').then(() => null, (err: unknown) => err) as Error & { cause?: Error };
         expect(failure).toBeInstanceOf(Error);
-        expect(`${failure.message} ${failure.cause?.message ?? ''}`).toContain('LambderDdbSessionStore requires @aws-sdk/');
+        expect(`${failure.message} ${failure.cause?.message ?? ''}`).toContain('LambderDdbSessionStore requires @aws-sdk/client-dynamodb: npm install @aws-sdk/client-dynamodb');
     });
 
     it('a failed load is not memoized, so a later call reports again rather than caching a stale rejection', async () => {

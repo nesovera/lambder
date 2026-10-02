@@ -1,7 +1,7 @@
 # Calling a Lambder app from another lambda (LambderInvokeCaller)
 
 API Gateway delivers an HTTP request to a Lambder app as a JSON event and takes
-a JSON response object back. A direct `InvokeCommand` carries JSON in both
+a JSON response object back. A Lambda `InvokeCommand` carries JSON in both
 directions too, so a caller that builds the event API Gateway would have built,
 invokes the function with it, and reads the response object Lambder returns is
 talking to an unmodified Lambder app. That is all `LambderInvokeCaller` is.
@@ -26,28 +26,29 @@ through the same mapping, so their outcomes agree.
 
 Nothing about it is invoke-specific. What makes a function invoke-only is its
 deployment: no HTTP trigger and no Function URL, with `lambda:InvokeFunction`
-granted to the one role that may call it. There is no header to check for that,
-because a header is something any HTTP client can set. The guard below asserts
-how the request arrived, so a misrouted event fails loudly instead of running,
-and it is worth writing for that alone:
+granted to the one role that may call it. The callee can still check how each
+request reached it: `ctx.arrivedVia` is `"invoke"` exactly when the event came
+from a Lambda invoke, which the server reads from the event's
+`requestContext.apiId`, a field a gateway writes itself and no HTTP client can
+set. A header is no such check, since any HTTP client can send one. The guard
+below refuses anything but an invoke, so a misrouted event fails loudly
+instead of running, and on a function that also answers HTTP it keeps every
+browser out of the APIs that declare it:
 
 ```typescript
 // gateway-lambda/src/index.ts
-import { initLambder, lambderGuard, refuse, LAMBDER_INVOKE_HEADER, LAMBDER_INVOKE_PROTOCOL } from "lambder";
+import { initLambder, lambderGuard, refuse } from "lambder";
 import { z } from "zod";
 
 const lambderApp = initLambder().create({
     apiPath: "/api",
     guards: {
-        // NOT an authorization: the marker is an ordinary request header, so
-        // on a function that also answers HTTP any client can set it. What
-        // authorizes this call is the IAM grant, and what keeps a browser out
-        // is that this function has no HTTP trigger at all. This says the
-        // expectation out loud, and turns a misrouted event into a refusal
-        // rather than a run.
+        // Only a caller IAM lets invoke this function produces an invoke, so
+        // the grant stays the authorization; this guard makes an API refuse
+        // whatever reached it another way, rather than run it.
         arrivedByInvoke: lambderGuard({
             handler: async (ctx) => {
-                if (ctx.header(LAMBDER_INVOKE_HEADER) !== LAMBDER_INVOKE_PROTOCOL) refuse("This function is reached by invoke only.");
+                if (ctx.arrivedVia !== "invoke") refuse("This function is reached by invoke only.");
             },
         }),
     },
@@ -132,6 +133,7 @@ builds an ordinary API context:
 | `apiPayload` | From the body envelope, after a compressed payload is restored |
 | `host` | The `host` option, defaulting to the callee's function name, so hooks that branch on host see a stable value. The callee's `trustedHostHeaders` are not read on an invoke |
 | `ip` | The per-call `clientIp`, which becomes the event's `requestContext.http.sourceIp`; empty when the call did not supply one. The callee's `trustedClientIpHeaders` are not read on an invoke |
+| `arrivedVia` | `"invoke"`, read from the event's `requestContext.apiId`, which no HTTP client can set: what a guard or a hook checks to tell an invoke |
 | `header("x-lambder-invoke")` | `"1"` |
 | `header("x-lambder-invoked-by")` | The calling function's name, when the caller runs in Lambda (`AWS_LAMBDA_FUNCTION_NAME`) |
 | `header("x-lambder-parent-request-id")` | The request id of the invocation that made the call, when it runs under a Lambder handler; the callee's [call summary](./configuration.md#callsummary) records it as `parentRequestId`, so a query over both functions' logs joins a call to the calls it made |
@@ -142,20 +144,21 @@ builds an ordinary API context:
 The body is the envelope `LambderCaller` sends: `version`, `signature`,
 `token`, `siteHost`, `payload` (or `payloadBr` plus `payloadBytes`),
 `guardInputs` and `idempotencyKey`. The endpoint is the path, never a field of
-the body. Nothing marks an invoke to the app but the marker header,
-which is the point: every server feature applies unchanged. The server itself
-tells the two apart in one place, the forwarding headers. An invoke's event
-carries `lambder-invoke` as its `requestContext.apiId`, a field a gateway
-writes itself and no HTTP client can set, and on such an event the callee
-takes `ctx.ip` and `ctx.host` from the caller's `clientIp` and `host` alone,
-whatever `trustedClientIpHeaders` and `trustedHostHeaders` it lists. Those
-headers are trusted because a proxy in front of the function writes them, and
-an invoke has no such proxy.
+the body. The pipeline treats an invoke as it treats any call, which is the
+point: every server feature applies unchanged. The server itself tells the two
+apart in one place, the forwarding headers. An invoke's event carries
+`lambder-invoke` as its `requestContext.apiId`, a field a gateway writes itself
+and no HTTP client can set, and on such an event the callee takes `ctx.ip` and
+`ctx.host` from the caller's `clientIp` and `host` alone, whatever
+`trustedClientIpHeaders` and `trustedHostHeaders` it lists. Those headers are
+trusted because a proxy in front of the function writes them, and an invoke has
+no such proxy. The same field is what `ctx.arrivedVia` reports as `"invoke"`,
+for the app's own code to tell an invoke by.
 
-The marker is a marker, never an authorization. On a function that is also
-reachable over HTTP it is a header any client can set, so what makes an invoke
-API safe is the IAM grant and, for a function with both roles, whatever guard
-the API declares. `ctx.ip` is likewise whatever the caller names as
+The marker header is a marker, never an authorization. On a function that is
+also reachable over HTTP it is a header any client can set, so what makes an
+invoke API safe is the IAM grant and, for a function with both roles, a guard
+that checks `ctx.arrivedVia` as the one above does. `ctx.ip` is likewise whatever the caller names as
 `clientIp`, so an IP-keyed rate limit on an invoke API limits per named
 address, and a guard
 that assumes a browser (a cookie, a CSRF token) only applies when the call
@@ -178,7 +181,8 @@ it an address the browser chose. Any other forwarding header
 (`x-forwarded-host`, `x-real-ip`) travels as it is and sets nothing on a callee
 of this version.
 
-The constants are exported for guards and hooks that want to read them by name:
+The header names are exported for code that reads the headers by name (a
+guard tells an invoke by `ctx.arrivedVia`, not by the marker):
 `LAMBDER_INVOKE_HEADER`, `LAMBDER_INVOKED_BY_HEADER`,
 `LAMBDER_PARENT_REQUEST_HEADER` and `LAMBDER_INVOKE_PROTOCOL` (the `"1"`,
 which a future incompatible event shape would bump).
@@ -198,7 +202,7 @@ which a future incompatible event shape would bump).
 | `maxResponsePayloadBytes` | `20_000_000` | Ceiling on what a compressed answer may restore to, the counterpart of the callee's `maxRequestPayloadBytes` |
 | `timeoutMs` | none | Default per-call timeout. The callee keeps running regardless, so its own timeout is the real ceiling |
 | `onLogList` | `console.log` | Receives each answer's `logList`, with the API name |
-| `onFailure` | none | Awaited for every failed call, before `api()` throws or `apiOutcome()` returns. A throw inside it is logged and ignored: `apiOutcome()` never throws |
+| `onFailure` | none | Awaited for every failed call, before `api()` throws or `apiOutcome()` returns, but for one its own `signal` aborted. A throw inside it is logged and ignored: `apiOutcome()` never throws. A failure it took is not reported again by the instance's `crashes.report`; see [Errors and logs](#errors-and-logs) |
 | `beforeCall` | none | Run before every call (`api()`, `apiOutcome()`, a group's call, `request()`) with its endpoint name or `METHOD path`, before anything is built or sent. What it throws is thrown to the caller, from `apiOutcome()` too; see below |
 | `sessionTokenCookieKey` | `"LMDRSESSIONTKID"` | The session token cookie's name, when a session is carried and the callee uses a non-default `tokenCookieKey`. The CSRF value rides in the envelope's `token` field, which has no name to configure |
 | `transport` | the Lambda SDK | Replaces the SDK: `(event, { functionName, eventJson, signal }) => Promise<{ functionError, result }>`. `eventJson` is the event serialized once; the SDK sends those bytes as they are |
@@ -240,7 +244,7 @@ finishes its work.
 | Option | Description |
 | --- | --- |
 | `timeoutMs` | Overrides the constructor default for this call |
-| `signal` | External `AbortSignal`, combined with the timeout when both are set |
+| `signal` | External `AbortSignal`, combined with the timeout when both are set. A call it aborts fails as `aborted`, which `onFailure` is not told; one it aborts with a `TimeoutError` (`AbortSignal.timeout()`, alone or inside `AbortSignal.any()`) fails as `timeout` |
 | `compressRequest` | `false` sends the payload plainly, `true` compresses regardless of the threshold |
 | `clientIp` | The address the callee reads as `ctx.ip`: it becomes the synthesized event's `requestContext.http.sourceIp`, the field a gateway fills in, and the callee reads no forwarding header on an invoke, whatever its `trustedClientIpHeaders` |
 | `headers` | Extra request headers the callee sees |
@@ -319,13 +323,14 @@ see [Carrying a user's session](#carrying-a-users-session) for why they matter.
 
 ## Failure reasons
 
-The first nine are the same reasons, in the same order of precedence, that
+The first ten are the same reasons, in the same order of precedence, that
 `LambderCaller` reports for an HTTP call; the last three exist only here.
 
 | `reason` | Meaning |
 | --- | --- |
-| `network` | Nothing came back: a connectivity failure, or an external signal aborted the call |
-| `timeout` | `timeoutMs` elapsed and the invoke was given up on. An answer that arrives after that is reported here too, never as a success |
+| `network` | Nothing came back: a connectivity failure |
+| `timeout` | `timeoutMs` elapsed and the invoke was given up on, or the call's own `signal` aborted with a `TimeoutError`. An answer that arrives after that is reported here too, never as a success |
+| `aborted` | The call's own `signal` aborted it for any other reason, before it was sent or while it was out: the calling code gave it up, so `onFailure` is not told. `api()` still throws it, having nothing else to return. Whichever of the timeout and the signal aborted the call first names it |
 | `server` | The callee answered 5xx, or with a body that is not a Lambder envelope. `response` carries the envelope when it sent one, which is how `crash` and `logList` arrive |
 | `validation` | 422: the callee rejected the input. `zodError` carries the issues |
 | `versionExpired` | The callee answered `versionExpired`: this caller's signature for the endpoint is not the callee's |
@@ -466,7 +471,9 @@ const reportFailure: LambderInvokeFailureHandler =
         if (failure.reason === "validation" || failure.reason === "versionExpired") return;
         await reportError(failure.error, {
             apiName: `${functionName}:${apiName}`,
-            requestId: failure.crash?.requestId ?? null,
+            // On the error, where every reason has it; the outcome carries
+            // `crash` only on the reasons an envelope can come back with.
+            requestId: failure.error.crash?.requestId ?? null,
             extra: { reason: failure.reason, logList: failure.logList.slice(-20) },
         });
     };
@@ -488,10 +495,13 @@ const payments = new LambderInvokeCaller<PaymentsContract>({
 });
 ```
 
-An app that reports failures here should skip a `LambderInvokeError` in its
-`crashes.report`, so a thrown `api()` failure is not recorded twice:
-`if (isLambderInvokeError(error)) return;`. The framework does not skip it for
-you, since a caller without an `onFailure` would then lose it.
+A failure `onFailure` took is recorded once. Once the handler has returned,
+the failure's error is marked as reported, and when `api()` throws it up
+through the calling app's handler, that instance's `crashes.report` skips it:
+the request is still answered as the crash it is, and only the second report
+goes. A caller with no `onFailure`, or whose `onFailure` threw, leaves the
+error unmarked, so the crash reporter is told as it is of any crash and
+nothing is lost.
 
 On the success path, anything the callee pushed onto `ctx.logList` arrives as
 the answer's `logList`. It is on the outcome, and it also goes to
@@ -507,7 +517,7 @@ mode makes the options argument, and the shape of each value, mandatory at the
 call site:
 
 ```typescript
-await caller.urls.cache({ url }, { guardInputs: { deviceAuth: { deviceToken } } });
+await caller.urls.cache({ url }, { guardInputs: { terminalAuth: { terminalToken } } });
 ```
 
 `guardInputsProvider` supplies values for every call from one place, with
@@ -543,7 +553,12 @@ A key scope works here as it does in the browser
 `createIdempotencyKeyScope()` as the call's `idempotencyKey`, and
 it sends its current key and moves to a new one once an answer settles the
 operation, so a corrected retry after a refusal goes out under a new key while a
-retry after a timeout replays the original.
+retry after a timeout replays the original. A call that never reached the
+transport (one that could not be built, one over the invoke cap, one whose
+signal had aborted before it was sent) used no key, whatever reason it fails
+with: the scope treats it as not sent, as the browser caller does, so a refusal
+after it still moves the scope on. A call aborted after it was sent may have
+reached the callee, so its key is kept as possibly used, as after a timeout.
 
 It matters more here than it looks. The SDK retries only what was answered
 before the callee ran, and with `maxAttempts: 1` (the default here) it retries
@@ -627,6 +642,14 @@ applies here as it does to an API call: an event over
 This section is about testing a caller of another function. For the app's own
 endpoints, routes and sessions, see [Testing](./testing.md).
 
+Under [`lambderTestApp`](./testing.md#what-the-app-constructs-itself) the
+app's own callers need no transport of their own: its `invokeMocks` option
+names a mock app per function name (`{ billing: billingMock }`), and each
+`LambderInvokeCaller` the app built without a `transport` is answered by the
+one for its `functionName`. A caller whose function has no mock fails loudly,
+every call a `network` failure whose error names the function, instead of
+reaching AWS.
+
 `LambderInvokeCaller.localTransport(handler)` runs a callee's real handler in
 this process the way Lambda would, including turning a thrown error into a
 `FunctionError` payload. Tests then exercise the real handlers behind the real
@@ -688,11 +711,11 @@ It accepts the same fields a call does (`payload`, `host`, `apiVersion`,
 ## One function, both roles
 
 A function that serves HTTP and is also an invoke target needs nothing: the
-same `getHandler()` answers both, the marker header tells them apart, and an
+same `getHandler()` answers both, `ctx.arrivedVia` tells them apart, and an
 API can be declared for one, the other or both through its guards. Bear in mind
-that on such a function the marker is settable by any HTTP client, so an API
-meant for invokes only needs a guard that checks something an HTTP client
-cannot forge.
+that on such a function the marker header is settable by any HTTP client, so
+an API meant for invokes only declares a guard that checks `ctx.arrivedVia`,
+as `arrivedByInvoke` above does, which no HTTP client can forge.
 
 ## Not supported
 

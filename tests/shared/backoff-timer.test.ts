@@ -74,7 +74,7 @@ describe('LambderBackoffTimer', () => {
     });
 
     it('refuses a negative time, a longest wait below the shortest and a factor below one, naming the option', () => {
-        expect(() => new LambderBackoffTimer({ baseMs: -1 })).toThrow(/baseMs must be a number of 0 or more/);
+        expect(() => new LambderBackoffTimer({ baseMs: -1 })).toThrow(/baseMs must be a number above 0/);
         expect(() => new LambderBackoffTimer({ maxMs: Number.NaN })).toThrow(/maxMs/);
         expect(() => new LambderBackoffTimer({ baseMs: 100, maxMs: 50 })).toThrow(/maxMs must be a number of 100 or more/);
         expect(() => new LambderBackoffTimer({ factor: 0.5 })).toThrow(/factor must be a number of 1 or more/);
@@ -84,6 +84,41 @@ describe('LambderBackoffTimer', () => {
         expectRetryWait(flat, 100);
         // A base past the default longest wait moves the default with it.
         expectRetryWait(new LambderBackoffTimer({ baseMs: 90_000 }), 90_000);
+    });
+
+    it('refuses the options that would make the ladder a retry loop with no pause', () => {
+        // Every rung is a multiple of the base: 0 * factor^n is 0 forever.
+        expect(() => new LambderBackoffTimer({ baseMs: 0 })).toThrow(/baseMs must be a number above 0.*0 retries with no pause/);
+        expect(() => new LambderBackoffTimer({ baseMs: Number.NaN })).toThrow(/baseMs must be a number above 0/);
+        // setTimeout fires anything longer than 2^31 - 1 ms at once.
+        expect(() => new LambderBackoffTimer({ maxMs: 2 ** 31 })).toThrow(/maxMs must be at most 2147483647.*no pause/);
+        expect(() => new LambderBackoffTimer({ baseMs: 2 ** 31 })).toThrow(/baseMs must be a number above 0 and at most 2147483647/);
+        expect(() => new LambderBackoffTimer({ jitter: 'Full' as 'full' })).toThrow(/jitter must be "full" or "none", got "Full"/);
+        // The longest delay a timer keeps is still a valid ceiling.
+        expectRetryWait(new LambderBackoffTimer({ baseMs: 100, maxMs: 2 ** 31 - 1, jitter: 'none' }), 200);
+    });
+
+    it('counts the retries since the last reset, so a loop that gives up reads the timer rather than a counter of its own', async () => {
+        const timer = new LambderBackoffTimer({ baseMs: 100, maxMs: 350 });
+        expect(timer.retries).toBe(0);
+        expectRetryWait(timer, 150);
+        expect(timer.retries).toBe(1);
+        const waiting = timer.wait();
+        expect(timer.retries).toBe(2);
+        await vi.advanceTimersByTimeAsync(200);
+        await waiting;
+        // A dropped wait still counted its retry, as cancel() keeps the count.
+        timer.retry(vi.fn());
+        timer.cancel();
+        expect(timer.retries).toBe(3);
+        // A wait refused for an already aborted signal schedules nothing and counts nothing.
+        const gone = new AbortController();
+        gone.abort();
+        await expect(timer.wait(gone.signal)).rejects.toBeDefined();
+        expect(timer.retries).toBe(3);
+        timer.reset();
+        expect(timer.retries).toBe(0);
+        expectRetryWait(timer, 150);
     });
 
     it('waits a fixed time with after, off the ladder', () => {

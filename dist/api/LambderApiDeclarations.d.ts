@@ -139,10 +139,16 @@ export type LambderContractOfGroups<TGroups extends readonly unknown[]> = Lambde
 type LambderGroupTypedAny<TGroup> = 0 extends 1 & TGroup ? true : 0 extends 1 & LambderLoadedGroupOf<TGroup> ? true : LambderLoadedGroupOf<TGroup> extends {
     readonly apis: infer TApis;
 } ? (0 extends 1 & TApis ? true : string extends keyof TApis ? true : false) : false;
-/** The group names one registerApiGroups() call names twice. */
-type LambderRepeatedGroupNames<TGroups extends readonly unknown[], TSeen = never> = TGroups extends readonly [infer THead, ...infer TRest] ? (THead extends {
+/**
+ * The group names one registerApiGroups() call names twice. Written as an
+ * accumulator, the recursive reference standing alone in its branch, so the
+ * compiler evaluates it as a loop: an app registers a group per feature,
+ * and recursion nested in a union runs into the compiler's instantiation
+ * depth limit at a group count a large app reaches.
+ */
+type LambderRepeatedGroupNames<TGroups extends readonly unknown[], TSeen = never, TRepeated = never> = TGroups extends readonly [infer THead, ...infer TRest] ? THead extends {
     name: infer TName;
-} ? ([TName] extends [TSeen] ? TName : never) | LambderRepeatedGroupNames<TRest, TSeen | TName> : never) : never;
+} ? LambderRepeatedGroupNames<TRest, TSeen | TName, TRepeated | ([TName] extends [TSeen] ? TName : never)> : TRepeated : TRepeated;
 /**
  * What registerApiGroups() asks of its receiver: the instance itself, unless
  * a group, what a lazy group loads or a group's endpoints is typed `any` (a
@@ -163,8 +169,8 @@ export type LambderRegisteredGroupsCheck<TGroups extends readonly unknown[], TSe
 export type LambderGroupNameCheck<TName extends string> = TName extends LambderReservedGroupName ? {
     readonly "lambder: a caller already has a member of this name, so no group may take it": TName;
 } : unknown;
-/** The actions more than one of a group's parts declare. */
-type LambderRepeatedActions<TParts extends readonly unknown[], TSeen = never> = TParts extends readonly [infer THead, ...infer TRest] ? (Extract<keyof THead, TSeen> | LambderRepeatedActions<TRest, TSeen | keyof THead>) : never;
+/** The actions more than one of a group's parts declare; an accumulator, as LambderRepeatedGroupNames is, for the same reason. */
+type LambderRepeatedActions<TParts extends readonly unknown[], TSeen = never, TRepeated = never> = TParts extends readonly [infer THead, ...infer TRest] ? LambderRepeatedActions<TRest, TSeen | keyof THead, TRepeated | Extract<keyof THead, TSeen>> : TRepeated;
 /** A group's parts held to declaring each action once: a part would otherwise replace another's endpoint of the same name. */
 export type LambderGroupPartsCheck<TParts extends readonly unknown[]> = [
     LambderRepeatedActions<TParts>

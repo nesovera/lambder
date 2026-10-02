@@ -1,4 +1,5 @@
 import { remoteStoreFile } from "../shared/contracts/LambderFileSource.js";
+import { withInstallHint } from "./LambderSdkInstallHint.js";
 const DEFAULT_NOT_FOUND_ERROR_NAMES = ["NoSuchKey", "NotFound", "AccessDenied", "KeyTooLongError", "InvalidURI", "InvalidObjectName"];
 /**
  * Files from an S3 bucket, or any S3-compatible store such as Cloudflare
@@ -18,7 +19,7 @@ export class LambderS3FileSource {
     clientConfig;
     notFoundErrorNames;
     client;
-    sdk;
+    clientSdk;
     constructor({ bucket, prefix = "", client, clientConfig, notFoundErrorNames = DEFAULT_NOT_FOUND_ERROR_NAMES }) {
         if (!bucket.trim())
             throw new Error("bucket is required");
@@ -28,21 +29,11 @@ export class LambderS3FileSource {
         this.clientConfig = clientConfig;
         this.notFoundErrorNames = notFoundErrorNames;
     }
-    loadSdk() {
-        if (!this.sdk) {
-            this.sdk = import("@aws-sdk/client-s3").catch(() => {
-                throw new Error("LambderS3FileSource requires @aws-sdk/client-s3: npm install @aws-sdk/client-s3");
-            });
-        }
-        return this.sdk;
-    }
     async read(relativePath) {
-        const { S3Client, GetObjectCommand } = await this.loadSdk();
-        if (!this.client)
-            this.client = new S3Client(this.clientConfig ?? {});
+        const { sdk, client } = await this.s3();
         let output;
         try {
-            output = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: `${this.prefix}${relativePath}` }));
+            output = await client.send(new sdk.GetObjectCommand({ Bucket: this.bucket, Key: `${this.prefix}${relativePath}` }));
         }
         catch (err) {
             const name = err.name;
@@ -53,5 +44,12 @@ export class LambderS3FileSource {
         if (!output.Body)
             return null;
         return remoteStoreFile(Buffer.from(await output.Body.transformToByteArray()), output.ContentType);
+    }
+    /** The SDK, loaded on the first read, and the client: the one supplied, or one made from clientConfig. */
+    async s3() {
+        this.clientSdk ??= withInstallHint(import("@aws-sdk/client-s3"), "@aws-sdk/client-s3", "LambderS3FileSource", () => { this.clientSdk = undefined; });
+        const sdk = await this.clientSdk;
+        this.client ??= new sdk.S3Client(this.clientConfig ?? {});
+        return { sdk, client: this.client };
     }
 }

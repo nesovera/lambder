@@ -15,10 +15,6 @@ vi.mock('@aws-sdk/client-dynamodb', async (importOriginal) => {
     seen.loads.push('@aws-sdk/client-dynamodb');
     return await importOriginal<typeof import('@aws-sdk/client-dynamodb')>();
 });
-vi.mock('@aws-sdk/lib-dynamodb', async (importOriginal) => {
-    seen.loads.push('@aws-sdk/lib-dynamodb');
-    return await importOriginal<typeof import('@aws-sdk/lib-dynamodb')>();
-});
 
 describe('DynamoDB SDK loading order', () => {
     it('importing lambder and constructing an app with sessions and the stores loads nothing; the first table access loads the SDK', async () => {
@@ -40,6 +36,12 @@ describe('DynamoDB SDK loading order', () => {
 
         // A second store shares the loaded module; nothing is imported twice.
         await cache.get('missing');
+        expect(seen.loads).toEqual(['@aws-sdk/client-dynamodb']);
+
+        // The session store speaks the same item-level API, so it needs that
+        // one package and no other.
+        const sessions = new lambder.LambderDdbSessionStore({ tableName: 'sessions', client: fakeClient });
+        expect(await sessions.get('hashed-key', 'secret-hash')).toBeNull();
         expect(seen.loads).toEqual(['@aws-sdk/client-dynamodb']);
     });
 
@@ -66,24 +68,20 @@ describe('the client the loader makes', () => {
     });
 
     it('is one client per region, shared by every store not given one', async () => {
-        const { createDynamoClientLoader, createDynamoDocumentClientLoader } = await import('../../src/stores/LambderDdbSdk.js');
-        const [cache, limiter, other] = await Promise.all([
+        const { createDynamoClientLoader } = await import('../../src/stores/LambderDdbSdk.js');
+        const [cache, limiter, sessions, other] = await Promise.all([
             createDynamoClientLoader({ user: 'LambderDdbCache', region: 'eu-central-1' })(),
             createDynamoClientLoader({ user: 'LambderDdbRateLimiter', region: 'eu-central-1' })(),
+            createDynamoClientLoader({ user: 'LambderDdbSessionStore', region: 'eu-central-1' })(),
             createDynamoClientLoader({ user: 'LambderDdbRateLimiter', region: 'eu-north-1' })(),
         ]);
         expect(limiter.client).toBe(cache.client);
+        expect(sessions.client).toBe(cache.client);
         expect(other.client).not.toBe(cache.client);
-
-        const [sessions, moreSessions] = await Promise.all([
-            createDynamoDocumentClientLoader({ user: 'LambderDdbSessionStore', region: 'eu-central-1' })(),
-            createDynamoDocumentClientLoader({ user: 'LambderDdbSessionStore', region: 'eu-central-1' })(),
-        ]);
-        expect(moreSessions.client).toBe(sessions.client);
     });
 
     it('falls to the SDK default chain when the store was given none', async () => {
-        // All four stores share this rule. A store with a fixed fallback region
+        // Every DynamoDB store shares this rule. A store with a fixed fallback region
         // would quietly land there when an app deployed elsewhere and left the
         // option out, while its sibling stores followed the deployment.
         const { createDynamoClientLoader } = await import('../../src/stores/LambderDdbSdk.js');

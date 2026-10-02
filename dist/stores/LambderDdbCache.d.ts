@@ -1,6 +1,8 @@
 import type { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { type LambderCompressionOption } from "../shared/wire/LambderCompressionOption.js";
-import type { LambderCache, LambderCacheKey, LambderCacheListOptions, LambderCacheSetOptions } from "../shared/contracts/LambderCache.js";
+import type { LambderCache, LambderCacheGetOrSetOptions, LambderCacheKey, LambderCacheListOptions, LambderCacheSetOptions } from "../shared/contracts/LambderCache.js";
+import type { LambderMemoryCacheOptions } from "./LambderMemoryCache.js";
+import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
 export interface LambderDdbCacheOptions {
     tableName: string;
     /** Region the client is created for on first use; the SDK's default chain otherwise. */
@@ -26,12 +28,6 @@ export interface LambderDdbCacheOptions {
      * boundary without moving the world's clock.
      */
     now?: () => number;
-}
-export interface LambderDdbCacheGetOrSetOptions extends LambderCacheSetOptions {
-    /** How long one container's fill lease on a missing entry holds the others off. Default: 15. */
-    leaseSeconds?: number;
-    /** How long a container waits for another's fill before loading itself. Default: (leaseSeconds + 1) * 1000. */
-    waitForFillMs?: number;
 }
 /**
  * Persistent JSON cache backed by DynamoDB.
@@ -86,6 +82,16 @@ export declare class LambderDdbCache implements LambderCache {
     /** This instance's own writes, as its reads and its memory layer need to know them (see LocalWriteLedger). */
     private readonly localWrites;
     constructor(options: LambderDdbCacheOptions);
+    /**
+     * Puts a memory twin under this cache in place, for `lambder/testing`:
+     * every LambderCache member answers from the twin from then on. The twin
+     * is built with this cache's own default TTL, size limit and clock, so a
+     * test meets the rules this cache was configured with. Keyed by a symbol
+     * no entry point exports; see registerSwappableInstance.
+     */
+    [LAMBDER_BACKEND_SWAP](twins: {
+        cache(options: LambderMemoryCacheOptions): LambderCache;
+    }): void;
     get<T>(key: LambderCacheKey): Promise<T | undefined>;
     private getByAddress;
     /**
@@ -158,7 +164,7 @@ export declare class LambderDdbCache implements LambderCache {
      * grouping very large values makes listing more expensive.
      */
     listSortKeys(partition: string, options?: LambderCacheListOptions): Promise<string[]>;
-    getOrSet<T>(key: LambderCacheKey, loader: () => Promise<T>, options?: LambderDdbCacheGetOrSetOptions): Promise<T>;
+    getOrSet<T>(key: LambderCacheKey, loader: () => Promise<T>, options?: LambderCacheGetOrSetOptions): Promise<T>;
     /** The fill once a read found nothing: one container loads under the lease while the others wait for its value. */
     private fill;
     /**
@@ -198,7 +204,7 @@ export declare class LambderDdbCache implements LambderCache {
     private deleteItems;
     private invalidateManifest;
     private batchWrite;
-    /** The JSON text of a stored payload. */
+    /** The JSON text of a stored payload, restored under maxValueBytes, the most this cache writes. */
     private decode;
     private remember;
     private partitionKey;

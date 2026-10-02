@@ -1,5 +1,7 @@
-import { assertPartitionKeyFits, createDynamoClientLoader, isConditionalCheckFailure, } from "./LambderDdbSdk.js";
+import { assertPartitionKeyFits, createDynamoClientLoader, isConditionalCheckFailure, storedNumber, } from "./LambderDdbSdk.js";
 import { randomSecret } from "../shared/util/LambderSignedClaims.js";
+import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
+import { delegateToTwin, registerSwappableInstance } from "../shared/util/LambderSwappableInstances.js";
 /**
  * Why each item of a cancelled transaction was refused, in the order the
  * items were sent, or null when the error is not a cancelled transaction.
@@ -46,10 +48,9 @@ const sendRetryingConflicts = async (write) => {
         }
     }
 };
-/** A number attribute as stored, or the fallback when it is missing or not a number, since NaN compares false to everything. */
-const storedNumber = (raw, fallback) => {
-    const value = Number(raw);
-    return Number.isFinite(value) ? value : fallback;
+/** Every LambderOneShotSecretStore member, which the swap door hands to a memory twin. */
+const ONE_SHOT_SECRET_STORE_MEMBERS = {
+    issue: true, findByScope: true, findByDigest: true, attempt: true, consume: true, retire: true,
 };
 /**
  * One-shot secrets in DynamoDB, under the store's prefix, so the table can be
@@ -92,6 +93,17 @@ export class LambderDdbOneShotSecretStore {
         this.tableName = options.tableName;
         this.keyPrefix = options.keyPrefix ?? "OTS";
         this.ready = createDynamoClientLoader({ user: "LambderDdbOneShotSecretStore", region: options.region, client: options.client });
+        registerSwappableInstance(this);
+    }
+    /**
+     * Puts a memory twin under this store in place, for `lambder/testing`:
+     * every LambderOneShotSecretStore member answers from the twin from then
+     * on, so the LambderOneShotSecrets built over this store issues and
+     * verifies in memory. Keyed by a symbol no entry point exports; see
+     * registerSwappableInstance.
+     */
+    [LAMBDER_BACKEND_SWAP](twins) {
+        delegateToTwin(this, twins.oneShotSecretStore(), ONE_SHOT_SECRET_STORE_MEMBERS);
     }
     scopeKey(scope) {
         return {

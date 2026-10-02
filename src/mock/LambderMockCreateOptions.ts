@@ -23,6 +23,7 @@ import type {
 } from "../shared/wire/LambderApiContract.js";
 import type { LambderApiGuard } from "../api/LambderApiGuards.js";
 import type { LambderApiOptionEntry, LambderGuardDeclarationEntry } from "../shared/wire/LambderApiOptionEntries.js";
+import type { LambderApiSchemaEntry } from "../shared/wire/LambderApiSchemaEntries.js";
 import type { LambderApiRateLimitPolicyConfig } from "../api/LambderApiRateLimits.js";
 import type { LambderApiRequest } from "../api/LambderApiRequest.js";
 import type { LambderApiTransport } from "../shared/transport/LambderApiTransport.js";
@@ -149,9 +150,31 @@ export type LambderMockGuardShapeOf<D> =
     : { apiInput?: undefined; guardInput?: undefined })
     & (D extends { session: true } ? { session: true } : { session?: false | undefined });
 
-/** Each mock guard the declarations know held to its declared shape; a guard the table does not have is free. */
+/** The refusal codes a guard or a guard declaration names, as a union: never for one that names none, string for a list typed no narrower. */
+type LambderMockRefusalCodesIn<T> = T extends { refusals?: infer R } ? (NonNullable<R> extends readonly (infer N extends string)[] ? N : never) : never;
+
+/**
+ * A mock guard's own `refusals` held to the codes the server's guard of its
+ * name declares in the generated table: the same codes, in any order. They
+ * type the mock guard's ctx.refuse and are what checkApiRefusals holds the
+ * guard to, so a mock guard declaring other codes than the server's would be
+ * checked against a guard that does not exist. A list typed as any string,
+ * on either side, says nothing to compare; create() compares it.
+ */
+type LambderMockGuardRefusalsAgree<TGuard, TDeclaration> =
+    string extends LambderMockRefusalCodesIn<TGuard> | LambderMockRefusalCodesIn<TDeclaration> ? unknown
+    : [LambderMockRefusalCodesIn<TGuard>] extends [LambderMockRefusalCodesIn<TDeclaration>]
+        ? ([LambderMockRefusalCodesIn<TDeclaration>] extends [LambderMockRefusalCodesIn<TGuard>] ? unknown : LambderMockGuardRefusalsMismatch<TDeclaration>)
+        : LambderMockGuardRefusalsMismatch<TDeclaration>;
+
+/** The error a disagreeing guard meets: the property name is the message, and its value the codes the server's guard declares. */
+type LambderMockGuardRefusalsMismatch<TDeclaration> = {
+    readonly "lambder: this mock guard's refusals are not the codes the server's guard of its name declares in guardDeclarations; declare exactly these": TDeclaration extends { refusals: infer R } ? R : readonly [];
+};
+
+/** Each mock guard the declarations know held to its declared shape and refusal codes; a guard the table does not have is free. */
 type LambderMockGuardsAgree<G, D> = {
-    [N in keyof G & keyof D]: G[N] extends LambderMockGuardShapeOf<D[N]> ? unknown : LambderMockGuardShapeOf<D[N]>;
+    [N in keyof G & keyof D]: (G[N] extends LambderMockGuardShapeOf<D[N]> ? unknown : LambderMockGuardShapeOf<D[N]>) & LambderMockGuardRefusalsAgree<G[N], D[N]>;
 };
 
 /**
@@ -225,6 +248,14 @@ type LambderMockGuardShapes<S, G> = {
  */
 export type LambderMockApiOptionsCover<C> = { [K in keyof C & string]: { mode: LambderContractMode<C, K> } };
 
+/**
+ * What the generated `apiSchemas` table has to hold: an entry for every
+ * endpoint the contract declares. A table generated before an endpoint was
+ * added is a compile error at the option rather than a throw when that
+ * endpoint's entry registers.
+ */
+export type LambderMockApiSchemasCover<C> = { readonly [K in keyof C & string]: LambderApiSchemaEntry };
+
 export type LambderMockAppOptions<
     C, S, G,
     P extends LambderMockRateLimitPolicies<S> = LambderMockRateLimitPolicies<S>,
@@ -239,8 +270,10 @@ export type LambderMockAppOptions<
     /**
      * The server's guard declarations, as the generated options module
      * exports them (`guardDeclarations`). Given, every mock guard of a name
-     * the table has is held to its input mode and session requirement at
-     * the `guards` option (see LambderMockGuardShapeOf). Nothing runs on it.
+     * the table has is held to its input mode, session requirement and
+     * refusal codes at the `guards` option (see LambderMockGuardShapeOf), and
+     * create() compares the refusal codes again, for a list typed no narrower
+     * than strings or a caller the compiler did not see. Nothing runs on it.
      */
     guardDeclarations?: D;
     /**
@@ -254,6 +287,22 @@ export type LambderMockAppOptions<
      * contract (see LambderMockApiOptionsCover).
      */
     apiOptions?: A & LambderMockApiOptionsCover<C>;
+    /**
+     * The server's input and output schemas per API, as the generated schemas
+     * module exports them (`apiSchemas`, written by writeApiSchemas). Given,
+     * the input of every call a handler answers is validated against the
+     * server's input schema and refused as the server refuses it (422, or
+     * what onInvalidInput answers), the handler reads the payload as the
+     * server's parse leaves it, and every answer is parsed through the
+     * server's output schema, which drops what it does not declare and fills
+     * its defaults. An entry's own `input` schema still applies, to what the
+     * server's leaves. Each schema is rebuilt on the first call that needs
+     * it. Refinements and transforms are not in the table (writeApiSchemas
+     * lists them). The module names every endpoint: import it from the mock's
+     * setup alone, which a production build never loads. The table has to
+     * cover the contract (see LambderMockApiSchemasCover).
+     */
+    apiSchemas?: LambderMockApiSchemasCover<C>;
     /** Stamped on every answer's envelope as apiVersion, as the server's option is. */
     apiVersion?: string;
     /** The version floor, as on the server: a call naming a lower `version` answers versionExpired whatever its signature says. */

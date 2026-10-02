@@ -1,7 +1,7 @@
 import type { LambderApiAnswer } from "../api/LambderApiAnswer.js";
 import { apiNameOfCallPath } from "../shared/wire/LambderApiNames.js";
 import { DEFAULT_API_PATH } from "../shared/wire/LambderDefaultApiPath.js";
-import { readApiEnvelope, cookieValuesByName, isApiCallContentType, lowercaseHeaderNames, type LambderApiRequest } from "../api/LambderApiRequest.js";
+import { readApiEnvelopeText, cookieValuesByName, isApiCallContentType, lowercaseHeaderNames, type LambderApiRequest } from "../api/LambderApiRequest.js";
 import { getAnswerHeader } from "../shared/wire/LambderAnswerHeaders.js";
 import { base64ToText } from "../shared/util/LambderBase64.js";
 import { normalizeClientIp } from "../shared/util/LambderClientIp.js";
@@ -59,8 +59,6 @@ export const lambderMockInvokeTransport = (
     const apiPath = options.apiPath ?? DEFAULT_API_PATH;
     const rawBody = event.body ?? "";
     const body = event.isBase64Encoded ? base64ToText(rawBody) : rawBody;
-    let post: Record<string, unknown> = {};
-    try { post = JSON.parse(body || "{}") ?? {}; } catch { post = {}; }
     const headers = lowercaseHeaderNames(event.headers);
     const cookies = cookieValuesByName(event.cookies ?? []);
     // A JSON POST to `{apiPath}/{group}/{action}` is a call, as the server's
@@ -72,7 +70,7 @@ export const lambderMockInvokeTransport = (
     const apiName = event.requestContext?.http?.method === "POST" && isApiCallContentType(headers)
         ? apiNameOfCallPath(apiPath, event.rawPath ?? "")
         : null;
-    const request = apiName !== null && readApiEnvelope(post, {
+    const request = apiName !== null && readApiEnvelopeText(body, {
         headers, cookies,
         ip: normalizeClientIp(event.requestContext?.http?.sourceIp ?? ""),
         host: headers.host || event.requestContext?.domainName || "lambder-invoke",

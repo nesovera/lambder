@@ -1,4 +1,4 @@
-import type { LambderCache, LambderCacheKey, LambderCacheListOptions, LambderCacheSetOptions } from "../shared/contracts/LambderCache.js";
+import type { LambderCache, LambderCacheGetOrSetOptions, LambderCacheKey, LambderCacheListOptions, LambderCacheSetOptions } from "../shared/contracts/LambderCache.js";
 import { type LambderCacheAddress } from "./LambderCacheKeys.js";
 /** One entry as a storage keeps it: the value's JSON text and the second it stops being live. */
 export interface LambderCacheStoredEntry {
@@ -85,7 +85,7 @@ export declare class LambderStorageBackedCache implements LambderCache {
     delete(key: LambderCacheKey): Promise<boolean>;
     deletePartition(partition: string): Promise<number>;
     listSortKeys(partition: string, options?: LambderCacheListOptions): Promise<string[]>;
-    getOrSet<T>(key: LambderCacheKey, loader: () => Promise<T>, options?: LambderCacheSetOptions): Promise<T>;
+    getOrSet<T>(key: LambderCacheKey, loader: () => Promise<T>, options?: LambderCacheGetOrSetOptions): Promise<T>;
     /** Whole seconds, as entries expire in every cache here, so a TTL ends on the same second as the memory cache's. */
     private nowSeconds;
     /** The entry at the address while it is live; the storage may still hold one past its expiry. */

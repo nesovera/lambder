@@ -50,8 +50,11 @@ import {
 } from "../shared/wire/LambderCallOptions.js";
 import { beginIdempotentAttempt, IDEMPOTENT_ATTEMPT_NOT_SENT, type LambderIdempotentAttempt } from "../shared/wire/LambderIdempotencyKeyScope.js";
 import { createCallAbort, stopWaitingWhenAborted } from "../shared/util/LambderCallAbort.js";
+import { markErrorReported } from "../shared/util/LambderErrorReportMark.js";
 import { coerceToError, errorFromCrashDetail } from "../shared/wire/LambderCrashDetail.js";
 import { assertPositiveInteger } from "../shared/util/LambderOptionChecks.js";
+import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
+import { registerSwappableInstance } from "../shared/util/LambderSwappableInstances.js";
 import { resolveCompressionOption, type LambderCompressionOption, type LambderCompressionSettings } from "../shared/wire/LambderCompressionOption.js";
 import {
     DEFAULT_INVOKE_REQUEST_COMPRESSION_SETTINGS,
@@ -98,7 +101,11 @@ export type LambderInvokeTransport = (
 export type LambderInvokeLogListHandler = (apiName: string, logList: unknown[]) => void | Promise<void>;
 /** The beforeCall option: every call, by its endpoint name or `METHOD path`, before anything is built or sent. */
 export type LambderInvokeCallCheck = (name: string, info: { functionName: string }) => void;
-/** The onFailure option: every failed call, once, awaited before api() throws or apiOutcome() returns. */
+/**
+ * The onFailure option: every failed call, once, awaited before api() throws
+ * or apiOutcome() returns, but for a call its own signal aborted, which is the
+ * calling code's choice rather than a failure to report.
+ */
 export type LambderInvokeFailureHandler = (failure: LambderInvokeFailure, info: { apiName: string; functionName: string }) => void | Promise<void>;
 
 /**
@@ -160,8 +167,11 @@ type LambderInvokeCallerBaseOptions = {
     /**
      * Called and awaited for every failed call before api() throws or
      * apiOutcome() returns, so failures are reported in one place, before the
-     * lambda answers. A throw inside it is logged and otherwise ignored, so
-     * apiOutcome() never throws.
+     * lambda answers. A call its own signal aborted is not told: the calling
+     * code gave it up. A throw inside it is logged and otherwise ignored, so
+     * apiOutcome() never throws. The error of a failure it took is marked as
+     * reported, so the instance's crash reporting does not report it again
+     * when api() throws it up through a handler.
      */
     onFailure?: LambderInvokeFailureHandler;
     /**
@@ -245,7 +255,7 @@ type FailureInit = FailureInitFields & (
     | { reason: 'payloadTooLarge'; bytes: number }
     | { reason: 'versionExpired' | 'sessionExpired' | 'notAuthorized'; response: LambderApiRefusalEnvelope }
     | { reason: 'refusal'; refusal: LambderUncheckedRefusalMessage; response: LambderApiRefusalEnvelope }
-    | { reason: 'network' | 'timeout' | 'server' | 'protocol' | 'unknown' }
+    | { reason: 'network' | 'timeout' | 'aborted' | 'server' | 'protocol' | 'unknown' }
 );
 
 /**
@@ -270,7 +280,8 @@ class LambderInvokeCallerCore<TContract extends LambderApiContractShape = any, T
     readonly #beforeCall?: LambderInvokeCallCheck;
     readonly #guardInputsProvider?: (apiName: string) => unknown;
     readonly #sessionTokenCookieKey: string;
-    readonly #transport: LambderInvokeTransport;
+    /** The transport given, or the Lambda SDK; `lambder/testing` replaces the SDK's through the swap door below. */
+    #transport: LambderInvokeTransport;
     readonly #clientConfig: LambdaClientConfig | undefined;
     #client: LambdaClient | undefined;
     #sdk: Promise<typeof import("@aws-sdk/client-lambda")> | undefined;
@@ -302,11 +313,25 @@ class LambderInvokeCallerCore<TContract extends LambderApiContractShape = any, T
         this.#guardInputsProvider = guardInputsProvider;
         this.#sessionTokenCookieKey = sessionTokenCookieKey ?? DEFAULT_SESSION_TOKEN_COOKIE_KEY;
         this.#transport = transport ?? ((_event, { eventJson, signal }) => this.#invokeThroughSdk(eventJson, signal));
+        // A caller given a transport reaches what the transport reaches, which
+        // its author chose; only the SDK path is the test kit's to replace.
+        if(!transport) registerSwappableInstance(this);
         // Each group of the callee's contract, as a property:
         // caller.email.send(input) is caller.api("email.send", input), and
         // .outcome the apiOutcome.
         const byName = this as unknown as { api(apiName: string, ...args: unknown[]): Promise<unknown>; apiOutcome(apiName: string, ...args: unknown[]): Promise<unknown> };
         return withApiGroupCalls(this, (apiName, args) => byName.api(apiName, ...args), (apiName, args) => byName.apiOutcome(apiName, ...args));
+    }
+
+    /**
+     * Points this caller, in place of the Lambda SDK, at what
+     * `lambder/testing` answers its function with: a mock app the test
+     * supplied for it, or a transport that fails every call naming the
+     * function. Keyed by a symbol no entry point exports; see
+     * registerSwappableInstance.
+     */
+    [LAMBDER_BACKEND_SWAP](twins: { invokeTransport(callee: { functionName: string; apiPath: string }): LambderInvokeTransport }): void {
+        this.#transport = twins.invokeTransport({ functionName: this.#functionName, apiPath: this.#apiPath });
     }
 
     /**
@@ -398,19 +423,24 @@ class LambderInvokeCallerCore<TContract extends LambderApiContractShape = any, T
         return { functionError: output.FunctionError ?? null, result };
     }
 
-    /** Delivers one event, serialized exactly once; an event over the invoke cap, a rejected transport, or one that answered after the call was given up on, is a failure. */
+    /**
+     * Delivers one event, serialized exactly once; an event over the invoke
+     * cap, a rejected transport, or one that answered after the call was given
+     * up on, is a failure. `reachedTransport` says whether the transport was
+     * handed the event, since only then may the callee have run.
+     */
     async #deliverEvent(
         event: APIGatewayProxyEventV2,
         eventJson: string,
         options: { timeoutMs?: number; signal?: AbortSignal },
-    ): Promise<{ sent: LambderInvokeTransportResult } | { failed: FailureInit }> {
+    ): Promise<{ sent: LambderInvokeTransportResult } | { failed: FailureInit; reachedTransport: boolean }> {
         // Measured here so every path that delivers an event is capped: an
         // oversized event would otherwise come back as the SDK's
         // RequestEntityTooLargeException, which classifies as `protocol` and
         // names neither the size nor the cap.
         const bytes = Buffer.byteLength(eventJson, "utf8");
         if(bytes > LAMBDER_INVOKE_MAX_EVENT_BYTES){
-            return { failed: {
+            return { reachedTransport: false, failed: {
                 reason: 'payloadTooLarge', bytes,
                 detail: `the event is ${bytes} bytes, over the ${LAMBDER_INVOKE_MAX_EVENT_BYTES} byte invoke cap`,
             } };
@@ -423,7 +453,7 @@ class LambderInvokeCallerCore<TContract extends LambderApiContractShape = any, T
             // transport: honouring the signal is the transport's obligation,
             // and not every transport meets it.
             const refused = abort.abortFailure("beforeSending");
-            if(refused) return { failed: { reason: refused.reason, cause: refused.error, detail: refused.error.message } };
+            if(refused) return { reachedTransport: false, failed: { reason: refused.reason, cause: refused.error, detail: refused.error.message } };
 
             const sent = await this.#transport(event, { functionName: this.#functionName, eventJson, signal: abort.signal });
 
@@ -431,13 +461,14 @@ class LambderInvokeCallerCore<TContract extends LambderApiContractShape = any, T
             // transport that ignores the signal resolves late, and trusting it
             // would hand the call site data it had already abandoned.
             const late = abort.abortFailure("afterAnswering");
-            if(late) return { failed: { reason: late.reason, cause: late.error, detail: late.error.message } };
+            if(late) return { reachedTransport: true, failed: { reason: late.reason, cause: late.error, detail: late.error.message } };
             return { sent };
         } catch(err){
             const cause = coerceToError(err, "the invoke failed");
-            // The caller's own timeout wins, since only the caller knows about
-            // it; otherwise the rejection says what it was.
-            return { failed: { reason: abort.timedOut() ? 'timeout' : classifyDeliveryFailure(cause), cause } };
+            // The caller's own abort wins, timeout or signal, since only the
+            // caller knows which aborted the call; otherwise the rejection
+            // says what it was.
+            return { reachedTransport: true, failed: { reason: abort.abortReason() ?? classifyDeliveryFailure(cause), cause } };
         } finally {
             abort.detach();
         }
@@ -484,10 +515,19 @@ class LambderInvokeCallerCore<TContract extends LambderApiContractShape = any, T
             ...(init.response !== undefined ? { response: init.response } : {}),
         } as LambderInvokeFailure;
         error.outcome = failure;
-        if(this.#onFailure){
+        // The calling code aborted this call itself, so there is nothing to
+        // report: the error still reaches whoever reads the outcome.
+        if(this.#onFailure && failure.reason !== 'aborted'){
             // A reporting hook that breaks must not turn apiOutcome() into a
             // throwing call, nor replace the failure it was told about.
-            try { await this.#onFailure(failure, { apiName, functionName: this.#functionName }); }
+            try {
+                await this.#onFailure(failure, { apiName, functionName: this.#functionName });
+                // Reported now, so the crash reporting a thrown api() reaches
+                // skips it rather than recording the one failure twice. Only
+                // once the hook returned: one that threw may have reported
+                // nothing, and a duplicate is better than a loss.
+                markErrorReported(error);
+            }
             catch(err){ console.error(`[lambder invoke] onFailure threw for ${this.#functionName} ${apiName}`, err); }
         }
         return failure;
@@ -590,7 +630,14 @@ class LambderInvokeCallerCore<TContract extends LambderApiContractShape = any, T
         }
 
         const delivery = await this.#deliverEvent(event, eventJson, options);
-        if("failed" in delivery) return await this.#failureOutcome(apiName, delivery.failed);
+        if("failed" in delivery){
+            // An event the transport was never handed did not use the key,
+            // whatever the failure reads as (an abort reads as aborted or
+            // timeout): the same as the browser caller's failure before
+            // sending.
+            if(!delivery.reachedTransport) idempotentAttempt.settle(IDEMPOTENT_ATTEMPT_NOT_SENT);
+            return await this.#failureOutcome(apiName, delivery.failed);
+        }
         if(delivery.sent.functionError){
             return await this.#failureOutcome(apiName, { reason: 'crash', functionError: parseFunctionError(delivery.sent.result) });
         }
@@ -738,7 +785,7 @@ export type LambderInvokeGroupCalls<TContract, TProvidedGuards extends string> =
 };
 
 /**
- * A typed client of another Lambder function, over a direct Lambda invoke:
+ * A typed client of another Lambder function, over a Lambda invoke:
  * `caller.email.send(input)` for the callee's endpoint `email.send`,
  * `.outcome(input)` for its outcome, and `caller.api("email.send", input)`
  * for code that has the name as a value.

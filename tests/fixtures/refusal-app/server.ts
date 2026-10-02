@@ -2,6 +2,7 @@ import { z } from "zod";
 import { initLambder, LambderMemorySessionStore } from "../../../src/index.js";
 import { orderRefusals } from "./vocabulary.js";
 import { audited, orderHandlers, OrderMissingRefusal, refuseClosed, refusePlainly, refuseWith, requireOrder, Wallet, WalletShortRefusal } from "./helpers.js";
+import { denyPlainly, requireShippable } from "./aliases.js";
 
 export const init = initLambder<{ userId: string }>().declareRefusals(orderRefusals, { requireCodes: true });
 
@@ -67,6 +68,17 @@ export const lambder = app.registerApiGroups(app.defineApiGroup("orders", {
     hold: app.defineApi({ input: Empty, output: Empty }, audited(async () => requireOrder("1"))),
     // Held in an object and registered by reference, reaching a code it does not declare.
     drop: app.defineApi({ input: Empty, output: Empty }, orderHandlers.drop),
+    // Raises through its refuse held in a variable and destructured under another name: both reach what it declares.
+    close: app.defineApi({ input: Empty, output: Empty, refusals: ["order-closed", "order-missing"] }, async (ctx) => {
+        const held = ctx.refuse;
+        if(Math.random() > 2) held("Closed.", { code: "order-closed" });
+        const { refuse: deny } = ctx;
+        return deny("No such order.", { code: "order-missing", data: { orderId: "1" } });
+    }),
+    // Reaches the init's refuse held under another name, with a code it does not declare.
+    ship: app.defineApi({ input: Empty, output: Empty }, async () => requireShippable()),
+    // Reaches the free refuse imported under another name, with no code.
+    pause: app.defineApi({ input: Empty, output: Empty }, async () => denyPlainly()),
 }));
 
 /** An app's own wrapper around a registration: what it registers is a parameter, which the check cannot follow. */

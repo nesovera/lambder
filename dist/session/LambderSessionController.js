@@ -286,7 +286,20 @@ export default class LambderSessionController {
         return created;
     }
     ;
-    async fetchSession() {
+    /**
+     * The session the request's cookies name, checked against the posted
+     * CSRF token and renewed (its dataRefresh once due, its sliding write),
+     * onto ctx.session. Throws LambderSessionNotFoundError when there is
+     * none.
+     *
+     * `refreshData: true` renews the data on this read whatever its
+     * deadline, for a read that wants it fresh (a page load): the dataRefresh
+     * callback runs once and its result shares the read's one write. A read
+     * followed by refreshSessionData() runs both twice whenever the data was
+     * due. Requires dataRefresh, and throws without it once there is a
+     * session to renew.
+     */
+    async fetchSession(options = {}) {
         const { sessionTokens: candidates, csrfTokens } = this.scanSessionCookies();
         if (!this.areRequestSessionTokensValid(candidates)) {
             throw new LambderSessionNotFoundError("Session tokens are invalid");
@@ -361,7 +374,7 @@ export default class LambderSessionController {
         // Renewed only once this session is known to be the caller's: a
         // slide or a dataRefresh is a write on their behalf.
         const expiresBefore = found.session.expiresAt;
-        const session = await this.manager.renewSession(found.session);
+        const session = await this.manager.renewSession(found.session, { refreshData: options.refreshData });
         // Ended while this request read it (a logout, a password change), or
         // by its own dataRefresh: no session either way.
         if (!session)
@@ -431,9 +444,10 @@ export default class LambderSessionController {
         throw new LambderSessionNotFoundError();
     }
     ;
-    async fetchSessionIfExists() {
+    /** fetchSession, answering null where it throws LambderSessionNotFoundError; it takes the same `refreshData`. */
+    async fetchSessionIfExists(options = {}) {
         try {
-            return await this.fetchSession();
+            return await this.fetchSession(options);
         }
         catch (err) {
             // Only a "no session" exit becomes null, the ambiguous one
@@ -486,9 +500,15 @@ export default class LambderSessionController {
      * Deletes every session of the given sessionKey (e.g. a user id): "log
      * this subject out everywhere". Unlike endSessionAll it needs no fetched
      * session and touches no cookies, so it works on any subject.
+     *
+     * Answers whether it is sure none is left. False means a client
+     * rotating its session in a tight loop raced every pass of the delete,
+     * so a session of the subject may still stand (it is logged too); running
+     * it again is the remedy, and a caller ending sessions because a
+     * credential changed must not report success on false.
      */
     async deleteSessionAllByKey(sessionKey) {
-        await this.manager.deleteSessionAllByKey(sessionKey);
+        return await this.manager.deleteSessionAllByKey(sessionKey);
     }
     ;
     /**
@@ -509,12 +529,22 @@ export default class LambderSessionController {
         this.ctx.session = null;
     }
     ;
+    /**
+     * Ends every session of this session's subject, this one included, and
+     * clears this request's cookies: "log out everywhere".
+     *
+     * Answers false on deleteSessionAllByKey's terms: a session of the
+     * subject may still stand, and running the delete again is the remedy.
+     * This request's own session is over either way, so the second run is
+     * deleteSessionAllByKey with the sessionKey read before this call.
+     */
     async endSessionAll() {
         if (!this.ctx.session)
             throw new LambderSessionNotFoundError();
-        await this.manager.deleteSessionAll(this.ctx.session);
+        const deletedAll = await this.manager.deleteSessionAll(this.ctx.session);
         this.clearSessionCookies();
         this.ctx.session = null;
+        return deletedAll;
     }
     ;
 }

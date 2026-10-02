@@ -14,5 +14,7 @@ export { writeApiSignatures } from "./build/writeApiSignatures.js";
 export { writeApiContract } from "./build/writeApiContract.js";
 export { writeApiOptions } from "./build/writeApiOptions.js";
 export { writeApiGuardParams } from "./build/writeApiGuardParams.js";
+// Development only: the schemas a mock validates its calls against.
+export { writeApiSchemas } from "./build/writeApiSchemas.js";
 export { checkApiRefusals } from "./build/checkApiRefusals.js";
 export { generateApiFiles } from "./build/generateApiFiles.js";

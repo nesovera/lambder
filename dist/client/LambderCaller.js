@@ -1,7 +1,7 @@
 import Cookies from 'js-cookie';
 import { compressPayloadGzip, isRequestCompressionAvailable, resolveRequestCompressionMinBytes, DEFAULT_REQUEST_COMPRESSION_SETTINGS, } from '../shared/wire/LambderRequestPayload.js';
 import { resolveCompressionOption } from '../shared/wire/LambderCompressionOption.js';
-import { resolveApiOutcome } from '../shared/wire/LambderApiOutcome.js';
+import { resolveApiOutcome, } from '../shared/wire/LambderApiOutcome.js';
 import { mergeGuardInputs, } from '../shared/wire/LambderCallOptions.js';
 import { beginIdempotentAttempt, IDEMPOTENT_ATTEMPT_NOT_SENT } from '../shared/wire/LambderIdempotencyKeyScope.js';
 import { createCallAbort } from '../shared/util/LambderCallAbort.js';
@@ -13,6 +13,7 @@ import { LambderReloadLoopBreaker, RELOAD_LOOP_WINDOW_MS } from './LambderReload
 import { lambderFetchTransport } from './lambderFetchTransport.js';
 import { withApiGroupCalls } from '../shared/wire/LambderApiGroupCalls.js';
 import { splitApiName } from '../shared/wire/LambderApiNames.js';
+import { DEFAULT_API_PATH } from '../shared/wire/LambderDefaultApiPath.js';
 /**
  * What keeps a stale bundle from reloading itself forever (see the class):
  * one for the page, shared by every caller it builds, since a reload is the
@@ -39,9 +40,10 @@ class LambderCallerCore {
     get isLoading() { return this.fetchTrackerList.length > 0; }
     #versionExpiredHandler;
     #sessionExpiredHandler;
-    // Hears every endpoint's refusals, so held at the widest message: the
-    // constructor option types it to the contract's codes, and dispatch,
-    // generic over one endpoint's message, hands it one of those.
+    // These three hear every endpoint's calls, so they are held at the widest
+    // message: the constructor options type them to the contract's codes,
+    // and dispatch, generic over one endpoint's message, hands them one of
+    // those.
     #refusalHandler;
     #notAuthorizedHandler;
     #errorHandler;
@@ -59,7 +61,7 @@ class LambderCallerCore {
         // The conditional provider option is resolved per instantiation;
         // inside the class it is read through the plain shape.
         const { apiPath, apiVersion, apiSignatures, isCorsEnabled, timeoutMs, versionExpiredHandler, sessionExpiredHandler, refusalHandler, notAuthorizedHandler, errorHandler, logListHandler, fetchStartedHandler, fetchEndedHandler, apiInputValidationErrorHandler, sessionCookieDomain, requestCompression, guardInputsProvider, transport, } = options;
-        this.#apiPath = apiPath;
+        this.#apiPath = apiPath ?? DEFAULT_API_PATH;
         this.#apiVersion = apiVersion;
         this.#apiSignatures = apiSignatures;
         this.#timeoutMs = timeoutMs;
@@ -137,38 +139,50 @@ class LambderCallerCore {
                 this.fetchTrackerList.splice(at, 1);
         };
         let fetchEndCalled = false;
-        const fetchEnded = async (fetchResult) => {
+        const fetchEnded = async (outcome) => {
             dropFetchTracker();
             if (fetchEndCalled || !fetchEndedHandler)
                 return;
             fetchEndCalled = true;
             await fetchEndedHandler({
                 fetchParams: { apiName, payload, headers },
-                fetchResult,
+                fetchResult: outcome,
                 activeFetchList: [...this.fetchTrackerList],
             });
         };
         let errorHandlerCalled = false;
-        const reportError = async (err) => {
+        const reportError = async (error, failure) => {
             if (errorHandlerCalled || !errorHandler)
                 return;
             errorHandlerCalled = true;
-            await errorHandler(err);
+            await errorHandler(error, failure);
+        };
+        /**
+         * Ends a call no answer was read for: the attempt told, the lifecycle
+         * closed, and the failure reported, unless the site's own signal is
+         * what ended it. The site gave that call up itself (a superseded
+         * read, a view that closed), and reporting it would put a "could not
+         * reach the server" in front of a person for something the page chose.
+         */
+        const unansweredOutcome = async (failure, attemptOutcome) => {
+            idempotentAttempt.settle(attemptOutcome);
+            await fetchEnded(failure);
+            if (failure.reason !== 'aborted')
+                await reportError(failure.error, failure);
+            return failure;
         };
         // Timeout and abort wiring, shared with LambderInvokeCaller so the two
         // cannot drift on what a late or abandoned call means.
         const abort = createCallAbort({ timeoutMs: options?.timeoutMs ?? this.#timeoutMs, signal: options?.signal });
         const signal = abort.signal;
-        /** Reports a call that was given up on, or null while it still stands. */
+        /** Ends a call that was given up on, or null while it still stands. */
         const abandonedOutcome = async (stage) => {
-            const failure = abort.abortFailure(stage);
-            if (!failure)
+            const abandoned = abort.abortFailure(stage);
+            if (!abandoned)
                 return null;
-            idempotentAttempt.settle(stage === "beforeSending" ? IDEMPOTENT_ATTEMPT_NOT_SENT : { ok: false, reason: failure.reason });
-            await fetchEnded(failure.error);
-            await reportError(failure.error);
-            const outcome = { ok: false, reason: failure.reason, error: failure.error };
-            return outcome;
+            const failure = { ok: false, reason: abandoned.reason, error: abandoned.error };
+            // Nothing sent tried nothing; a request that left may have run.
+            return await unansweredOutcome(failure, stage === "beforeSending" ? IDEMPOTENT_ATTEMPT_NOT_SENT : failure);
         };
         try {
             // A name that is not group.action names no endpoint and no path:
@@ -177,8 +191,9 @@ class LambderCallerCore {
             if (!splitApiName(apiName)) {
                 idempotentAttempt.settle(IDEMPOTENT_ATTEMPT_NOT_SENT);
                 const error = new Error(`Lambder: "${apiName}" is not an endpoint name. An endpoint is named group.action, both identifiers.`);
-                await reportError(error);
-                return { ok: false, reason: 'unknown', error };
+                const failure = { ok: false, reason: 'unknown', error };
+                await reportError(error, failure);
+                return failure;
             }
             this.fetchTrackerList.push(fetchTracker);
             if (fetchStartedHandler)
@@ -235,18 +250,15 @@ class LambderCallerCore {
                 });
             }
             catch (err) {
-                const wrappedError = coerceToError(err, "Request failed");
-                // The caller's own abort wins, since only it knows about that.
-                // Otherwise a transport that named its reason is believed:
-                // "protocol" means something came back and was not an answer,
-                // which is what this caller already calls `server`.
-                const reason = abort.timedOut() ? 'timeout'
-                    : isLambderTransportFailure(err) && err.reason === 'protocol' ? 'server'
-                        : 'network';
-                idempotentAttempt.settle({ ok: false, reason });
-                await fetchEnded(wrappedError);
-                await reportError(wrappedError);
-                return { ok: false, reason, error: wrappedError };
+                // The caller's own abort wins, timeout or signal, since only it
+                // knows which aborted the call. Otherwise a transport that named
+                // its reason is believed: "protocol" means something came back
+                // and was not an answer, which is what this caller already
+                // calls `server`.
+                const reason = abort.abortReason()
+                    ?? (isLambderTransportFailure(err) && err.reason === 'protocol' ? 'server' : 'network');
+                const failure = { ok: false, reason, error: coerceToError(err, "Request failed") };
+                return await unansweredOutcome(failure, failure);
             }
             // An answer that arrives after the call was given up on is not a
             // success. A transport that ignores request.signal resolves late,
@@ -271,25 +283,20 @@ class LambderCallerCore {
                     for (const record of logList)
                         console.log("[lambder]", record);
             }
+            await fetchEnded(outcome);
             if (!outcome.ok && outcome.reason === 'server') {
-                await fetchEnded(outcome.error);
-                await reportError(outcome.error);
+                await reportError(outcome.error, outcome);
                 return outcome;
             }
             if (!outcome.ok && outcome.reason === 'validation') {
-                await fetchEnded(null);
                 if (apiInputValidationErrorHandler) {
                     await apiInputValidationErrorHandler(outcome.zodError);
                 }
                 else {
-                    await reportError(new Error("API Input Validation Error", { cause: outcome.zodError }));
+                    await reportError(new Error("API Input Validation Error", { cause: outcome.zodError }), outcome);
                 }
                 return outcome;
             }
-            // Whatever is left carries the envelope: a success or one of the
-            // envelope's own refusals, which is why no assertion is needed.
-            const data = outcome.response;
-            await fetchEnded(data);
             if (!outcome.ok && outcome.reason === 'versionExpired') {
                 // A page asks for one reload at a time, however many of its
                 // calls are refused. A call refused again after a reload
@@ -300,7 +307,7 @@ class LambderCallerCore {
                 if (decision === "alreadyAsked")
                     return outcome;
                 if (decision === "loopConfirmed") {
-                    await reportError(new Error(`Version expired again for API "${apiName}" within ${RELOAD_LOOP_WINDOW_MS / 60000} minutes of a reload: the bundle being served is still the stale one, so versionExpiredHandler was not called again.`));
+                    await reportError(new Error(`Version expired again for API "${apiName}" within ${RELOAD_LOOP_WINDOW_MS / 60000} minutes of a reload: the bundle being served is still the stale one, so versionExpiredHandler was not called again.`), outcome);
                     return outcome;
                 }
                 await pageReloadLoopBreaker.runReloadAsk(async () => {
@@ -308,7 +315,7 @@ class LambderCallerCore {
                         await versionExpiredHandler();
                     }
                     else {
-                        await reportError(new Error("Version Expired; Please refresh;"));
+                        await reportError(new Error("Version Expired; Please refresh;"), outcome);
                     }
                 });
                 return outcome;
@@ -334,7 +341,7 @@ class LambderCallerCore {
                     await sessionExpiredHandler();
                 }
                 else {
-                    await reportError(new Error("Session Expired; Please log in again;"));
+                    await reportError(new Error("Session Expired; Please log in again;"), outcome);
                 }
                 return outcome;
             }
@@ -343,7 +350,7 @@ class LambderCallerCore {
                     await notAuthorizedHandler();
                 }
                 else {
-                    await reportError(new Error("Not Authorized;"));
+                    await reportError(new Error("Not Authorized;"), outcome);
                 }
                 return outcome;
             }
@@ -358,13 +365,13 @@ class LambderCallerCore {
         catch (err) {
             // Escape hatch for anything above (typically an app handler throwing):
             // dispatch never throws, so api()/apiOutcome() call sites never do.
-            const wrappedError = coerceToError(err, "The call failed before it produced an outcome");
+            const failure = { ok: false, reason: 'unknown', error: coerceToError(err, "The call failed before it produced an outcome") };
             try {
-                await fetchEnded(wrappedError);
-                await reportError(wrappedError);
+                await fetchEnded(failure);
+                await reportError(failure.error, failure);
             }
             catch { /* an app handler threw again; never propagate */ }
-            return { ok: false, reason: 'unknown', error: wrappedError };
+            return failure;
         }
         finally {
             // Whatever ended the call before its attempt was told (a provider
@@ -398,8 +405,9 @@ class LambderCallerCore {
      * The endpoint's output on success, `undefined` on every failure. An
      * output is always an object or an array, so the result is truthy exactly
      * when the call succeeded; the handlers configured on the caller have
-     * already been told why it did not. Use apiOutcome() to branch on the
-     * reason at the call site.
+     * already been told why it did not, unless the call's own signal aborted
+     * it, which tells none. Use apiOutcome() to branch on the reason at the
+     * call site.
      */
     async api(apiName, ...rest) {
         const [payload, options] = rest;

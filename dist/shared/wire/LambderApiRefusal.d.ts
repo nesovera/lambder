@@ -69,14 +69,39 @@ type LambderRefusalMessageFields = {
     content: string;
 };
 /**
- * A refusal no app declared: one the framework wrote itself (a
- * LambderRefusalCode), or an app's `refuse("...")` without a code. It never
- * carries data.
+ * The data `lambder/rate-limited` carries, so a client tells one limit from
+ * another and words each its own way rather than reading the content.
+ */
+export type LambderRateLimitRefusalData = {
+    /**
+     * The name of the policy that refused, as the rateLimits option declares
+     * it. It reaches every client, so a policy's name is one fit to show.
+     */
+    policy: string;
+    /** Seconds until the refusing window resets: the Retry-After header's value, a whole number of at least 1. */
+    retryAfterSeconds: number;
+};
+/** The data each framework code carries, by code. A framework code not named here carries none. */
+type LambderFrameworkRefusalData = {
+    "lambder/rate-limited": LambderRateLimitRefusalData;
+};
+/**
+ * A refusal no app declared that carries no data: one the framework wrote
+ * itself under a code that carries none, or an app's `refuse("...")` without
+ * a code. What an answer written outside any one endpoint (`res.apiRefusal`)
+ * carries.
  */
 export type LambderPlainRefusalMessage = LambderRefusalMessageFields & {
-    code?: LambderRefusalCode;
+    code?: Exclude<LambderRefusalCode, keyof LambderFrameworkRefusalData>;
     data?: undefined;
 };
+/** A framework code that carries data, one arm per code, so a switch on the code narrows `data`. */
+type LambderFrameworkDataRefusalMessage = {
+    [TCode in keyof LambderFrameworkRefusalData]: LambderRefusalMessageFields & {
+        code: TCode;
+        data: LambderFrameworkRefusalData[TCode];
+    };
+}[keyof LambderFrameworkRefusalData];
 /**
  * One declared code's message: the code, and its data when the code declares
  * data. TDeclaration is the code's value in a contract entry's `refusals`:
@@ -96,15 +121,17 @@ type LambderDeclaredRefusalMessage<TCode extends string, TDeclaration> = Lambder
  *
  * TRefusals maps each code the endpoint declares to its contract value
  * (`{ data: D }` or `{}`; see LambderContractRefusalsOf). Every declared code
- * is one arm, carrying its own data type, and the framework's codes and the
- * uncoded refusal are one more arm with no data. A `switch (message.code)`
- * therefore narrows `data` in each case, and a `default: never` holds: the
- * server refuses to send a code the endpoint did not declare (see
+ * is one arm, carrying its own data type, and so is every framework code that
+ * carries data (`lambder/rate-limited`, with LambderRateLimitRefusalData);
+ * the other framework codes and the uncoded refusal are one more arm with no
+ * data. A `switch (message.code)` therefore narrows `data` in each case, and
+ * a `default: never` holds: the server refuses to send a code the endpoint
+ * did not declare, or a framework code without its data (see
  * LambderApiRefusalValidationError), so no other code can arrive.
  *
  * Left without an argument it is the framework's own vocabulary alone.
  */
-export type LambderRefusalMessage<TRefusals = {}> = 0 extends 1 & TRefusals ? LambderUncheckedRefusalMessage : LambderPlainRefusalMessage | {
+export type LambderRefusalMessage<TRefusals = {}> = 0 extends 1 & TRefusals ? LambderUncheckedRefusalMessage : LambderPlainRefusalMessage | LambderFrameworkDataRefusalMessage | {
     [TCode in keyof TRefusals & string]: LambderDeclaredRefusalMessage<TCode, TRefusals[TCode]>;
 }[keyof TRefusals & string];
 /**
@@ -134,17 +161,17 @@ export declare const refusalMessageOf: (message: unknown) => LambderUncheckedRef
  * than retyping the strings.
  */
 export declare const LAMBDER_REFUSAL_CODES: {
-    /** A rate-limit policy refused (429). A policy's own message carries it. */
+    /** A rate-limit policy refused (429), in the policy's own words, with the policy's name and the seconds to wait as its data (LambderRateLimitRefusalData). */
     readonly rateLimited: "lambder/rate-limited";
     /** The original of an idempotent request is still processing (409). */
     readonly duplicateInFlight: "lambder/duplicate-in-flight";
-    /** The idempotencyKey was already used for a request with a different payload (409). */
+    /** The idempotencyKey was already used for a request with another payload, or another guard input that counts (409). */
     readonly idempotencyKeyReused: "lambder/idempotency-key-reused";
     /** The idempotencyKey is malformed (400). */
     readonly invalidIdempotencyKey: "lambder/invalid-idempotency-key";
     /** No API is registered under the requested name. */
     readonly apiNotFound: "lambder/api-not-found";
-    /** The request's compressed payload is malformed or over the size limit (400). */
+    /** The call's body is not a JSON object, or its compressed payload is malformed or over the size limit (400). */
     readonly invalidRequestPayload: "lambder/invalid-request-payload";
     /** Only the mock runtime emits it: the endpoint is registered as not mocked, with a reason. */
     readonly notMocked: "lambder/not-mocked";

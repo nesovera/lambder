@@ -6,7 +6,8 @@ import type { LambderApiIdempotencyOption, LambderGuardsOptionValue, LambderRate
  * One endpoint's declaration as the pipeline runs it: what the server's
  * defineApi options carry, minus the handler, in a shape the mock
  * runtime can restate from a type-only contract. The schemas are optional
- * because the mock has none; when input is present, validation runs and the
+ * because a mock may have none (its input schema is the generated table's,
+ * an entry's own, or neither); when input is present, validation runs and the
  * handler sees the parsed payload. Output is part of the endpoint's
  * signature (apiSignatureOf), which is what a client's build is checked
  * against; the server also parses every output a handler returns through it

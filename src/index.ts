@@ -46,8 +46,8 @@ export { LambderExpiringMap, LambderExpiringMapFullError } from "./shared/util/L
 // Waiting longer after each failure, once: what the upload runner and an app's own retrying code climb.
 export { LambderBackoffTimer } from "./shared/util/LambderBackoffTimer.js";
 export type { LambderBackoffTimerOptions } from "./shared/util/LambderBackoffTimer.js";
-// Signed claims tokens, and the keyed digest and random secret for the secrets an app stores.
-export { LambderSignedClaims, keyedDigest, randomSecret } from "./shared/util/LambderSignedClaims.js";
+// Signed claims tokens, and the keyed digest, random secret and random code for the secrets an app stores.
+export { LambderSignedClaims, keyedDigest, randomSecret, randomCode } from "./shared/util/LambderSignedClaims.js";
 export type { LambderSignedClaimsOptions } from "./shared/util/LambderSignedClaims.js";
 export { constantTimeEquals } from "./shared/util/LambderTextDigest.js";
 export type { LambderStoredCookie } from "./shared/transport/LambderCookieJar.js";
@@ -67,7 +67,7 @@ export type { LambderSynthesizedRequest, LambderLambdaHttpResult, LambderInvokeS
 // The API core: the request, answer, envelope and pipeline both the server and the mock runtime run
 export { LambderApiPipeline } from "./api/LambderApiPipeline.js";
 export type { LambderApiPipelineOptions, LambderApiSessionsConfig, LambderApiInputRefusal, LambderApiRunResult, LambderApiExec } from "./api/LambderApiPipeline.js";
-export { readApiEnvelope, restoreCompressedPayload } from "./api/LambderApiRequest.js";
+export { readApiEnvelope, readApiEnvelopeText, restoreCompressedPayload } from "./api/LambderApiRequest.js";
 export type { LambderApiRequest, LambderApiRequestInfo, LambderCompressedPayloadFields, LambderRestorePayloadResult } from "./api/LambderApiRequest.js";
 export { toHttpAnswer } from "./api/LambderApiAnswer.js";
 export type { LambderApiAnswer } from "./api/LambderApiAnswer.js";
@@ -132,6 +132,7 @@ export type {
     LambderApiRefusalOptions,
     LambderRefusalMessage,
     LambderPlainRefusalMessage,
+    LambderRateLimitRefusalData,
     LambderUncheckedRefusalMessage,
     LambderRefusalCode,
     LambderRefuseOptions,
@@ -156,12 +157,8 @@ export type { LambderDdbSessionStoreOptions } from "./stores/LambderDdbSessionSt
 // Response model
 export {
     LambderResponse,
-    finalizeResponse,
-    answerFromResponse,
-    responseFromAnswer,
     type LambderHttpResponse,
     type LambderHeadersInput,
-    type LambderFinalizeOptions,
     type LambderResponseCompressionSettings,
     type LambderResponseCompressionOption,
 } from "./core/LambderResponse.js";
@@ -169,7 +166,7 @@ export {
 export type { LambderHttpStatusCode, LambderRefusalStatusCode } from "./shared/wire/LambderHttpStatus.js";
 
 // Type-safe templating (tagged templates with auto-escaping)
-export { html, xml, raw, jsonScript, escapeHtml, renderHtmlValue, LambderSafeHtml, type LambderHtmlValue } from "./shared/LambderHtml.js";
+export { html, xml, raw, jsonScript, escapeHtml, renderHtmlValue, LambderSafeHtml, type LambderHtmlValue, type LambderJsonScriptOptions } from "./shared/LambderHtml.js";
 
 // Comment-based HTML templating engine (build-pipeline-safe slots and conditionals, standalone)
 export { LambderTemplatingEngine } from "./core/LambderTemplatingEngine.js";
@@ -177,6 +174,7 @@ export type { LambderTemplateData, LambderTemplatingEngineOptions } from "./core
 export type {
     LambderResponseOptions,
     LambderRawResponseInit,
+    LambderTemplateFileOptions,
 } from "./core/LambderResponseBuilder.js";
 
 // Routing / configuration types
@@ -270,12 +268,15 @@ export { LambderSessionNotFoundError, LambderSessionAmbiguousError } from "./ses
 // Caches (standalone): the interface they all implement, the DynamoDB-backed
 // compressed one (server-only), its in-memory twin for tests, and the one
 // over storage an app supplies, which brings the same rules itself
-export type { LambderCache, LambderCacheKey, LambderCacheSetOptions, LambderCacheListOptions } from "./shared/contracts/LambderCache.js";
-export { LambderDdbCache } from "./stores/LambderDdbCache.js";
 export type {
-    LambderDdbCacheOptions,
-    LambderDdbCacheGetOrSetOptions,
-} from "./stores/LambderDdbCache.js";
+    LambderCache,
+    LambderCacheKey,
+    LambderCacheSetOptions,
+    LambderCacheGetOrSetOptions,
+    LambderCacheListOptions,
+} from "./shared/contracts/LambderCache.js";
+export { LambderDdbCache } from "./stores/LambderDdbCache.js";
+export type { LambderDdbCacheOptions } from "./stores/LambderDdbCache.js";
 export { LambderMemoryCache } from "./stores/LambderMemoryCache.js";
 export type { LambderMemoryCacheOptions } from "./stores/LambderMemoryCache.js";
 export { LambderStorageBackedCache } from "./stores/LambderStorageBackedCache.js";
@@ -298,6 +299,10 @@ export type {
 export { LambderDdbRateLimiter } from "./stores/LambderDdbRateLimiter.js";
 export type { LambderDdbRateLimiterOptions } from "./stores/LambderDdbRateLimiter.js";
 export { LambderMemoryRateLimiter } from "./stores/LambderMemoryRateLimiter.js";
+
+// Passwords at rest: argon2id PHC strings through node:crypto
+export { LambderPasswordHasher } from "./secrets/LambderPasswordHasher.js";
+export type { LambderPasswordHasherOptions } from "./secrets/LambderPasswordHasher.js";
 
 // One-shot secrets: codes and tokens handed out once and taken back once, the
 // store interface they live in, and the DynamoDB and in-memory stores
@@ -402,7 +407,7 @@ export type {
 
 // The declared options as plain data: what apiOptionEntries() reports and
 // writeApiOptions writes, and the readers over the generated tables.
-export { apiGuardParam, apiGuardParamExportName } from "./shared/wire/LambderApiOptionEntries.js";
+export { apiGuardParam, apiGuardParamExportName, apisWithGuard } from "./shared/wire/LambderApiOptionEntries.js";
 export type {
     LambderApiOptionEntries,
     LambderApiOptionEntry,
@@ -421,9 +426,13 @@ export type {
     LambderLanguageMeta,
     LambderI18nConfig,
     LambderI18nInstance,
+    LambderI18nReadonlyInstance,
     LambderI18nTranslator,
     LambderI18nExtractParams,
     LambderI18nDictionaryLoader,
+    LambderI18nDictionaryEntry,
+    LambderI18nPluralEntry,
+    LambderI18nPluralCategory,
     LambderI18nCodes,
     LambderI18nKeys,
     LambderI18nTranslatorFor,
@@ -460,9 +469,12 @@ export type {
 
 // Context types and utilities
 export type { LambderRenderContext, LambderSessionRenderContext, LambderHttpEvent, LambderHttpEventFormat } from "./core/LambderContext.js";
+// One instance's context, named from `typeof` the instance, for a helper typed apart from its handlers.
+export type { LambderRenderContextOf, LambderSessionRenderContextOf } from "./core/LambderContext.js";
 export type {
     LambderApiAnswerOutcome,
     LambderApiSuccessOutcome,
+    LambderApiFailure,
     LambderApiCallFailure,
     LambderApiValidationFailure,
     LambderApiEnvelopeFailure,
@@ -470,7 +482,7 @@ export type {
 } from "./shared/wire/LambderApiOutcome.js";
 export { resolveApiOutcome } from "./shared/wire/LambderApiOutcome.js";
 export { createContext, isV2HttpEvent } from "./core/LambderContext.js";
-export type { LambderContextOptions, LambderOriginProof } from "./core/LambderContext.js";
+export type { LambderContextOptions, LambderOriginProof, LambderRequestArrival } from "./core/LambderContext.js";
 
 // One summary line per API call (the callSummary option)
 export type { LambderCallSummary, LambderCallSummaryOption } from "./core/LambderCallSummary.js";

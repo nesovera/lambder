@@ -11,12 +11,14 @@ npm install lambder zod
 ```
 
 Lambder needs Node 20 or later, which every current Lambda Node.js runtime
-provides. On Lambda the AWS SDK v3 is already provided by the runtime, so add `@aws-sdk/client-dynamodb` and `@aws-sdk/lib-dynamodb` as dev
-dependencies and keep them out of the deployment package. Anywhere else (a
-container, a long-running server, local tests) install them for real. Both are
-loaded on the first session or store access, so an app that keeps no sessions
-and uses no store needs neither. The
-[README's install section](../README.md#installation) has the full table.
+provides. On Lambda the AWS SDK v3 is already provided by the runtime, so add
+`@aws-sdk/client-dynamodb` as a dev dependency and keep it out of the
+deployment package. Anywhere else (a container, a long-running server, local
+tests) install it for real. It is the one package the DynamoDB session store
+and every other DynamoDB store need, and it is loaded on the first session or
+store access, so an app that keeps no sessions and uses no store does not need
+it. The [README's install section](../README.md#installation) has the full
+table.
 
 ## 1. Create the instance
 

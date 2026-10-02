@@ -14,7 +14,7 @@ import {
     successEnvelope, refusalEnvelope, plainRefusalEnvelope, envelopeAnswer, refusalAnswer, validationAnswer, apiNotFoundAnswer,
     sessionExpiredAnswer, versionExpiredAnswer, invalidPayloadAnswer, crashAnswer,
 } from '../../src/api/LambderApiEnvelope.js';
-import { readApiEnvelope, restoreCompressedPayload, type LambderApiRequest } from '../../src/api/LambderApiRequest.js';
+import { readApiEnvelope, readApiEnvelopeText, restoreCompressedPayload, type LambderApiRequest } from '../../src/api/LambderApiRequest.js';
 import { bindCallTools, createApiCallContext, type LambderApiCallContext } from '../../src/api/LambderApiCallContext.js';
 import { LambderApiPipeline } from '../../src/api/LambderApiPipeline.js';
 import type { LambderApiDefinition } from '../../src/api/LambderApiDefinition.js';
@@ -104,6 +104,10 @@ describe('The envelope', () => {
         expect(() => plainRefusalEnvelope('1', { notAuthorized: false } as never, 'test')).toThrow(/always a refusal/);
         expect(() => plainRefusalEnvelope('1', { refusal: { type: 'error', content: 'No.', code: 'app/closed' as never } }, 'test')).toThrow(/was given the code "app\/closed"/);
         expect(() => plainRefusalEnvelope('1', { refusal: { type: 'error', content: 'No.', data: { a: 1 } as never } }, 'test')).toThrow(/a message with data/);
+        // The one framework code that carries data: only the rate-limit engine knows its policy.
+        // @ts-expect-error lambder/rate-limited is not a code an answer written by hand carries
+        expect(() => plainRefusalEnvelope('1', { refusal: { type: 'warning', code: 'lambder/rate-limited', content: 'Slow.' } }, 'res.apiRefusal()'))
+            .toThrow(/res\.apiRefusal\(\) was given the code "lambder\/rate-limited"\. A rate limit refuses with the policy that refused/);
     });
 
     it('each answer function renders its outcome with the right status, headers and body', () => {
@@ -178,7 +182,7 @@ describe('The envelope', () => {
 
     it('carries the call\'s logList on a 422, as every other answer does', () => {
         const zodError = z.object({ v: z.string() }).safeParse({}).error!;
-        expect(JSON.parse(validationAnswer(zodError, ['looked up the org']).body).logList).toEqual(['looked up the org']);
+        expect(JSON.parse(validationAnswer(zodError, ['looked up the store']).body).logList).toEqual(['looked up the store']);
         expect(JSON.parse(validationAnswer(zodError, []).body).logList).toBeUndefined();
     });
 
@@ -207,7 +211,7 @@ describe('Reading and restoring a request', () => {
 
     it('readApiEnvelope takes the envelope fields as posted, and the name from where the call was posted, never from the body', () => {
         expect(readApiEnvelope({ apiName: 'other.name' }, info, 'thing.do').apiName).toBe('thing.do');
-        expect(readApiEnvelope(null, info, 'thing.do')).toMatchObject({ apiName: 'thing.do', payload: undefined, version: null, token: '', compressedPayload: null });
+        expect(readApiEnvelope(undefined, info, 'thing.do')).toMatchObject({ apiName: 'thing.do', payload: undefined, version: null, token: '', compressedPayload: null });
         const parsed = readApiEnvelope({ version: '2', token: 't', siteHost: 's', payload: { p: 1 }, guardInputs: { g: 1 }, idempotencyKey: 'k' }, info, 'thing.do');
         expect(parsed).toMatchObject({ apiName: 'thing.do', version: '2', token: 't', siteHost: 's', payload: { p: 1 }, guardInputs: { g: 1 }, idempotencyKey: 'k', ip: '9.9.9.9', host: 'h', compressedPayload: null });
         // Only a call posted to apiPath itself, with the name in the body, is marked as one on the retired path.
@@ -218,6 +222,29 @@ describe('Reading and restoring a request', () => {
         // guards map it is not: see the guard named "length" below.
         expect(readApiEnvelope({ guardInputs: ['nope'] }, info, 'thing.do')).toMatchObject({ guardInputs: undefined });
         expect(readApiEnvelope({ payloadGz: 'zz', payloadBytes: 3 }, info, 'thing.do').compressedPayload).toEqual({ gzip: 'zz', brotli: undefined, declaredBytes: 3 });
+    });
+
+    it('flags a body that is no envelope, and prepare() answers it with the invalid-payload refusal before anything else', async () => {
+        // No body at all is an empty envelope; a JSON object is an envelope.
+        expect(readApiEnvelope(undefined, info, 'thing.do').invalidEnvelope).toBeUndefined();
+        expect(readApiEnvelopeText('', info, 'thing.do').invalidEnvelope).toBeUndefined();
+        expect(readApiEnvelopeText('{"payload":{"n":1}}', info, 'thing.do')).toMatchObject({ payload: { n: 1 } });
+        expect(readApiEnvelopeText('{"payload":{"n":1}}', info, 'thing.do').invalidEnvelope).toBeUndefined();
+        // Anything else is flagged, read as an empty envelope, and named by its kind, never its value.
+        for(const [body, kind] of [['5', 'a number'], ['"x"', 'a string'], ['true', 'a boolean'], ['null', 'null'], ['[1,2]', 'an array']] as const){
+            expect(readApiEnvelopeText(body, info, 'thing.do')).toMatchObject({ invalidEnvelope: `Request body must be a JSON object, got ${kind}.`, payload: undefined, version: null });
+            expect(readApiEnvelope(JSON.parse(body), info, 'thing.do').invalidEnvelope).toBe(`Request body must be a JSON object, got ${kind}.`);
+        }
+        expect(readApiEnvelopeText('payload=1', info, 'thing.do').invalidEnvelope).toBe('Request body must be a JSON object, and it is not valid JSON.');
+        expect(readApiEnvelope(undefined, info, 'thing.do', { bodyNotJson: true }).invalidEnvelope).toBe('Request body must be a JSON object, and it is not valid JSON.');
+
+        // Ahead of the version floor and the signature gate, whose fields such a body cannot carry.
+        const pipeline = new LambderApiPipeline({ apiVersion: '1.2.0', minApiVersion: '1.0.0' });
+        const answer = await pipeline.prepare(readApiEnvelopeText('[1,2]', info, 'thing.do'));
+        expect(answer?.statusCode).toBe(400);
+        expect(JSON.parse(answer!.body)).toEqual({ apiVersion: '1.2.0', payload: null, refusal: { type: 'error', code: LAMBDER_REFUSAL_CODES.invalidRequestPayload, content: 'Request body must be a JSON object, got an array.' } });
+        const run = await pipeline.run(readApiEnvelopeText('5', info, 'thing.do'), createApiCallContext(), { name: 'thing.do', mode: 'public' }, async () => { throw new Error('never runs'); });
+        expect(run.answer.statusCode).toBe(400);
     });
 
     it('restoreCompressedPayload restores gzip and Brotli under the declared length, and refuses what it cannot vouch for', async () => {
@@ -272,18 +299,11 @@ describe('LambderApiPipeline', () => {
         expect(JSON.parse((await pipeline.prepare(request({ version: '1.2.9' })))!.body).versionExpired).toBe(true);
         expect(JSON.parse((await pipeline.prepare(request({ apiName: 'nope', version: '1.2.9' })))!.body).versionExpired).toBe(true);
         expect(() => new LambderApiPipeline({ minApiVersion: 'v1' })).toThrow(/minApiVersion must be a dotted version/);
-        // A floor above the build's own version is taken as that version,
-        // said once: 1.1.0 reloads, 1.2.0 is served, whatever the floor said.
-        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-        try {
-            const clamped = new LambderApiPipeline({ apiVersion: '1.2.0', minApiVersion: '1.5.0' });
-            expect(clamped.minApiVersion).toBe('1.2.0');
-            expect(warn).toHaveBeenCalledWith(expect.stringMatching(/minApiVersion 1\.5\.0 is above apiVersion 1\.2\.0; the floor is taken as 1\.2\.0/));
-            expect(JSON.parse((await clamped.prepare(request({ version: '1.1.0' })))!.body).versionExpired).toBe(true);
-            expect(await clamped.prepare(request({ version: '1.2.0' }))).toBeNull();
-        } finally {
-            warn.mockRestore();
-        }
+        // A floor above the build's own version would refuse the build's own
+        // clients, so it is refused at creation, as any misconfiguration is.
+        expect(() => new LambderApiPipeline({ apiVersion: '1.2.0', minApiVersion: '1.5.0' }))
+            .toThrow(/Lambder: minApiVersion 1\.5\.0 is above apiVersion 1\.2\.0, so it would refuse this build's own clients/);
+        expect(() => new LambderApiPipeline({ apiVersion: '1.5.0', minApiVersion: '1.5.0' })).not.toThrow();
         // A stamp the floor cannot read would count as 0 and refuse every
         // client of this build, so it is refused at creation instead.
         expect(() => new LambderApiPipeline({ apiVersion: 'dev', minApiVersion: '1.2.10' })).toThrow(/apiVersion must be a dotted version/);

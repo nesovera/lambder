@@ -26,6 +26,7 @@ const caller = new LambderCaller<ApiContractType>({
     },
     refusalHandler: (message) => showToast(message),
     sessionExpiredHandler: () => redirectToLogin(),
+    errorHandler: (error, failure) => reportError(error, { reason: failure.reason, status: failure.status }),
 });
 
 // Fully typed: groups and endpoints autocomplete, the payload and result are inferred.
@@ -54,7 +55,7 @@ in the frontend's type check. In a large app, import it instead from the file
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `apiPath` | `"/api"` | Must match the server's `apiPath` |
+| `apiPath` | `"/api"`, the server's own default | Must match the server's `apiPath` |
 | `apiVersion` | none | Sent with each call as `version`; informational, the server stamps its own on every answer |
 | `apiSignatures` | none | The server's generated signature map. Every call carries its endpoint's signature, and a stale one answers `versionExpired`. See [The signature map](#the-signature-map) |
 | `isCorsEnabled` | cross-origin `apiPath` | Send credentialed cross-origin requests (fetch's `cors` mode, cookies included). By default on exactly when `apiPath` is an absolute URL on another origin than the page's, which is when a browser needs it; an explicit value wins. Ignored when `transport` is passed |
@@ -67,10 +68,10 @@ in the frontend's type check. In a large app, import it instead from the file
 | `sessionExpiredHandler` | none | The session is missing or expired. Called, and the CSRF cookie cleared, only while that cookie is still the one the call sent or is gone: a call sent before a login that answers after it comes back as its `sessionExpired` outcome, with no handler called and nothing touched. Over a cookie jar (the mock's memory mode, `lambder/testing`, `lambderCookieJarTransport`) the jar's CSRF cookie is the one compared, since that session never reaches `document.cookie` |
 | `refusalHandler` | none | The envelope carried a `refusal`, handed over as the message object |
 | `notAuthorizedHandler` | none | The envelope carried `notAuthorized` |
-| `errorHandler` | none | Network, timeout, server or unknown failure |
+| `errorHandler` | none | `(error, failure)`: every failure no other handler takes (see [Failure semantics](#failure-semantics)), with the error to report and the failure outcome it came from. Never told of a call its own `signal` aborted |
 | `apiInputValidationErrorHandler` | none | The server rejected the input (422), with the Zod issues |
 | `logListHandler` | `console.log` | Receives each answer's `logList`, with the API name; the browser twin of `LambderInvokeCaller`'s `onLogList` |
-| `fetchStartedHandler` / `fetchEndedHandler` | none | Call lifecycle, for global loading state |
+| `fetchStartedHandler` / `fetchEndedHandler` | none | Call lifecycle, for global loading state. `fetchEndedHandler` is told of every call that started, however it ended, with its outcome as `fetchResult` |
 
 `setSessionCookieKey(tokenKey, csrfKey)` mirrors non-default server cookie
 names. `caller.fetchTrackerList` is the calls currently in flight, in the order
@@ -140,7 +141,7 @@ Every constructor handler can be overridden in the options of a single call
 | --- | --- |
 | `headers` | Extra request headers |
 | `timeoutMs` | Overrides the constructor default for this call |
-| `signal` | External `AbortSignal`, combined with the timeout when both are set |
+| `signal` | External `AbortSignal`, combined with the timeout when both are set. A call it aborts fails as `aborted`, which no handler reports; one it aborts with a `TimeoutError` (`AbortSignal.timeout()`, alone or inside `AbortSignal.any()`) fails as `timeout` |
 | `compressRequest` | `false` sends the payload plainly, `true` compresses regardless of the threshold |
 | `guardInputs` | Values for the API's guardInput-mode guards, keyed by guard name |
 | `idempotencyKey` | Replay-protection key for APIs declared idempotent on the server. The typed contract makes it mandatory for those APIs, as it does `guardInputs` |
@@ -160,6 +161,8 @@ never throws and resolves to a discriminated union:
 const outcome = await caller.companies.getPage.outcome({ companyName: "Acme" });
 if (outcome.ok) {
     render(outcome.payload);
+} else if (outcome.reason === "aborted") {
+    return;   // this page gave the call up itself
 } else if (outcome.reason === "network" || outcome.reason === "timeout") {
     showOfflineScreen();
 } else if (outcome.reason === "sessionExpired") {
@@ -171,23 +174,61 @@ if (outcome.ok) {
 }
 ```
 
-| `reason` | Meaning |
-| --- | --- |
-| `network` | The request never completed |
-| `timeout` | `timeoutMs` elapsed and the fetch was aborted |
-| `server` | 5xx, a body that is not a Lambder envelope (API Gateway's own `{"message": ...}` errors included, on a 5xx too: an object is an envelope only when it carries `apiVersion`), a non-2xx envelope that names no reason, a 2xx envelope that names none but whose payload is not an object or an array (no handler of the API wrote it), or a transport failure naming `protocol` |
-| `validation` | 422; `zodError` carries the issue detail |
-| `versionExpired` | This build's signature for the endpoint is not the server's, its version is below the server's `minApiVersion`, or the app answered `res.versionExpired` |
-| `sessionExpired` | No valid session |
-| `notAuthorized` | The envelope's `notAuthorized` flag |
-| `refusal` | A structured refusal; `refusal` carries it |
-| `unknown` | Anything else |
+| `reason` | Meaning | The handler told |
+| --- | --- | --- |
+| `network` | The request never completed | `errorHandler` |
+| `timeout` | `timeoutMs` elapsed and the fetch was aborted, or the call's own `signal` aborted with a `TimeoutError` | `errorHandler` |
+| `aborted` | The call's own `signal` aborted it for any other reason, before it was sent or while it was out: the site gave it up | none |
+| `server` | 5xx, a body that is not a Lambder envelope (API Gateway's own `{"message": ...}` errors included, on a 5xx too: an object is an envelope only when it carries `apiVersion`), a non-2xx envelope that names no reason, a 2xx envelope that names none but whose payload is not an object or an array (no handler of the API wrote it), or a transport failure naming `protocol` | `errorHandler` |
+| `validation` | 422; `zodError` carries the issue detail | `apiInputValidationErrorHandler`, or `errorHandler` without one |
+| `versionExpired` | This build's signature for the endpoint is not the server's, its version is below the server's `minApiVersion`, or the app answered `res.versionExpired` | `versionExpiredHandler`, or `errorHandler` without one; `errorHandler` when the reload brought the same bundle back (see [The signature map](#the-signature-map)) |
+| `sessionExpired` | No valid session | `sessionExpiredHandler`, or `errorHandler` without one; neither for an answer about an older session than the page holds |
+| `notAuthorized` | The envelope's `notAuthorized` flag | `notAuthorizedHandler`, or `errorHandler` without one |
+| `refusal` | A structured refusal; `refusal` carries it | `refusalHandler` |
+| `unknown` | Anything else | `errorHandler` |
+
+`errorHandler` is called as `errorHandler(error, failure)`: `error` is the
+Error to report (the outcome's own, or one that names what happened, such as
+`"Not Authorized;"` for a `notAuthorized` with no handler of its own), and
+`failure` the failure outcome that led there, with its `reason`, `status`,
+`refusal`, `response` and `retryAfterSeconds` where the call has them. A
+reporter that files failures by kind reads `failure.reason` rather than the
+message, and a handler written as `(error) => ...` keeps working. Its type
+is `LambderApiFailure`, typed on the constructor with every refusal code the
+contract declares and on a per-call override with the endpoint's own.
+`fetchEndedHandler` is handed the same outcome `apiOutcome()` resolves to, as
+`fetchResult`, for every call that started.
+
+**Aborting a call.** A call whose own `signal` aborts fails as `aborted` and
+tells no handler but `fetchEndedHandler`: a page that gives up a read the
+person has moved past (a search superseded by the next keystroke, a view
+that closed) aborts it, and nobody sees "could not reach the server" for
+it. One controller per read, aborted when the next one starts, is all a
+search box needs:
+
+```typescript
+let searchController: AbortController | undefined;
+const search = async (query: string) => {
+    searchController?.abort();
+    searchController = new AbortController();
+    const outcome = await caller.stores.search.outcome({ query }, { signal: searchController.signal });
+    if (outcome.ok) showResults(outcome.payload);
+};
+```
+
+Only the call's own `signal` reads as `aborted`. Its `timeoutMs` firing is
+`timeout`, still a failure that is reported, and whichever of the two aborted
+the call first names it. A deadline carried on the signal is a timeout too:
+a signal that aborts with a `TimeoutError`, as `AbortSignal.timeout(ms)` does
+alone or inside `AbortSignal.any([viewSignal, AbortSignal.timeout(ms)])`,
+fails the call as `timeout`, so a call bounded that way is reported when its
+deadline passes.
 
 Failure outcomes also carry `retryAfterSeconds` (from the answer's
 `Retry-After`: a 429's, or a 503 that says when to come back),
 and the rest by reason, because the failure side is a discriminated union
-rather than one arm of optional fields: `network`, `timeout`, `server` and
-`unknown` always carry `error`; `validation` always carries `zodError`; and
+rather than one arm of optional fields: `network`, `timeout`, `aborted`,
+`server` and `unknown` always carry `error`; `validation` always carries `zodError`; and
 `versionExpired`, `sessionExpired`, `notAuthorized` and `refusal` always
 carry `response`, the parsed envelope (a `server` failure carries it too when
 the server answered with Lambder's own 500 body, which is how `crash` and
@@ -196,9 +237,9 @@ none of its fields reach `response`, `refusal` or `logList`). So
 narrowing on `reason` narrows to what that reason
 actually has, with no optional reads and no `!`.
 
-Every configured handler still fires on the matching failure, so global UX
-(toasts, re-login prompts) lives in the constructor while individual call sites
-branch on the outcome. An answer's `logList` reaches `logListHandler` whatever
+Every configured handler still fires on the matching failure, as the table
+says, so global UX (toasts, re-login prompts) lives in the constructor while
+individual call sites branch on the outcome. An answer's `logList` reaches `logListHandler` whatever
 the outcome, a 5xx and a 422 included, which is where a crashed call's log
 trail arrives.
 
@@ -252,9 +293,9 @@ guard name, with per-call `guardInputs` merged on top. Name the guards it
 covers in the caller's second type parameter:
 
 ```typescript
-const caller = new LambderCaller<ApiContractType, "orgPermission">({
+const caller = new LambderCaller<ApiContractType, "staffPermission">({
     apiPath: "/api",
-    guardInputsProvider: () => ({ orgPermission: { orgSlug } }),
+    guardInputsProvider: () => ({ staffPermission: { storeSlug } }),
 });
 ```
 
@@ -280,13 +321,18 @@ the caller moves the scope to a new key once an answer settles the
 operation:
 
 - A success settles it, and so does `lambder/idempotency-key-reused`: the
-  server refuses a key reused for a different payload, so that key can never
-  carry the person's new request.
+  server refuses a key reused for a different request, which is a different
+  payload or a different value for one of the API's `guardInput` guards (one
+  declaring `singleUseInput: true`, a captcha token or a refreshed short-lived
+  token, is not counted; see
+  [Guard inputs and idempotency](./api-policies.md#guard-inputs-and-idempotency)),
+  so that key can never carry the person's new request.
 - A refusal of this request (a `refusal`, a rejected input, not
   authorized) settles it too, so the person's next attempt, a corrected form
   included, is a new operation. The exception is a key an earlier attempt
-  may have used: after a timeout, a network failure, a 5xx or a duplicate of
-  an original still in flight, the operation may have run under that key,
+  may have used: after a timeout, a network failure, a call aborted after it
+  was sent, a 5xx or a duplicate of an original still in flight, the
+  operation may have run under that key,
   and guards, validation and rate limits refuse before the replay record is
   claimed. The key is kept, so the next attempt replays the original's
   answer rather than running it again. A double-tap is the one duplicate the
@@ -294,7 +340,8 @@ operation:
   answer, the second tap's duplicate refusal leaves the key to that answer,
   so a first tap refused ("only 5 in stock") still moves the scope on and the
   corrected order goes under a new key.
-- A rate limit (a 429), an expired session and a stale version keep the key.
+- A rate limit (a 429), an expired session, a stale version and a call
+  aborted before it was sent keep the key.
 
 An answer that arrives for a key the scope has already moved past changes
 nothing, so a slow first attempt cannot rotate away the key a later one is
@@ -322,11 +369,11 @@ const caller = new LambderCaller<ApiContractType>({
 });
 
 // Nothing at the call sites changes; this one goes compressed, that one plain.
-await caller.stops.importAll({ stops: bigArray });
-await caller.stops.get({ id: "42" });
+await caller.products.importAll({ products: bigArray });
+await caller.products.get({ id: "42" });
 
 // Per call, either way:
-await caller.stops.importAll(huge, { compressRequest: false });
+await caller.products.importAll(huge, { compressRequest: false });
 ```
 
 A compressed call sends `payloadGz` (gzip bytes, base64) beside `payloadBytes`
@@ -399,7 +446,9 @@ What a transport owes the caller, whether it ships here or you write one:
   included, because reading what a status means is `resolveApiOutcome()`'s job
   alone. A transport that rejects on a status throws away the envelope a
   refusal, a validation failure or a crash arrived in.
-- **A rejection is a transport failure**, reported as `network`. A transport
+- **A rejection is a transport failure**, reported as `network`, unless the
+  call's own timeout or signal had aborted it, which the caller alone knows
+  and reports as `timeout` or `aborted` whatever the rejection says. A transport
   that knows better throws a `LambderTransportFailure`: `protocol` says
   something came back and was not an answer, or the callee threw instead of
   answering, which the caller reports as `server` rather than as flaky
@@ -408,7 +457,7 @@ What a transport owes the caller, whether it ships here or you write one:
 - **`request.signal` must be honoured**, by rejecting as soon as it aborts. It
   is what makes `timeoutMs` and a per-call `signal` mean anything. The caller
   does not take a late answer on trust either: an answer that arrives after its
-  own abort fired is reported as `timeout` (or `network`), never as a success.
+  own abort fired is reported as `timeout` (or `aborted`), never as a success.
 - **Timeouts and retries belong to the caller**, so one call is one delivery
   attempt and an idempotency key means what it says.
 - **A transport that keeps the session's cookies itself says which CSRF
@@ -467,6 +516,74 @@ travels on every call it makes, and a `Set-Cookie` carrying a `Domain` is
 refused outright, since there is no sending host to check that `Domain`
 against and believing it is how a jar hands one host a cookie set for another.
 `new LambderCookieJar({ host })` scopes such a jar in one place instead.
+
+## Retrying with a backoff
+
+A client that has to come back by itself (a socket that reconnects, a screen
+that recovers after a deploy, a loop that tries storage again) waits longer
+after each failure, and most such clients also wait for other reasons (a
+refresh cadence, a pause before recreating something) that must never stack
+with a retry. `LambderBackoffTimer`, from `lambder/client` (and the root entry),
+holds exactly one wait of either kind: `retry` and `wait` climb the ladder,
+`after` waits a fixed time without climbing it, and scheduling any of them
+replaces whatever was waiting. A caller says what to run and when it worked,
+and never keeps a handle and a counter of its own.
+
+```typescript
+import { LambderBackoffTimer } from "lambder/client";
+
+const reconnect = new LambderBackoffTimer({ baseMs: 1_000, maxMs: 60_000 });
+
+socket.onclose = () => reconnect.retry(open);      // waits longer after each failure
+socket.onopen = () => reconnect.reset();           // the next failure waits the shortest time again
+page.onhide = () => reconnect.cancel();            // drops the pending wait, keeps the count
+```
+
+The ladder: a retry waits the base plus a share of a ceiling that grows by
+`factor` with every retry, the whole never past `maxMs`. With full jitter (the
+default) the share is random, so anything many clients fail at together (a
+deploy dropping every socket, a power cut bringing every screen in a building
+up at once) is retried across the whole window instead of in step, which is
+what keeps the herd off the server; even the first wait falls between the
+base and twice it. `jitter: "none"` waits the whole ceiling, a predictable
+ladder for a caller that is alone: twice the base, then climbing to `maxMs`.
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `baseMs` | `1000` | The shortest retry wait, above 0; the first after a reset falls between it and twice it |
+| `maxMs` | `60000`, or `baseMs` when that is longer | The longest any retry wait is; at least `baseMs`, at most 2147483647 |
+| `factor` | `2` | How much the ceiling grows with each retry; at least 1 |
+| `jitter` | `"full"` | `"full"`: the base plus a random share of the ceiling. `"none"`: the base plus the whole ceiling |
+
+Options that would make the ladder a retry loop with no pause are refused
+where the timer is built: a `baseMs` of 0 (every wait is a multiple of it),
+and a `maxMs` past 2147483647 ms, the longest delay `setTimeout` keeps (a
+longer one fires at once). So are a `factor` below 1 and a `jitter` other
+than the two.
+
+`wait(signal?)` is `retry` for code that awaits rather than calls back: it
+resolves after the next rung, rejects at once with the signal's reason when
+`signal` aborts, and rejects with an `Error` when `cancel()` or a later wait
+drops it before it ran, so an `await` on it always settles. `pending` is true
+while a wait of any kind is scheduled and false again by the time it runs, so
+what it runs may schedule the next one. `retries` is how many retries `retry`
+and `wait` have scheduled since the last `reset()`, a dropped one included, so
+a loop that gives up after so many reads the timer:
+
+```typescript
+const storageBackoff = new LambderBackoffTimer({ baseMs: 1_000, maxMs: 15_000 });
+for(;;){
+    if(await tryStorage()) break;
+    if(storageBackoff.retries === 3) throw new Error("storage stayed unreachable");   // four tries in all
+    await storageBackoff.wait(signal);   // throws the abort reason if the caller gives up meanwhile
+}
+```
+
+That loop is what [`LambderUploadRunner`](./uploads.md) runs between tries at
+storage and at the app's own ticket and confirm calls; its `storageRetry`
+option's `baseDelayMs` and `maxDelayMs` are the timer's `baseMs` and `maxMs`,
+and its `attempts` the first try plus the retries, which a step that succeeds
+gives back with `reset()`.
 
 ## Mocking the contract
 

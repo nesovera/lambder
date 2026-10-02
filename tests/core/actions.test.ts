@@ -6,13 +6,14 @@ import { describe, it, expect } from 'vitest';
 import Lambder from '../../src/core/Lambder.js';
 import { browse, testPublicFiles } from '../helpers.js';
 import { lambderTestApp } from '../../src/testing.js';
+import { html } from '../../src/shared/LambderHtml.js';
 describe('Actions (addAction: raw event or context filtering)', () => {
     const sourceIs = (source: string) => (event: unknown) =>
         (event as { source?: string } | null)?.source === source;
 
     it('dispatches non-HTTP events, first match wins', async () => {
         const lambder = new Lambder({ files: testPublicFiles() })
-            .addRoute('/page', (ctx, res) => res.html('http'))
+            .addRoute('/page', (ctx, res) => res.html(html`http`))
             .addAction(sourceIs('app.reconciliation'), async (event) => ({ reconciled: true, id: (event as any).id }))
             .addAction(() => true, async () => 'catch-all');
 
@@ -50,9 +51,9 @@ describe('Actions (addAction: raw event or context filtering)', () => {
         const lambder = new Lambder({ files: testPublicFiles() })
             .addAction(
                 (event, ctx) => ctx !== null && ctx.host === 'dev.example.com' && ctx.cookie.dev !== 'atlas',
-                async (event, { res }) => res!.status404('Not found'),
+                async (event, { res }) => res!.status404(html`Not found`),
             )
-            .addRoute('/page', (ctx, res) => { handlerRan = true; return res.html('secret'); });
+            .addRoute('/page', (ctx, res) => { handlerRan = true; return res.html(html`secret`); });
 
         const blocked = await browse(lambder, { host: 'dev.example.com' }).request('GET', '/page');
         expect(blocked.statusCode).toBe(404);
@@ -64,8 +65,8 @@ describe('Actions (addAction: raw event or context filtering)', () => {
 
     it('joins the same first-match chain as routes, in registration order', async () => {
         const lambder = new Lambder({ files: testPublicFiles() })
-            .addRoute('/page', (ctx, res) => res.html('route wins'))
-            .addAction((event, ctx) => ctx !== null && ctx.path === '/page', async (event, { res }) => res!.html('action'));
+            .addRoute('/page', (ctx, res) => res.html(html`route wins`))
+            .addAction((event, ctx) => ctx !== null && ctx.path === '/page', async (event, { res }) => res!.html(html`action`));
 
         const result = await browse(lambder).request('GET', '/page');
         expect(result.text()).toBe('route wins');
@@ -73,7 +74,7 @@ describe('Actions (addAction: raw event or context filtering)', () => {
 
     it('errors when an HTTP-matched action does not return a response', async () => {
         const lambder = new Lambder({ files: testPublicFiles() })
-            .setGlobalErrorHandler((err, ctx, res) => res.status(500, err.message))
+            .setGlobalErrorHandler((err, ctx, res) => res.text(err.message, { statusCode: 500 }))
             .addAction((event, ctx) => ctx !== null && ctx.path === '/oops', async () => ({ not: 'a response' }));
 
         const result = await browse(lambder).request('GET', '/oops');
@@ -84,7 +85,7 @@ describe('Actions (addAction: raw event or context filtering)', () => {
     it('still routes HTTP events normally when no action filter matches', async () => {
         const lambder = new Lambder({ files: testPublicFiles() })
             .addAction((event, ctx) => ctx === null, async () => 'event only')
-            .addRoute('/page', (ctx, res) => res.html('http'));
+            .addRoute('/page', (ctx, res) => res.html(html`http`));
 
         const visitor = browse(lambder);
         const result = await visitor.request('GET', '/page');
@@ -99,7 +100,7 @@ describe('Actions (addAction: raw event or context filtering)', () => {
 
     it('rethrows action errors for Lambda-native retry/DLQ semantics', async () => {
         const lambder = new Lambder({ files: testPublicFiles() })
-            .setGlobalErrorHandler((err, ctx, res) => res.status(500, 'should not be used for events'))
+            .setGlobalErrorHandler((err, ctx, res) => res.text('should not be used for events', { statusCode: 500 }))
             .addAction(sourceIs('app.fails'), async () => { throw new Error('job failed'); });
 
         await expect(lambderTestApp(lambder).event({ source: 'app.fails' })).rejects.toThrow('job failed');

@@ -1,5 +1,8 @@
-import { describe, it, expect, afterEach, vi } from "vitest";
-import { createLambderI18n } from "../../src/shared/LambderI18n.js";
+import { describe, it, expect, expectTypeOf, afterEach, vi } from "vitest";
+import {
+    createLambderI18n,
+    type LambderI18nKeys, type LambderI18nPluralEntry, type LambderI18nReadonlyInstance,
+} from "../../src/shared/LambderI18n.js";
 
 const makeI18n = () => createLambderI18n({
     languages: {
@@ -68,10 +71,10 @@ describe("LambderI18n: base translation", () => {
             languages: { en: { name: "English" } },
             defaultLanguage: "en",
             enforced: ["en"],
-            base: { en: { invited: "{name} invited you to {org}" } },
+            base: { en: { invited: "{name} invited you to {store}" } },
         });
-        expect(i18n.t("invited", { name: "Eve {org}", org: "Acme" })).toBe("Eve {org} invited you to Acme");
-        expect(i18n.t("invited", { name: "$& and $1", org: "Acme" })).toBe("$& and $1 invited you to Acme");
+        expect(i18n.t("invited", { name: "Eve {store}", store: "Acme" })).toBe("Eve {store} invited you to Acme");
+        expect(i18n.t("invited", { name: "$& and $1", store: "Acme" })).toBe("$& and $1 invited you to Acme");
     });
 
     it("forLanguage returns an explicitly-bound translator", () => {
@@ -252,6 +255,116 @@ describe("LambderI18n: language resolution", () => {
         unsubscribe();
         i18n.setLanguage("en");
         expect(seen).toEqual(["tr", "ar"]);
+    });
+});
+
+describe("LambderI18n: language tags in any case", () => {
+    /** Codes registered with their region and script subtags capitalised, as BCP 47 writes them. */
+    const makeRegionalI18n = () => {
+        const runs = { "pt-BR": 0 };
+        const i18n = createLambderI18n({
+            languages: { en: { name: "English" }, "pt-BR": { name: "Português" }, "zh-Hant": { name: "繁體中文" } },
+            defaultLanguage: "en",
+            enforced: ["en"],
+            base: {
+                en: { save: "Save", greet: "Hello {name}" },
+                "pt-BR": async () => { runs["pt-BR"] += 1; return { save: "Salvar", greet: "Olá {name}" }; },
+                "zh-Hant": { save: "儲存", greet: "你好 {name}" },
+            },
+        });
+        return { i18n, runs };
+    };
+
+    it("detects a browser preference in another case, and answers the code as registered", () => {
+        stubPage({ languages: ["fr-FR", "pt-br", "en"], language: "fr-FR" });
+        expect(makeRegionalI18n().i18n.currentLanguage).toBe("pt-BR");
+
+        stubPage({ languages: ["ZH-HANT"], language: "ZH-HANT" });
+        const { i18n } = makeRegionalI18n();
+        expect(i18n.currentLanguage).toBe("zh-Hant");
+        expect(i18n.currentLanguageMeta).toMatchObject({ code: "zh-Hant", name: "繁體中文" });
+        expect(i18n.t("save")).toBe("儲存");
+
+        // The primary subtag too: a registered "en" from "EN-us".
+        stubPage({ languages: ["EN-us"], language: "EN-us" });
+        expect(makeRegionalI18n().i18n.currentLanguage).toBe("en");
+    });
+
+    it("takes what a detector returns in any case, answered as registered", () => {
+        const i18n = createLambderI18n({
+            languages: { en: { name: "English" }, "pt-BR": { name: "Português" } },
+            defaultLanguage: "en",
+            enforced: ["en"],
+            base: { en: { hi: "Hi" }, "pt-BR": { hi: "Oi" } },
+            detectLanguage: () => "/PT-br/precos".split("/")[1],
+        });
+        expect(i18n.currentLanguage).toBe("pt-BR");
+        expect(i18n.t("hi")).toBe("Oi");
+    });
+
+    it("switches, translates, loads and registers by a code in any case, keyed by the code as registered", async () => {
+        const { i18n, runs } = makeRegionalI18n();
+        const seen: string[] = [];
+        i18n.onLanguageChange((code) => seen.push(code));
+        // A code read off a URL or a cookie at runtime, whatever the types say.
+        const fromOutside = (code: string) => code as "pt-BR";
+
+        await i18n.loadLanguage(fromOutside("pt-br"));
+        expect(runs["pt-BR"]).toBe(1);
+        expect(i18n.forLanguage(fromOutside("PT-BR"))("save")).toBe("Salvar");
+        expect(i18n.forLanguage(fromOutside("pt-br"))).toBe(i18n.forLanguage("pt-BR"));
+
+        i18n.setLanguage(fromOutside("pt-br"));
+        expect(i18n.currentLanguage).toBe("pt-BR");
+        i18n.setLanguage("pt-BR");
+        // The load announced itself, then the switch once: the second spelling names the same language.
+        expect(seen).toEqual(["en", "pt-BR"]);
+
+        i18n.registerDictionary(fromOutside("PT-br"), { save: "Gravar" });
+        expect(i18n.t("save")).toBe("Gravar");
+
+        // isLanguageCode stays exact: it narrows the string it is handed to a registered code.
+        expect(i18n.isLanguageCode("pt-BR")).toBe(true);
+        expect(i18n.isLanguageCode("pt-br")).toBe(false);
+        expect(() => i18n.setLanguage(fromOutside("pt-pt"))).toThrow(/unsupported language code "pt-pt"/);
+    });
+
+    it("refuses two registered codes that differ only in case: they are one language tag", () => {
+        expect(() => createLambderI18n({
+            languages: { en: { name: "English" }, "pt-BR": { name: "Português" }, "pt-br": { name: "Português" } },
+            defaultLanguage: "en",
+            enforced: ["en"],
+            base: { en: { a: "A" }, "pt-BR": { a: "A" }, "pt-br": { a: "A" } },
+        })).toThrow(/registers "pt-BR" and "pt-br", one language tag in two spellings/);
+    });
+});
+
+describe("LambderI18n: a read-only view over any instance of one contract", () => {
+    it("takes instances over different language sets, and offers none of the members that change one", () => {
+        const en = { save: "Save", greet: "Hello {name}" } as const;
+        const withTurkish = createLambderI18n({
+            languages: { en: { name: "English" }, tr: { name: "Türkçe" } },
+            defaultLanguage: "en",
+            enforced: ["en"],
+            base: { en, tr: { save: "Kaydet", greet: "Merhaba {name}" } },
+        });
+        const withArabicAndGerman = createLambderI18n({
+            languages: { en: { name: "English" }, ar: { name: "العربية", dir: "rtl" }, de: { name: "Deutsch" } },
+            defaultLanguage: "en",
+            enforced: ["en", "de"],
+            base: { en, ar: { save: "حفظ", greet: "مرحبا {name}" }, de: { save: "Speichern", greet: "Hallo {name}" } },
+        });
+
+        expectTypeOf(withTurkish).toExtend<LambderI18nReadonlyInstance<typeof en>>();
+        expectTypeOf(withArabicAndGerman).toExtend<LambderI18nReadonlyInstance<typeof en>>();
+        type Mutator = "setLanguage" | "resetLanguage" | "loadLanguage" | "registerDictionary" | "applyToDocument" | "checkPluralCoverage" | "extend" | "extendPartial";
+        expectTypeOf<Extract<keyof LambderI18nReadonlyInstance<typeof en>, Mutator>>().toEqualTypeOf<never>();
+
+        const readers: LambderI18nReadonlyInstance<typeof en>[] = [withTurkish, withArabicAndGerman];
+        // The contract still types each call: params are required where the text has tokens.
+        expect(readers.map((reader) => reader.forLanguage(reader.languageList[1]!)("greet", { name: "Ada" }))).toEqual(["Merhaba Ada", "مرحبا Ada"]);
+        expect(readers.map((reader) => reader.t("save"))).toEqual(["Save", "Save"]);
+        expect(readers.map((reader) => reader.languageMetaList.map((meta) => meta.code))).toEqual([["en", "tr"], ["en", "ar", "de"]]);
     });
 });
 
@@ -559,12 +672,12 @@ describe("LambderI18n: placeholders kept", () => {
             languages, defaultLanguage: "en", enforced: ["en"],
             base: {
                 en: { items: "{count} items", greet: "Hello {name}", save: "Save" },
-                tr: { items: "Öğeler", greet: "Merhaba {name} {org}", save: "Kaydet" },
+                tr: { items: "Öğeler", greet: "Merhaba {name} {store}", save: "Kaydet" },
             },
         });
         expect(creating).toThrow(/base dictionary, these "tr" translations/);
         expect(creating).toThrow(/"items" has none where the default language has \{count\}/);
-        expect(creating).toThrow(/"greet" has \{name\}, \{org\} where the default language has \{name\}/);
+        expect(creating).toThrow(/"greet" has \{name\}, \{store\} where the default language has \{name\}/);
     });
 
     it("takes the placeholders in any order, and repeated", () => {
@@ -598,6 +711,327 @@ describe("LambderI18n: placeholders kept", () => {
         const i18n = createLambderI18n({ languages, defaultLanguage: "en", enforced: ["en"], base: { en: { greet: "Hello {name}" }, tr: { greet: "Merhaba {name}" } } });
         expect(() => i18n.registerDictionary("tr", { greet: "Merhaba" })).toThrow(/registerDictionary\("tr"\)/);
         expect(i18n.forLanguage("tr")("greet", { name: "Ada" })).toBe("Merhaba Ada");
+    });
+});
+
+/** English and Arabic, with a count-varying entry each: two categories against six. */
+const pluralLanguages = {
+    en: { name: "English", intlLocale: "en" },
+    ar: { name: "العربية", intlLocale: "ar", dir: "rtl" },
+} as const;
+const pluralEnglish = {
+    items: { one: "{count} item", other: "{count} items" },
+    ordersAt: { one: "One order at {store}", other: "{count} orders at {store}" },
+    save: "Save",
+} as const;
+const pluralArabic = {
+    items: {
+        zero: "لا توجد منتجات",
+        one: "منتج واحد",
+        two: "منتجان",
+        few: "{count} منتجات",
+        many: "{count} منتجًا",
+        other: "{count} منتج",
+    },
+    ordersAt: {
+        zero: "لا توجد طلبات في {store}",
+        one: "طلب واحد في {store}",
+        two: "طلبان في {store}",
+        few: "{count} طلبات في {store}",
+        many: "{count} طلبًا في {store}",
+        other: "{count} طلب في {store}",
+    },
+    save: "حفظ",
+};
+const makePluralI18n = () => createLambderI18n({
+    languages: pluralLanguages,
+    defaultLanguage: "en",
+    enforced: ["en"],
+    base: { en: pluralEnglish, ar: pluralArabic },
+});
+
+describe("LambderI18n: plural entries", () => {
+    it("picks the form for the count under each language's plural rules", () => {
+        const i18n = makePluralI18n();
+        const english = i18n.forLanguage("en");
+        const arabic = i18n.forLanguage("ar");
+
+        expect([0, 1, 2, 5].map((count) => english("items", { count }))).toEqual(["0 items", "1 item", "2 items", "5 items"]);
+        // Arabic's six: 0 zero, 1 one, 2 two, and by n % 100, 3-10 few, 11-99 many, the rest (100) other.
+        expect([0, 1, 2, 3, 11, 100].map((count) => arabic("items", { count }))).toEqual([
+            "لا توجد منتجات", "منتج واحد", "منتجان", "3 منتجات", "11 منتجًا", "100 منتج",
+        ]);
+        expect(english("ordersAt", { count: 1, store: "Main St" })).toBe("One order at Main St");
+        expect(arabic("ordersAt", { count: 2, store: "Main St" })).toBe("طلبان في Main St");
+
+        i18n.setLanguage("ar");
+        expect(i18n.t("items", { count: 2 })).toBe("منتجان");
+    });
+
+    it("falls back to the default language's entry, picking its form under the default language's rules", () => {
+        const i18n = makePluralI18n();
+        const child = i18n.extendPartial({ en: { tickets: { one: "{count} ticket", other: "{count} tickets" } } });
+        // Under Arabic's rules 2 is "two", a form English has no text for.
+        expect(child.forLanguage("ar")("tickets", { count: 2 })).toBe("2 tickets");
+        expect(child.forLanguage("ar")("tickets", { count: 1 })).toBe("1 ticket");
+    });
+
+    it("picks under the language's Intl locale, so two variants of one language can differ", () => {
+        // Brazilian Portuguese counts 0 as one; European Portuguese as other.
+        const orders = { one: "{count} pedido", many: "{count} de pedidos", other: "{count} pedidos" };
+        const i18n = createLambderI18n({
+            languages: { br: { name: "Português (Brasil)", intlLocale: "pt-BR" }, pt: { name: "Português", intlLocale: "pt-PT" } },
+            defaultLanguage: "br",
+            enforced: ["br"],
+            base: { br: { orders }, pt: { orders } },
+        });
+        expect(i18n.forLanguage("br")("orders", { count: 0 })).toBe("0 pedido");
+        expect(i18n.forLanguage("pt")("orders", { count: 0 })).toBe("0 pedidos");
+    });
+
+    it("takes a plain text for a plural key in a language whose rules use only other", () => {
+        const i18n = createLambderI18n({
+            languages: { en: { name: "English" }, ja: { name: "日本語" } },
+            defaultLanguage: "en",
+            enforced: ["en"],
+            base: { en: { items: pluralEnglish.items }, ja: { items: "商品 {count} 点" } },
+        });
+        expect(i18n.forLanguage("ja")("items", { count: 1 })).toBe("商品 1 点");
+        i18n.registerDictionary("ja", { items: { other: "{count} 点の商品" } });
+        expect(i18n.forLanguage("ja")("items", { count: 3 })).toBe("3 点の商品");
+    });
+
+    it("answers the other form for a count the caller did not pass, rather than throwing", () => {
+        const i18n = makePluralI18n();
+        const untyped = i18n.forLanguage("en") as (key: string, params?: Record<string, unknown>) => string;
+        expect(untyped("items")).toBe("{count} items");
+        expect(untyped("items", { count: "1" })).toBe("1 item");
+    });
+});
+
+describe("LambderI18n: plural coverage at runtime", () => {
+    /** Arabic items written with two of the six forms Arabic's rules use. */
+    const sparseArabic = { ...pluralArabic, items: { one: "منتج واحد", other: "{count} منتج" } };
+
+    it("never refuses an entry for a category it lacks, and shows its other form for a count in that category", async () => {
+        // Which categories a language uses is the runtime's plural data, and
+        // runtimes ship different data, so a gap must never stop a page.
+        const i18n = createLambderI18n({
+            languages: pluralLanguages, defaultLanguage: "en", enforced: ["en"],
+            base: { en: pluralEnglish, ar: sparseArabic },
+        });
+        const arabic = i18n.forLanguage("ar");
+        expect(arabic("items", { count: 1 })).toBe("منتج واحد");
+        expect([0, 2, 3, 11].map((count) => arabic("items", { count }))).toEqual(["0 منتج", "2 منتج", "3 منتج", "11 منتج"]);
+
+        // Nor where an extension, a loader or a registration brings one.
+        expect(() => i18n.extend({
+            en: { tickets: { one: "{count} ticket", other: "{count} tickets" } },
+            ar: { tickets: { other: "{count} تذكرة" } },
+        })).not.toThrow();
+        const lazy = createLambderI18n({
+            languages: pluralLanguages, defaultLanguage: "en", enforced: ["en"],
+            base: { en: pluralEnglish, ar: async () => sparseArabic },
+        });
+        await lazy.loadLanguage("ar");
+        expect(lazy.forLanguage("ar")("items", { count: 2 })).toBe("2 منتج");
+        expect(() => i18n.registerDictionary("ar", { items: { other: "{count} منتج" } })).not.toThrow();
+        expect(() => i18n.registerDictionary("en", { items: { other: "{count} items" } })).not.toThrow();
+        expect(i18n.forLanguage("en")("items", { count: 1 })).toBe("1 items");
+    });
+
+    it("starts on a runtime whose plural data lists a category the dictionary was not written for", () => {
+        // A runtime newer than the one the dictionary was tested on: its
+        // English also uses many, for a million.
+        const Real = Intl.PluralRules;
+        class NewerPluralRules extends Real {
+            resolvedOptions() { return { ...super.resolvedOptions(), pluralCategories: ["one", "many", "other"] as Intl.LDMLPluralRule[] }; }
+            select(count: number) { return count === 1_000_000 ? "many" : super.select(count); }
+        }
+        // Intl's members are not enumerable, so the stub chains to it rather than copying it.
+        vi.stubGlobal("Intl", Object.assign(Object.create(Intl), { PluralRules: NewerPluralRules }));
+
+        const i18n = makePluralI18n();
+        expect(i18n.forLanguage("en")("items", { count: 1_000_000 })).toBe("1000000 items");
+        expect(i18n.forLanguage("en")("items", { count: 1 })).toBe("1 item");
+    });
+
+    it("takes a plain text for a plural key as its other form, in any language", () => {
+        const i18n = createLambderI18n({
+            languages: { en: { name: "English" }, tr: { name: "Türkçe" } }, defaultLanguage: "en", enforced: ["en"],
+            base: { en: { items: pluralEnglish.items }, tr: { items: "{count} ürün" } },
+        });
+        expect(i18n.forLanguage("tr")("items", { count: 1 })).toBe("1 ürün");
+        i18n.registerDictionary("en", { items: "Items: {count}" });
+        expect(i18n.forLanguage("en")("items", { count: 1 })).toBe("Items: 1");
+    });
+
+    it("does not warn while it falls back", () => {
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+        const error = vi.spyOn(console, "error").mockImplementation(() => {});
+        const i18n = createLambderI18n({
+            languages: pluralLanguages, defaultLanguage: "en", enforced: ["en"],
+            base: { en: pluralEnglish, ar: sparseArabic },
+        });
+        for (const count of [0, 2, 3, 11, 0, 2]) i18n.forLanguage("ar")("items", { count });
+        expect(warn).not.toHaveBeenCalled();
+        expect(error).not.toHaveBeenCalled();
+    });
+});
+
+describe("LambderI18n: checkPluralCoverage", () => {
+    it("resolves when every entry holds every category its language uses", async () => {
+        await expect(makePluralI18n().checkPluralCoverage()).resolves.toBeUndefined();
+    });
+
+    it("rejects with every gap, by key, language and the categories missing, the default language's included", async () => {
+        const { few: _few, many: _many, ...arabicItems } = pluralArabic.items;
+        const i18n = createLambderI18n({
+            languages: { ...pluralLanguages, tr: { name: "Türkçe", intlLocale: "tr" }, ja: { name: "日本語", intlLocale: "ja" } },
+            defaultLanguage: "en",
+            enforced: ["en"],
+            base: {
+                en: { ...pluralEnglish, tickets: { other: "{count} tickets" } },
+                ar: { ...pluralArabic, items: arabicItems as LambderI18nPluralEntry, tickets: { other: "{count} تذكرة" } },
+                tr: { items: "{count} ürün", ordersAt: { one: "{store} için {count} sipariş", other: "{store} için {count} sipariş" }, save: "Kaydet", tickets: { one: "{count} bilet", other: "{count} bilet" } },
+                // Japanese uses other alone, so a plain text is complete.
+                ja: { items: "商品 {count} 点", ordersAt: { other: "{store} の注文 {count} 件" }, save: "保存", tickets: { other: "チケット {count} 枚" } },
+            },
+        });
+        const failure = await i18n.checkPluralCoverage().then(() => null, (err: Error) => err);
+        expect(failure?.message).toMatch(/^LambderI18n: these plural entries lack forms for categories their language's plural rules use/);
+        expect(failure?.message.split("\n").slice(1).sort()).toEqual([
+            `  "items" in "ar" lacks few, many: "ar" uses zero, one, two, few, many, other`,
+            `  "items" in "tr" is a text, which stands for the other form alone, and lacks one: "tr" uses one, other`,
+            `  "tickets" in "ar" lacks zero, one, two, few, many: "ar" uses zero, one, two, few, many, other`,
+            `  "tickets" in "en" lacks one: "en" uses one, other`,
+        ]);
+    });
+
+    it("loads the languages behind loaders first, and checks them too", async () => {
+        let loads = 0;
+        const i18n = createLambderI18n({
+            languages: pluralLanguages, defaultLanguage: "en", enforced: ["en"],
+            base: { en: pluralEnglish, ar: async () => { loads += 1; return { ...pluralArabic, items: { other: "{count} منتج" } }; } },
+        });
+        await expect(i18n.checkPluralCoverage()).rejects.toThrow(/"items" in "ar" lacks zero, one, two, few, many/);
+        expect(loads).toBe(1);
+
+        const failing = createLambderI18n({
+            languages: pluralLanguages, defaultLanguage: "en", enforced: ["en"],
+            base: { en: pluralEnglish, ar: async () => { throw new Error("ar.json: 503"); } },
+        });
+        await expect(failing.checkPluralCoverage()).rejects.toThrow("ar.json: 503");
+    });
+
+    it("checks the entries an extension translates with, its parents' included, by the entry t would use", async () => {
+        const i18n = makePluralI18n();
+        const child = i18n.extendPartial({
+            en: { tickets: { one: "{count} ticket", other: "{count} tickets" } },
+            ar: { tickets: { one: "تذكرة واحدة", other: "{count} تذكرة" } },
+        });
+        await expect(i18n.checkPluralCoverage()).resolves.toBeUndefined();
+        await expect(child.checkPluralCoverage()).rejects.toThrow(/"tickets" in "ar" lacks zero, two, few, many/);
+
+        // A registration that completes the entry closes the gap.
+        child.registerDictionary("ar", { tickets: { zero: "لا توجد تذاكر", one: "تذكرة واحدة", two: "تذكرتان", few: "{count} تذاكر", many: "{count} تذكرة", other: "{count} تذكرة" } });
+        await expect(child.checkPluralCoverage()).resolves.toBeUndefined();
+    });
+});
+
+describe("LambderI18n: plural entries refused", () => {
+    it("refuses a plural entry where the default language has a text, since t takes no count for it", () => {
+        const i18n = makePluralI18n();
+        expect(() => i18n.registerDictionary("ar", { save: { one: "حفظ", other: "حفظ" } } as never))
+            .toThrow(/"save" is a plural entry where the default language has a text, for which t takes no count/);
+    });
+
+    it("refuses a key that is no plural category, a form that is no text, a missing other, and a value that is neither", () => {
+        const i18n = makePluralI18n();
+        expect(() => i18n.registerDictionary("en", { items: { one: "{count} item", ones: "{count} item", other: "{count} items" } } as never))
+            .toThrow(/these "en" entries are refused:[\s\S]*"items" has "ones", which is no plural category \(zero, one, two, few, many, other\)/);
+        expect(() => i18n.registerDictionary("en", { items: { one: 1, other: "{count} items" } } as never))
+            .toThrow(/"items" has a one form that is not a text/);
+        expect(() => i18n.registerDictionary("ar", { items: { one: "منتج واحد" } } as never))
+            .toThrow(/"items" has no other form, which every plural entry needs/);
+        expect(() => i18n.registerDictionary("en", { save: 5, cancel: ["Cancel"] } as never))
+            .toThrow(/"save" is neither a text nor a plural entry[\s\S]*"cancel" is neither a text nor a plural entry/);
+        expect(i18n.forLanguage("en")("items", { count: 1 })).toBe("1 item");
+    });
+
+    it("refuses the same where an extension or a loader brings it, the loaded language staying on the default one", async () => {
+        const i18n = makePluralI18n();
+        expect(() => i18n.extend({
+            en: { tickets: { one: "{count} ticket", other: "{count} tickets" } },
+            ar: { tickets: { one: "تذكرة واحدة" } as never },
+        })).toThrow(/extend\(\) dictionary, these "ar" entries are refused:[\s\S]*"tickets" has no other form/);
+
+        const lazy = createLambderI18n({
+            languages: pluralLanguages, defaultLanguage: "en", enforced: ["en"],
+            base: { en: pluralEnglish, ar: async () => ({ ...pluralArabic, items: { one: "منتج واحد", lots: "{count} منتج", other: "{count} منتج" } }) },
+        });
+        await expect(lazy.loadLanguage("ar")).rejects.toThrow(/the "ar" loader, these "ar" entries are refused:[\s\S]*"items" has "lots"/);
+        expect(lazy.forLanguage("ar")("items", { count: 2 })).toBe("2 items");
+    });
+
+    it("needs an Intl locale that is a well-formed tag, for a language that has plural entries only", () => {
+        // Every runtime refuses a malformed tag alike, so this one fails where
+        // the dictionary arrives rather than in t.
+        const languages = { en: { name: "English" }, xx: { name: "Test", intlLocale: "en_US" } };
+        expect(() => createLambderI18n({ languages, defaultLanguage: "en", enforced: ["en"], base: { en: { save: "Save" }, xx: { save: "Save" } } }))
+            .not.toThrow();
+        expect(() => createLambderI18n({
+            languages, defaultLanguage: "en", enforced: ["en"],
+            base: { en: { items: pluralEnglish.items }, xx: { items: { one: "{count} item", other: "{count} items" } } },
+        })).toThrow(/"xx" has plural entries, and Intl.PluralRules refuses its Intl locale "en_US"/);
+    });
+});
+
+describe("LambderI18n: plural placeholders", () => {
+    it("lets any form leave out {count} to spell the number, and holds every form to the other tokens", () => {
+        // Arabic names one and two in words, so those forms carry no {count},
+        // and every form carries {store}: the value a caller passes.
+        expect(() => makePluralI18n()).not.toThrow();
+
+        const dropped = { ...pluralArabic, ordersAt: { ...pluralArabic.ordersAt, few: "{count} طلبات" } };
+        const added = { ...pluralArabic, ordersAt: { ...pluralArabic.ordersAt, many: "{count} طلبًا في {store} {city}" } };
+        const creating = (ar: typeof pluralArabic) => () => createLambderI18n({
+            languages: pluralLanguages, defaultLanguage: "en", enforced: ["en"], base: { en: pluralEnglish, ar },
+        });
+        expect(creating(dropped)).toThrow(/these "ar" translations carry other placeholders[\s\S]*"ordersAt" \(few\) has \{count\} where every form needs \{store\} and may add \{count\}/);
+        expect(creating(added)).toThrow(/"ordersAt" \(many\) has \{city\}, \{count\}, \{store\} where every form needs \{store\}/);
+    });
+
+    it("holds the default language's own forms to each other", () => {
+        expect(() => createLambderI18n({
+            languages: { en: { name: "English" } }, defaultLanguage: "en", enforced: ["en"],
+            base: { en: { ordersAt: { one: "One order", other: "{count} orders at {store}" } } },
+        })).toThrow(/these "en" plural forms carry other placeholders[\s\S]*"ordersAt" \(one\) has none where every form needs \{store\}/);
+    });
+
+    it("lists entry and placeholder refusals of one block in one error", () => {
+        const creating = () => createLambderI18n({
+            languages: pluralLanguages, defaultLanguage: "en", enforced: ["en"],
+            base: { en: pluralEnglish, ar: { ...pluralArabic, items: { ...pluralArabic.items, lots: "{count} منتج" } as never, save: "حفظ {x}" } },
+        });
+        expect(creating).toThrow(/entries are refused:[\s\S]*"items" has "lots"[\s\S]*carry other placeholders[\s\S]*"save" has \{x\} where the default language has none/);
+    });
+});
+
+describe("LambderI18n: a plural key named default in a loaded dictionary", () => {
+    it("reads it as the dictionary's own entry where the contract makes default plural, and as a module's export otherwise", async () => {
+        const languages = { en: { name: "English" }, ar: { name: "العربية" } };
+        const en = { default: { one: "{count} default item", other: "{count} default items" }, save: "Save" } as const;
+        const arDictionary = { default: { ...pluralArabic.items }, save: "حفظ" };
+
+        const bare = createLambderI18n({ languages, defaultLanguage: "en", enforced: ["en"], base: { en, ar: async () => arDictionary } });
+        await bare.loadLanguage("ar");
+        expect(bare.forLanguage("ar")("default", { count: 2 })).toBe("منتجان");
+        expect(bare.forLanguage("ar")("save")).toBe("حفظ");
+
+        const asModule = createLambderI18n({ languages, defaultLanguage: "en", enforced: ["en"], base: { en, ar: async () => ({ default: arDictionary }) } });
+        await asModule.loadLanguage("ar");
+        expect(asModule.forLanguage("ar")("default", { count: 2 })).toBe("منتجان");
     });
 });
 
@@ -758,6 +1192,59 @@ describe("LambderI18n: quality behaviors", () => {
         i18n.setLanguage("ar");
         expect(i18n.currentLanguageMeta).not.toBe(before);
         expect(i18n.currentLanguageMeta).toBe(i18n.currentLanguageMeta);
+    });
+});
+
+describe("LambderI18n: compile-time plural contract", () => {
+    it("requires a numeric count for a plural key, beside the tokens across its forms", () => {
+        const i18n = makePluralI18n();
+        i18n.t("items", { count: 2 });
+        i18n.t("ordersAt", { count: 2, store: "Main St" });
+        i18n.t("save");
+        // @ts-expect-error - a plural key takes a count
+        void (() => i18n.t("items"));
+        // @ts-expect-error - the count is a number
+        void (() => i18n.t("items", { count: "2" }));
+        // @ts-expect-error - a token one form carries is required for every count
+        void (() => i18n.t("ordersAt", { count: 2 }));
+        // @ts-expect-error - no other params
+        void (() => i18n.t("items", { count: 2, store: "Main St" }));
+        expectTypeOf<LambderI18nKeys<typeof i18n>>().toEqualTypeOf<"items" | "ordersAt" | "save">();
+        expect(i18n.forLanguage("ar")("save")).toBe("حفظ");
+    });
+
+    it("requires other in a plural entry, and keeps a text key a text in every language", () => {
+        const languages = { en: { name: "English" }, ja: { name: "日本語" } } as const;
+        void (() => createLambderI18n({
+            languages, defaultLanguage: "en", enforced: ["en"],
+            // @ts-expect-error - other is required
+            base: { en: { items: { one: "{count} item" } }, ja: { items: "商品 {count} 点" } },
+        }));
+        void (() => createLambderI18n({
+            languages, defaultLanguage: "en", enforced: ["en"],
+            // @ts-expect-error - a plural entry where the contract has a text: t would take no count for it
+            base: { en: { save: "Save" }, ja: { save: { other: "保存" } } },
+        }));
+        // A plural contract takes a plain text in another language: the
+        // count still reaches t, and the rules decide whether one form is enough.
+        const i18n = createLambderI18n({
+            languages, defaultLanguage: "en", enforced: ["en"],
+            base: { en: { items: { one: "{count} item", other: "{count} items" } }, ja: { items: "商品 {count} 点" } },
+        });
+        const child = i18n.extendPartial({ en: { tickets: { one: "{count} ticket", other: "{count} tickets" } }, ja: { tickets: { other: "チケット {count} 枚" } } });
+        child.t("tickets", { count: 1 });
+        // @ts-expect-error - extendPartial keeps the plural contract
+        void (() => child.t("tickets"));
+        expect(child.forLanguage("ja")("tickets", { count: 4 })).toBe("チケット 4 枚");
+    });
+
+    it("lets a read-only view take an instance whose contract has plural entries", () => {
+        const withArabic = makePluralI18n();
+        expectTypeOf(withArabic).toExtend<LambderI18nReadonlyInstance<typeof pluralEnglish>>();
+        const reader: LambderI18nReadonlyInstance<typeof pluralEnglish> = withArabic;
+        expect(reader.forLanguage("ar")("items", { count: 3 })).toBe("3 منتجات");
+        // @ts-expect-error - the contract still types each call
+        void (() => reader.t("items"));
     });
 });
 

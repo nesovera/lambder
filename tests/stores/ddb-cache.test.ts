@@ -23,10 +23,11 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { LambderDdbCache, type LambderDdbCacheGetOrSetOptions } from "../../src/stores/LambderDdbCache.js";
+import { LambderDdbCache } from "../../src/stores/LambderDdbCache.js";
 import { LambderMemoryCache } from "../../src/stores/LambderMemoryCache.js";
 import { LambderStorageBackedCache } from "../../src/stores/LambderStorageBackedCache.js";
-import type { LambderCache } from "../../src/shared/contracts/LambderCache.js";
+import { lambderCacheConformance, type LambderCacheConformanceOptions } from "../../src/testing.js";
+import { conformanceClock } from "../../src/testing/LambderConformanceRunner.js";
 import { MemoryCacheStorage } from "../helpers.js";
 
 type Item = Record<string, AttributeValue>;
@@ -1342,282 +1343,63 @@ describe("LambderDdbCache - grouped keys", () => {
 });
 
 /**
- * One set of rules, every cache. Code is written against LambderCache and
- * tested over LambderMemoryCache, which is only sound while the memory cache
- * answers as the table-backed one does: the same keys refused, the same JSON
- * round trip, the same expiry, the same listing. An app's own storage under
- * LambderStorageBackedCache is held to the same rules. Each rule below runs
- * over all three, through one clock that moves only when the test moves it.
+ * One set of rules, every cache: the suite `lambder/testing` exports for an
+ * app's own cache, driven through each of Lambder's. Code is written against
+ * LambderCache and tested over LambderMemoryCache, which is only sound while
+ * the memory cache answers as the table-backed one does. An app's own storage
+ * under LambderStorageBackedCache is held to the same rules; the storage's
+ * own rules run in store-conformance.test.ts.
+ *
+ * None of the rules is the cache failing, so none may log a fail-open: each
+ * case here also fails when anything reached console.error.
  */
-describe.each([
+const cacheImplementations: Array<{ name: string } & Omit<LambderCacheConformanceOptions, "it" | "expect">> = [
+    { name: "LambderDdbCache", create: ({ now }) => createCache(new MemoryDynamoClient(), 512, { now }) },
     {
-        name: "LambderDdbCache",
-        create: (now: () => number): LambderCache => createCache(new MemoryDynamoClient(), 512, { now }),
+        // The other item shape: every value stored as its JSON bytes, the
+        // encoding a value below minBytes is stored in too.
+        name: "LambderDdbCache (compression off)",
+        create: ({ now }) => createCache(new MemoryDynamoClient(), 512, { now, compression: false }),
     },
-    {
-        name: "LambderMemoryCache",
-        create: (now: () => number): LambderCache => new LambderMemoryCache({ now }),
-    },
-    {
-        name: "LambderStorageBackedCache",
-        create: (now: () => number): LambderCache => new LambderStorageBackedCache({ storage: new MemoryCacheStorage(), now }),
-    },
-])("LambderCache conformance: $name", ({ create }) => {
-    const START = 1_700_000_000_000;
-    let clock = START;
-    const build = () => { clock = START; return create(() => clock); };
+    { name: "LambderMemoryCache", create: ({ now }) => new LambderMemoryCache({ now }) },
+    { name: "LambderStorageBackedCache", create: ({ now }) => new LambderStorageBackedCache({ storage: new MemoryCacheStorage(), now }) },
+];
 
-    it("hands back a parse of what was stored, never the object itself", async () => {
-        const cache = build();
-        const value = { list: [1, 2], at: new Date(START) };
-        await cache.set("round-trip", value);
-        value.list.push(3);
-
-        const read = await cache.get<{ list: number[]; at: string }>("round-trip");
-        expect(read).toEqual({ list: [1, 2], at: new Date(START).toISOString() });
-        expect(await cache.get("round-trip")).not.toBe(read);
-    });
-
-    it("answers undefined for an absent key and false from has()", async () => {
-        const cache = build();
-        await expect(cache.get("absent")).resolves.toBeUndefined();
-        await expect(cache.has("absent")).resolves.toBe(false);
-    });
-
-    it("expires an entry at its TTL, the expiry second itself included", async () => {
-        const cache = build();
-        await cache.set("short", "value", { ttlSeconds: 10 });
-        clock = START + 9_000;
-        await expect(cache.get("short")).resolves.toBe("value");
-        await expect(cache.has("short")).resolves.toBe(true);
-        clock = START + 10_000;
-        await expect(cache.get("short")).resolves.toBeUndefined();
-        await expect(cache.has("short")).resolves.toBe(false);
-    });
-
-    it("refuses a value JSON cannot represent, and keys the table would refuse", async () => {
-        const cache = build();
-        await expect(cache.set("nothing", undefined)).rejects.toThrow("Cache value must be JSON-serializable");
-        await expect(cache.get("  ")).rejects.toThrow("Cache key is required");
-        await expect(cache.get({ pk: "reports", sk: "  " })).rejects.toThrow("Cache sort key is required");
-        await expect(cache.get({ pk: "reports", sk: "#".repeat(500) })).rejects.toThrow("900");
-    });
-
-    it("deletes one entry and says whether there was one", async () => {
-        const cache = build();
-        await cache.set("gone", 1);
-        await expect(cache.delete("gone")).resolves.toBe(true);
-        await expect(cache.get("gone")).resolves.toBeUndefined();
-        await expect(cache.delete("gone")).resolves.toBe(false);
-    });
-
-    it("answers false from delete while a fill is loading the key, since a load in progress is no entry", async () => {
-        // Regression: the DynamoDB cache counted the fill's lease as an entry.
-        const cache = build();
-        const { loader, open } = gatedLoader({ tag: "old" });
-
-        const fill = cache.getOrSet("filling", loader);
-        await vi.waitFor(() => expect(loader).toHaveBeenCalledOnce());
-        await expect(cache.delete("filling")).resolves.toBe(false);
-        open();
-
-        await expect(fill).resolves.toEqual({ tag: "old" });
-        await expect(cache.get("filling")).resolves.toBeUndefined();
-    });
-
-    it("counts no entry past its TTL as deleted, from delete or deletePartition", async () => {
-        // Regression: the DynamoDB cache counted an expired manifest the
-        // table's TTL had not removed yet.
-        const cache = build();
-        await cache.set("short", 1, { ttlSeconds: 10 });
-        await cache.set({ pk: "store", sk: "short" }, 2, { ttlSeconds: 10 });
-        await cache.set({ pk: "store", sk: "long" }, 3, { ttlSeconds: 100 });
-        clock = START + 10_000;
-
-        await expect(cache.delete("short")).resolves.toBe(false);
-        await expect(cache.deletePartition("store")).resolves.toBe(1);
-    });
-
-    it("lists a partition's sort keys in order, by prefix and up to a limit, and leaves plain keys out", async () => {
-        const cache = build();
-        await cache.set({ pk: "store", sk: "1800:1900" }, 3);
-        await cache.set({ pk: "store", sk: "1700:1800" }, 2);
-        await cache.set({ pk: "store", sk: "0900:1000" }, 1);
-        await cache.set({ pk: "other", sk: "1700:1800" }, 4);
-        await cache.set("store", "a plain key sharing the partition");
-
-        await expect(cache.listSortKeys("store")).resolves.toEqual(["0900:1000", "1700:1800", "1800:1900"]);
-        await expect(cache.listSortKeys("store", { prefix: "1" })).resolves.toEqual(["1700:1800", "1800:1900"]);
-        await expect(cache.listSortKeys("store", { limit: 1 })).resolves.toEqual(["0900:1000"]);
-    });
-
-    it("orders a key before one it is a prefix of when the longer one goes on below \"#\", as the table does", async () => {
-        const cache = build();
-        await cache.set({ pk: "cities", sk: "New York" }, 1);
-        await cache.set({ pk: "cities", sk: "New York City" }, 2);
-        await cache.set({ pk: "cities", sk: "New Yorker" }, 3);
-
-        await expect(cache.listSortKeys("cities")).resolves.toEqual(["New York City", "New York", "New Yorker"]);
-        await expect(cache.listSortKeys("cities", { prefix: "New", limit: 1 })).resolves.toEqual(["New York City"]);
-    });
-
-    it("orders keys holding \"#\" or \"~\" by their escaped form, as the table ranges them", async () => {
-        const cache = build();
-        await cache.set({ pk: "reports", sk: "a#b" }, 1);
-        await cache.set({ pk: "reports", sk: "a~b" }, 2);
-        await cache.set({ pk: "reports", sk: "a~1b" }, 3);
-        await cache.set({ pk: "reports", sk: "ab" }, 4);
-
-        // "~" escapes as "~0" and "#" as "~1", so both land past every letter.
-        await expect(cache.listSortKeys("reports")).resolves.toEqual(["ab", "a~1b", "a~b", "a#b"]);
-        await expect(cache.listSortKeys("reports", { prefix: "a~" })).resolves.toEqual(["a~1b", "a~b"]);
-    });
-
-    it("drops a partition's grouped entries in one call and counts them", async () => {
-        const cache = build();
-        await cache.set({ pk: "store", sk: "a" }, 1);
-        await cache.set({ pk: "store", sk: "b" }, 2);
-        await cache.set({ pk: "other", sk: "a" }, 3);
-
-        await expect(cache.deletePartition("store")).resolves.toBe(2);
-        await expect(cache.listSortKeys("store")).resolves.toEqual([]);
-        await expect(cache.get({ pk: "other", sk: "a" })).resolves.toBe(3);
-    });
-
-    it("drops and counts a plain key sharing the partition, and leaves other partitions' plain keys alone", async () => {
-        const cache = build();
-        await cache.set("store", "a plain key sharing the partition");
-        await cache.set({ pk: "store", sk: "a" }, 1);
-        await cache.set("other", "a plain key of its own");
-
-        await expect(cache.deletePartition("store")).resolves.toBe(2);
-        await expect(cache.get("store")).resolves.toBeUndefined();
-        await expect(cache.get("other")).resolves.toBe("a plain key of its own");
-    });
-
-    it("loads once for concurrent getOrSet calls, then serves what it stored", async () => {
-        const cache = build();
-        const loader = vi.fn(async () => ({ city: "New York" }));
-
-        const [first, second] = await Promise.all([cache.getOrSet("city", loader), cache.getOrSet("city", loader)]);
-        expect(first).toEqual({ city: "New York" });
-        expect(second).toEqual({ city: "New York" });
-        expect(loader).toHaveBeenCalledOnce();
-        await expect(cache.getOrSet("city", loader)).resolves.toEqual({ city: "New York" });
-        expect(loader).toHaveBeenCalledOnce();
-    });
-
-    it("hands each call that shares a load or a read a parse of its own", async () => {
-        // Regression: every call that joined one fill got the same object, so
-        // one caller's change to its answer showed in the others'.
-        const cache = build();
-        const loader = async () => ({ list: [1] });
-
-        const [first, second] = await Promise.all([cache.getOrSet("shared", loader), cache.getOrSet("shared", loader)]);
-        expect(second).not.toBe(first);
-        first.list.push(2);
-        expect(second).toEqual({ list: [1] });
-
-        const [hit, joiner] = await Promise.all([cache.getOrSet("shared", loader), cache.getOrSet("shared", loader)]);
-        expect(joiner).not.toBe(hit);
-        expect(joiner).toEqual({ list: [1] });
-    });
-
-    it("leaves a loader's undefined uncached, quietly, and asks the loader again next time", async () => {
-        const cache = build();
-        const error = vi.spyOn(console, "error").mockImplementation(() => {});
-        const loader = vi.fn(async () => undefined);
-
-        try {
-            await expect(cache.getOrSet("not-found", loader)).resolves.toBeUndefined();
-            await expect(cache.has("not-found")).resolves.toBe(false);
-            await expect(cache.getOrSet("not-found", loader)).resolves.toBeUndefined();
-            expect(loader).toHaveBeenCalledTimes(2);
-            expect(error).not.toHaveBeenCalled();
-        } finally {
-            error.mockRestore();
-        }
-    });
-
-    it("answers the stored JSON on the call that filled the entry, as on every later one", async () => {
-        const cache = build();
-        const loader = async () => ({ at: new Date("2026-01-02T03:04:05.000Z"), gone: undefined, count: 1 });
-
-        const first = await cache.getOrSet("shape", loader);
-        const later = await cache.getOrSet("shape", loader);
-        expect(first).toEqual({ at: "2026-01-02T03:04:05.000Z", count: 1 });
-        expect(Object.keys(first)).toEqual(["at", "count"]);
-        expect(later).toEqual(first);
-    });
-
-    it("propagates a loader that throws", async () => {
-        const cache = build();
-        await expect(cache.getOrSet("broken", async () => { throw new Error("origin down"); })).rejects.toThrow("origin down");
-    });
-
-    it("never stores a slow fill's value over a set and a delete that landed while it loaded", async () => {
-        // Regression: the fill stored "old" over the delete, to be served for
-        // the entry's whole TTL.
-        const cache = build();
-        const error = vi.spyOn(console, "error").mockImplementation(() => {});
-        const { loader, open } = gatedLoader({ tag: "old" });
-
-        const fill = cache.getOrSet("raced", loader);
-        await vi.waitFor(() => expect(loader).toHaveBeenCalledOnce());
-        await cache.set("raced", { tag: "new" });
-        // A call after the write reads it, rather than joining the load it overtook.
-        await expect(cache.getOrSet("raced", async () => ({ tag: "other" }))).resolves.toEqual({ tag: "new" });
-        await cache.delete("raced");
-        open();
-
-        await expect(fill).resolves.toEqual({ tag: "old" });
-        await expect(cache.get("raced")).resolves.toBeUndefined();
+/** The runner's `it`, with every case also failing on a fail-open logged along the way. */
+const quietIt = (name: string, run: () => Promise<void>) => it(name, async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+        await run();
         expect(error).not.toHaveBeenCalled();
-    });
-
-    it("never stores a slow fill's value over a deletePartition that landed while it loaded", async () => {
-        const cache = build();
-        const key = { pk: "store", sk: "a" };
-        const { loader, open } = gatedLoader({ tag: "old" });
-
-        const fill = cache.getOrSet(key, loader);
-        await vi.waitFor(() => expect(loader).toHaveBeenCalledOnce());
-        await expect(cache.deletePartition("store")).resolves.toBe(0);
-        open();
-
-        await expect(fill).resolves.toEqual({ tag: "old" });
-        await expect(cache.get(key)).resolves.toBeUndefined();
-    });
-
-    it("throws an invalid getOrSet option to the caller before loading, rather than failing open", async () => {
-        // Regression: the check ran inside the fail-open, so a bad option
-        // logged, handed the loader's value back and left caching off.
-        const cache = build();
-        const error = vi.spyOn(console, "error").mockImplementation(() => {});
-        const loader = vi.fn(async () => "value");
-        // The table's own options reach its twin through the interface too.
-        const leaseOptions: LambderDdbCacheGetOrSetOptions[] = [{ leaseSeconds: 0 }, { waitForFillMs: 1.5 }];
-
-        await expect(cache.getOrSet("options", loader, { ttlSeconds: 0 })).rejects.toThrow("ttlSeconds");
-        await expect(cache.getOrSet("options", loader, leaseOptions[0])).rejects.toThrow("leaseSeconds");
-        await expect(cache.getOrSet("options", loader, leaseOptions[1])).rejects.toThrow("waitForFillMs");
-        expect(loader).not.toHaveBeenCalled();
-        expect(error).not.toHaveBeenCalled();
-    });
+    } finally {
+        error.mockRestore();
+    }
 });
+
+for (const { name, create } of cacheImplementations) {
+    describe(`LambderCache conformance: ${name}`, () => {
+        lambderCacheConformance({ it: quietIt, expect, create });
+
+        // The suite asserts that a refusal throws; these are the words every
+        // cache here throws it with, shared through LambderCacheKeys and
+        // LambderCacheValues.
+        it("refuses with the messages every cache here shares", async () => {
+            const cache = await create(conformanceClock());
+            await expect(cache.set("nothing", undefined)).rejects.toThrow("Cache value must be JSON-serializable");
+            await expect(cache.get("  ")).rejects.toThrow("Cache key is required");
+            await expect(cache.get({ pk: "reports", sk: "  " })).rejects.toThrow("Cache sort key is required");
+            await expect(cache.get({ pk: "reports", sk: "#".repeat(500) })).rejects.toThrow("900");
+            await expect(cache.getOrSet("options", async () => 1, { ttlSeconds: 0 })).rejects.toThrow("ttlSeconds");
+            await expect(cache.getOrSet("options", async () => 1, { leaseSeconds: 0 })).rejects.toThrow("leaseSeconds");
+            await expect(cache.getOrSet("options", async () => 1, { waitForFillMs: 1.5 })).rejects.toThrow("waitForFillMs");
+        });
+    });
+}
 
 describe("LambderMemoryCache", () => {
     it("refuses a value past maxValueBytes, as the DynamoDB cache does", async () => {
         const cache = new LambderMemoryCache({ maxValueBytes: 10 });
         await expect(cache.set("big", "x".repeat(20))).rejects.toThrow("Cache value exceeds maxValueBytes");
-    });
-
-    it("orders sort keys by their UTF-8 bytes, as DynamoDB orders a range key", async () => {
-        const cache = new LambderMemoryCache();
-        // "B" (0x42) sorts before "a" (0x61) by bytes, the opposite of a locale compare.
-        await cache.set({ pk: "p", sk: "a" }, 1);
-        await cache.set({ pk: "p", sk: "B" }, 2);
-        await expect(cache.listSortKeys("p")).resolves.toEqual(["B", "a"]);
     });
 
     it("forgets everything on reset()", async () => {

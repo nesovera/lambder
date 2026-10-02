@@ -204,13 +204,17 @@ source through [`LambderTemplatingEngine`](./templating.md) (compiled once,
 cached across warm invocations) and returns it as an HTML response.
 
 Template markers are HTML comments, so they survive a Vite or webpack build
-untouched and the browser renders the default content during frontend
-development:
+untouched, and between elements the browser shows nothing of them during
+frontend development and renders the default content. The title is the
+exception: `<title>`'s content is text to a browser, so a marker there would
+show in the tab. A shell leaves its title plain and is rendered with
+`htmlVirtualSlots: true`, which makes the `<title>` element's content the slot
+`title` and the position before `</head>` the slot `head`, for a file that
+does not declare slots by those names itself:
 
 ```html
 <!-- frontend index.html -->
-<title><!--slot:title-->My App<!--/slot:title--></title>
-<!--slot:head/-->
+<title>My App</title>
 ```
 
 ```typescript
@@ -218,17 +222,42 @@ lambder.servePublicFiles().serveIndexHtml(async (ctx, res) => {
     return res.templateFile("index.html", {
         title: pageTitle(ctx),                          // escaped automatically
         head: html`<link rel="canonical" href="${canonicalUrl(ctx)}" />`,
-    }, { cacheControl: "no-cache" });
+    }, { cacheControl: "no-cache", htmlVirtualSlots: true });
 });
 ```
 
-Files without template markers can opt into virtual slots (`title` is the
-`<title>` element, `head` is the position before `</head>`) with
-`res.templateFile(path, data, { htmlVirtualSlots: true })`.
+What else a raw file shows in a browser (a marker in an attribute value or a
+tag, both branches of an if/else) is under [The raw file in a
+browser](./templating.md#the-raw-file-in-a-browser).
+
+The shell is edited with the frontend and filled by the server, so the data
+is checked against it on every render: a key the file has no slot or
+condition for throws, naming the file, the key and the file's slots and
+conditions. A slot renamed in the HTML fails the request, and the test that
+renders it, rather than shipping a page without the server's content. A
+handler that knows its shell's names can state them as well, and a
+misspelled key is then a compile error:
+
+```typescript
+type ShellNames = "title" | "head";
+
+lambder.servePublicFiles().serveIndexHtml(async (ctx, res) => {
+    return res.templateFile<ShellNames>("index.html", {
+        title: pageTitle(ctx),
+        head: html`<link rel="canonical" href="${canonicalUrl(ctx)}" />`,
+    }, { cacheControl: "no-cache", htmlVirtualSlots: true });
+});
+```
+
+The type is the handler's statement about a file the compiler never reads,
+so the render-time check holds either way.
 
 ## Multi-tenant hosting
 
-Per-brand or per-tenant roots are just app logic in the path mapper:
+Per-brand or per-tenant roots are just app logic in the path mapper. Every
+brand's shell is rendered with the same data, so each declares the same
+slots (`dir` below included); one without it refuses the request rather than
+dropping the value:
 
 ```typescript
 lambder
@@ -238,8 +267,8 @@ lambder
             title: pageTitle(ctx),
             head: html`<link rel="canonical" href="${canonicalUrl(ctx)}" />
                 ${jsonScript("app-data", preloadedState(ctx))}`,
-            isRtl: activeLang(ctx) === "ar",
-        }, { cacheControl: "no-cache" });
+            dir: activeLang(ctx) === "ar" ? "rtl" : "ltr",   // <html dir="<!--slot:dir-->ltr<!--/slot:dir-->">
+        }, { cacheControl: "no-cache", htmlVirtualSlots: true });
     });
 ```
 
@@ -250,7 +279,7 @@ lambder
     .addRoute(/* app routes first */)
     .servePublicFiles()                    // real files
     .serveIndexHtml()                      // app shell for page requests
-    .setRouteFallbackHandler((ctx, res) => res.status404("Not Found"));
+    .setRouteFallbackHandler((ctx, res) => res.status404(html`<h1>Not found</h1>`));
 ```
 
 See [Routing](./routing.md#the-fallback-chain) for how the chain relates to

@@ -1,7 +1,7 @@
 import type { LambderUncheckedRefusalMessage } from '../shared/wire/LambderApiRefusal.js';
 import { type LambderRequestCompressionOption } from '../shared/wire/LambderRequestPayload.js';
 import type { LambderApiContractShape, LambderContractAnyRefusalMessage, LambderContractRefusalMessage } from '../shared/wire/LambderApiContract.js';
-import { type LambderApiOutcome, type LambderValidationError } from '../shared/wire/LambderApiOutcome.js';
+import { type LambderApiFailure, type LambderApiOutcome, type LambderValidationError } from '../shared/wire/LambderApiOutcome.js';
 import { type LambderCallArgs, type LambderContractOutputOf, type LambderGuardInputsProviderOption, type LambderSharedCallOptions } from '../shared/wire/LambderCallOptions.js';
 import { type LambderApiTransport } from '../shared/transport/LambderApiTransport.js';
 import { type LambderApiSignatureMap } from '../shared/wire/LambderApiSignatureMap.js';
@@ -23,12 +23,23 @@ type FetchStartEventHandler = (params: {
     fetchParams: EventHandlerFetchParams;
     activeFetchList: FetchTracker[];
 }) => void | Promise<void>;
-type FetchEndEventHandler = (params: {
+/**
+ * Told that a call ended, however it ended, with the outcome apiOutcome()
+ * resolves to. TMessage is what the calls it hears can refuse with, as for
+ * RefusalHandler.
+ */
+type FetchEndEventHandler<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = (params: {
     fetchParams: EventHandlerFetchParams;
-    fetchResult: any;
+    fetchResult: LambderApiOutcome<unknown, TMessage>;
     activeFetchList: FetchTracker[];
 }) => void | Promise<void>;
-type ErrorHandler = (err: Error) => void | Promise<void>;
+/**
+ * Told a failure no other handler takes, with the error to report and the
+ * failure outcome it came from (its reason, status, refusal and response),
+ * so a reporter can word or file it by reason without reading the message.
+ * A call its own signal aborted is never one. TMessage as for RefusalHandler.
+ */
+type ErrorHandler<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = (error: Error, failure: LambderApiFailure<TMessage>) => void | Promise<void>;
 type ValidationErrorHandler = (zodError: LambderValidationError) => (void | false) | Promise<(void | false)>;
 /**
  * Handed the refusal as its message object, a plain-string refusal
@@ -51,13 +62,14 @@ export type LambderCallOptions<TMessage extends LambderUncheckedRefusalMessage =
     refusalHandler?: RefusalHandler<TMessage>;
     apiInputValidationErrorHandler?: ValidationErrorHandler;
     notAuthorizedHandler?: NotifyHandler;
-    errorHandler?: ErrorHandler;
+    errorHandler?: ErrorHandler<TMessage>;
     logListHandler?: LambderLogListHandler;
     fetchStartedHandler?: FetchStartEventHandler;
-    fetchEndedHandler?: FetchEndEventHandler;
+    fetchEndedHandler?: FetchEndEventHandler<TMessage>;
 };
 type LambderCallerBaseOptions<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = {
-    apiPath: string;
+    /** Must match the server's apiPath. Default: "/api", the server's own default. */
+    apiPath?: string;
     /** Sent with every call as `version`, informational: the server stamps its own on every answer. */
     apiVersion?: string;
     /**
@@ -82,11 +94,12 @@ type LambderCallerBaseOptions<TMessage extends LambderUncheckedRefusalMessage = 
     /** Handed every refusal a call of this caller comes back with, typed with every code the contract declares. */
     refusalHandler?: RefusalHandler<TMessage>;
     notAuthorizedHandler?: NotifyHandler;
-    errorHandler?: ErrorHandler;
+    /** Handed every failure no other handler takes (see ErrorHandler), typed with every code the contract declares. */
+    errorHandler?: ErrorHandler<TMessage>;
     /** Receives each answer's logList, with the API name. Default: console.log with a `[lambder]` prefix, one line per entry. */
     logListHandler?: LambderLogListHandler;
     fetchStartedHandler?: FetchStartEventHandler;
-    fetchEndedHandler?: FetchEndEventHandler;
+    fetchEndedHandler?: FetchEndEventHandler<TMessage>;
     apiInputValidationErrorHandler?: ValidationErrorHandler;
     /** Must mirror the server's session cookie Domain, otherwise expired cookies cannot be cleared. */
     sessionCookieDomain?: string | ((hostname: string) => string | undefined | null);
@@ -143,8 +156,9 @@ declare class LambderCallerCore<TContract extends LambderApiContractShape = any,
      * The endpoint's output on success, `undefined` on every failure. An
      * output is always an object or an array, so the result is truthy exactly
      * when the call succeeded; the handlers configured on the caller have
-     * already been told why it did not. Use apiOutcome() to branch on the
-     * reason at the call site.
+     * already been told why it did not, unless the call's own signal aborted
+     * it, which tells none. Use apiOutcome() to branch on the reason at the
+     * call site.
      */
     api<TApiName extends keyof TContract & string = string>(apiName: TApiName, ...rest: LambderCallArgs<TContract, TApiName, TProvidedGuards, LambderCallOptions<LambderContractRefusalMessage<TContract, TApiName>>>): Promise<LambderContractOutputOf<TContract, TApiName> | undefined>;
 }

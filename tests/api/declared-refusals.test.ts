@@ -19,6 +19,7 @@ import { lambderTestApp, assertApiFailure, assertApiRefusal, assertApiSuccess } 
 import { refuse, LAMBDER_REFUSAL_CODES, type LambderRefusalMessage } from '../../src/shared/wire/LambderApiRefusal.js';
 import type { LambderContractAnyRefusalMessage, LambderContractRefusalMessage } from '../../src/shared/wire/LambderApiContract.js';
 import LambderCaller from '../../src/client/LambderCaller.js';
+import { rateLimitRefusal } from '../../src/api/LambderApiRateLimits.js';
 
 type SessionData = { userId: string; role: 'clerk' | 'manager' };
 
@@ -436,7 +437,7 @@ describe('Declared refusals: creation', () => {
         // An app's guards file holds its map to LambderApiGuard, whose `refusals?: readonly string[]`
         // is not an inference site for a guard's refusals: a guard that names none declares none.
         const guards = {
-            sessionOnly: init.guard({ session: true, handler: () => {} }),
+            signedIn: init.guard({ session: true, handler: () => {} }),
             open: init.guard({ handler: (_ctx, _payload, _reason: string) => {} }),
             checked: init.guard({ guardInput: z.object({ token: z.string() }), handler: (ctx, { token }) => {
                 // @ts-expect-error a guard declaring no refusals raises no code
@@ -446,7 +447,7 @@ describe('Declared refusals: creation', () => {
                 if(ctx.session.data.role !== 'manager') ctx.refuse('Closed.', { code: 'order-closed' });
             } }),
         } satisfies Record<string, LambderApiGuard<any, any, any>>;
-        expectTypeOf(guards.sessionOnly.refusals).toEqualTypeOf<readonly [] | undefined>();
+        expectTypeOf(guards.signedIn.refusals).toEqualTypeOf<readonly [] | undefined>();
         expectTypeOf(guards.manager.refusals).toEqualTypeOf<readonly ['order-closed'] | undefined>();
         expect(guards.open.refusals).toBeUndefined();
         expect(guards.manager.refusals).toEqual(['order-closed']);
@@ -491,5 +492,47 @@ describe('Declared refusals: creation', () => {
             // @ts-expect-error a rate-limit message has no code
             rateLimits: { limiter: new LambderMemoryRateLimiter(), policies: { burst: { per: 'ip', perMin: 1, refusal: { type: 'warning', code: 'app/slow', content: 'Slow down.' } } } },
         })).toThrow(/rate-limit policy "burst" sets a refusal code/);
+    });
+});
+
+describe('Declared refusals: a rate limit raised by hand', () => {
+    /**
+     * An endpoint that raises lambder/rate-limited itself, in each of the
+     * ways a handler can. A client narrows the code to its policy and its
+     * wait, so the code is sent only with both.
+     */
+    const createLimitedStore = () => {
+        const app = initLambder().create({ apiPath: '/api' });
+        return lambderTestApp(app.registerApiGroups(app.defineApiGroup('order', {
+            checkout: app.defineApi({ input: z.object({ mode: z.enum(['helper', 'bare', 'bad-data']) }), output: z.object({ ok: z.boolean() }) }, async (ctx) => {
+                switch(ctx.apiPayload.mode){
+                    case 'helper': throw rateLimitRefusal('Checkout limit.', { policy: 'checkoutPerStore', retryAfterSeconds: 2.7 });
+                    case 'bare': return refuse('Slow down.', { code: LAMBDER_REFUSAL_CODES.rateLimited, statusCode: 429 });
+                    case 'bad-data': return refuse('Slow down.', { code: LAMBDER_REFUSAL_CODES.rateLimited, data: { policy: 'checkoutPerStore', retryAfterSeconds: 0 } });
+                }
+            }),
+        })));
+    };
+
+    it('sends the one rateLimitRefusal() builds, its data the policy and the whole seconds the Retry-After header carries', async () => {
+        const outcome = await createLimitedStore().visitor().apiOutcome('order.checkout', { mode: 'helper' });
+        assertApiRefusal(outcome, LAMBDER_REFUSAL_CODES.rateLimited);
+        expectTypeOf(outcome.refusal.data).toEqualTypeOf<{ policy: string; retryAfterSeconds: number }>();
+        expect(outcome.refusal).toEqual({ type: 'warning', code: 'lambder/rate-limited', content: 'Too many requests. Please try again later.', data: { policy: 'checkoutPerStore', retryAfterSeconds: 2 } });
+        expect(outcome.status).toBe(429);
+        expect(outcome.retryAfterSeconds).toBe(2);
+    });
+
+    it('crashes on lambder/rate-limited without its data, or with data that is not a policy and a wait', async () => {
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+        const app = createLimitedStore();
+        assertApiFailure(await app.visitor().apiOutcome('order.checkout', { mode: 'bare' }), 'server', { status: 500 });
+        expect(app.crashes.at(-1)?.message).toMatch(/refused with the code "lambder\/rate-limited", which carries data, and no data/);
+        assertApiFailure(await app.visitor().apiOutcome('order.checkout', { mode: 'bad-data' }), 'server', { status: 500 });
+        expect(app.crashes.at(-1)?.message).toMatch(/refused with the code "lambder\/rate-limited" and data that is not \{ policy, retryAfterSeconds \}/);
+    });
+
+    it('refuses a wait that is no number of seconds as it is built', () => {
+        expect(() => rateLimitRefusal('x', { policy: 'p', retryAfterSeconds: Number.NaN })).toThrow(/waits a finite number of seconds, got NaN/);
     });
 });

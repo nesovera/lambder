@@ -80,6 +80,12 @@ export default class Lambder {
     // Construction
     // Everything an instance is, fixed before the first registration.
     // =====================================================================
+    // Fixed at construction, because what was built from them keeps its own
+    // copy: the pipeline and the crash handling stamp the apiVersion they
+    // were given, servePublicFiles serves through the reader it was given,
+    // and the callers of an instance post to the apiPath they were built
+    // with. A later write would leave the instance disagreeing with itself.
+    /** Where API calls go: `{apiPath}/{group}/{action}`. */
     apiPath;
     /** Stamped on every API answer's envelope as apiVersion. Informational: a client's staleness is judged per endpoint by its signature, see apiSignatures(). */
     apiVersion;
@@ -126,8 +132,7 @@ export default class Lambder {
     refusalVocabulary;
     /** Every API's refusals option as written, for apiOptionEntries(); its definition holds the resolved set. */
     refusalOptions = new Map();
-    hookList = { "beforeRender": [], "afterRender": [], "fallback": [] };
-    createdHooks = [];
+    hookList = { "created": [], "beforeRender": [], "afterRender": [], "fallback": [] };
     initPromise = null;
     globalErrorHandler = null;
     routeFallbackHandler = null;
@@ -211,6 +216,7 @@ export default class Lambder {
             rateLimits: options.rateLimits,
             guards: options.guards,
             idempotency: options.idempotency,
+            atRestSecret: session?.sessionSalt,
         });
         this.trustedClientIpHeaders = options.trustedClientIpHeaders ?? [];
         this.trustedHostHeaders = options.trustedHostHeaders ?? [];
@@ -539,14 +545,11 @@ export default class Lambder {
         this.apiHandlers.set(name, { output: api.output, compress: api.compress, handler: api.handler });
     }
     addHook(hookEvent, hookFn, priority = 0) {
-        if (hookEvent === "created") {
-            // Runs once, lazily, before the first request or event is handled.
-            this.createdHooks.push(hookFn);
-        }
-        else {
-            this.hookList[hookEvent].push({ priority, hookFn });
-            this.hookList[hookEvent].sort((a, b) => a.priority - b.priority);
-        }
+        // In priority order, lower first; the sort is stable, so hooks of one
+        // priority run in the order they were added. A created hook runs once,
+        // lazily, before the first request or event is handled.
+        this.hookList[hookEvent].push({ priority, hookFn });
+        this.hookList[hookEvent].sort((a, b) => a.priority - b.priority);
         return this;
     }
     addAction(filter, actionFn) {
@@ -723,6 +726,23 @@ export default class Lambder {
         }
         return { apis, rateLimitPolicies, guards };
     }
+    /**
+     * Every registered API's input and output schemas by name, sorted by
+     * name: what writeApiSchemas (lambder/build) writes as JSON Schema to a
+     * module the mock validates its calls against. A build-time view, as
+     * apiSignatureEntries() is: it comes off the server instance, which a
+     * generator imports and a client never does.
+     */
+    async apiSchemaEntries() {
+        await this.loadApiGroups();
+        const entries = {};
+        for (const name of [...this.apiDefinitions.keys()].sort()) {
+            // Both are always there on the server: registration takes them from the declaration, which requires them.
+            const { input, output } = this.apiDefinitions.get(name);
+            entries[name] = { input: input, output: output };
+        }
+        return entries;
+    }
     getResponseBuilder(ctx) {
         return new LambderResponseBuilder({
             files: this.files,
@@ -759,8 +779,8 @@ export default class Lambder {
     ensureInitialized() {
         if (!this.initPromise) {
             const pending = (async () => {
-                for (const hookFn of this.createdHooks) {
-                    await hookFn(this);
+                for (const hook of this.hookList["created"]) {
+                    await hook.hookFn(this);
                 }
             })();
             this.initPromise = pending;
@@ -828,11 +848,12 @@ export default class Lambder {
         for (const hook of this.hookList["fallback"]) {
             await hook.hookFn(currentCtx, resolver);
         }
-        // A request under apiPath is the API's to answer, whatever it asked
-        // for. A root apiPath shares every path with the site, so there only
-        // apiPath itself and the calls are.
+        // A request at or under apiPath is the API's to answer, whatever it
+        // asked for. A root apiPath shares every path with the site, the site
+        // root included, so there only the calls are.
         const apiArea = this.apiPath.replace(/\/+$/, "");
-        const isAPI = currentCtx.api !== null || currentCtx.path === this.apiPath || (apiArea !== "" && currentCtx.path.startsWith(`${apiArea}/`));
+        const isAPI = currentCtx.api !== null
+            || (apiArea !== "" && (currentCtx.path === this.apiPath || currentCtx.path.startsWith(`${apiArea}/`)));
         if (isAPI) {
             if (this.apiFallbackHandler)
                 return await this.apiFallbackHandler(currentCtx, resolver);
@@ -871,8 +892,9 @@ export default class Lambder {
                 return responseFromAnswer(versionExpiredAnswer(this.apiVersion));
             // The protocol's own pre-pass, run here rather than left to the
             // pipeline so that hooks and route matching see a plain payload,
-            // and so a stale client is answered before any of them, whether or
-            // not the name it asked for exists.
+            // and so a stale client, or a body that is no envelope, is
+            // answered before any of them, whether or not the name it asked
+            // for exists.
             const prepared = await this.pipeline.prepare(ctx.api);
             if (prepared)
                 return responseFromAnswer(prepared);
@@ -1141,14 +1163,14 @@ export default class Lambder {
      * The answer to a request that needed a session and has none, whether it
      * never had one or it ended while the request held it: an API call gets
      * the protocol's sessionExpired envelope, as the pipeline gives a session
-     * API, and anything else the setSessionExpiredRouteHandler answer, a 401
-     * by default.
+     * API, and anything else the setSessionExpiredRouteHandler answer, a
+     * plain-text 401 by default, as the framework's own 404 and 500 are.
      */
     async sessionMissingResponse(ctx, resolver) {
         if (ctx.api)
             return responseFromAnswer(sessionExpiredAnswer(this.apiVersion, ctx.logList));
         if (!this.sessionExpiredRouteHandler)
-            return resolver.status(401, "Session required.");
+            return resolver.text("Session required.", { statusCode: 401 });
         try {
             return await this.sessionExpiredRouteHandler(ctx, resolver);
         }
@@ -1306,11 +1328,45 @@ const lambderInitOf = (declared) => ({
     },
 });
 /**
- * The entry point of an app: binds the session data type, and hands out the
- * builders and create() that share it. `declareRefusals()` binds the app's
+ * The entry point of an app, and the canonical way to create an instance:
+ * fix the session data type first, then create with the full configuration
+ * in one declaration. The policy, guard and idempotency types are inferred
+ * from the options, so the instance is born fully typed, and the endpoints
+ * declared with its defineApi are typed against it. There are no ordering
+ * rules, and nothing can be half-configured.
+ *
+ * Beside create() it hands out the builders that share the session data
+ * type (guard, rateLimitKey, refuse). `declareRefusals()` binds the app's
  * refusal vocabulary too, so a guard's ctx.refuse and the init's own refuse
  * are typed to it before any instance exists, and create() gives it to the
  * instance for every API's refusals option to name codes from.
+ *
+ * ```typescript
+ * // app.ts (imports no api modules, so modules can import from it)
+ * export const lambderApp = initLambder<SessionData>().create({
+ *     apiPath: "/api",
+ *     session: { store: new LambderDdbSessionStore({ tableName: "app-session", region: "us-east-1" }), sessionSalt: "..." },
+ *     rateLimits: { limiter, policies },
+ *     guards,
+ *     idempotency: { store },
+ * });
+ * export const { defineApi, defineApiGroup, lazyApiGroup } = lambderApp;
+ *
+ * // orders.ts
+ * export const orderApis = defineApiGroup("orders", {
+ *     place: defineApi({ input, output, guards: "signedIn" }, async (ctx) => ...),
+ * });
+ *
+ * // index.ts: registration only
+ * const lambder = lambderApp.registerApiGroups(orderApis).addHook(...);
+ * export const handler = lambder.getHandler();
+ * ```
+ *
+ * Curried because TypeScript type arguments are all-or-nothing per call:
+ * passing the session data type to `new Lambder<S>(...)` would silently
+ * widen the inferred policy and guard types to their {} defaults. Fixing the
+ * session type in the first call lets the second infer everything else.
+ * `new Lambder(options)` serves untyped or session-data-free instances.
  */
 export const initLambder = () => ({
     ...lambderInitOf(null),

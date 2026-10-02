@@ -3,13 +3,15 @@ import { createDynamoClientLoader, isConditionalCheckFailure, type LambderDynamo
 import { getCrypto } from "../shared/util/LambderNodeModules.js";
 import { LambderExpiringMap } from "../shared/util/LambderExpiringMap.js";
 import { assertPositiveInteger } from "../shared/util/LambderOptionChecks.js";
-import { compressText, restoreText, LambderCompressionError } from "../shared/wire/LambderCompressionCodec.js";
+import { LambderCompressionError } from "../shared/wire/LambderCompressionCodec.js";
 import {
     resolveCompressionOption,
     type LambderCompressionOption, type LambderCompressionSettings,
 } from "../shared/wire/LambderCompressionOption.js";
 import { LRUCache } from "lru-cache";
-import type { LambderCache, LambderCacheKey, LambderCacheListOptions, LambderCacheSetOptions } from "../shared/contracts/LambderCache.js";
+import type {
+    LambderCache, LambderCacheGetOrSetOptions, LambderCacheKey, LambderCacheListOptions, LambderCacheSetOptions,
+} from "../shared/contracts/LambderCache.js";
 import {
     cacheMemoryKeyOf, decodeCacheSortKey, encodeCacheSortKey, normalizeCacheKey, normalizeCachePartition,
     type LambderCacheAddress,
@@ -19,6 +21,10 @@ import {
     type LambderCacheFillSettings,
 } from "./LambderCacheValues.js";
 import { LambderCacheFiller, type LambderCacheLoad } from "./LambderCacheFiller.js";
+import { restoreStoredText, storedTextOf, type LambderStoredText } from "./LambderStoredText.js";
+import type { LambderMemoryCacheOptions } from "./LambderMemoryCache.js";
+import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
+import { delegateToTwin, registerSwappableInstance } from "../shared/util/LambderSwappableInstances.js";
 
 const DEFAULT_CHUNK_BYTES = 350 * 1024;
 const MAX_SAFE_CHUNK_BYTES = 380 * 1024;
@@ -47,8 +53,8 @@ const RECENT_WRITE_SECONDS = 5;
 /** Keys, and partitions, remembered as recently written at most; past it the ones closest to expiring go first (see LambderExpiringMap). */
 const RECENT_WRITE_MAX_ENTRIES = 1_000;
 
-/** How a value's bytes are stored: Brotli, or the UTF-8 JSON itself. */
-type CacheEncoding = "br" | "identity";
+/** How a value's bytes are stored: Brotli, or the UTF-8 JSON itself (see LambderStoredText). */
+type CacheEncoding = LambderStoredText["encoding"];
 
 /** What one attempt at a fill lease found (see takeLease): the lease, another fill's lease, or a live value's manifest as the leader holds it. */
 type LeaseAttempt = "taken" | "held" | { filled: CacheManifest };
@@ -128,13 +134,6 @@ export interface LambderDdbCacheOptions {
      * boundary without moving the world's clock.
      */
     now?: () => number;
-}
-
-export interface LambderDdbCacheGetOrSetOptions extends LambderCacheSetOptions {
-    /** How long one container's fill lease on a missing entry holds the others off. Default: 15. */
-    leaseSeconds?: number;
-    /** How long a container waits for another's fill before loading itself. Default: (leaseSeconds + 1) * 1000. */
-    waitForFillMs?: number;
 }
 
 // Node builtins are loaded lazily through LambderNodeModules so this module can
@@ -238,6 +237,11 @@ class LocalWriteLedger {
     }
 }
 
+/** Every LambderCache member, which the swap door hands to a memory twin. */
+const CACHE_MEMBERS: Record<keyof LambderCache, true> = {
+    get: true, has: true, set: true, delete: true, deletePartition: true, listSortKeys: true, getOrSet: true,
+};
+
 /**
  * Persistent JSON cache backed by DynamoDB.
  *
@@ -328,6 +332,19 @@ export class LambderDdbCache implements LambderCache {
         this.localWrites = new LocalWriteLedger(this.now);
         this.ready = createDynamoClientLoader({ user: "LambderDdbCache", region: options.region, client: options.client });
         this.filler = new LambderCacheFiller(`DynamoDB cache failed open in ${this.namespace}`);
+        registerSwappableInstance(this);
+    }
+
+    /**
+     * Puts a memory twin under this cache in place, for `lambder/testing`:
+     * every LambderCache member answers from the twin from then on. The twin
+     * is built with this cache's own default TTL, size limit and clock, so a
+     * test meets the rules this cache was configured with. Keyed by a symbol
+     * no entry point exports; see registerSwappableInstance.
+     */
+    [LAMBDER_BACKEND_SWAP](twins: { cache(options: LambderMemoryCacheOptions): LambderCache }): void {
+        const twin = twins.cache({ defaultTtlSeconds: this.defaultTtlSeconds, maxValueBytes: this.maxValueBytes, now: this.now });
+        delegateToTwin<LambderCache>(this, twin, CACHE_MEMBERS);
     }
 
     async get<T>(key: LambderCacheKey): Promise<T | undefined> {
@@ -453,9 +470,7 @@ export class LambderDdbCache implements LambderCache {
         const { json, utf8 } = serializeCacheValue(value, this.maxValueBytes);
         const input = Buffer.from(utf8.buffer, utf8.byteOffset, utf8.byteLength);
 
-        const brotli = this.compression && input.length >= this.compression.minBytes ? this.compression : null;
-        const encoding: CacheEncoding = brotli ? "br" : "identity";
-        const stored = brotli ? await compressText(input, "br", brotli.quality) : input;
+        const { encoding, stored } = await storedTextOf(input, this.compression);
         if (stored.length > this.maxValueBytes) {
             throw new Error(`Stored cache value exceeds maxValueBytes (${stored.length} > ${this.maxValueBytes})`);
         }
@@ -689,7 +704,7 @@ export class LambderDdbCache implements LambderCache {
     async getOrSet<T>(
         key: LambderCacheKey,
         loader: () => Promise<T>,
-        options: LambderDdbCacheGetOrSetOptions = {},
+        options: LambderCacheGetOrSetOptions = {},
     ): Promise<T> {
         const address = normalizeCacheKey(key);
         const settings = resolveGetOrSetOptions(options, this.defaultTtlSeconds);
@@ -1021,9 +1036,10 @@ export class LambderDdbCache implements LambderCache {
         }
     }
 
-    /** The JSON text of a stored payload. */
+    /** The JSON text of a stored payload, restored under maxValueBytes, the most this cache writes. */
     private async decode(stored: Buffer, encoding: CacheEncoding, uncompressedBytes: number): Promise<string> {
-        return encoding === "br" ? await restoreText(stored, "br", { declaredBytes: uncompressedBytes }) : stored.toString("utf8");
+        if (encoding === "identity") return stored.toString("utf8");
+        return await restoreStoredText(stored, uncompressedBytes, { user: "LambderDdbCache", maxTextBytes: this.maxValueBytes });
     }
 
     private remember(

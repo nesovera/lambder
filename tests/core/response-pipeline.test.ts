@@ -7,6 +7,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { z } from 'zod';
 import Lambder, { initLambder } from '../../src/core/Lambder.js';
 import { decodeBody, gunzipBody, brotliBody, createMockEvent, createMockEventV2, createApiEvent, createMockContext, testPublicFiles } from '../helpers.js';
+import { html, raw, xml } from '../../src/shared/LambderHtml.js';
 
 describe('Compression (Brotli / gzip)', () => {
     const bigHtml = '<p>' + 'lambder '.repeat(500) + '</p>';
@@ -14,7 +15,7 @@ describe('Compression (Brotli / gzip)', () => {
     // These events are a REST API's (v1), where compression is on only when named.
     const serveBig = (options?: ConstructorParameters<typeof Lambder>[0]) =>
         new Lambder({ files: testPublicFiles(), compression: true, ...options })
-            .addRoute('/big', (ctx, res) => res.html(bigHtml));
+            .addRoute('/big', (ctx, res) => res.html(raw(bigHtml)));
 
     it('prefers Brotli when the client accepts it', async () => {
         const result = await serveBig().render(
@@ -97,7 +98,7 @@ describe('Compression (Brotli / gzip)', () => {
 
     it('does not gzip when the client does not accept gzip', async () => {
         const lambder = new Lambder({ files: testPublicFiles() })
-            .addRoute('/big', (ctx, res) => res.html(bigHtml));
+            .addRoute('/big', (ctx, res) => res.html(raw(bigHtml)));
 
         const result = await lambder.render(createMockEvent('/big'), createMockContext());
 
@@ -107,7 +108,7 @@ describe('Compression (Brotli / gzip)', () => {
 
     it('does not gzip small responses in auto mode', async () => {
         const lambder = new Lambder({ files: testPublicFiles() })
-            .addRoute('/small', (ctx, res) => res.html('<p>small</p>'));
+            .addRoute('/small', (ctx, res) => res.html(html`<p>small</p>`));
 
         const result = await lambder.render(
             createMockEvent('/small', { headers: { Host: 'localhost', 'Accept-Encoding': 'gzip' } }),
@@ -120,7 +121,7 @@ describe('Compression (Brotli / gzip)', () => {
 
     it('compress: true forces gzip even below the size threshold', async () => {
         const lambder = new Lambder({ files: testPublicFiles() })
-            .addRoute('/forced', (ctx, res) => res.xml('<x/>', { compress: true }));
+            .addRoute('/forced', (ctx, res) => res.xml(xml`<x/>`, { compress: true }));
 
         const result = await lambder.render(
             createMockEvent('/forced', { headers: { Host: 'localhost', 'Accept-Encoding': 'gzip' } }),
@@ -148,7 +149,7 @@ describe('Compression (Brotli / gzip)', () => {
 
     it('compress: false opts out entirely', async () => {
         const lambder = new Lambder({ files: testPublicFiles() })
-            .addRoute('/opt-out', (ctx, res) => res.html(bigHtml, { compress: false }));
+            .addRoute('/opt-out', (ctx, res) => res.html(raw(bigHtml), { compress: false }));
 
         const result = await lambder.render(
             createMockEvent('/opt-out', { headers: { Host: 'localhost', 'Accept-Encoding': 'gzip' } }),
@@ -160,7 +161,7 @@ describe('Compression (Brotli / gzip)', () => {
 
     it('compression: false disables auto gzip globally', async () => {
         const lambder = new Lambder({ files: testPublicFiles(), compression: false })
-            .addRoute('/big', (ctx, res) => res.html(bigHtml));
+            .addRoute('/big', (ctx, res) => res.html(raw(bigHtml)));
 
         const result = await lambder.render(
             createMockEvent('/big', { headers: { Host: 'localhost', 'Accept-Encoding': 'gzip' } }),
@@ -175,7 +176,7 @@ describe('Compression (Brotli / gzip)', () => {
 describe('ETag / conditional requests', () => {
     it('sets an ETag on GET 200 responses and answers If-None-Match with 304', async () => {
         const lambder = new Lambder({ files: testPublicFiles() })
-            .addRoute('/page', (ctx, res) => res.html('<p>etag me</p>'));
+            .addRoute('/page', (ctx, res) => res.html(html`<p>etag me</p>`));
 
         const first = await lambder.render(createMockEvent('/page'), createMockContext());
         const etag = first.multiValueHeaders?.['ETag']?.[0];
@@ -207,7 +208,7 @@ describe('ETag / conditional requests', () => {
         }).addRoute('/page', (ctx, res) => {
             ctx.setCookie('LMDRSESSIONTKID', 'slid', { path: '/' });
             ctx.setResponseHeader('X-Request-Id', 'abc');
-            return res.html('<p>etag me</p>', { cacheControl: 'private, max-age=0, must-revalidate' });
+            return res.html(html`<p>etag me</p>`, { cacheControl: 'private, max-age=0, must-revalidate' });
         });
 
         const headers = { Host: 'localhost', Origin: 'https://app.example.com' };
@@ -233,15 +234,15 @@ describe('ETag / conditional requests', () => {
         const lambder = initLambder().create({ files: testPublicFiles() })
             .addRoute('/shared', (ctx, res) => {
                 ctx.setCookie('guest', 'visitor-1', { path: '/' });
-                return res.html('<p>hi</p>', { cacheControl: 'public, max-age=600, s-maxage=86400, stale-while-revalidate=30' });
+                return res.html(html`<p>hi</p>`, { cacheControl: 'public, max-age=600, s-maxage=86400, stale-while-revalidate=30' });
             })
             .addRoute('/unsaid', (ctx, res) => {
                 ctx.setCookie('guest', 'visitor-1', { path: '/' });
-                return res.html('<p>hi</p>');
+                return res.html(html`<p>hi</p>`);
             })
             .addRoute('/stored-nowhere', (ctx, res) => {
                 ctx.setCookie('guest', 'visitor-1', { path: '/' });
-                return res.html('<p>hi</p>', { cacheControl: 'no-store' });
+                return res.html(html`<p>hi</p>`, { cacheControl: 'no-store' });
             })
             .addRoute('/broken', (ctx, res) => {
                 ctx.setCookie('guest', 'visitor-1', { path: '/' });
@@ -271,7 +272,7 @@ describe('ETag / conditional requests', () => {
 
     it('does not set ETags on POST responses', async () => {
         const lambder = new Lambder({ files: testPublicFiles() })
-            .addRoute('/submit', (ctx, res) => res.html('ok'));
+            .addRoute('/submit', (ctx, res) => res.html(html`ok`));
 
         const result = await lambder.render(
             createMockEvent('/submit', { httpMethod: 'POST' }),
@@ -282,7 +283,7 @@ describe('ETag / conditional requests', () => {
 
     it('etag: false disables the ETag per response', async () => {
         const lambder = new Lambder({ files: testPublicFiles() })
-            .addRoute('/page', (ctx, res) => res.html('x', { etag: false }));
+            .addRoute('/page', (ctx, res) => res.html(html`x`, { etag: false }));
 
         const result = await lambder.render(createMockEvent('/page'), createMockContext());
         expect(result.multiValueHeaders?.['ETag']).toBeUndefined();
@@ -311,5 +312,18 @@ describe('The response size guard', () => {
         expect(overInBytes.statusCode).toBe(500);
         expect(decodeBody(overInBytes)).toContain('2700 bytes');
         expect(decodeBody(overInBytes)).toContain('maxResponseBytes (1000)');
+    });
+});
+
+describe('The root entry', () => {
+    /**
+     * Finalization and the answer conversions take the instance's internal
+     * options and answers, which nothing outside the server adapter builds:
+     * the adapter runs them, and an app holds a LambderResponse.
+     */
+    it('keeps the server adapter\'s finalization and answer conversions to itself', async () => {
+        const root: Record<string, unknown> = await import('../../src/index.js');
+        expect(['finalizeResponse', 'answerFromResponse', 'responseFromAnswer'].filter((name) => name in root)).toEqual([]);
+        expect(root.LambderResponse).toBeDefined();
     });
 });

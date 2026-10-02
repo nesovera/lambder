@@ -75,4 +75,23 @@ export declare const keyedDigest: (secret: string, value: string) => Promise<str
  * without one is told so.
  */
 export declare const randomSecret: (bytes?: number) => string;
+/**
+ * The characters of an alphabet a code is drawn from, as code points, once
+ * they are 2 to 256 distinct ones; anything else throws, naming `name`. One
+ * character draws nothing random, a repeat weighs its character double, and
+ * past 256 the one byte randomCode draws per character cannot reach every
+ * character. Returns the characters so the check reads as an assignment.
+ */
+export declare const assertCodeAlphabet: (alphabet: unknown, name: string) => string[];
+/**
+ * A code of `length` characters drawn uniformly from `alphabet` with the
+ * runtime's cryptographic random source: the digits emailed to an address,
+ * the letters of a pairing code somebody types. One byte draws one
+ * character, and a byte at or above the largest multiple of the alphabet's
+ * size is discarded and drawn again, since `byte % alphabet.length` alone
+ * favours the alphabet's first characters. The alphabet is 2 to 256 distinct
+ * characters (code points) and `length` a positive integer; anything else
+ * throws. Synchronous, as randomSecret is.
+ */
+export declare const randomCode: (alphabet: string, length: number) => string;
 export {};

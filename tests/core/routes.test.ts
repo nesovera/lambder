@@ -16,6 +16,7 @@ import { browse, testPublicFiles } from '../helpers.js';
 import Lambder, { initLambder } from '../../src/core/Lambder.js';
 import { LambderDdbSessionStore } from '../../src/stores/LambderDdbSessionStore.js';
 import { lambderTestApp } from '../../src/testing.js';
+import { html } from '../../src/shared/LambderHtml.js';
 
 describe('Routes - Basic Path Matching', () => {
     it('should match simple string paths', async () => {
@@ -24,7 +25,7 @@ describe('Routes - Basic Path Matching', () => {
             apiPath: '/api'
         })
             .addRoute('/hello', (ctx, res) => {
-                return res.html('Hello World');
+                return res.html(html`Hello World`);
             });
 
         const visitor = browse(lambder);
@@ -41,10 +42,10 @@ describe('Routes - Basic Path Matching', () => {
             apiPath: '/api'
         })
             .addRoute('/hello', (ctx, res) => {
-                return res.html('Hello');
+                return res.html(html`Hello`);
             })
             .setRouteFallbackHandler((ctx, res) => {
-                return res.status404('Not Found');
+                return res.status404(html`Not Found`);
             });
 
         const visitor = browse(lambder);
@@ -59,13 +60,13 @@ describe('Routes - Basic Path Matching', () => {
             apiPath: '/api'
         })
             .addRoute('/home', (ctx, res) => {
-                return res.html('Home Page');
+                return res.html(html`Home Page`);
             })
             .addRoute('/about', (ctx, res) => {
-                return res.html('About Page');
+                return res.html(html`About Page`);
             })
             .addRoute('/contact', (ctx, res) => {
-                return res.html('Contact Page');
+                return res.html(html`Contact Page`);
             });
 
         const visitor = browse(lambder);
@@ -143,7 +144,7 @@ describe('Routes - RegExp Matching', () => {
             apiPath: '/api'
         })
             .addRoute(/^\/admin/, (ctx, res) => {
-                return res.html('Admin Area');
+                return res.html(html`Admin Area`);
             });
 
         const visitor = browse(lambder);
@@ -198,7 +199,7 @@ describe('Routes - Function-based Conditional Routing', () => {
             apiPath: '/api'
         })
             .addRoute((ctx) => ctx.path.startsWith('/custom'), (ctx, res) => {
-                return res.html('Custom Route');
+                return res.html(html`Custom Route`);
             });
 
         const visitor = browse(lambder);
@@ -215,7 +216,7 @@ describe('Routes - Function-based Conditional Routing', () => {
             .addRoute(
                 (ctx) => ctx.path === '/special' && ctx.get.key === 'secret',
                 (ctx, res) => {
-                    return res.html('Special Access');
+                    return res.html(html`Special Access`);
                 }
             );
 
@@ -236,7 +237,7 @@ describe('Routes - Function-based Conditional Routing', () => {
             .addRoute(
                 (ctx) => ctx.host === 'admin.example.com' && ctx.path === '/dashboard',
                 (ctx, res) => {
-                    return res.html('Admin Dashboard');
+                    return res.html(html`Admin Dashboard`);
                 }
             );
 
@@ -257,10 +258,10 @@ describe('Routes - Session Protected Routes', () => {
     it('should protect routes with addSessionRoute', async () => {
         const lambder = createSessionApp()
             .setGlobalErrorHandler((err, ctx, res) => {
-                return res.html(`<h1>Error: ${err.message}</h1>`);
+                return res.html(html`<h1>Error: ${err.message}</h1>`);
             })
             .addSessionRoute('/protected', (ctx, res) => {
-                return res.html(`Welcome ${ctx.session.data.userId}`);
+                return res.html(html`Welcome ${ctx.session.data.userId}`);
             });
 
         const visitor = await lambderTestApp(lambder).signIn('user-123', { userId: '123', role: 'user' });
@@ -273,7 +274,7 @@ describe('Routes - Session Protected Routes', () => {
     it('should reject access without valid session', async () => {
         const lambder = createSessionApp()
             .addSessionRoute('/protected', (ctx, res) => {
-                return res.html('Protected');
+                return res.html(html`Protected`);
             })
             .setGlobalErrorHandler((err, ctx, res) => {
                 return res.raw({ statusCode: 401, body: 'Unauthorized' });
@@ -315,10 +316,10 @@ describe('Routes - Priority and Ordering', () => {
             apiPath: '/api'
         })
             .addRoute('/item', (ctx, res) => {
-                return res.html('Exact Match');
+                return res.html(html`Exact Match`);
             })
             .addRoute(/^\/item/, (ctx, res) => {
-                return res.html('Regex Match');
+                return res.html(html`Regex Match`);
             });
 
         const visitor = browse(lambder);
@@ -334,10 +335,10 @@ describe('Routes - Priority and Ordering', () => {
             apiPath: '/api'
         })
             .addRoute('/users/admin', (ctx, res) => {
-                return res.html('Admin User');
+                return res.html(html`Admin User`);
             })
             .addRoute('/users/:userId', (ctx, res) => {
-                return res.html(`User ${ctx.pathParams?.userId}`);
+                return res.html(html`User ${ctx.pathParams?.userId}`);
             });
 
         const visitor = browse(lambder);
@@ -359,7 +360,7 @@ describe('Routes - Wildcard and Catch-all Routes', () => {
             apiPath: '/api'
         })
             .addRoute('/(.*)', (ctx, res) => {
-                return res.html('Catch All');
+                return res.html(html`Catch All`);
             });
 
         const visitor = browse(lambder);
@@ -377,10 +378,10 @@ describe('Routes - Wildcard and Catch-all Routes', () => {
             apiPath: '/api'
         })
             .addRoute('/specific', (ctx, res) => {
-                return res.html('Specific');
+                return res.html(html`Specific`);
             })
             .addRoute('/(.*)', (ctx, res) => {
-                return res.html('Fallback');
+                return res.html(html`Fallback`);
             });
 
         const visitor = browse(lambder);
@@ -400,7 +401,7 @@ describe('Routes - Method Filtering', () => {
             apiPath: '/api'
         })
             .addRoute('/resource', (ctx, res) => {
-                return res.html(`${ctx.method} Response`);
+                return res.html(html`${ctx.method} Response`);
             });
 
         const visitor = browse(lambder);

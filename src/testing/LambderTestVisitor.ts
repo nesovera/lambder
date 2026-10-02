@@ -1,5 +1,10 @@
-import LambderCaller, { type LambderCallerGroupCalls, type LambderCallerMembers, type LambderCallerOptions } from "../client/LambderCaller.js";
-import { withApiGroupCalls } from "../shared/wire/LambderApiGroupCalls.js";
+import LambderCaller, { type LambderCallerMembers, type LambderCallerOptions, type LambderCallOptions } from "../client/LambderCaller.js";
+import {
+    withApiGroupCalls,
+    type LambderContractActionOf,
+    type LambderContractGroupsOf,
+    type LambderContractNamesInGroup,
+} from "../shared/wire/LambderApiGroupCalls.js";
 import type { LambderApiOutcome } from "../shared/wire/LambderApiOutcome.js";
 import type { LambderHttpEventFormat } from "../core/LambderContext.js";
 import type { LambderHandler } from "../core/LambderCreateOptions.js";
@@ -14,9 +19,10 @@ import type { LambderCreatedSession } from "../session/LambderSessionManager.js"
 import type { LambderApiTransport } from "../shared/transport/LambderApiTransport.js";
 import { LambderCookieJar } from "../shared/transport/LambderCookieJar.js";
 import { lambderCookieJarTransport } from "../shared/transport/lambderCookieJarTransport.js";
-import type { LambderApiContractShape } from "../shared/wire/LambderApiContract.js";
+import type { LambderApiContractShape, LambderContractRefusalMessage } from "../shared/wire/LambderApiContract.js";
 import type { LambderApiSignatureMap } from "../shared/wire/LambderApiSignatureMap.js";
-import type { LambderGuardInputsProviderOption } from "../shared/wire/LambderCallOptions.js";
+import type { LambderCallArgs, LambderContractOutputOf, LambderGuardInputsProviderOption } from "../shared/wire/LambderCallOptions.js";
+import { assertApiSuccess } from "../shared/wire/LambderOutcomeAssertions.js";
 import { DEFAULT_MAX_RESTORED_PAYLOAD_BYTES } from "../shared/wire/LambderRequestPayload.js";
 
 /**
@@ -80,11 +86,40 @@ export type LambderTestVisitorArgs<TOptions, TProvidedGuards extends string> =
     [TProvidedGuards] extends [never] ? [options?: TOptions] : [options: TOptions];
 
 /**
+ * A visitor's `api`: the endpoint's output, typed as the output alone, or a
+ * thrown Error saying what came back instead. A test step that should
+ * succeed reads its output on the next line; a refused or crashed step stops
+ * the test there, rather than as an undefined read further on.
+ */
+export type LambderTestVisitorApi<TContract extends LambderApiContractShape, TProvidedGuards extends string> = <TApiName extends keyof TContract & string = string>(
+    apiName: TApiName,
+    ...rest: LambderCallArgs<TContract, TApiName, TProvidedGuards, LambderCallOptions<LambderContractRefusalMessage<TContract, TApiName>>>
+) => Promise<LambderContractOutputOf<TContract, TApiName>>;
+
+/**
+ * One endpoint as a visitor hands it out on its group: called, it is the
+ * visitor's `api` for that endpoint (the output, or a thrown Error saying what
+ * came back instead); `.outcome` is its `apiOutcome`, which never throws.
+ */
+export type LambderTestVisitorEndpoint<TContract, TName extends keyof TContract & string, TProvidedGuards extends string> = {
+    (...args: LambderCallArgs<TContract, TName, TProvidedGuards, LambderCallOptions<LambderContractRefusalMessage<TContract, TName>>>): Promise<LambderContractOutputOf<TContract, TName>>;
+    outcome(...args: LambderCallArgs<TContract, TName, TProvidedGuards, LambderCallOptions<LambderContractRefusalMessage<TContract, TName>>>): Promise<LambderApiOutcome<LambderContractOutputOf<TContract, TName>, LambderContractRefusalMessage<TContract, TName>>>;
+};
+
+/** Every endpoint of a contract by group, as a visitor hands them out: `visitor.orders.place(input)`. */
+export type LambderTestVisitorGroupCalls<TContract, TProvidedGuards extends string> = {
+    readonly [TGroup in LambderContractGroupsOf<TContract>]: {
+        readonly [TName in LambderContractNamesInGroup<TContract, TGroup> as LambderContractActionOf<TName>]: LambderTestVisitorEndpoint<TContract, TName, TProvidedGuards>;
+    };
+};
+
+/**
  * One simulated browser in front of a real Lambder app: a cookie jar, an
- * address and a host of its own, and two ways in. `api` / `apiOutcome` are a
- * typed LambderCaller's, over the real handler in this process, so a call
- * runs the whole pipeline (rate limits, session, replay, guards, validation)
- * the way a browser's would. `request` is everything else a browser sends:
+ * address and a host of its own, and two ways in. `api` / `apiOutcome` go
+ * through a typed LambderCaller, over the real handler in this process, so a
+ * call runs the whole pipeline (rate limits, session, replay, guards,
+ * validation) the way a browser's would; `api` throws where the caller's
+ * would hand back undefined. `request` is everything else a browser sends:
  * pages, redirects, session routes, file requests. Both carry the same jar,
  * so a session started through one is the session the other presents.
  *
@@ -100,8 +135,14 @@ class LambderTestVisitorCore<TContract extends LambderApiContractShape = any, TS
      * An answer's logList is not printed; it is on the outcome.
      */
     readonly caller: LambderCaller<TContract, TProvidedGuards>;
-    /** The payload on success, `undefined` on a failure: LambderCaller.api, through this visitor. */
-    readonly api: LambderCallerMembers<TContract, TProvidedGuards>["api"];
+    /**
+     * The endpoint's output; throws on every failure, with an Error that
+     * names the endpoint and says what came back the way assertApiSuccess
+     * does: the reason, the status, the refusal's code and message, and for
+     * a crash the error the app threw, which is also the end of the Error's
+     * cause chain. `apiOutcome` is for a test that expects a failure.
+     */
+    readonly api: LambderTestVisitorApi<TContract, TProvidedGuards>;
     /**
      * The full outcome, never throwing: LambderCaller.apiOutcome, through
      * this visitor. Pair it with assertApiSuccess / assertApiFailure.
@@ -153,12 +194,27 @@ class LambderTestVisitorCore<TContract extends LambderApiContractShape = any, TS
             if(crash && !outcome.ok && "error" in outcome && outcome.error.cause === undefined) outcome.error.cause = crash;
             return outcome;
         };
-        this.api = ((apiName: string, ...callArgs: unknown[]) => caller.api(apiName, ...callArgs)) as LambderCallerMembers<TContract, TProvidedGuards>["api"];
+        // The plain call reads as the output, so a failure has nowhere to go
+        // but a throw. assertApiSuccess says what came back, as a test's own
+        // assertion would; the endpoint's name says which step of a setup it
+        // was.
+        const api = async (apiName: string, ...callArgs: unknown[]) => {
+            const outcome = await apiOutcome(apiName, ...callArgs);
+            try {
+                assertApiSuccess(outcome);
+            } catch(err){
+                const described = err as Error;
+                throw new Error(`${apiName}: ${described.message}`, { cause: described.cause });
+            }
+            return outcome.payload;
+        };
+        this.api = api as LambderTestVisitorApi<TContract, TProvidedGuards>;
         this.apiOutcome = apiOutcome as LambderCallerMembers<TContract, TProvidedGuards>["apiOutcome"];
-        // Each group of the contract, as on a caller, through this visitor's
-        // own two calls: visitor.orders.place.outcome(input) carries the crash
-        // cause as visitor.apiOutcome does.
-        return withApiGroupCalls(this, (apiName, args) => caller.api(apiName, ...args), (apiName, args) => apiOutcome(apiName, ...args));
+        // Each group of the contract through this visitor's own two calls:
+        // visitor.orders.place(input) throws as visitor.api does, and
+        // visitor.orders.place.outcome(input) carries the crash cause as
+        // visitor.apiOutcome does.
+        return withApiGroupCalls(this, (apiName, args) => api(apiName, ...args), (apiName, args) => apiOutcome(apiName, ...args));
     }
 
     /**
@@ -244,11 +300,11 @@ class LambderTestVisitorCore<TContract extends LambderApiContractShape = any, TS
 
 /**
  * One simulated browser in front of a real Lambder app, with the app's
- * endpoints by group as a caller has them: `visitor.orders.place(input)`,
- * `visitor.orders.place.outcome(input)`.
+ * endpoints by group: `visitor.orders.place(input)` for the output (thrown on
+ * a failure), `visitor.orders.place.outcome(input)` for the outcome.
  */
 export type LambderTestVisitor<TContract extends LambderApiContractShape = any, TSessionData = any, TProvidedGuards extends string = never> =
-    LambderTestVisitorCore<TContract, TSessionData, TProvidedGuards> & LambderCallerGroupCalls<TContract, TProvidedGuards>;
+    LambderTestVisitorCore<TContract, TSessionData, TProvidedGuards> & LambderTestVisitorGroupCalls<TContract, TProvidedGuards>;
 
 export const LambderTestVisitor = LambderTestVisitorCore as unknown as {
     new <TContract extends LambderApiContractShape = any, TSessionData = any, TProvidedGuards extends string = never>(

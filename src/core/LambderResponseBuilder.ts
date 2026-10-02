@@ -23,6 +23,12 @@ export type LambderResponseOptions = {
     etag?: boolean | "auto";
 };
 
+/** res.templateFile's options: a response's, and how the file is compiled. */
+export type LambderTemplateFileOptions = LambderResponseOptions & {
+    /** Expose the <title> content as slot "title" and the point before </head> as slot "head" (see LambderTemplatingEngineOptions). */
+    htmlVirtualSlots?: boolean;
+};
+
 export type LambderRawResponseInit = {
     statusCode: LambderHttpStatusCode;
     headers?: LambderHeadersInput;
@@ -31,6 +37,22 @@ export type LambderRawResponseInit = {
     isBase64Encoded?: boolean;
     compress?: boolean | "auto";
     etag?: boolean | "auto";
+};
+
+/**
+ * The body of a response a browser renders as markup: safe markup only. A
+ * plain string is refused rather than sent, since nothing can tell markup an
+ * author wrote from text a request supplied (`"No match at " + ctx.path`),
+ * and the latter, sent as a page, runs as script. The tag escapes what it
+ * interpolates, raw() is the one visible place where trusted markup passes as
+ * it is, and text goes out as text.
+ */
+const markupBody = (method: string, tag: "html" | "xml", body: unknown): string => {
+    if(body instanceof LambderSafeHtml) return body.value;
+    throw new TypeError(
+        `Lambder: ${method} takes safe ${tag === "html" ? "HTML" : "XML"}, and was given ${body === null ? "null" : typeof body}. Build the body with ${tag}\`...\`, which ` +
+        `escapes what it interpolates, mark markup you trust with raw(), or send plain text with res.text(body, { statusCode }).`,
+    );
 };
 
 /**
@@ -98,24 +120,29 @@ export default class LambderResponseBuilder {
         return this.buildResponse(200, "application/json; charset=utf-8", JSON.stringify(data), options);
     }
 
+    /** A plain-text body, sent as text: the place for a message, whatever status it goes out with (`{ statusCode }`). */
     text(data: string, options?: LambderResponseOptions): LambderResponse {
         return this.buildResponse(200, "text/plain; charset=utf-8", data, options);
     }
 
-    xml(data: string | LambderSafeHtml, options?: LambderResponseOptions): LambderResponse {
-        return this.buildResponse(200, "application/xml; charset=utf-8", String(data), options);
+    /** An XML document (a sitemap, a feed, SVG) built with xml`...` or marked safe with raw(). */
+    xml(data: LambderSafeHtml, options?: LambderResponseOptions): LambderResponse {
+        return this.buildResponse(200, "application/xml; charset=utf-8", markupBody("res.xml", "xml", data), options);
     };
 
-    html(data: string | LambderSafeHtml, options?: LambderResponseOptions): LambderResponse {
-        return this.buildResponse(200, "text/html; charset=utf-8", String(data), options);
+    /** An HTML page built with html`...` or marked safe with raw(). */
+    html(data: LambderSafeHtml, options?: LambderResponseOptions): LambderResponse {
+        return this.buildResponse(200, "text/html; charset=utf-8", markupBody("res.html", "html", data), options);
     };
 
-    status(statusCode: LambderHttpStatusCode, body?: string, options?: LambderResponseOptions): LambderResponse {
-        return this.buildResponse(statusCode, "text/html; charset=utf-8", body ?? "", options);
+    /** An HTML response with any status code, its body built like res.html's; no body sends an empty one. */
+    status(statusCode: LambderHttpStatusCode, body?: LambderSafeHtml, options?: LambderResponseOptions): LambderResponse {
+        return this.buildResponse(statusCode, "text/html; charset=utf-8", body === undefined ? "" : markupBody("res.status", "html", body), options);
     };
 
-    status404(data: string, options?: LambderResponseOptions): LambderResponse {
-        return this.buildResponse(404, "text/html; charset=utf-8", data, options);
+    /** An HTML 404, its body built like res.html's. */
+    status404(data: LambderSafeHtml, options?: LambderResponseOptions): LambderResponse {
+        return this.buildResponse(404, "text/html; charset=utf-8", markupBody("res.status404", "html", data), options);
     };
 
     /**
@@ -162,7 +189,7 @@ export default class LambderResponseBuilder {
     /** A file from the files source as a response; 404 when there is none. */
     async file(filePath: string, options?: LambderResponseOptions): Promise<LambderResponse> {
         const file = await this.requireFiles("res.file").read(filePath);
-        if(!file) return this.status404("File not found", { etag: false });
+        if(!file) return this.text("File not found", { statusCode: 404, etag: false });
         return this.buildResponse(200, file.mimeType, file.body, options);
     };
 
@@ -171,16 +198,26 @@ export default class LambderResponseBuilder {
      * LambderTemplatingEngine (comment-based slots/conditionals) and return
      * it as an HTML response. The compiled template is cached on the
      * instance across warm invocations; a missing file throws (it is a
-     * server-side configuration error, not a client 404). Set
-     * htmlVirtualSlots to expose "title"/"head" slots on marker-less files.
+     * server-side configuration error, not a client 404), and so does a data
+     * key the file has no slot or condition for, naming the file. TNames, when
+     * given, is the file's slot and condition names, so a misspelled key is a
+     * compile error. Set htmlVirtualSlots to expose "title"/"head" slots on
+     * marker-less files.
      */
-    async templateFile(
+    async templateFile<TNames extends string = string>(
         filePath: string,
-        data?: LambderTemplateData,
-        options?: LambderResponseOptions & { htmlVirtualSlots?: boolean },
+        data?: LambderTemplateData<TNames>,
+        options?: LambderTemplateFileOptions,
     ): Promise<LambderResponse> {
         const template = await this.requireFiles("res.templateFile").template(filePath, { htmlVirtualSlots: options?.htmlVirtualSlots });
-        return this.buildResponse(200, "text/html; charset=utf-8", template.render(data), options);
+        let body: string;
+        try {
+            body = template.render(data);
+        } catch(error){
+            // The engine knows its source, not the file it came from.
+            throw new Error(`Lambder: res.templateFile(${JSON.stringify(filePath)}): ${(error as Error).message}`, { cause: error });
+        }
+        return this.buildResponse(200, "text/html; charset=utf-8", body, options);
     };
 
     /**

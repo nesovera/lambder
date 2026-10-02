@@ -15,12 +15,15 @@ import { lambderGuard } from '../../src/core/LambderPolicyBuilders.js';
 import { refuse, LAMBDER_REFUSAL_CODES } from '../../src/shared/wire/LambderApiRefusal.js';
 import { LambderLocalFileSource } from '../../src/stores/LambderLocalFileSource.js';
 import { LambderMemorySessionStore } from '../../src/stores/LambderMemorySessionStore.js';
+import { LambderMemoryRateLimiter } from '../../src/stores/LambderMemoryRateLimiter.js';
+import { LambderMemoryIdempotencyStore } from '../../src/stores/LambderMemoryIdempotencyStore.js';
 import type { LambderSessionStore } from '../../src/shared/contracts/LambderSessionStore.js';
 import type { LambderRateLimiter } from '../../src/shared/contracts/LambderRateLimiter.js';
 import type { LambderIdempotencyStore } from '../../src/shared/contracts/LambderIdempotencyStore.js';
 import LambderCaller from '../../src/client/LambderCaller.js';
 import { lambderHandlerTransport } from '../../src/invoke/lambderHandlerTransport.js';
 import { lambderTestApp, assertApiSuccess, assertApiFailure, assertApiRefusal } from '../../src/testing.js';
+import { html } from '../../src/shared/LambderHtml.js';
 
 type SessionData = { userId: string; role: 'admin' | 'member'; refreshed?: boolean };
 
@@ -107,12 +110,12 @@ const createApp = () => {
         }),
     )
         .addRoute('/broken', () => { throw new Error('the page broke'); })
-        .addRoute('/hello/:name', (ctx, res) => res.html(`<p>Hello ${ctx.pathParams.name}, q=${ctx.get.q ?? ''}, country=${ctx.headers['x-country'] ?? ''}</p>`))
+        .addRoute('/hello/:name', (ctx, res) => res.html(html`<p>Hello ${ctx.pathParams.name}, q=${ctx.get.q ?? ''}, country=${ctx.headers['x-country'] ?? ''}</p>`))
         .addRoute('/old', (_ctx, res) => res.redirect('/hello/moved'))
-        .addRoute('/remember', (_ctx, res) => { _ctx.setCookie('theme', 'dark'); return res.html('ok'); })
+        .addRoute('/remember', (_ctx, res) => { _ctx.setCookie('theme', 'dark'); return res.html(html`ok`); })
         .addRoute('/theme', (ctx, res) => res.json({ theme: ctx.cookie.theme ?? null }))
         .addRoute({ method: 'POST', path: '/form' }, (ctx, res) => res.json({ got: ctx.post }))
-        .addSessionRoute('/account', (ctx, res) => res.html(`account of ${ctx.session.data.userId}`))
+        .addSessionRoute('/account', (ctx, res) => res.html(html`account of ${ctx.session.data.userId}`))
         .addAction((event) => (event as { source?: string } | null)?.source === 'aws.events', async (event, tools) => {
             scheduledRuns.push(event);
             return { ran: true, functionName: tools.lambdaContext.functionName };
@@ -350,6 +353,70 @@ describe('lambderTestApp: what the app threw', () => {
     });
 });
 
+describe('LambderTestVisitor: the plain call', () => {
+    it('hands back the output, and throws on a refusal, naming the endpoint and saying what came back', async () => {
+        const member = await app.signIn('bob', { userId: 'bob', role: 'member' });
+        expect(await member.account.me({})).toEqual({ userId: 'bob', refreshed: false });
+
+        const refused = /^admin\.only: Expected the call to succeed, but it was a failure with reason "notAuthorized", status 200, refusal .*"code":"app\/wrong-role".*"content":"Wrong role\."/;
+        await expect(member.admin.only({})).rejects.toThrow(refused);
+        await expect(member.api('admin.only', {})).rejects.toThrow(refused);
+        await expect(app.visitor().test.echo({ text: 42 as unknown as string })).rejects.toThrow(/^test\.echo: .*reason "validation"/);
+        await expect(app.visitor().account.me({})).rejects.toThrow(/^account\.me: .*reason "sessionExpired"/);
+    });
+
+    it('throws for a crash with the error the app threw, in the message and at the end of the cause chain', async () => {
+        const thrown = await app.visitor().test.crash({}).then(() => null, (err: Error) => err);
+
+        expect(thrown?.message).toMatch(/^test\.crash: .*reason "server", status 500.*\(cause: boom\)/);
+        const crash = (thrown?.cause as Error).cause as Error;
+        expect(crash.message).toBe('boom');
+        expect(crash.stack).toContain('test-app.test.ts');
+    });
+
+    it('leaves the outcome to a test that expects a failure, and the caller underneath as any frontend has it', async () => {
+        const guest = app.visitor();
+        assertApiFailure(await guest.account.me.outcome({}), 'sessionExpired');
+        expect(await guest.caller.api('account.me', {})).toBeUndefined();
+    });
+});
+
+describe('LambderTestApp.assertNoCrashesAfterEach', () => {
+    it('fails a test that leaves crashes behind, listing each with its stack, and forgets the ones it reported', async () => {
+        let check: () => void = () => { throw new Error('no check was installed'); };
+        app.assertNoCrashesAfterEach((installed) => { check = installed; });
+        expect(() => check()).not.toThrow();
+
+        await app.visitor().apiOutcome('test.crash', {});
+        await app.visitor().request('GET', '/broken');
+        let failure: Error | undefined;
+        try { check(); } catch(err){ failure = err as Error; }
+
+        expect(failure?.message).toMatch(/^The app crashed answering 2 requests in this test:\n\n1\) Error: boom\n {3}at .*\n/);
+        expect(failure?.message).toMatch(/\n\n2\) Error: the page broke\n {3}at /);
+        expect(app.crashes).toEqual([]);
+        expect(() => check()).not.toThrow();
+
+        await app.visitor().apiOutcome('test.crash', {});
+        expect(() => check()).toThrow(/^The app crashed answering a request in this test:\n\n1\) Error: boom/);
+    });
+
+    describe('installed with the runner\'s own afterEach', () => {
+        const checked = lambderTestApp(createApp());
+        checked.assertNoCrashesAfterEach(afterEach);
+
+        it('passes a test that crashed nothing', async () => {
+            expect(await checked.visitor().test.echo({ text: 'hi' })).toMatchObject({ text: 'hi' });
+        });
+
+        it('passes a test that crashed on purpose and reset', async () => {
+            await checked.visitor().apiOutcome('test.crash', {});
+            expect(checked.crashes.map((crash) => crash.message)).toEqual(['boom']);
+            checked.reset();
+        });
+    });
+});
+
 describe('lambderTestApp: reset', () => {
     afterEach(() => app.reset());
 
@@ -557,6 +624,17 @@ describe('lambderTestApp: the files option', () => {
     it('refuses the option on an app that reads no files', () => {
         expect(() => lambderTestApp(initLambder().create({}), { files: new LambderLocalFileSource({ root: './tests/fixtures/public' }) }))
             .toThrow(/created without one/);
+    });
+});
+
+describe('lambderTestApp: the store options', () => {
+    it('refuses a store for a subsystem the app was created without, as it refuses a files source for an app that reads no files', () => {
+        expect(() => lambderTestApp(initLambder().create({}), { session: { store: new LambderMemorySessionStore() } }))
+            .toThrow('lambderTestApp: the session.store option was given, but the app was created without sessions, so nothing reads sessions to put a store under.');
+        expect(() => lambderTestApp(initLambder().create({}), { rateLimits: { limiter: new LambderMemoryRateLimiter() } }))
+            .toThrow('lambderTestApp: the rateLimits.limiter option was given, but the app was created without rate limits, so nothing counts calls to put a limiter under.');
+        expect(() => lambderTestApp(initLambder().create({}), { idempotency: { store: new LambderMemoryIdempotencyStore() } }))
+            .toThrow('lambderTestApp: the idempotency.store option was given, but the app was created without idempotency, so nothing records answers to put a store under.');
     });
 });
 

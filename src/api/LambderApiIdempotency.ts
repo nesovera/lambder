@@ -6,7 +6,7 @@ import { LambderApiRefusal, LAMBDER_REFUSAL_CODES, type LambderRefusalMessage } 
 import type { LambderIdempotencyDoneRecord, LambderIdempotencyBeginResult, LambderIdempotencyStore } from "../shared/contracts/LambderIdempotencyStore.js";
 import type { LambderApiIdempotencyOption } from "../shared/wire/LambderApiOptionValues.js";
 import { joinKeyFields } from "../shared/util/joinKeyFields.js";
-import { boundKeyField } from "../shared/util/boundKeyField.js";
+import type { LambderKeyFieldDigest } from "../shared/util/LambderKeyFieldDigest.js";
 import { assertPositiveInteger } from "../shared/util/LambderOptionChecks.js";
 import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
 import { canonicalJson } from "../shared/util/canonicalJson.js";
@@ -139,22 +139,26 @@ const keyReusedRefusal = (apiName: string): LambderApiRefusal => new LambderApiR
 
 /**
  * A request's fingerprint: what makes two requests under one key the same
- * request. The payload as it was posted, as canonical JSON so key order does
- * not matter, digested so a record keeps 64 characters rather than the
- * payload. Guard inputs stay out: a captcha or proof token is single use, so
- * a genuine retry carries a new one, and a fingerprint over it would refuse
- * that retry as another request. A runtime without
- * WebCrypto (the mock on a page served over plain http, a phone on the LAN)
- * keeps the canonical JSON itself: a fingerprint is only compared with ones
- * the same runtime took, so its form does not matter, only that one payload
- * always gives the same one. Either form is non-empty (canonical JSON is at
- * least `null`), which is what lets a store report the empty string for a
- * record it cannot tie to any request.
+ * request. The payload as it was posted, beside the guard inputs that say
+ * what the call is about (see LambderApiGuardsEngine.fingerprintedInputsOf),
+ * as canonical JSON so key order does not matter, digested so a record keeps
+ * 64 characters rather than the request. A guard input selecting a store or
+ * a tenant is part of the request as surely as the payload is: left out, the
+ * same key sent for another tenant would replay the first tenant's answer. A
+ * guard input declared single use (a captcha token) is left out by the
+ * guards engine, since a genuine retry carries a fresh one.
+ *
+ * A runtime without WebCrypto (the mock on a page served over plain http, a
+ * phone on the LAN) keeps the canonical JSON itself: a fingerprint is only
+ * compared with ones the same runtime took, so its form does not matter,
+ * only that one request always gives the same one. Either form is non-empty,
+ * which is what lets a store report the empty string for a record it cannot
+ * tie to any request.
  */
-const requestFingerprintOf = async (payload: unknown): Promise<string> => {
+const requestFingerprintOf = async (payload: unknown, guardInputs: Readonly<Record<string, unknown>>): Promise<string> => {
     let canonical: string;
     try {
-        canonical = canonicalJson(payload ?? null);
+        canonical = canonicalJson({ payload: payload ?? null, guardInputs });
     } catch {
         // Sorting the keys recurses once per nesting level, so a payload
         // nested deep enough to exhaust the stack is refused as the caller's
@@ -188,8 +192,9 @@ export type LambderIdempotentCall = {
  * is the right default, but silently it looks exactly like working: permanent
  * failures (a missing table, a missing IAM action, an SDK that would not
  * install) could have an app execute every retry twice for months with
- * nothing in its logs. The scope key is left out, since it carries the
- * caller's identity and posted key.
+ * nothing in its logs. The scope key is left out: digested as its caller's
+ * fields are, it is still the same for every attempt of one caller, and a
+ * log is read by more people than the table.
  */
 const reportFailOpen = (apiName: string, attempted: string, err: unknown): void => {
     console.error(
@@ -208,14 +213,17 @@ const reportFailOpen = (apiName: string, attempted: string, err: unknown): void 
 export class LambderApiIdempotencyEngine {
     /** Stamped on the crash answer the engine records for an answer that broke its output schema. */
     private readonly apiVersion: string | null;
+    /** What every caller-controlled field of a scope is written as. */
+    private readonly keyFieldDigest: LambderKeyFieldDigest;
     private store: LambderIdempotencyStore | null = null;
     private defaultTtlSeconds = 24 * 3600;
     private defaultPendingTtlSeconds = DEFAULT_IDEMPOTENCY_PENDING_TTL_SECONDS;
     private failOpen = true;
     private callerIdentity: LambderApiIdempotencyConfig["callerIdentity"] = undefined;
 
-    constructor(apiVersion: string | null){
+    constructor(apiVersion: string | null, keyFieldDigest: LambderKeyFieldDigest){
         this.apiVersion = apiVersion;
+        this.keyFieldDigest = keyFieldDigest;
     }
 
     configure(config: LambderApiIdempotencyConfig): void {
@@ -280,21 +288,24 @@ export class LambderApiIdempotencyEngine {
      * served before guards run.
      *
      * joinKeyFields escapes the fields, so no two distinct scopes collide.
-     * The identity field is the caller's (a device token in the docs' own
-     * example), so it is bounded first (boundKeyField): an over-long one
-     * would push the scope past a store's key limit, and the store's refusal
-     * is a throw that failOpen turns into no idempotency for that caller.
+     * Every field but the API name is the caller's (a session key, an
+     * identity such as the docs' device token, the posted key), so each is
+     * written as its digest (LambderKeyFieldDigest): a table read shows which
+     * API a record answers and never whose it is, and no field is long
+     * enough to push the scope past a store's key limit, whose refusal is a
+     * throw that failOpen turns into no idempotency for that caller.
      */
     private async scopeOf(apiName: string, ctx: LambderApiCallContext, request: LambderApiRequest, key: string): Promise<string> {
+        const postedKey = await this.keyFieldDigest.digestOf("key", key);
         const sessionKey = ctx.session?.sessionKey;
-        if(sessionKey) return joinKeyFields(await boundKeyField("s", sessionKey), apiName, key);
+        if(sessionKey) return joinKeyFields(await this.keyFieldDigest.digestOf("s", sessionKey), apiName, postedKey);
         // No session to scope by. The app may still say who this is, through
         // callerIdentity; without one the key alone is the scope, which is
         // what makes it a bearer token for its own answer.
         const identity = this.callerIdentity ? await this.callerIdentity(ctx, request) : null;
         return identity
-            ? joinKeyFields(await boundKeyField("i", identity), apiName, key)
-            : joinKeyFields("k", apiName, key);
+            ? joinKeyFields(await this.keyFieldDigest.digestOf("i", identity), apiName, postedKey)
+            : joinKeyFields("k", apiName, postedKey);
     }
 
     /**
@@ -304,15 +315,17 @@ export class LambderApiIdempotencyEngine {
      * refuses with a 400. Taken at the replay lookup, before input validation
      * replaces the payload with its parsed form, so the fingerprint is of the
      * request as it was posted, and callerIdentity (app code that may verify
-     * a token or read a store) runs once.
+     * a token or read a store) runs once. `guardInputs` are the posted guard
+     * inputs the fingerprint holds, as the guards engine picks them
+     * (fingerprintedInputsOf): the engine that knows which are single use.
      */
-    async resolveKeyedCall(apiName: string, request: LambderApiRequest, ctx: LambderApiCallContext): Promise<LambderIdempotentCall | null> {
+    async resolveKeyedCall(apiName: string, request: LambderApiRequest, ctx: LambderApiCallContext, guardInputs: Readonly<Record<string, unknown>>): Promise<LambderIdempotentCall | null> {
         if(!this.store) return null;
         const key = this.readKey(request);
         if(key === null) return null;
         return {
             scopeKey: await this.scopeOf(apiName, ctx, request, key),
-            fingerprint: await requestFingerprintOf(request.payload),
+            fingerprint: await requestFingerprintOf(request.payload, guardInputs),
         };
     }
 

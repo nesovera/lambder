@@ -1,11 +1,11 @@
 /**
  * SHA-256 and HMAC-SHA256 through WebCrypto: the digests every layer shares.
  * The session crypto hashes bearer secrets with the first and partitions
- * session keys with the second, the rate-limit engine folds an over-long
- * tracker key, signed claims and keyed digests are HMACs under an app's
- * secret, so every key space is built from the same primitives on every
- * runtime (browsers on a secure context, Node 20+, edge runtimes); an
- * upload's checksum is the same digest over the file's bytes.
+ * session keys with the second, the policy engines digest the caller's
+ * fields of their store keys, signed claims and keyed digests are HMACs
+ * under an app's secret, so every key space is built from the same
+ * primitives on every runtime (browsers on a secure context, Node 20+, edge
+ * runtimes); an upload's checksum is the same digest over the file's bytes.
  */
 /** Lowercase hex of a byte array, two characters per byte. */
 export declare const bytesToHexString: (bytes: Uint8Array) => string;

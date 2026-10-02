@@ -25,6 +25,8 @@ import type { LambderApiTransport } from '../../src/shared/transport/LambderApiT
 import { assertApiSuccess, assertApiFailure, assertApiRefusal } from '../../src/shared/wire/LambderOutcomeAssertions.js';
 import type { LambderApiOptionEntry, LambderGuardDeclarationEntry } from '../../src/shared/wire/LambderApiOptionEntries.js';
 import { apiCallPath } from '../../src/shared/wire/LambderApiNames.js';
+import { LambderKeyFieldDigest } from '../../src/shared/util/LambderKeyFieldDigest.js';
+import { joinKeyFields } from '../../src/shared/util/joinKeyFields.js';
 
 type SessionData = { userId: string; tenants: { tenantId: string; role: 'reader' | 'writer' }[] };
 
@@ -60,6 +62,8 @@ const mockGuards = {
     tenant: mock.guard({
         guardInput: z.object({ tenantId: z.string() }),
         session: true,
+        // The codes the server's tenant guard declares (contractGuardDeclarations), which a mock given that table has to declare too.
+        refusals: ['app/not-a-member', 'app/read-only'],
         handler: (ctx, { tenantId }, role: 'reader' | 'writer') => {
             const membership = ctx.session.data.tenants.find((tenant) => tenant.tenantId === tenantId);
             if(!membership) refuse('Not a member.', { code: 'app/not-a-member', notAuthorized: true });
@@ -251,7 +255,7 @@ describe('LambderMockApp - answers', () => {
         const compressing = new LambderCaller<Contract>({
             apiPath: '/api', isCorsEnabled: false, apiVersion: '2', requestCompression: true, transport: mockApp.transport(),
         });
-        const notes = Array.from({ length: 300 }, (_, i) => `note-${i} on the main line`);
+        const notes = Array.from({ length: 300 }, (_, i) => `note-${i} in the stockroom`);
         await compressing.apiOutcome('admin.run', { notes } as never);
         expect(mockApp.calls.at(-1)?.payload).toEqual({ notes });
     });
@@ -294,7 +298,7 @@ describe('LambderMockApp - answers', () => {
     it('a compressed request payload is restored before the handler sees it', async () => {
         const { mockApp } = createMockApp();
         const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false, requestCompression: true, transport: mockApp.transport() });
-        const notes = Array.from({ length: 300 }, (_, i) => `note-${i} on the main line`);
+        const notes = Array.from({ length: 300 }, (_, i) => `note-${i} in the stockroom`);
         expect(await caller.api('tools.echo', { notes })).toEqual({ count: 300 });
         expect(mockApp.calls.at(-1)?.payload).toEqual({ notes });
     });
@@ -485,7 +489,9 @@ describe('LambderMockApp - guards, rate limits, idempotency, version', () => {
         expect(third.refusal).toMatchObject({ code: LAMBDER_REFUSAL_CODES.rateLimited });
         expect(third.retryAfterSeconds).toBeGreaterThanOrEqual(1);
         expect(mockApp.calls.at(-1)?.outcome).toBe('rateLimited');
-        expect(mockApp.rateLimiter?.countOf('api|tools.limited|tight|ip:127.0.0.1', 'perMin')).toBe(2);
+        // The address counted as the server counts it: digested under the mock sessions' default salt.
+        const addressKey = await new LambderKeyFieldDigest('lambder-mock').digestOf('ip', '127.0.0.1');
+        expect(mockApp.rateLimiter?.countOf(joinKeyFields('api', 'tools.limited', 'tight', addressKey), 'perMin')).toBe(2);
     });
 
     it('replays an idempotent answer for a repeated key without running the handler again', async () => {
@@ -585,6 +591,32 @@ describe('LambderMockApp - failure injection and latency', () => {
         expect(mockApp.calls.filter((call) => call.outcome === 'injected').length).toBe(8);
     });
 
+    it('an injected rate limit carries the policy it names and its wait as data, as a real one does', async () => {
+        const { mockApp } = createMockApp();
+        const caller = callerFor(mockApp);
+        mockApp.failNext('user.get', { reason: 'rateLimited', policy: 'lookupsPerIp', retryAfterSeconds: 7 });
+        mockApp.failNext('user.get', 'rateLimited');
+
+        const named = await caller.apiOutcome('user.get', { userId: '1' });
+        expect(!named.ok && named.refusal).toEqual({ type: 'warning', code: 'lambder/rate-limited', content: 'Too many requests. Please try again later.', data: { policy: 'lookupsPerIp', retryAfterSeconds: 7 } });
+        const unnamed = await caller.apiOutcome('user.get', { userId: '1' });
+        expect(!unnamed.ok && unnamed.refusal).toMatchObject({ data: { policy: 'injected', retryAfterSeconds: 30 } });
+    });
+
+    it('an injected sessionExpired ends the session the call carries, as the server answers it only where there is none', async () => {
+        const { mockApp } = createMockApp();
+        const adaJar = new LambderCookieJar();
+        const beaJar = new LambderCookieJar();
+        await mockApp.signIn('ada', { userId: 'ada', tenants: [] }, { jar: adaJar });
+        await mockApp.signIn('bea', { userId: 'bea', tenants: [] }, { jar: beaJar });
+
+        mockApp.failNext('account.me', 'sessionExpired');
+        assertApiFailure(await callerFor(mockApp, { jar: adaJar }).apiOutcome('account.me', {}), 'sessionExpired');
+        // Ada's session is gone, as the server would have none to read; Bea's, which the call did not carry, stays.
+        expect(mockApp.sessionStore?.size).toBe(1);
+        expect(await callerFor(mockApp, { jar: beaJar }).api('account.me', {})).toEqual({ userId: 'bea' });
+    });
+
     it('setFailure persists until cleared; setOffline rejects every call', async () => {
         const { mockApp } = createMockApp();
         const caller = callerFor(mockApp);
@@ -654,7 +686,7 @@ describe('LambderMockApp - failure injection and latency', () => {
         const pending = caller.apiOutcome('user.get', { userId: '1' }, { signal: controller.signal });
         controller.abort();
         const aborted = await pending;
-        assertApiFailure(aborted, 'network');
+        assertApiFailure(aborted, 'aborted');
     });
 });
 
@@ -876,24 +908,19 @@ describe('LambderMockApp - overrides, reset, observation', () => {
             mockApp.api('tools.limited', { rateLimit: 'tight', handler: async () => ({ n: 1 }) }),
         ));
         const caller = callerFor(mockApp);
-        mockApp.setLatency(120);
+        mockApp.setLatency(60_000);
 
         mockApp.reset();
 
-        // No timer is advanced: a call still carrying the latency set before
-        // the reset would be sitting on one, which is what this asserts
-        // instead of an elapsed wall-clock time.
-        vi.useFakeTimers();
-        try {
-            let settled = false;
-            const pending = caller.api('tools.limited', {});
-            void pending.then(() => { settled = true; });
-            await vi.advanceTimersByTimeAsync(0);
-            expect(settled).toBe(true);
-            expect(await pending).toEqual({ n: 1 });
-        } finally {
-            vi.useRealTimers();
-        }
+        // A call still carrying the minute of latency set before the reset
+        // would lose this race by a wide margin. Real timers, because the
+        // limiter's key digest runs on WebCrypto, which settles outside a
+        // fake timer queue.
+        const answered = await Promise.race([
+            caller.api('tools.limited', {}),
+            new Promise<'still waiting'>((resolve) => setTimeout(() => resolve('still waiting'), 2_000)),
+        ]);
+        expect(answered).toEqual({ n: 1 });
         expect(mockApp.calls[0]?.id).toBe(1);
     });
 
@@ -1089,6 +1116,19 @@ describe('LambderMockApp - the MSW adapter and the document mirror', () => {
         expect(events.map((event) => event.phase)).toEqual(['request', 'response']);
     });
 
+    it('keeps the adapter\'s bookkeeping off the app, and refuses a target that is not a mock app', () => {
+        const { mockApp } = createMockApp();
+        // Behind the adapter door: what the adapter asks and tells the
+        // runtime is no member an app can call.
+        for(const member of ['hasRegisteredEntry', 'notePassthrough', 'mirrorCookiesIntoDocument', 'adoptCookieJar']){
+            expect(member in mockApp).toBe(false);
+        }
+        const { msw } = fakeMswModule();
+        const lookalike = { handleRequest: mockApp.handleRequest.bind(mockApp), pageCookieJar: mockApp.pageCookieJar, defaultClientIp: '127.0.0.1', cookieHost: 'localhost' };
+        expect(() => lambderMockMswHandler(lookalike as never, { msw, apiPath: '/api' }))
+            .toThrow('lambderMockMswHandler serves a LambderMockApp: pass the app initLambderMock().create() built, as lambderMockMswHandler(mockApp, { apiPath, msw }).');
+    });
+
     it('the document mirror drops Secure off a secure context, skips HttpOnly, and reset expires what it planted', async () => {
         // Development over plain http on a LAN address: the browser refuses a
         // Secure write, so a mirror that keeps the attribute leaves the page
@@ -1156,6 +1196,50 @@ describe('LambderMockApp - the MSW adapter and the document mirror', () => {
             expect(page.read(app.csrfCookieKey)).toBeUndefined();
             const after = await post('account.me', { payload: {}, token, siteHost: 'api.example.com' }) as Response;
             expect(await after.json()).toMatchObject({ sessionExpired: true });
+        });
+    });
+
+    it('signs the page in behind the adapter with signIn alone: both carry the runtime\'s page jar when given none', async () => {
+        // A jar of the adapter's own would hold the sessions of the calls it
+        // serves and never the one signIn planted, so every session call
+        // behind the worker after a signIn would answer sessionExpired.
+        const page = fakeDocumentCookies();
+        await withFakePage(page, async () => {
+            const app = mock.create({ ...requiredOptions });
+            app.registerPartial(app.apiSlice(app.api('account.me', { guards: 'signedIn', handler: async ({ session }) => ({ userId: session.data.userId }) })));
+            const { msw, post } = fakeMswModule();
+            lambderMockMswHandler(app, { msw, apiPath: '/api' });
+
+            await app.signIn('ada', { userId: 'ada', tenants: [] });
+            const token = page.read(app.csrfCookieKey);
+            const me = await post('account.me', { payload: {}, token, siteHost: 'localhost' }) as Response;
+            expect(await me.json()).toMatchObject({ payload: { userId: 'ada' } });
+
+            await app.signOut('ada');
+            expect(app.pageCookieJar.get(app.tokenCookieKey, { includeHttpOnly: true })).toBeUndefined();
+
+            // The page's jar is the runtime's own, so reset() empties it.
+            await app.signIn('bea', { userId: 'bea', tenants: [] });
+            expect(app.pageCookieJar.get(app.tokenCookieKey, { includeHttpOnly: true })).toBeTruthy();
+            app.reset();
+            expect(app.pageCookieJar.get(app.tokenCookieKey, { includeHttpOnly: true })).toBeUndefined();
+        });
+    });
+
+    it('reset expires a mirrored cookie at the Domain it was set with, which a deletion naming its path alone never reaches', async () => {
+        const page = fakeDocumentCookies();
+        await withFakePage(page, async () => {
+            const app = mock.create({ ...requiredOptions, sessions: { cookieOptions: { domain: 'example.test' } }, cookieHost: 'shop.example.test' });
+            await app.signIn('ada', { userId: 'ada', tenants: [] });
+            expect(page.written.some((header) => header.startsWith(`${app.csrfCookieKey}=`) && /;\s*Domain=example\.test/i.test(header))).toBe(true);
+
+            page.written.length = 0;
+            app.reset();
+            expect(page.written).toHaveLength(1);
+            expect(page.written[0]).toMatch(new RegExp(`^${app.csrfCookieKey}=;`));
+            expect(page.written[0]).toMatch(/;\s*Domain=example\.test/i);
+            expect(page.written[0]).toMatch(/;\s*Path=\//i);
+            expect(page.written[0]).toMatch(/;\s*Max-Age=0/i);
         });
     });
 
@@ -1570,6 +1654,7 @@ describe('LambderMockApp - declarations read off the apiOptions table', () => {
         tenant: mock.guard({
             guardInput: z.object({ tenantId: z.string() }),
             session: true,
+            refusals: ['app/not-a-member', 'app/read-only'],
             handler: (ctx, { tenantId }, role: 'reader' | 'writer') => {
                 const membership = ctx.session.data.tenants.find((tenant) => tenant.tenantId === tenantId);
                 if(!membership) refuse('Not a member.', { code: 'app/not-a-member' });
@@ -1650,6 +1735,14 @@ describe('LambderMockApp - declarations read off the apiOptions table', () => {
         const reader = await callerOf(expiring, jar).apiOutcome('order.create', { qty: 1 }, { guardInputs: { tenant: { tenantId: 't1' } }, idempotencyKey: createIdempotencyKey() });
         assertApiFailure(reader, 'sessionExpired');
         expect(reader.refusal).toMatchObject({ code: 'app/read-only', content: 'Read-only member.' });
+
+        // Injected, the code ends the session the call carries as the raised one does.
+        const writerJar = new LambderCookieJar();
+        await expiring.signIn('ada', { userId: 'ada', tenants: [{ tenantId: 't1', role: 'writer' }] }, { jar: writerJar });
+        expect(expiring.sessionStore?.size).toBe(1);
+        expiring.failNext('order.create', { reason: 'refusal', message: { type: 'warning', code: 'app/read-only', content: 'Read-only.' } });
+        assertApiFailure(await callerOf(expiring, writerJar).apiOutcome('order.create', { qty: 1 }, { guardInputs: { tenant: { tenantId: 't1' } }, idempotencyKey: createIdempotencyKey() }), 'sessionExpired');
+        expect(expiring.sessionStore?.size).toBe(0);
     });
 
     it('holds a refusal to the codes the tables declare for the entry, its guards\' included', async () => {
@@ -1692,6 +1785,33 @@ describe('LambderMockApp - declarations read off the apiOptions table', () => {
         assertApiFailure(await callerOf(app, jar).apiOutcome('order.create', { qty: 1 }, { guardInputs: { tenant: { tenantId: 't1' } }, idempotencyKey: createIdempotencyKey() }), 'server', { status: 500 });
         expect(app.calls.at(-1)?.error).toMatchObject({ message: expect.stringContaining('and data it does not declare') });
         vi.restoreAllMocks();
+    });
+
+    it('holds a mock guard\'s refusals to the codes the server\'s guard of its name declares, at compile time and at runtime', () => {
+        const tables = { apiOptions: contractOptions, guardDeclarations: contractGuardDeclarations };
+        const tenantInput = z.object({ tenantId: z.string() });
+        const member = { tenantId: 't1', role: 'writer' as const };
+        // The same codes in another order agree.
+        expect(() => mock.create({ ...requiredOptions, ...tables, guards: { ...declaredGuards, tenant: mock.guard({ guardInput: tenantInput, session: true, refusals: ['app/read-only', 'app/not-a-member'], handler: (_ctx, _input, _role: 'reader' | 'writer') => member }) } }))
+            .not.toThrow();
+        // One short of the server's.
+        expect(() => mock.create({
+            ...requiredOptions, ...tables,
+            // @ts-expect-error the server's tenant guard declares app/read-only too
+            guards: { ...declaredGuards, tenant: mock.guard({ guardInput: tenantInput, session: true, refusals: ['app/not-a-member'], handler: (_ctx, _input, _role: 'reader' | 'writer') => member }) },
+        })).toThrow('LambderMockApp: the mock guard "tenant" declares the refusals "app/not-a-member", and the server\'s guard of that name declares "app/not-a-member", "app/read-only" in the guardDeclarations table. A mock guard declares exactly the server guard\'s codes: regenerate the table, or give the mock guard refusals: ["app/not-a-member", "app/read-only"].');
+        // A code the server's guard does not declare, on a guard that declares none.
+        expect(() => mock.create({
+            ...requiredOptions, ...tables,
+            // @ts-expect-error the server's signedIn guard declares no refusals
+            guards: { ...declaredGuards, signedIn: mock.guard({ session: true, refusals: ['app/read-only'], handler: () => {} }) },
+        })).toThrow(/the mock guard "signedIn" declares the refusals "app\/read-only", and the server's guard of that name declares none/);
+        // A list typed as any string compiles, and create() still compares it.
+        const loose: readonly string[] = ['app/read-only'];
+        expect(() => mock.create({ ...requiredOptions, ...tables, guards: { ...declaredGuards, tenant: mock.guard({ guardInput: tenantInput, session: true, refusals: loose, handler: (_ctx, _input, _role: 'reader' | 'writer') => member }) } }))
+            .toThrow(/the mock guard "tenant" declares the refusals "app\/read-only"/);
+        // Without the declarations a mock guard's codes are its own.
+        expect(() => mock.create({ ...requiredOptions, guards: { ...declaredGuards, signedIn: mock.guard({ session: true, refusals: ['app/read-only'], handler: () => {} }) } })).not.toThrow();
     });
 
     it('needs the vocabulary declared on the init when the tables name a code, and refuses a table naming one the vocabulary does not hold', () => {

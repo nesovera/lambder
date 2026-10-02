@@ -106,7 +106,7 @@ npm install lambder zod
 ```
 
 `zod` is a required peer dependency: the published declarations name its types,
-so npm installs it alongside lambder. The four AWS SDK clients and `msw` are
+so npm installs it alongside lambder. The AWS SDK packages and `msw` are
 optional peers, so installing lambder never drags them into your tree. Add
 whatever the code you actually import needs:
 
@@ -114,7 +114,7 @@ whatever the code you actually import needs:
 | --- | --- |
 | `lambder/client` (browser, shared isomorphic code) | `zod`. `LambderCookieJar` pulls in `tough-cookie` and its public suffix list, so a bundle that never imports the jar never carries either |
 | `lambder` on AWS Lambda (any current Node.js runtime; the package needs Node 20 or later) | `zod`. The runtime already provides the AWS SDK v3, so mark the SDK packages as dev dependencies and keep them out of the deployment package, as long as the runtime's `@aws-sdk/client-dynamodb` is new enough for `LambderDdbRateLimiter` (3.868.0, see below) |
-| `lambder` anywhere else (a long-running server, a container, local tests) | `zod`, plus `@aws-sdk/client-dynamodb` and `@aws-sdk/lib-dynamodb` when sessions or the DynamoDB stores are used; both are loaded on the first table access, so an app that uses neither needs neither |
+| `lambder` anywhere else (a long-running server, a container, local tests) | `zod`, plus `@aws-sdk/client-dynamodb` when sessions or the DynamoDB stores are used; it is loaded on the first table access, so an app that uses neither does not need it |
 | `LambderS3FileSource` | `@aws-sdk/client-s3`, loaded on first read |
 | `LambderInvokeCaller` | `@aws-sdk/client-lambda`, loaded on the first call |
 | `lambder/mock` | nothing; `msw` only for the optional network-panel adapter |
@@ -140,7 +140,7 @@ The package ships five entry points; pick by where the code runs:
 | `lambder/client` | Browser and isomorphic shared code | `LambderCaller`, `LambderApiRefusal`/`refuse`, the API contract and envelope types, `LambderUploadRunner`, `LambderBackoffTimer`, `LambderSignedClaims`, `html`/`xml` tagged templates, `createLambderI18n` |
 | `lambder/mock` | Browser and Node, in development and tests | `LambderMockApp`, the mock runtime: your typed contract served from mock handlers over the real API pipeline and memory stores |
 | `lambder/testing` | Node, in tests | `lambderTestApp`: your real instance under test in this process, memory stores put under it in place, simulated browsers with typed callers in front of it, and the outcome assertions; the store conformance suites, to hold a store you write to the rules Lambder's own meet |
-| `lambder/build` | Node, in a build step | `writeApiSignatures`: the signature file both sides ship, written or checked from your instance; `writeApiOptions`: every API's declared options, policies and guard declarations as plain data, for the code that decides with them; `writeApiGuardParams`: one guard's parameters, one export per API and nothing else, so a browser gating on that guard carries only the ones it imports; `writeApiContract`: the contract as plain types a client compiles instead of the server; `generateApiFiles`: every one of them, for every app a script names, in one call |
+| `lambder/build` | Node, in a build step | `writeApiSignatures`: the signature file both sides ship, written or checked from your instance; `writeApiOptions`: every API's declared options, policies and guard declarations as plain data, for the code that decides with them; `writeApiGuardParams`: one guard's parameters, one export per API and nothing else, so a browser gating on that guard carries only the ones it imports; `writeApiContract`: the contract as plain types a client compiles instead of the server; `generateApiFiles`: every one of them, for every app a script names, in one call; `checkApiRefusals`: every refusal a handler can reach, held to the codes its endpoint may send |
 
 Frontends and shared isomorphic packages should import from `lambder/client`
 only; the entry's module graph contains no AWS SDK, Node built-ins, or server
@@ -158,7 +158,7 @@ and the helpers the two caches share), `src/client/`,
 transport), `src/mock/` (the mock runtime), `src/testing/` (the test app and the store conformance suites),
 `src/build/` (what a generator script runs at build time), and `src/shared/`
 (isomorphic modules every entry re-exports, grouped into `wire/` for the
-format both sides speak, `contracts/` for the six store and source
+format both sides speak, `contracts/` for the seven store and source
 interfaces, `transport/` for the caller-to-server seam, and `util/` for
 helpers).
 Directories are layers and imports only ever point down;
@@ -209,19 +209,16 @@ framework:
 ## Versioning and changes
 
 Released versions and what each one changed are in
-[CHANGELOG.md](./CHANGELOG.md). The current major is v10, which makes both
-sides of an answer exact. A success is only ever the handler's parsed output,
-and an output is an object or an array, so `caller.api()` is truthy exactly
-on success and a success's payload is typed as exactly the output; a hook, a
-fallback or an error handler answers an API call with `res.apiRefusal()`,
-never with a payload. A refusal names a code the app declared, which the
-contract carries and a caller narrows on, with its data typed. Every break
-and what to do about it is in the 10.0.1 entry, and the compiler finds most
-of them. The ones it cannot are changes of behavior: a refusal whose code its
-API does not declare is now a crash rather than an answer, and a success
-whose payload is not an object or an array now reads as a server failure. An
-app still on v8 goes through the 9.0.1 entry first, and one on an older
-major through the entries before it.
+[CHANGELOG.md](./CHANGELOG.md). Both sides of an answer are exact. A success
+is only ever the handler's parsed output, and an output is an object or an
+array, so `caller.api()` is truthy exactly on success and a success's payload
+is typed as exactly the output; a hook, a fallback or an error handler
+answers an API call with `res.apiRefusal()`, never with a payload. A refusal
+names a code the app declared, which the contract carries and a caller
+narrows on, with its data typed. Each major's first entry lists every break
+it made and what to do about it, and the compiler finds most of them; the
+entry names the ones it cannot, which are changes of behavior. An app on an
+older major goes through each major's entry in turn.
 
 ## Contributing
 

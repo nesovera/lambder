@@ -171,9 +171,15 @@ export default class LambderSessionManager<SessionData = any> {
      */
     private hashToken;
     createSession(sessionKey: string, data?: SessionData, ttlInSeconds?: number, options?: {
-        /** The data refresh deadline to start with (regenerateSession starts its data due). */
+        /** The data refresh deadline to start with, in epoch seconds. Default: dataRefresh.ttlSeconds from now. */
         dataExpiresAt?: number;
     }): Promise<LambderCreatedSession<SessionData>>;
+    /**
+     * Writes a new record holding `data` under fresh tokens, and hands it
+     * back with `served` as its data: the schema's reading of what the record
+     * holds, which createSession has checked and a rotation carries over.
+     */
+    private mintSession;
     /**
      * Writes new session data onto the record, and nothing else: the expiry
      * slides only in renewSession, which also re-issues the cookies, so a
@@ -216,8 +222,16 @@ export default class LambderSessionManager<SessionData = any> {
      * when the session is over: a refresh said so (a deleted or disabled
      * login), or the record was deleted while this request read it (a
      * logout, a password change), which a renewal must not undo.
+     *
+     * `refreshData: true` renews the data on this read whatever its
+     * deadline, for a read that wants it fresh (a page load): the callback
+     * runs once and its result shares the read's one write, where a read
+     * followed by refreshSessionData would run both twice whenever the data
+     * was due. Requires dataRefresh, and throws without it.
      */
-    renewSession(session: LambderSessionRecord<SessionData>): Promise<LambderSessionRecord<SessionData> | null>;
+    renewSession(session: LambderSessionRecord<SessionData>, options?: {
+        refreshData?: boolean;
+    }): Promise<LambderSessionRecord<SessionData> | null>;
     /**
      * Data about to be stored, held to the schema: what a read of it will
      * serve, or the error `refused` builds from where it does not match.
@@ -297,7 +311,7 @@ export default class LambderSessionManager<SessionData = any> {
      * than landing data derived before the change. Requires dataRefresh to
      * be configured.
      */
-    expireSessionDataAllByKey(sessionKey: string): Promise<boolean>;
+    expireSessionDataAllByKey(sessionKey: string): Promise<void>;
     /**
      * Replaces the session with a new one under new tokens, carrying over
      * the data as the delete removed it rather than as this request read
@@ -319,6 +333,22 @@ export default class LambderSessionManager<SessionData = any> {
      * marked by expireSessionDataAllByKey while the new record was being
      * written may have passed it by, and due, its next read renews the data
      * from the source of truth either way.
+     *
+     * The record is read first, because what the request holds is the
+     * schema's reading of the data, which a schema that strips keys or
+     * transforms is not the data the record holds. The new record holds the
+     * stored data, every comparison is between stored data, and the request
+     * is handed the schema's reading of what the new record holds, as a read
+     * would hand it.
      */
     regenerateSession(session: LambderSessionRecord<SessionData>): Promise<LambderCreatedSession<SessionData> | null>;
+    /**
+     * Data a rotation carries over, as the request is handed it: the
+     * schema's reading of it. It is the record's own data rather than the
+     * app's, so it is not refused as a write would be. Where the schema
+     * refuses it, the request keeps the data it already held, and the new
+     * record's next read meets it as every read meets such data: refreshed
+     * with dataRefresh (the new record starts due), ended without.
+     */
+    private carriedDataOf;
 }

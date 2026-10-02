@@ -1,6 +1,6 @@
-import { assertPartitionKeyFits, createDynamoClientLoader, isConditionalCheckFailure, } from "./LambderDdbSdk.js";
+import { assertPartitionKeyFits, createDynamoClientLoader, isConditionalCheckFailure, storedNumber, } from "./LambderDdbSdk.js";
+import { restoreStoredText, storedTextOf } from "./LambderStoredText.js";
 import { getCrypto } from "../shared/util/LambderNodeModules.js";
-import { compressText, restoreText } from "../shared/wire/LambderCompressionCodec.js";
 import { resolveCompressionOption, } from "../shared/wire/LambderCompressionOption.js";
 /** Bodies of 1KB or more are stored Brotli-compressed by default; smaller ones stay plain. */
 const COMPRESSION_DEFAULTS = { minBytes: 1024, quality: 5 };
@@ -11,15 +11,13 @@ const COMPRESSION_DEFAULTS = { minBytes: 1024, quality: 5 };
  */
 const MAX_STORED_BODY_BYTES = 350_000;
 /**
- * Ceiling on a stored body's declared length, the budget the restore
- * decompresses under. The store's own writes stay far inside it (a response
- * that reaches a client is a few megabytes at most, and the compressed bytes
- * must fit MAX_STORED_BODY_BYTES), so a record declaring more is not this
- * store's, and trusting it would let a few hundred kilobytes of Brotli expand
- * until the function dies. The cache bounds the same number against its
- * maxValueBytes.
+ * Ceiling on a stored body, in UTF-8 bytes: the most the store writes and the
+ * most it restores (see LambderStoredText). A response that reaches a client
+ * is a few megabytes at most, so a body past it answers "too-large", and a
+ * record declaring more is not this store's. The cache bounds the same
+ * number against its maxValueBytes.
  */
-const MAX_REPLAY_BODY_BYTES = 32 * 1024 * 1024;
+const BODY_CEILING = { user: "LambderDdbIdempotencyStore", maxTextBytes: 32 * 1024 * 1024 };
 /**
  * What an item that keeps no fingerprint reports: one no request matches,
  * since the engine's fingerprints are never empty. Such an item was not
@@ -29,16 +27,6 @@ const MAX_REPLAY_BODY_BYTES = 32 * 1024 * 1024;
  * free and running the request over it.
  */
 const UNKNOWN_REQUEST_FINGERPRINT = "";
-/**
- * A number attribute as stored, or the fallback when it is missing or not a
- * number. `Number(undefined)` and `Number("nope")` are both NaN, which every
- * later comparison answers false to: a NaN expiry reads as "not expired" and
- * a NaN status code reaches the client as one.
- */
-const storedNumber = (raw, fallback) => {
-    const value = Number(raw);
-    return Number.isFinite(value) ? value : fallback;
-};
 /** 16 random bytes, hex, through the optional-crypto seam so a bundler's browser stub cannot break the import. */
 const newOwnerToken = async () => {
     const crypto = await getCrypto();
@@ -138,18 +126,15 @@ export class LambderDdbIdempotencyStore {
     /**
      * A stored item's response body: plain (`body`) or Brotli (`bodyBr` +
      * `bodyBytes`). The stored length is the decompression budget, so it is
-     * checked here the way the headers are: a record declaring more than this
-     * store ever writes is unusable, not an invitation to allocate it.
+     * checked against the ceiling the way the headers are checked: a record
+     * declaring more than this store ever writes is unusable, not an
+     * invitation to allocate it.
      */
     static async readItemBody(item) {
         const compressed = item.bodyBr?.B;
         if (!compressed)
             return item.body?.S ?? "";
-        const declaredBytes = storedNumber(item.bodyBytes?.N, 0);
-        if (declaredBytes > MAX_REPLAY_BODY_BYTES) {
-            throw new Error(`LambderDdbIdempotencyStore: the stored body declares ${declaredBytes} bytes, over the ${MAX_REPLAY_BODY_BYTES}-byte replay limit, so the record is unusable.`);
-        }
-        return await restoreText(compressed, "br", { declaredBytes });
+        return await restoreStoredText(compressed, storedNumber(item.bodyBytes?.N, 0), BODY_CEILING);
     }
     /** A stored answer as the engine reads it, with every field of the record checked rather than cast. */
     static async answerOf(item) {
@@ -252,37 +237,32 @@ export class LambderDdbIdempotencyStore {
      * compression off, stay plain. Returns:
      *
      * - "stored": the record is in place and will replay.
-     * - "too-large": even compressed, the body exceeds the item budget;
-     *   nothing was written and the caller should release the claim.
+     * - "too-large": the body is past the store's ceiling, or even
+     *   compressed it exceeds the item budget; nothing was written and the
+     *   caller should release the claim.
      * - "lost": the ownerToken no longer matches, i.e. the claim expired and
      *   a retry took the scope over; nothing was written.
      */
     async complete(scopeKey, ownerToken, { statusCode, headers, body, fingerprint, ttlSeconds }) {
         const nowSeconds = this.nowSeconds();
         const rawBody = Buffer.from(body, "utf8");
-        let bodyAttributes;
-        // A zero-length body is never compressed, whatever minBytes says: it
-        // would be stored as `bodyBr` with `bodyBytes: 0`, and a declared
-        // length of zero is one the codec refuses on the way back, so the
-        // record would be unreadable for its whole TTL and every retry would
-        // execute again. The plain path stores it as the empty string, which
-        // reads back as one.
-        if (this.compression && rawBody.byteLength > 0 && rawBody.byteLength >= this.compression.minBytes) {
-            const compressed = await compressText(rawBody, "br", this.compression.quality);
-            if (compressed.byteLength > MAX_STORED_BODY_BYTES)
-                return "too-large";
-            // bodyBytes bounds and verifies decompression on read.
-            bodyAttributes = { bodyBr: { B: compressed }, bodyBytes: { N: String(rawBody.byteLength) } };
-        }
-        else {
-            // The budget is on what actually gets stored, so the plain path is
-            // measured too. Without this an oversized body reaches DynamoDB and
-            // comes back as a ValidationException, which is not a
-            // ConditionalCheckFailedException and so escapes as a store error.
-            if (rawBody.byteLength > MAX_STORED_BODY_BYTES)
-                return "too-large";
-            bodyAttributes = { body: { S: body } };
-        }
+        // Past the ceiling, the record would be one the store refuses to
+        // read back, however small its compressed bytes.
+        if (rawBody.byteLength > BODY_CEILING.maxTextBytes)
+            return "too-large";
+        const text = await storedTextOf(rawBody, this.compression);
+        // The budget is on what actually gets stored, plain or compressed.
+        // Without it an oversized body reaches DynamoDB and comes back as a
+        // ValidationException, which is not a ConditionalCheckFailedException
+        // and so escapes as a store error.
+        if (text.stored.byteLength > MAX_STORED_BODY_BYTES)
+            return "too-large";
+        // bodyBytes bounds and verifies decompression on read. The plain path
+        // stores the body as a string, an empty one included, which reads
+        // back as one.
+        const bodyAttributes = text.encoding === "br"
+            ? { bodyBr: { B: text.stored }, bodyBytes: { N: String(text.textBytes) } }
+            : { body: { S: body } };
         try {
             const { client, sdk } = await this.ready();
             await client.send(new sdk.PutItemCommand({

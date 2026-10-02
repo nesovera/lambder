@@ -1,6 +1,7 @@
 import { crashAnswer } from "../api/LambderApiEnvelope.js";
 import { describeCrash } from "../shared/wire/LambderCrashDetail.js";
 import { stopWaitingWhenAborted } from "../shared/util/LambderCallAbort.js";
+import { isErrorReported } from "../shared/util/LambderErrorReportMark.js";
 import { LambderResponse, responseFromAnswer } from "./LambderResponse.js";
 /**
  * How long a crash's answer waits for the reporter by default: long enough
@@ -33,10 +34,15 @@ export class LambderCrashHandling {
      * with it as unfinished, and either way the request goes on to be
      * answered. The report itself cannot be cancelled and runs on; only the
      * wait ends.
+     *
+     * An error already reported where it arose (an invoke failure its
+     * caller's onFailure took, which api() then threw) is not handed over
+     * again: it is still a crash, answered as one, but reporting it here
+     * would record the one failure twice.
      */
     async report(error, site) {
         const report = this.options.report;
-        if (!report)
+        if (!report || isErrorReported(error))
             return;
         const deadline = AbortSignal.timeout(this.reportTimeoutMs);
         try {
@@ -74,8 +80,12 @@ export class LambderCrashHandling {
         if (ctx?.api) {
             return responseFromAnswer(crashAnswer(this.apiVersion, revealed ? { crash: revealed, logList: ctx.logList } : undefined));
         }
+        // Typed as the text it is, as the framework's own 404 is: with no
+        // Content-Type a browser sniffs the body, and a crash message that
+        // reads like markup would render as a page.
         return new LambderResponse({
             statusCode: 500,
+            headers: { "Content-Type": "text/plain; charset=utf-8" },
             body: revealed
                 ? ["Internal Server Error.", "", revealed.stack ?? `${revealed.name}: ${revealed.message}`,
                     ...(revealed.causeList ?? []).map((cause) => `Caused by: ${cause.stack ?? `${cause.name}: ${cause.message}`}`)].join("\n")

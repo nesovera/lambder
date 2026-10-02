@@ -3,7 +3,7 @@ import type {
     LambderOneShotSecretRecord,
     LambderOneShotSecretStore,
 } from "../shared/contracts/LambderOneShotSecretStore.js";
-import { keyedDigest, randomSecret } from "../shared/util/LambderSignedClaims.js";
+import { assertCodeAlphabet, keyedDigest, randomCode, randomSecret } from "../shared/util/LambderSignedClaims.js";
 import { constantTimeEquals } from "../shared/util/LambderTextDigest.js";
 import { assertPositiveInteger } from "../shared/util/LambderOptionChecks.js";
 import { joinKeyFields } from "../shared/util/joinKeyFields.js";
@@ -148,11 +148,11 @@ export class LambderOneShotSecrets<TKinds extends Record<string, LambderOneShotS
             if(kind.shape === "code"){
                 assertPositiveInteger(kind.length, `kinds.${name}.length`);
                 assertPositiveInteger(kind.maxAttempts, `kinds.${name}.maxAttempts`);
-                assertAlphabet(kind.alphabet ?? DIGITS, name);
+                assertCodeAlphabet(kind.alphabet ?? DIGITS, `kinds.${name}.alphabet`);
             }else if(kind.shape === "token"){
                 if(kind.alphabet !== undefined || kind.length !== undefined){
                     assertPositiveInteger(kind.length, `kinds.${name}.length`);
-                    assertAlphabet(kind.alphabet ?? "", name);
+                    assertCodeAlphabet(kind.alphabet, `kinds.${name}.alphabet`);
                 }else{
                     assertPositiveInteger(kind.bytes ?? 32, `kinds.${name}.bytes`);
                 }
@@ -194,7 +194,7 @@ export class LambderOneShotSecrets<TKinds extends Record<string, LambderOneShotS
      * less than that ago is refused instead, with the second it may ask
      * again; of two callers racing past the cooldown, exactly one is issued.
      * `meta` is what the app wants back at redemption: an identity, an
-     * issuing organization, as small strings.
+     * issuing store, as small strings.
      *
      * A secret whose digest another scope holds is drawn again, up to
      * MAX_DRAWS times; past that the kind's alphabet and length leave too few
@@ -205,8 +205,8 @@ export class LambderOneShotSecrets<TKinds extends Record<string, LambderOneShotS
         const cooldown = options.cooldownSeconds === undefined ? undefined : assertPositiveInteger(options.cooldownSeconds, "cooldownSeconds");
         const nowSeconds = this.nowSeconds();
         for(let draw = 0; draw < MAX_DRAWS; draw += 1){
-            const plaintext = definition.shape === "code" ? drawCode(definition.alphabet ?? DIGITS, definition.length)
-                : definition.alphabet !== undefined ? drawCode(definition.alphabet, definition.length)
+            const plaintext = definition.shape === "code" ? randomCode(definition.alphabet ?? DIGITS, definition.length)
+                : definition.alphabet !== undefined ? randomCode(definition.alphabet, definition.length)
                 : randomSecret(definition.bytes ?? 32);
             const draft: LambderOneShotSecretDraft = {
                 kind,
@@ -270,33 +270,3 @@ export class LambderOneShotSecrets<TKinds extends Record<string, LambderOneShotS
         return { state: "accepted", scope: record.scope, meta: { ...record.meta }, issuedAt: record.issuedAt };
     }
 }
-
-const assertAlphabet = (alphabet: string, name: string): void => {
-    if(alphabet.length < 2 || alphabet.length > 256 || new Set(alphabet).size !== alphabet.length){
-        throw new Error(`Lambder: kinds.${name}.alphabet must be 2 to 256 distinct characters.`);
-    }
-};
-
-/**
- * A code of `length` characters drawn uniformly from `alphabet`. Bytes at or
- * above the largest multiple of the alphabet's size are discarded, so the
- * modulo cannot favour the alphabet's first characters.
- */
-const drawCode = (alphabet: string, length: number): string => {
-    const webCrypto = globalThis.crypto;
-    if(typeof webCrypto?.getRandomValues !== "function"){
-        throw new Error("Lambder needs crypto.getRandomValues in this runtime to draw a code. Every browser provides it; Node 20+ provides it as globalThis.crypto.");
-    }
-    const ceiling = Math.floor(256 / alphabet.length) * alphabet.length;
-    const characters: string[] = [];
-    const buffer = new Uint8Array(length * 2);
-    while(characters.length < length){
-        webCrypto.getRandomValues(buffer);
-        for(const byte of buffer){
-            if(byte >= ceiling) continue;
-            characters.push(alphabet[byte % alphabet.length]!);
-            if(characters.length === length) break;
-        }
-    }
-    return characters.join("");
-};

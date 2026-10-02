@@ -9,7 +9,8 @@
  * Lambder's.
  *
  * The DynamoDB stores run against the in-memory DynamoDB from helpers, which
- * models the conditional writes they depend on. Time comes from the clock
+ * models the conditional writes they depend on. The caches' own suite runs
+ * in ddb-cache.test.ts, beside the in-memory table the DynamoDB cache needs. Time comes from the clock
  * each case hands its store, and the system clock deliberately does NOT move
  * with it: a store that read Date.now() behind its `now` option would see
  * time standing still and fail the expiry rules, rather than pass because the
@@ -26,6 +27,7 @@ import { LambderDdbSessionStore } from '../../src/stores/LambderDdbSessionStore.
 import { LambderMemoryOneShotSecretStore } from '../../src/stores/LambderMemoryOneShotSecretStore.js';
 import { LambderDdbOneShotSecretStore } from '../../src/stores/LambderDdbOneShotSecretStore.js';
 import {
+    lambderCacheStorageConformance,
     lambderIdempotencyStoreConformance,
     lambderOneShotSecretStoreConformance,
     lambderRateLimiterConformance,
@@ -35,7 +37,7 @@ import {
     type LambderRateLimiterConformanceOptions,
     type LambderSessionStoreConformanceOptions,
 } from '../../src/testing.js';
-import { MemoryDdb, MemoryDdbDocument } from '../helpers.js';
+import { MemoryCacheStorage, MemoryDdb, MemoryDdbSessionTable } from '../helpers.js';
 
 /** An implementation under its name, with what its suite asks beside the runner. */
 type Implementation<TOptions> = { name: string } & Omit<TOptions, 'it' | 'expect'>;
@@ -136,14 +138,14 @@ const sessionStoreImplementations: Implementation<LambderSessionStoreConformance
     { name: 'LambderMemorySessionStore', create: ({ now }) => new LambderMemorySessionStore({ now }), isMemoryOnly: true },
     {
         name: 'LambderDdbSessionStore',
-        create: () => new LambderDdbSessionStore({ tableName: 'test-sessions', client: new MemoryDdbDocument() as any }),
+        create: () => new LambderDdbSessionStore({ tableName: 'test-sessions', client: new MemoryDdbSessionTable() }),
     },
     {
         // The other supported setting, and a different item shape: the data
         // as a plain map rather than Brotli bytes, so every write that holds
         // data swaps attributes the other way round.
         name: 'LambderDdbSessionStore (compression off)',
-        create: () => new LambderDdbSessionStore({ tableName: 'test-sessions', client: new MemoryDdbDocument() as any, compression: false }),
+        create: () => new LambderDdbSessionStore({ tableName: 'test-sessions', client: new MemoryDdbSessionTable(), compression: false }),
     },
 ];
 
@@ -167,3 +169,17 @@ for(const { name, ...implementation } of oneShotImplementations){
         lambderOneShotSecretStoreConformance({ it, expect, ...implementation });
     });
 }
+
+// ---------------------------------------------------------------------------
+// LambderCacheStorage
+// ---------------------------------------------------------------------------
+
+/**
+ * Lambder ships no storage of its own: an app writes one over its table. So
+ * the suite runs over the one these tests write the way an app would
+ * (MemoryCacheStorage). The cache suite over LambderStorageBackedCache on top
+ * of it runs in ddb-cache.test.ts with the other caches.
+ */
+describe('LambderCacheStorage conformance: MemoryCacheStorage', () => {
+    lambderCacheStorageConformance({ it, expect, create: () => new MemoryCacheStorage() });
+});

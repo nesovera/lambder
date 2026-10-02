@@ -13,7 +13,7 @@
  */
 
 import { testPublicFiles } from '../helpers.js';
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -322,16 +322,39 @@ describe('create(): option values checked at construction', () => {
         expect(() => new Lambder({ apiVersion: '1.2.32', minApiVersion: '1.2.10' })).not.toThrow();
         expect(() => new Lambder({ apiVersion: '1.2.32', minApiVersion: '1.2.32' })).not.toThrow();
         expect(() => new Lambder({ minApiVersion: '1.2.10' })).not.toThrow();
-        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-        try {
-            expect(() => new Lambder({ apiVersion: '1.2.5', minApiVersion: '1.2.10' })).not.toThrow();
-            expect(warn).toHaveBeenCalledOnce();
-        } finally {
-            warn.mockRestore();
-        }
+        // A floor above the build's own version would refuse its own clients.
+        expect(() => new Lambder({ apiVersion: '1.2.5', minApiVersion: '1.2.10' })).toThrow(/Lambder: minApiVersion 1\.2\.10 is above apiVersion 1\.2\.5/);
+        expect(() => initLambder().create({ apiVersion: '1.2.5', minApiVersion: '1.2.10' })).toThrow(/Lambder: minApiVersion 1\.2\.10 is above apiVersion 1\.2\.5/);
         expect(() => new Lambder({ minApiVersion: '' })).toThrow(/Lambder: minApiVersion must be a dotted version/);
         expect(() => new Lambder({ minApiVersion: '1.2.' })).toThrow(/Lambder: minApiVersion must be a dotted version/);
     });
+
+    it('keeps apiPath, apiVersion and files as created, since what was built from them keeps its own copy', () => {
+        const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api', apiVersion: '1.2.0' });
+        // @ts-expect-error read-only: callers post to the apiPath they were built with
+        lambder.apiPath = '/v2';
+        // @ts-expect-error read-only: the pipeline stamps the apiVersion it was given
+        lambder.apiVersion = '2.0.0';
+        // @ts-expect-error read-only: servePublicFiles serves through the reader it was given
+        lambder.files = null;
+    });
+
+    it('documents initLambder where an editor shows it: on the declaration itself', () => {
+        const source = fileURLToPath(new URL('../../src/core/Lambder.ts', import.meta.url));
+        const config = ts.getParsedCommandLineOfConfigFile(fileURLToPath(new URL('../../tsconfig.json', import.meta.url)), {}, { ...ts.sys, onUnRecoverableConfigFileDiagnostic: () => {} });
+        const program = ts.createProgram([source], { ...config!.options, noEmit: true, declaration: false });
+        const checker = program.getTypeChecker();
+        const documentationOf = (name: string): string => {
+            const file = program.getSourceFile(source)!;
+            const symbol = checker.getSymbolsInScope(file, ts.SymbolFlags.Value | ts.SymbolFlags.Type).find((candidate) => candidate.name === name);
+            return ts.displayPartsToString(symbol?.getDocumentationComment(checker) ?? []);
+        };
+        const initDoc = documentationOf('initLambder');
+        expect(initDoc).toMatch(/^The entry point of an app, and the canonical way to create an instance/);
+        expect(initDoc).toContain('declareRefusals()');
+        expect(initDoc).toContain('Curried because');
+        expect(documentationOf('LambderInitCreateOptions')).toBe("The options create() takes: the constructor's, less the two declareRefusals() supplies.");
+    }, 120_000);
 
     it('refuses a maxResponseBytes that is not a positive integer', () => {
         expect(() => new Lambder({ maxResponseBytes: 0 })).toThrow(/Lambder: maxResponseBytes must be a positive integer/);

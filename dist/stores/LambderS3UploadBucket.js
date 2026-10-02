@@ -3,8 +3,15 @@ import { contentDispositionHeader } from "../shared/util/LambderContentDispositi
 import { uploadObjectFormFields, uploadObjectHeaders } from "../shared/wire/LambderUploadObjectFields.js";
 import { refuseUnacceptedUpload } from "../shared/wire/LambderUploadRefusal.js";
 import { withInstallHint } from "./LambderSdkInstallHint.js";
+import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
+import { delegateToTwin, registerSwappableInstance } from "../shared/util/LambderSwappableInstances.js";
 /** The S3 error names that mean nothing is stored under the key: HeadObject answers NotFound, the other calls NoSuchKey. */
 const MISSING_OBJECT_ERROR_NAMES = ["NotFound", "NoSuchKey"];
+/** Every LambderUploadBucket member, which the swap door hands to a memory twin. */
+const UPLOAD_BUCKET_MEMBERS = {
+    issueUploadTicket: true, verifyUploadedObject: true, issueDownloadUrl: true,
+    readObject: true, writeObject: true, copyObject: true, deleteObject: true,
+};
 /**
  * An S3 bucket browsers upload to directly (see LambderUploadBucket).
  *
@@ -46,6 +53,22 @@ export class LambderS3UploadBucket {
         this.ticketLifetimeSeconds = ticketLifetimeSeconds;
         this.downloadLifetimeSeconds = downloadLifetimeSeconds;
         this.uploadMethod = uploadMethod;
+        registerSwappableInstance(this);
+    }
+    /**
+     * Puts a memory twin under this bucket in place, for `lambder/testing`:
+     * every LambderUploadBucket member answers from the twin from then on.
+     * The twin signs with this bucket's own lifetimes and upload method, so a
+     * client takes the path against it that it takes against this bucket.
+     * Keyed by a symbol no entry point exports; see registerSwappableInstance.
+     */
+    [LAMBDER_BACKEND_SWAP](twins) {
+        const twin = twins.uploadBucket({
+            ticketLifetimeSeconds: this.ticketLifetimeSeconds,
+            downloadLifetimeSeconds: this.downloadLifetimeSeconds,
+            uploadMethod: this.uploadMethod,
+        });
+        delegateToTwin(this, twin, UPLOAD_BUCKET_MEMBERS);
     }
     async issueUploadTicket({ objectKey, fileFacts, uploadRule, lifetimeSeconds = this.ticketLifetimeSeconds, object }) {
         assertPinnedObjectKey(objectKey);

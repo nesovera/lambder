@@ -20,8 +20,8 @@ export type LambderSessionStoreConformanceOptions = LambderConformanceRunner & {
  * ```
  *
  * The records a case writes are dated from the case's clock, which starts at
- * a fixed moment and stands still unless a case moves it: a store that
- * expires records by the system clock, rather than by `now`, finds them all
- * long expired.
+ * a fixed moment far in the future and stands still unless a case moves it: a
+ * store that expires records by the system clock, rather than by `now`, never
+ * sees one expire.
  */
 export declare const lambderSessionStoreConformance: (options: LambderSessionStoreConformanceOptions) => void;

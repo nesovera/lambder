@@ -123,7 +123,7 @@ describe('A declared guard or rate limit is held to the fields the API\'s input 
         session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
         guards: {
             emailOwner: lambderGuard({ apiInput: z.object({ email: z.string() }), handler: async () => {} }),
-            sessionOnly: lambderGuard({ session: true, handler: async () => {} }),
+            signedIn: lambderGuard({ session: true, handler: async () => {} }),
         },
         rateLimits: {
             limiter: new LambderMemoryRateLimiter(),
@@ -146,7 +146,7 @@ describe('A declared guard or rate limit is held to the fields the API\'s input 
             // @ts-expect-error the same, in the map form
             byMap: app.defineApi({ ...noEmail, guards: { emailOwner: true } }, async () => ({})),
             // @ts-expect-error and on a session API
-            session: app.defineApi({ ...noEmail, guards: ['sessionOnly', 'emailOwner'] }, async () => ({})),
+            session: app.defineApi({ ...noEmail, guards: ['signedIn', 'emailOwner'] }, async () => ({})),
         }));
     });
 
@@ -154,11 +154,11 @@ describe('A declared guard or rate limit is held to the fields the API\'s input 
         const app = createKeyedApp();
         app.registerApiGroups(app.defineApiGroup('test', {
             // @ts-expect-error the input carries no email for the key's slice
-            byName: app.defineApi({ ...noEmail, guards: 'sessionOnly', rateLimit: 'perEmail' }, async () => ({})),
+            byName: app.defineApi({ ...noEmail, guards: 'signedIn', rateLimit: 'perEmail' }, async () => ({})),
             // @ts-expect-error the same, in the list form
-            byList: app.defineApi({ ...noEmail, guards: 'sessionOnly', rateLimit: ['perEmail'] }, async () => ({})),
+            byList: app.defineApi({ ...noEmail, guards: 'signedIn', rateLimit: ['perEmail'] }, async () => ({})),
             // @ts-expect-error the same, in the map form
-            byMap: app.defineApi({ ...noEmail, guards: 'sessionOnly', rateLimit: { perEmail: true } }, async () => ({})),
+            byMap: app.defineApi({ ...noEmail, guards: 'signedIn', rateLimit: { perEmail: true } }, async () => ({})),
             // @ts-expect-error and on a public API
             public: app.defineApi({ ...noEmail, rateLimit: 'perEmail' }, async () => ({})),
         }));
@@ -173,18 +173,18 @@ describe('A declared guard or rate limit is held to the fields the API\'s input 
         const sessionless = initLambder().create({
             files: testPublicFiles(),
             apiPath: '/api',
-            guards: { sessionOnly: lambderGuard({ session: true, handler: async () => {} }) },
+            guards: { signedIn: lambderGuard({ session: true, handler: async () => {} }) },
         });
         // @ts-expect-error an instance without sessions has no session for the guard to read
-        const guarded = sessionless.defineApi({ ...withEmail, guards: 'sessionOnly' }, async () => ({}));
+        const guarded = sessionless.defineApi({ ...withEmail, guards: 'signedIn' }, async () => ({}));
         expect(() => sessionless.registerApiGroups(sessionless.defineApiGroup('test', { guarded })))
             .toThrow(/a guard of API "test\.guarded" needs a session, and the instance was created without the session option/);
     });
 
     it('names the guards and policies at fault, and none when the input carries their fields', () => {
-        type Guards = { emailOwner: { apiInput: { email: string } }; sessionOnly: { session: true } };
+        type Guards = { emailOwner: { apiInput: { email: string } }; signedIn: { session: true } };
         type Policies = { perEmail: { per: { apiInput: z.ZodObject<{ email: z.ZodString }> } }; perIp: { per: 'ip' } };
-        expectTypeOf<LambderGuardNamesInputLacks<Guards, 'emailOwner' | 'sessionOnly', { name: string }>>().toEqualTypeOf<'emailOwner'>();
+        expectTypeOf<LambderGuardNamesInputLacks<Guards, 'emailOwner' | 'signedIn', { name: string }>>().toEqualTypeOf<'emailOwner'>();
         expectTypeOf<LambderGuardNamesInputLacks<Guards, 'emailOwner', { name: string; email: string }>>().toBeNever();
         expectTypeOf<LambderPolicyNamesInputLacks<Policies, 'perEmail' | 'perIp', { name: string }>>().toEqualTypeOf<'perEmail'>();
         expectTypeOf<LambderPolicyNamesInputLacks<Policies, 'perEmail', { email: string }>>().toBeNever();
@@ -194,9 +194,9 @@ describe('A declared guard or rate limit is held to the fields the API\'s input 
         const app = createKeyedApp();
         expect(() => app.registerApiGroups(app.defineApiGroup('test', {
             byName: app.defineApi({ ...withEmail, guards: 'emailOwner', rateLimit: 'perEmail' }, async () => ({})),
-            byList: app.defineApi({ ...withEmail, guards: ['emailOwner', 'sessionOnly'], rateLimit: ['perEmail', 'perSession'] }, async () => ({})),
-            byMap: app.defineApi({ ...withEmail, guards: { sessionOnly: true, emailOwner: true }, rateLimit: { perEmail: true } }, async () => ({})),
-            session: app.defineApi({ ...withEmail, guards: 'sessionOnly', rateLimit: 'perEmail' }, async () => ({})),
+            byList: app.defineApi({ ...withEmail, guards: ['emailOwner', 'signedIn'], rateLimit: ['perEmail', 'perSession'] }, async () => ({})),
+            byMap: app.defineApi({ ...withEmail, guards: { signedIn: true, emailOwner: true }, rateLimit: { perEmail: true } }, async () => ({})),
+            session: app.defineApi({ ...withEmail, guards: 'signedIn', rateLimit: 'perEmail' }, async () => ({})),
         })))
             .not.toThrow();
     });

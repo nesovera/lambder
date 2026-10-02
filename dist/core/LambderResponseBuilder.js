@@ -1,6 +1,21 @@
 import { outcomeOfEnvelope } from "../shared/wire/LambderCallOutcome.js";
 import { LambderResponse } from "./LambderResponse.js";
+import { LambderSafeHtml } from "../shared/LambderHtml.js";
 import { plainRefusalEnvelope } from "../api/LambderApiEnvelope.js";
+/**
+ * The body of a response a browser renders as markup: safe markup only. A
+ * plain string is refused rather than sent, since nothing can tell markup an
+ * author wrote from text a request supplied (`"No match at " + ctx.path`),
+ * and the latter, sent as a page, runs as script. The tag escapes what it
+ * interpolates, raw() is the one visible place where trusted markup passes as
+ * it is, and text goes out as text.
+ */
+const markupBody = (method, tag, body) => {
+    if (body instanceof LambderSafeHtml)
+        return body.value;
+    throw new TypeError(`Lambder: ${method} takes safe ${tag === "html" ? "HTML" : "XML"}, and was given ${body === null ? "null" : typeof body}. Build the body with ${tag}\`...\`, which ` +
+        `escapes what it interpolates, mark markup you trust with raw(), or send plain text with res.text(body, { statusCode }).`);
+};
 /**
  * Builds the responses of routes, hooks and error handlers. An API handler
  * never holds one: it returns its output or refuses, and writes headers and
@@ -52,23 +67,28 @@ export default class LambderResponseBuilder {
     json(data, options) {
         return this.buildResponse(200, "application/json; charset=utf-8", JSON.stringify(data), options);
     }
+    /** A plain-text body, sent as text: the place for a message, whatever status it goes out with (`{ statusCode }`). */
     text(data, options) {
         return this.buildResponse(200, "text/plain; charset=utf-8", data, options);
     }
+    /** An XML document (a sitemap, a feed, SVG) built with xml`...` or marked safe with raw(). */
     xml(data, options) {
-        return this.buildResponse(200, "application/xml; charset=utf-8", String(data), options);
+        return this.buildResponse(200, "application/xml; charset=utf-8", markupBody("res.xml", "xml", data), options);
     }
     ;
+    /** An HTML page built with html`...` or marked safe with raw(). */
     html(data, options) {
-        return this.buildResponse(200, "text/html; charset=utf-8", String(data), options);
+        return this.buildResponse(200, "text/html; charset=utf-8", markupBody("res.html", "html", data), options);
     }
     ;
+    /** An HTML response with any status code, its body built like res.html's; no body sends an empty one. */
     status(statusCode, body, options) {
-        return this.buildResponse(statusCode, "text/html; charset=utf-8", body ?? "", options);
+        return this.buildResponse(statusCode, "text/html; charset=utf-8", body === undefined ? "" : markupBody("res.status", "html", body), options);
     }
     ;
+    /** An HTML 404, its body built like res.html's. */
     status404(data, options) {
-        return this.buildResponse(404, "text/html; charset=utf-8", data, options);
+        return this.buildResponse(404, "text/html; charset=utf-8", markupBody("res.status404", "html", data), options);
     }
     ;
     /**
@@ -118,7 +138,7 @@ export default class LambderResponseBuilder {
     async file(filePath, options) {
         const file = await this.requireFiles("res.file").read(filePath);
         if (!file)
-            return this.status404("File not found", { etag: false });
+            return this.text("File not found", { statusCode: 404, etag: false });
         return this.buildResponse(200, file.mimeType, file.body, options);
     }
     ;
@@ -127,12 +147,23 @@ export default class LambderResponseBuilder {
      * LambderTemplatingEngine (comment-based slots/conditionals) and return
      * it as an HTML response. The compiled template is cached on the
      * instance across warm invocations; a missing file throws (it is a
-     * server-side configuration error, not a client 404). Set
-     * htmlVirtualSlots to expose "title"/"head" slots on marker-less files.
+     * server-side configuration error, not a client 404), and so does a data
+     * key the file has no slot or condition for, naming the file. TNames, when
+     * given, is the file's slot and condition names, so a misspelled key is a
+     * compile error. Set htmlVirtualSlots to expose "title"/"head" slots on
+     * marker-less files.
      */
     async templateFile(filePath, data, options) {
         const template = await this.requireFiles("res.templateFile").template(filePath, { htmlVirtualSlots: options?.htmlVirtualSlots });
-        return this.buildResponse(200, "text/html; charset=utf-8", template.render(data), options);
+        let body;
+        try {
+            body = template.render(data);
+        }
+        catch (error) {
+            // The engine knows its source, not the file it came from.
+            throw new Error(`Lambder: res.templateFile(${JSON.stringify(filePath)}): ${error.message}`, { cause: error });
+        }
+        return this.buildResponse(200, "text/html; charset=utf-8", body, options);
     }
     ;
     /**

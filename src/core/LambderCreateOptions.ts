@@ -167,7 +167,14 @@ export type LambderSessionOptions<TSessionData = any> = {
      * the store, so ctx.session.data would be typed by the table.
      */
     store: LambderSessionStore<any>;
-    /** The HMAC key that turns a sessionKey into the store's partition key, so a table read does not reveal whose sessions it holds. Treat as a secret. */
+    /**
+     * The HMAC key that turns a sessionKey into the store's partition key, so
+     * a table read does not reveal whose sessions it holds. A subkey derived
+     * from it (HKDF) also keys the at-rest digests of the caller's fields in
+     * every rate-limit key and idempotency scope. Changing it signs every
+     * session out and starts every rate-limit counter and idempotency record
+     * afresh. Treat as a secret.
+     */
     sessionSalt: string;
     enableSlidingExpiration?: boolean;
     /** Min seconds between sliding-expiration writes. Default: max(60, 5% of TTL). */
@@ -251,8 +258,8 @@ export type LambderCreateOptions<TSessionData = any> = {
      * a change the signatures cannot see (a security fix, a field whose
      * meaning changed under the same shape). Dotted numbers ("1.2.10"),
      * compared segment by segment; a call naming no version is not judged. A
-     * floor above `apiVersion` is taken as `apiVersion`, with a warning, so a
-     * mistaken floor cannot refuse this build's own clients. Default: none.
+     * floor above `apiVersion` throws at creation, since it would refuse this
+     * build's own clients. Default: none.
      */
     minApiVersion?: string;
     /**
@@ -296,7 +303,7 @@ export type LambderCreateOptions<TSessionData = any> = {
      * `per: "ip"` rate limits key off ctx.ip, and an address the caller picks
      * per request is not a limit. API Gateway APPENDS to x-forwarded-for, so
      * behind API Gateway alone the leftmost entry is the client's own claim
-     * and the header should be left out. A direct invoke reads none of these:
+     * and the header should be left out. A Lambda invoke reads none of these:
      * its ctx.ip is the invoker's `clientIp`.
      */
     trustedClientIpHeaders?: readonly string[];
@@ -308,24 +315,28 @@ export type LambderCreateOptions<TSessionData = any> = {
      *
      * The same rule as trustedClientIpHeaders: ctx.host decides cookie
      * domains and host-matched routes, and a host a client picks is a tenant
-     * a client picks. A direct invoke reads none of these: its ctx.host is the
+     * a client picks. A Lambda invoke reads none of these: its ctx.host is the
      * invoker's `host`.
      */
     trustedHostHeaders?: readonly string[];
     /**
      * Proof that a request came through the proxy the trusted headers are
-     * trusted for: `{ header, secrets }`, a header the proxy sets on every
-     * request it forwards (a Cloudflare transform rule, a CloudFront origin
-     * custom header) and the secret it carries, with the previous one beside
-     * it during a rotation. The trusted client address and host headers are
-     * read only from a request that carries it. One sent to the origin
-     * directly (an API Gateway's own execute-api URL, a Function URL) has
-     * its address and host from the gateway, whatever headers it wrote, so
-     * a `per: "ip"` limit counts it by the address it really came from. The
-     * header is taken off `ctx.headers` and `ctx.header()`, so no handler or
-     * hook meets the secret. Default: none, so the trusted headers are read
-     * on every request, which is right only for an origin nothing but the
-     * proxy can reach.
+     * trusted for: `{ header, secrets, proxyHeaders? }`, a header the proxy
+     * sets on every request it forwards (a Cloudflare transform rule, a
+     * CloudFront origin custom header) and the secret it carries, with the
+     * previous one beside it during a rotation. The trusted client address
+     * and host headers are read only from a request that carries it. One
+     * sent to the origin directly (an API Gateway's own execute-api URL, a
+     * Function URL) has its address and host from the gateway, whatever
+     * headers it wrote, so a `per: "ip"` limit counts it by the address it
+     * really came from, and the trusted headers and `proxyHeaders` (the
+     * other headers only the proxy writes) are taken off `ctx.headers` and
+     * `ctx.header()` on it. `ctx.arrivedVia` says which it was: "proxy" or
+     * "direct", or "invoke" for a Lambda invoke. The proof header itself is
+     * always taken off, so no handler or hook meets the secret. Default:
+     * none, so the trusted headers are read on every request, which is right
+     * only for an origin nothing but the proxy can reach, and
+     * `ctx.arrivedVia` is "unverified" on all but an invoke.
      */
     originProof?: LambderOriginProof;
     /**
@@ -657,10 +668,17 @@ export const assertCreateOptions = (options: LambderMergedCreateOptions<any>): v
 /** Shortest secret an origin proof takes: one a sender could guess is no proof. 32 characters of hex or base64 is 128 bits or more. */
 export const MIN_ORIGIN_PROOF_SECRET_LENGTH = 32;
 
-/** An origin proof that proves something: a header name, secrets long enough not to guess, and trusted headers for it to guard. */
+/** A header name as a proxy writes one. */
+const HEADER_NAME_PATTERN = /^[A-Za-z0-9-]+$/;
+
+/**
+ * An origin proof that proves something: a header name, secrets long enough
+ * not to guess, and proxy headers that are header names. It needs no
+ * trusted header to guard: ctx.arrivedVia is worth having on its own.
+ */
 const assertOriginProof = (options: LambderMergedCreateOptions<any>): void => {
     const proof = options.originProof!;
-    if(typeof proof?.header !== "string" || !/^[A-Za-z0-9-]+$/.test(proof.header)){
+    if(typeof proof?.header !== "string" || !HEADER_NAME_PATTERN.test(proof.header)){
         throw new Error("Lambder: originProof.header must be a header name, such as \"x-origin-proof\".");
     }
     if(!Array.isArray(proof.secrets) || proof.secrets.length === 0){
@@ -671,11 +689,12 @@ const assertOriginProof = (options: LambderMergedCreateOptions<any>): void => {
             throw new Error(`Lambder: every originProof secret must be a string of at least ${MIN_ORIGIN_PROOF_SECRET_LENGTH} characters; a shorter one could be guessed, and a guessed proof proves nothing.`);
         }
     }
-    const trusted = [...(options.trustedClientIpHeaders ?? []), ...(options.trustedHostHeaders ?? [])];
-    if(trusted.length === 0){
-        throw new Error("Lambder: originProof guards the trustedClientIpHeaders and trustedHostHeaders, and this instance trusts none, so it would prove nothing.");
+    const proxyHeaders: unknown = proof.proxyHeaders ?? [];
+    if(!Array.isArray(proxyHeaders) || proxyHeaders.some((name) => typeof name !== "string" || !HEADER_NAME_PATTERN.test(name))){
+        throw new Error("Lambder: originProof.proxyHeaders must list header names the proxy writes, such as [\"cf-ipcountry\"].");
     }
-    if(trusted.some((name) => name.toLowerCase() === proof.header.toLowerCase())){
-        throw new Error(`Lambder: originProof.header "${proof.header}" is also a trusted header; the proof is its own header, which the app never reads.`);
+    const proxyWritten: string[] = [...(options.trustedClientIpHeaders ?? []), ...(options.trustedHostHeaders ?? []), ...proxyHeaders];
+    if(proxyWritten.some((name) => name.toLowerCase() === proof.header.toLowerCase())){
+        throw new Error(`Lambder: originProof.header "${proof.header}" is also a trusted or proxy header; the proof is its own header, which the app never reads.`);
     }
 };

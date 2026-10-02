@@ -129,13 +129,13 @@ describe('LambderOneShotSecrets', () => {
 
     it('redeems a token by its value, once, and never as another kind or after expiry', async () => {
         const { secrets, advance } = secretsWith();
-        const { plaintext } = await issuedPlaintext(secrets, 'activationLink', 'activate:ada@example.com', { meta: { identity: 'id-7', organization: 'org-1' } });
+        const { plaintext } = await issuedPlaintext(secrets, 'activationLink', 'activate:ada@example.com', { meta: { identity: 'id-7', store: 'store-1' } });
 
         expect(await secrets.redeemToken('activationLink', 'nonsense')).toEqual({ state: 'none' });
         expect(await secrets.redeemToken('activationLink', plaintext.slice(0, -1))).toEqual({ state: 'none' });
         expect(await secrets.redeemToken('activationLink', 'x'.repeat(600))).toEqual({ state: 'none' });
         expect(await secrets.redeemToken('activationLink', plaintext))
-            .toEqual({ state: 'accepted', scope: 'activate:ada@example.com', meta: { identity: 'id-7', organization: 'org-1' }, issuedAt: Math.floor(START / 1000) });
+            .toEqual({ state: 'accepted', scope: 'activate:ada@example.com', meta: { identity: 'id-7', store: 'store-1' }, issuedAt: Math.floor(START / 1000) });
         expect(await secrets.redeemToken('activationLink', plaintext)).toEqual({ state: 'none' });
 
         const second = await issuedPlaintext(secrets, 'activationLink', 'activate:ada@example.com');
@@ -212,14 +212,14 @@ describe('LambderOneShotSecrets when two scopes draw the same token', () => {
         const { secrets } = tinyCodes();
         // Device A draws "A"; device B draws "A" too, is refused the digest, and draws "B".
         scriptDraws([0, 0, 1]);
-        const a = await secrets.issue('pairingCode', 'device:a', { meta: { organization: 'org-a' } });
-        const b = await secrets.issue('pairingCode', 'device:b', { meta: { organization: 'org-b' } });
+        const a = await secrets.issue('pairingCode', 'device:a', { meta: { store: 'store-a' } });
+        const b = await secrets.issue('pairingCode', 'device:b', { meta: { store: 'store-b' } });
         vi.restoreAllMocks();
 
         expect(a).toMatchObject({ issued: true, plaintext: 'A' });
         expect(b).toMatchObject({ issued: true, plaintext: 'B' });
-        expect(await secrets.redeemToken('pairingCode', 'A')).toMatchObject({ state: 'accepted', scope: 'device:a', meta: { organization: 'org-a' } });
-        expect(await secrets.redeemToken('pairingCode', 'B')).toMatchObject({ state: 'accepted', scope: 'device:b', meta: { organization: 'org-b' } });
+        expect(await secrets.redeemToken('pairingCode', 'A')).toMatchObject({ state: 'accepted', scope: 'device:a', meta: { store: 'store-a' } });
+        expect(await secrets.redeemToken('pairingCode', 'B')).toMatchObject({ state: 'accepted', scope: 'device:b', meta: { store: 'store-b' } });
     });
 
     it('gives up after five draws whose digest another scope holds, naming the kind', async () => {

@@ -25,13 +25,13 @@ type SessionData = { userId: string; role: 'admin' | 'member' };
 
 /** A server declaration, from which the contract type is taken exactly as an app would export it. */
 const serverGuards = {
-    orgPermission: lambderGuard({
-        guardInput: z.object({ organizationId: z.string() }),
+    staffPermission: lambderGuard({
+        guardInput: z.object({ storeId: z.string() }),
         session: true,
-        handler: async (ctx, { organizationId }, permission: Permission) => ({ organizationId, permission, userId: ctx.session.data.userId }),
+        handler: async (ctx, { storeId }, permission: Permission) => ({ storeId, permission, userId: ctx.session.data.userId }),
     }),
     captcha: lambderGuard({ guardInput: z.object({ token: z.string().min(3) }), handler: async () => {} }),
-    sessionOnly: lambderGuard({ session: true, handler: () => {} }),
+    signedIn: lambderGuard({ session: true, handler: () => {} }),
     open: lambderGuard({ handler: (_ctx, _payload, _reason: string) => {} }),
 };
 
@@ -50,10 +50,10 @@ const _server = serverApp.registerApiGroups(
         submit: serverApp.defineApi({ input: z.object({ text: z.string() }), output: z.object({ code: z.string() }), guards: 'captcha', idempotency: true }, async (_ctx) => ({ code: 'c' })),
     }),
     serverApp.defineApiGroup('users', {
-        remove: serverApp.defineApi({ input: z.object({ userId: z.string() }), output: z.object({ removed: z.boolean() }), guards: { orgPermission: 'USERS.MANAGE' }, refusals: ['user-gone', 'last-admin'] }, async (_ctx) => ({ removed: true })),
+        remove: serverApp.defineApi({ input: z.object({ userId: z.string() }), output: z.object({ removed: z.boolean() }), guards: { staffPermission: 'USERS.MANAGE' }, refusals: ['user-gone', 'last-admin'] }, async (_ctx) => ({ removed: true })),
     }),
     serverApp.defineApiGroup('account', {
-        me: serverApp.defineApi({ input: z.object({}), output: z.object({ userId: z.string() }), guards: 'sessionOnly' }, async (ctx) => ({ userId: ctx.session.data.userId })),
+        me: serverApp.defineApi({ input: z.object({}), output: z.object({ userId: z.string() }), guards: 'signedIn' }, async (ctx) => ({ userId: ctx.session.data.userId })),
     }),
     serverApp.defineApiGroup('admin', {
         exportOrders: serverApp.defineApi({ input: z.object({ month: z.string() }), output: z.any(), guards: { open: 'signed' } }, async (_ctx) => null),
@@ -76,13 +76,13 @@ type Contract = typeof _server.ApiContract;
 
 const mock = initLambderMock<Contract, SessionData>();
 const mockGuards = {
-    orgPermission: mock.guard({
-        guardInput: z.object({ organizationId: z.string() }),
+    staffPermission: mock.guard({
+        guardInput: z.object({ storeId: z.string() }),
         session: true,
-        handler: (ctx, { organizationId }, permission: Permission) => ({ organizationId, permission, userId: ctx.session.data.userId }),
+        handler: (ctx, { storeId }, permission: Permission) => ({ storeId, permission, userId: ctx.session.data.userId }),
     }),
     captcha: mock.guard({ guardInput: z.object({ token: z.string() }), handler: () => {} }),
-    sessionOnly: mock.guard({ session: true, handler: () => {} }),
+    signedIn: mock.guard({ session: true, handler: () => {} }),
     open: mock.guard({ handler: (_ctx, _payload, _reason: string) => {} }),
 };
 /** The policies an entry may restate, which the runtime checks a restatement against at registration. */
@@ -129,7 +129,7 @@ describe('Mock registry types - builders', () => {
 
     it('a session endpoint sees a typed session and a public one sees null', () => {
         mockApp.api('account.me', {
-            guards: 'sessionOnly',
+            guards: 'signedIn',
             handler: async ({ session }) => {
                 expectTypeOf(session).toEqualTypeOf<LambderSessionRecord<SessionData>>();
                 return { userId: session.data.userId };
@@ -149,8 +149,8 @@ describe('Mock registry types - builders', () => {
         // required and pinned to the contract (below), and the mock guard
         // behind one of them needs a session, which is what makes the entry
         // a session one.
-        expect(mockApp.api('account.me', { guards: 'sessionOnly', handler: async () => ({ userId: 'x' }) }).mode).toBe('session');
-        expect(mockApp.api('users.remove', { guards: { orgPermission: 'USERS.MANAGE' }, handler: async () => ({ removed: true }) }).mode).toBe('session');
+        expect(mockApp.api('account.me', { guards: 'signedIn', handler: async () => ({ userId: 'x' }) }).mode).toBe('session');
+        expect(mockApp.api('users.remove', { guards: { staffPermission: 'USERS.MANAGE' }, handler: async () => ({ removed: true }) }).mode).toBe('session');
         expect(mockApp.api('user.get', { guards: { open: 'public profile' }, handler: async () => ({ id: '1', name: 'Ada' }) }).mode).toBe('public');
         expect(mockApp.api('status.health', async () => ({ ok: true })).mode).toBe('public');
     });
@@ -168,13 +168,13 @@ describe('Mock registry types - builders', () => {
         // @ts-expect-error the guards field is required here
         mockApp.api('users.remove', { handler: async () => ({ removed: true }) });
         // @ts-expect-error USERS.VIEW is not what the server declares
-        mockApp.api('users.remove', { guards: { orgPermission: 'USERS.VIEW' }, handler: async () => ({ removed: true }) });
+        mockApp.api('users.remove', { guards: { staffPermission: 'USERS.VIEW' }, handler: async () => ({ removed: true }) });
 
         // A guard that takes no client input is still a guard the runtime
         // learns about only from this restatement: dropping it would run
         // none, and the mock would answer 200 where the server answers
         // notAuthorized. Two such shapes: session-only guards ('account.me' declares
-        // sessionOnly) and param-only ones ('user.get' declares open).
+        // signedIn) and param-only ones ('user.get' declares open).
         // @ts-expect-error me declares a guard, so the bare handler form is not allowed
         mockApp.api('account.me', async () => ({ userId: 'x' }));
         // @ts-expect-error me declares a guard, so the guards field is required
@@ -191,14 +191,14 @@ describe('Mock registry types - builders', () => {
         mockApp.api('status.health', { guards: { open: 'invented' }, handler: async () => ({ ok: true }) });
 
         const entry = mockApp.api('users.remove', {
-            guards: { orgPermission: 'USERS.MANAGE' },
+            guards: { staffPermission: 'USERS.MANAGE' },
             handler: async ({ guardData, guardInputs }) => {
-                expectTypeOf(guardData.orgPermission).toEqualTypeOf<{ organizationId: string; permission: Permission; userId: string }>();
-                expectTypeOf(guardInputs).toEqualTypeOf<{ orgPermission: { organizationId: string } }>();
+                expectTypeOf(guardData.staffPermission).toEqualTypeOf<{ storeId: string; permission: Permission; userId: string }>();
+                expectTypeOf(guardInputs).toEqualTypeOf<{ staffPermission: { storeId: string } }>();
                 return { removed: true };
             },
         });
-        expect(entry.definition.guards).toEqual({ orgPermission: 'USERS.MANAGE' });
+        expect(entry.definition.guards).toEqual({ staffPermission: 'USERS.MANAGE' });
 
         // Pinned to the server's own declaration, guardInputs or not.
         mockApp.api('user.get', { guards: { open: 'public profile' }, handler: async () => ({ id: '1', name: 'Ada' }) });
@@ -272,8 +272,8 @@ describe('Mock registry types - builders', () => {
 describe('Mock registry types - slices and register()', () => {
     const userMocks = mockApp.apiSlice(
         mockApp.api('user.get', { guards: { open: 'public profile' }, handler: async ({ payload }) => ({ id: payload.userId, name: 'Ada' }) }),
-        mockApp.api('users.remove', { guards: { orgPermission: 'USERS.MANAGE' }, handler: async () => ({ removed: true }) }),
-        mockApp.api('account.me', { guards: 'sessionOnly', handler: async ({ session }) => ({ userId: session.data.userId }) }),
+        mockApp.api('users.remove', { guards: { staffPermission: 'USERS.MANAGE' }, handler: async () => ({ removed: true }) }),
+        mockApp.api('account.me', { guards: 'signedIn', handler: async ({ session }) => ({ userId: session.data.userId }) }),
     );
     const feedbackMocks = mockApp.apiSlice(
         mockApp.api('feedback.submit', { guards: 'captcha', idempotency: true, handler: async () => ({ code: 'c' }) }),
@@ -401,12 +401,12 @@ describe('Mock registry types - slices and register()', () => {
 
 describe('Mock registry types - the guard map', () => {
     it('must name every guard the contract declares, with guardInput schemas that take what the server\'s contract says a client sends', () => {
-        const { orgPermission, captcha, sessionOnly, open } = mockGuards;
-        mock.create({ ...requiredOptions, guards: { orgPermission, captcha, sessionOnly, open } });
+        const { staffPermission, captcha, signedIn, open } = mockGuards;
+        mock.create({ ...requiredOptions, guards: { staffPermission, captcha, signedIn, open } });
         // @ts-expect-error captcha is declared by the contract and missing here
-        mock.create({ ...requiredOptions, guards: { orgPermission, sessionOnly, open } });
+        mock.create({ ...requiredOptions, guards: { staffPermission, signedIn, open } });
         mock.create({ ...requiredOptions, guards: {
-            orgPermission, sessionOnly, open,
+            staffPermission, signedIn, open,
             // @ts-expect-error the server's captcha input is { token: string }, not { code: number }
             captcha: mock.guard({ guardInput: z.object({ code: z.number() }), handler: () => {} }),
         } });
@@ -662,6 +662,11 @@ describe('The MSW adapter fits the real msw module', () => {
         expectTypeOf<typeof import('msw')>().toExtend<LambderMswModule>();
         // The app is what an adapter is handed, cookieHost and all.
         expectTypeOf<typeof mockApp>().toExtend<LambderMockMswTarget>();
+        // The adapter's bookkeeping is behind its door, not on the app's surface.
+        expectTypeOf<typeof mockApp>().not.toHaveProperty('hasRegisteredEntry');
+        expectTypeOf<typeof mockApp>().not.toHaveProperty('notePassthrough');
+        expectTypeOf<typeof mockApp>().not.toHaveProperty('mirrorCookiesIntoDocument');
+        expectTypeOf<typeof mockApp>().not.toHaveProperty('adoptCookieJar');
 
         // Compiled, not run: the documented wiring, which is where a
         // mismatched declaration would surface.
@@ -690,7 +695,7 @@ describe('The mock guards map is checked for surplus keys', () => {
 describe('Mock registry types - declared refusals', () => {
     it('types a handler\'s ctx.refuse and an injected refusal to the endpoint\'s codes, the data in the form it arrives in', () => {
         mockApp.api('users.remove', {
-            guards: { orgPermission: 'USERS.MANAGE' },
+            guards: { staffPermission: 'USERS.MANAGE' },
             handler: async (ctx) => {
                 if(ctx.payload.userId === 'last') return ctx.refuse('The last admin stays.', { code: 'last-admin' });
                 // @ts-expect-error the server's Date arrives as its string, which is what a mock writes
@@ -714,6 +719,30 @@ describe('Mock registry types - declared refusals', () => {
         mockApp.failNext('tools.limited', { reason: 'rateLimited', message: { type: 'warning', code: 'app/slow', content: 'Slow.' } });
         mockApp.reset();
         expect(mockApp).toBeDefined();
+    });
+
+    it('types a mock guard\'s ctx.refuse to the guard\'s own codes as the server init\'s builder does, and refuses a code outside the vocabulary as the guard is built', () => {
+        const declared = mock.declareRefusals({ 'user-gone': { data: z.object({ removedAt: z.date() }) }, 'last-admin': {} });
+        declared.guard({
+            refusals: ['last-admin'],
+            handler: (ctx) => {
+                if(Math.random() > 2) ctx.refuse('The last admin stays.', { code: 'last-admin' });
+                // @ts-expect-error a code the guard does not declare
+                if(Math.random() > 2) ctx.refuse('Gone.', { code: 'user-gone', data: { removedAt: new Date() } });
+            },
+        });
+        declared.guard({
+            session: true,
+            refusals: ['user-gone'],
+            // The schema's input form, which the mock parses as the server does.
+            handler: (ctx) => { if(ctx.session.data.role !== 'admin') ctx.refuse('Gone.', { code: 'user-gone', data: { removedAt: new Date() } }); },
+        });
+        declared.guard({ handler: (ctx) => {
+            // @ts-expect-error a guard declaring no refusals raises no code
+            if(Math.random() > 2) ctx.refuse('Stays.', { code: 'last-admin' });
+        } });
+        // @ts-expect-error the guard names a code the vocabulary does not hold
+        expect(() => declared.guard({ refusals: ['last-admn'], handler: () => {} })).toThrow(/a guard declares the refusal "last-admn", which the refusals vocabulary does not hold/);
     });
 });
 

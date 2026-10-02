@@ -29,7 +29,7 @@ const definition = (overrides: Partial<LambderApiDefinition> = {}): LambderApiDe
     ({ name: 'user.get', mode: 'public', input: userInput, output: userOutput, ...overrides });
 
 const guards = {
-    org: lambderGuard({ guardInput: z.object({ organizationId: z.string() }), handler: () => {} }),
+    store: lambderGuard({ guardInput: z.object({ storeId: z.string() }), handler: () => {} }),
     owner: lambderGuard({ apiInput: z.object({ id: z.string() }), handler: () => {} }),
     plain: lambderGuard({ handler: () => {} }),
 };
@@ -57,7 +57,7 @@ describe('The signature digest', () => {
             apiSignatureOf(definition({ mode: 'session' }), guards),
             apiSignatureOf(definition({ input: z.object({ id: z.string(), full: z.boolean() }) }), guards),
             apiSignatureOf(definition({ output: z.object({ id: z.string() }) }), guards),
-            apiSignatureOf(definition({ guards: 'org' }), guards),
+            apiSignatureOf(definition({ guards: 'store' }), guards),
             apiSignatureOf(definition({ guards: 'owner' }), guards),
             apiSignatureOf(definition({ idempotency: true }), guards),
             // A description is part of what zod emits, so it is part of the shape.
@@ -72,7 +72,7 @@ describe('The signature digest', () => {
         expect(await apiSignatureOf(definition({ rateLimit: 'tight' }), guards)).toBe(base);
         expect(await apiSignatureOf(definition({ idempotency: false }), guards)).toBe(base);
         // The guard schema is what counts, not the parameter beside its name.
-        expect(await apiSignatureOf(definition({ guards: { org: 'READ' } }), guards)).toBe(await apiSignatureOf(definition({ guards: { org: 'WRITE' } }), guards));
+        expect(await apiSignatureOf(definition({ guards: { store: 'READ' } }), guards)).toBe(await apiSignatureOf(definition({ guards: { store: 'WRITE' } }), guards));
     });
 
     it('changes when an endpoint can refuse with another code, or a code\'s data changes shape, and not with the order they are declared in', async () => {
@@ -194,8 +194,8 @@ const createServer = (apiSignatures?: LambderApiSignatureMap) => {
         app.defineApiGroup('user', {
             get: app.defineApi({ input: userInput, output: userOutput }, async (ctx) => ({ id: ctx.apiPayload.id, name: 'Ada' })),
         }),
-        app.defineApiGroup('org', {
-            get: app.defineApi({ input: z.object({}), output: z.object({ ok: z.boolean() }), guards: 'org' }, async (_ctx) => ({ ok: true })),
+        app.defineApiGroup('store', {
+            get: app.defineApi({ input: z.object({}), output: z.object({ ok: z.boolean() }), guards: 'store' }, async (_ctx) => ({ ok: true })),
         }),
         app.defineApiGroup('account', {
             me: app.defineApi({ input: z.void(), output: z.object({ userId: z.string() }), guards: 'signedIn' }, async (ctx) => ({ userId: ctx.session.data.userId })),
@@ -206,11 +206,11 @@ const createServer = (apiSignatures?: LambderApiSignatureMap) => {
 describe('The server and its map', () => {
     it('apiSignatures() lists every registered endpoint under its hashed name, sorted, with the digest the gate compares against', async () => {
         const map = await createServer().apiSignatures();
-        const keys = await Promise.all(['user.get', 'org.get', 'account.me'].map(apiNameKeyOf));
+        const keys = await Promise.all(['user.get', 'store.get', 'account.me'].map(apiNameKeyOf));
         expect(Object.keys(map).sort()).toEqual([...keys].sort());
         expect(Object.keys(map)).toEqual([...Object.keys(map)].sort());
         expect(map[keys[0]!]).toBe(await apiSignatureOf({ name: 'user.get', mode: 'public', input: userInput, output: userOutput }, guards));
-        expect(map[keys[1]!]).toBe(await apiSignatureOf({ name: 'org.get', mode: 'public', input: z.object({}), output: z.object({ ok: z.boolean() }), guards: 'org' }, guards));
+        expect(map[keys[1]!]).toBe(await apiSignatureOf({ name: 'store.get', mode: 'public', input: z.object({}), output: z.object({ ok: z.boolean() }), guards: 'store' }, guards));
         // Nothing in the file names an endpoint.
         expect(JSON.stringify(map)).not.toContain('user.get');
     });
@@ -221,7 +221,7 @@ describe('The server and its map', () => {
         const entries = await server.apiSignatureEntries();
 
         // The names the map does not carry, which is the whole point of this.
-        expect(entries.map((entry) => entry.name).sort()).toEqual(['account.me', 'org.get', 'user.get']);
+        expect(entries.map((entry) => entry.name).sort()).toEqual(['account.me', 'store.get', 'user.get']);
         // Same data, same order: the map is these entries with the names dropped.
         expect(Object.fromEntries(entries.map(({ key, signature }) => [key, signature]))).toEqual(map);
         expect(entries.map((entry) => entry.key)).toEqual(Object.keys(map));
@@ -297,7 +297,7 @@ describe('LambderCaller with a signature map', () => {
     });
 
     it('calls versionExpiredHandler once for a stale signature, and reports a repeat after the reload instead of reloading again', () => withFreshSessionStorage(async () => {
-        const map = { [await apiNameKeyOf('user.get')]: 'stale', [await apiNameKeyOf('org.get')]: 'stale-too' };
+        const map = { [await apiNameKeyOf('user.get')]: 'stale', [await apiNameKeyOf('store.get')]: 'stale-too' };
         const versionExpiredHandler = vi.fn();
         const errors: Error[] = [];
         // A page load evaluates LambderCaller's modules afresh, as a reload
@@ -332,7 +332,7 @@ describe('LambderCaller with a signature map', () => {
         expect(errors[0]!.message).toMatch(/Version expired again for API "user.get"/);
         // Once confirmed, another endpoint of the same stale bundle does not
         // earn a reload of its own either.
-        expect(await reloaded.apiOutcome('org.get', {}, { guardInputs: { org: { organizationId: 'o' } } })).toMatchObject({ ok: false, reason: 'versionExpired' });
+        expect(await reloaded.apiOutcome('store.get', {}, { guardInputs: { store: { storeId: 's' } } })).toMatchObject({ ok: false, reason: 'versionExpired' });
         expect(versionExpiredHandler).toHaveBeenCalledOnce();
         expect(errors.length).toBe(2);
     }));

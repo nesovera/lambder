@@ -12,7 +12,7 @@ const lambder = initLambder<SessionData>().create({
     apiPath: "/api",
     rateLimits: { limiter, policies, failOpen: true },
     idempotency: { store, defaultTtlSeconds: 24 * 3600, failOpen: true },
-    guards: { captcha, deviceAuth, orgPermission },
+    guards: { captcha, terminalAuth, staffPermission },
 });
 ```
 
@@ -73,7 +73,8 @@ own words when it names a `refusal`, so the caller's
 `refusalHandler` surfaces them with zero client code. A 429 also carries
 `Retry-After` (the exceeded fixed window's reset; `LambderCaller` outcomes
 expose it as `retryAfterSeconds`, and the CORS layer lists it in
-`Access-Control-Expose-Headers` by default).
+`Access-Control-Expose-Headers` by default), and its data names the policy
+that refused (see [What a client reads](#what-a-client-reads)).
 
 Preflight input slices (guard `apiInput` and `guardInput` values, rate-limit
 `apiInput` keys) answer a rejection through the same path as the API's own
@@ -125,7 +126,7 @@ rateLimits: {
 | `per` | `"ip"`, `"session"`, `lambderRateLimitKey({...})`, or left out | What one counter tracks. `"session"` is only referable from an endpoint one of whose guards needs a session. Left out, the handler that charges the policy supplies the key (see [Charging a policy from code](#charging-a-policy-from-code)), and no API can declare it |
 | `budget` | `"perApi"` (default), `"perPolicy"` | Whether each referencing API gets its own counter or they share one |
 | `chargeAt` | `"afterGuards"` (default), `"beforeGuards"` | For a custom-keyed policy only: charged after the guards and the input schema passed, or before them, so an attempt they refuse is counted too (a limit on guessing a code a guard checks) |
-| `refusal` | `LambderRateLimitMessage` | The refusal's words: its type, title and content. Its code is always `lambder/rate-limited` and it carries no data, so no endpoint has to declare a rate limit as one of its refusals; a code or data here is a compile error and a creation error |
+| `refusal` | `LambderRateLimitMessage` | The refusal's words: its type, title and content. Its code is always `lambder/rate-limited` and its data always the framework's (`{ policy, retryAfterSeconds }`), so no endpoint has to declare a rate limit as one of its refusals; a code or data here is a compile error and a creation error |
 
 A `per: "ip"` counter keys an IPv6 caller by its /64 (`ipv6PrefixLength`),
 since a subscriber, a VPS included, holds at least that much and may rotate
@@ -133,15 +134,71 @@ the address inside it on every request; an IPv4-mapped address
 (`::ffff:192.0.2.1`) counts as its IPv4 address. `ctx.ip` stays the exact
 address.
 
-A custom key is bounded before any limiter sees it: past 1024 UTF-8 bytes, as
-written into the key (where each `|` and `\` is escaped to two), the value
-your handler returned is replaced by its sha256 (`custom:h:<hex>`, the api and
-policy names still readable around it), and `per: "session"` keys are bounded
-the same way. Distinct callers stay on distinct counters, and no store
-is handed a key longer than its own limit. It is bounded in the engine rather
-than in a limiter because a store refuses an over-long key by throwing, and a
-throw is what `failOpen` swallows: a 3,000-character payload field would
-otherwise turn the whole policy off in silence.
+Every key reaches the limiter with the caller's half written as a digest (see
+[What a table read shows](#what-a-table-read-shows)): the address, the session
+key, and whatever your handler returned, each at any length. Distinct callers
+stay on distinct counters, and no store is handed a key longer than its own
+limit. It is done in the engine rather than in a limiter because a store
+refuses an over-long key by throwing, and a throw is what `failOpen` swallows:
+a 3,000-character payload field would otherwise turn the whole policy off in
+silence.
+
+### What a client reads
+
+A rate-limit refusal is always `lambder/rate-limited`, in the words the
+policy (or the API's override) wrote, and its data says which limit it was
+and how long to wait: `{ policy, retryAfterSeconds }`, typed
+`LambderRateLimitRefusalData`. `retryAfterSeconds` is the `Retry-After`
+header's value. The code narrows like every other, so a client words each
+limit its own way without parsing the content, and keeps the 429 and the
+header an app would lose by refusing with a code of its own from the handler:
+
+```typescript
+const showRefusal = (message: LambderRefusalMessage) => {
+    switch (message.code) {
+        case LAMBDER_REFUSAL_CODES.rateLimited:
+            return message.data.policy === "codePerEmail"
+                ? showToast(t("auth.tooManyCodes", { seconds: message.data.retryAfterSeconds }))
+                : showToast(t("common.slowDown", { seconds: message.data.retryAfterSeconds }));
+        default:
+            return showToast(message.content);
+    }
+};
+```
+
+The data names the policy to every client, so a policy's name is one fit to
+show: `codePerEmail`, not `brute-force-trap-3`. A refusal with the code is
+sent only with its data: `ctx.rateLimit`, a declared limit and
+`rateLimitRefusal(detail, { policy, retryAfterSeconds }, words?)` write it,
+and a `refuse()` with the code and no such data is a crash, as an undeclared
+code is. `res.apiRefusal` does not take the code.
+
+### What a table read shows
+
+The caller's part of every tracker key, and of every idempotency scope, is
+written as a digest of fixed length, whatever its own: the address (an IPv6
+caller's /64), the session key, a custom key, a `callerIdentity`, the posted
+idempotency key. The API name, the policy name and the kind of each key
+(`ip`, `session`, `custom`) stay readable around it:
+
+```
+api|auth.sendCode|codePerEmail|custom:3f7c...e1   (64 hex characters)
+```
+
+With sessions configured, the digest is an HMAC-SHA256 keyed by a subkey
+derived from the `sessionSalt` for this purpose alone (HKDF), so the keys in
+a table neither show who was counted or whose a stored answer is, nor let
+anyone test a guess without the salt. A stored answer's body is the response
+as it was sent, whatever that holds. The salt itself keys the session
+store's partition hash, which rides in every session cookie; the derived
+subkey is what keeps that hash from ever being a digest written here.
+Without sessions there is no secret to key it with, and the digest is a
+plain SHA-256: the values stay out of the table, but a reader can test
+guesses, which recovers a value from a small space (an IPv4 address, a phone
+number, an email from a list).
+
+Changing the `sessionSalt` changes every digest, so it starts every rate-limit
+counter and idempotency record afresh, as it signs every session out.
 
 ### Budgets
 
@@ -178,10 +235,10 @@ policies: {
     pairPerIp: { perMin: 5, per: "ip" },
 },
 
-const invite = lambder.defineApi({ input, output, guards: "orgAdmin" }, async (ctx) => {
+const invite = lambder.defineApi({ input, output, guards: "storeOwner" }, async (ctx) => {
     // ...the refusals that mean nothing goes out come first; then:
-    await ctx.rateLimit("invitesPerRecipient", `${orgId}:${email.toLowerCase()}`);
-    await sendInvitation(orgId, email);
+    await ctx.rateLimit("invitesPerRecipient", `${storeId}:${email.toLowerCase()}`);
+    await sendInvitation(storeId, email);
     return { sent: true };
 });
 
@@ -200,8 +257,8 @@ with the same header and text on a route. `ctx.isRateLimited(policy, key?)`
 counts the same way and answers `false`, or the window that refused with its
 `retryAfterSeconds`, without refusing anything.
 
-Both go through the instance's own limiter, so `failOpen`, the key bounding
-below and `lambder/testing`'s memory limiter all apply to them; calling a
+Both go through the instance's own limiter, so `failOpen`, the key digest
+above and `lambder/testing`'s memory limiter all apply to them; calling a
 limiter's `isRateLimited` directly skips all three. The policy name is checked
 where it is charged: an unknown name is a compile error, a policy without
 `per` requires the key, and a `per: "ip"` or `per: "session"` one refuses one,
@@ -260,20 +317,22 @@ guards: {
         // A token is spent once verified: check the input first (see below).
         runAt: "afterInputValidation",
         guardInput: z.object({ captchaToken: z.string() }),
+        // A retry carries a fresh token: see "Guard inputs and idempotency".
+        singleUseInput: true,
         handler: async (ctx, { captchaToken }) => {
             if (!await verifyCaptcha(captchaToken, ctx.ip)) refuse("Verification failed, please retry.");
         },
     }),
-    deviceAuth: lambderGuard({
-        apiInput: z.object({ deviceToken: z.string() }),
-        // Returns a value: the API handler reads ctx.guardData.deviceAuth.
-        handler: async (_ctx, { deviceToken }) => await resolveDeviceOrRefuse(deviceToken),
+    terminalAuth: lambderGuard({
+        apiInput: z.object({ terminalToken: z.string() }),
+        // Returns a value: the API handler reads ctx.guardData.terminalAuth.
+        handler: async (_ctx, { terminalToken }) => await resolveTerminalOrRefuse(terminalToken),
     }),
-    orgPermission: lambderGuard({
+    staffPermission: lambderGuard({
         session: true,
-        // Parameterized: APIs declare guards: { orgPermission: "SOME.PERMISSION" }.
+        // Parameterized: APIs declare guards: { staffPermission: "ORDERS.REFUND" }.
         handler: (ctx, _payload, permission: PermissionString) =>
-            requirePermissionOrRefuse(ctx.session, permission),   // return value -> ctx.guardData.orgPermission
+            requirePermissionOrRefuse(ctx.session, permission),   // return value -> ctx.guardData.staffPermission
     }),
 },
 ```
@@ -326,13 +385,13 @@ on `initLambder` is bound to the session type the app fixed there:
 ```typescript
 const lambderInit = initLambder<SessionData>();
 
-const orgPermission = lambderInit.guard({
+const staffPermission = lambderInit.guard({
     session: true,
     // ctx.session.data is SessionData, ctx.sessionController a LambderSessionController<SessionData>
     handler: (ctx, _payload, permission: PermissionString) => requirePermissionOrRefuse(ctx.session.data, permission),
 });
 
-export const lambderApp = lambderInit.create({ apiPath: "/api", session, guards: { orgPermission } });
+export const lambderApp = lambderInit.create({ apiPath: "/api", session, guards: { staffPermission } });
 ```
 
 `lambderInit.rateLimitKey()` is the same for a rate-limit key. The `guards`
@@ -353,7 +412,7 @@ the guard, so each such API's contract lists them and its callers narrow on
 them (see [Declared refusals](./apis.md#declared-refusals)):
 
 ```typescript
-const orgPermission = lambderInit.guard({
+const staffPermission = lambderInit.guard({
     session: true,
     refusals: ["missing-permission"],
     handler: (ctx, _payload, permission: PermissionString) => {
@@ -381,12 +440,55 @@ signature of every API declaring it.
 
 Both are validated before the guard runs and typed inside its handler.
 
+### Guard inputs and idempotency
+
+A `guardInput` value is part of the request an idempotency key belongs to,
+beside the payload: the same key sent with another value is another request,
+refused with `lambder/idempotency-key-reused` rather than replayed the first
+one's answer. That is what a value selecting what the call is about needs:
+
+```typescript
+storeStaff: lambderGuard({
+    session: true,
+    // Which store the clerk acts for. The same clerk, key and payload sent
+    // for "uptown" after "downtown" is another order, not a retry of it.
+    guardInput: z.object({ storeId: z.string() }),
+    handler: async (ctx, { storeId }) => await requireStaffOrRefuse(ctx.session.data, storeId),
+}),
+```
+
+A value that can differ between attempts of one operation is the opposite
+case: a single-use proof (a captcha token, a one-time code), or a credential
+the client refreshes between attempts (a short-lived token). A genuine retry
+may carry a new one, so it says nothing about which request this is. Counted,
+it would turn the retry into a 409, and the key scope would then move the
+person's next attempt to a new key, running the operation a second time. Such
+a guard declares `singleUseInput: true`, and its value is left out:
+
+```typescript
+captcha: lambderGuard({
+    runAt: "afterInputValidation",
+    guardInput: z.object({ captchaToken: z.string() }),
+    // The retry after a timeout solves a new captcha; it still replays the
+    // first attempt's answer instead of placing the order again.
+    singleUseInput: true,
+    handler: async (ctx, { captchaToken }) => {
+        if (!await verifyCaptcha(captchaToken, ctx.ip)) refuse("Verification failed, please retry.");
+    },
+}),
+```
+
+Only a `guardInput` guard takes it: an `apiInput` guard reads the payload,
+which always counts, so `singleUseInput` there is a compile error and a
+creation error. A proof carried inside the payload therefore reads as another
+request on every retry; send it in `guardInputs`.
+
 ### Referencing guards from an API
 
 ```typescript
-guards: "captcha",                            // one name
-guards: ["captcha", "deviceAuth"],            // a non-empty list, run in order
-guards: { orgPermission: "ORDERS.CREATE" },   // a non-empty { name: param } map, run in insertion order
+guards: "captcha",                              // one name
+guards: ["captcha", "terminalAuth"],            // a non-empty list, run in order
+guards: { staffPermission: "ORDERS.CREATE" },   // a non-empty { name: param } map, run in insertion order
 ```
 
 Guard results are typed end to end: the handler's `ctx.guardData` carries
@@ -435,10 +537,10 @@ const lambder = initLambder<SessionData>().create({
     apiPath: "/api",
     session,
     guards: {
-        orgPermission: lambderGuard({ session: true, handler: (ctx, _p, permission: PermissionString) => requireOrRefuse(ctx.session, permission) }),
+        staffPermission: lambderGuard({ session: true, handler: (ctx, _p, permission: PermissionString) => requireOrRefuse(ctx.session, permission) }),
         // The session itself is the whole authorization.
-        sessionOnly: lambderGuard({ session: true, handler: () => {} }),
-        deviceToken: lambderGuard({ apiInput: z.object({ deviceToken: z.string().min(20) }), handler: (_c, { deviceToken }) => requireDevice(deviceToken) }),
+        signedIn: lambderGuard({ session: true, handler: () => {} }),
+        terminalToken: lambderGuard({ apiInput: z.object({ terminalToken: z.string().min(20) }), handler: (_c, { terminalToken }) => requireTerminal(terminalToken) }),
         // Anyone may call, and the param records why: `grep "open:"` lists every public door.
         open: lambderGuard({ handler: (_c, _p, _reason: string) => {} }),
         // This endpoint establishes identity; the proof is the handler's own work.
@@ -448,16 +550,16 @@ const lambder = initLambder<SessionData>().create({
 });
 
 const orders = lambder.defineApiGroup("orders", {
-    create: lambder.defineApi({ input, output, guards: { orgPermission: "ORDERS.CREATE" } }, handler),   // a session endpoint
+    create: lambder.defineApi({ input, output, guards: { staffPermission: "ORDERS.CREATE" } }, handler),   // a session endpoint
     report: lambder.defineApi({ input, output }, handler),              // compile error: which guard?
     list: lambder.defineApi({ input, output, guards: {} }, handler),    // compile error: {} declares no guard
 });
 const account = lambder.defineApiGroup("account", {
-    logOut: lambder.defineApi({ input, output, guards: "sessionOnly" }, handler),                        // a session endpoint
-    login: lambder.defineApi({ input, output, guards: "credentialFlow" }, handler),                      // public
+    logOut: lambder.defineApi({ input, output, guards: "signedIn" }, handler),                             // a session endpoint
+    login: lambder.defineApi({ input, output, guards: "credentialFlow" }, handler),                        // public
 });
-const device = lambder.defineApiGroup("device", {
-    report: lambder.defineApi({ input, output, guards: "deviceToken" }, handler),
+const terminal = lambder.defineApiGroup("terminal", {
+    report: lambder.defineApi({ input, output, guards: "terminalToken" }, handler),
     translations: lambder.defineApi({ input, output, guards: { open: "Static strings already in the bundle." } }, handler),
 });
 ```
@@ -515,14 +617,14 @@ operation with `createIdempotencyKey()` and reuse it on retries.
   frequently arrives from a new IP. Every field is escaped before it is
   joined, so a key containing the separator cannot land in another scope.
 - **A key belongs to the request it was first sent with.** The claim keeps a
-  fingerprint of that request (its payload as posted, whatever order its
-  keys arrive in), and a retry of the same request replays its answer. Guard
-  inputs stay out of it: a captcha or proof token is single use, so a genuine
-  retry carries a new one. Such a token belongs in `guardInputs`: one carried
-  inside the payload (checked by an `apiInput` guard) is part of the
-  fingerprint, and a retry with a fresh one reads as another request. The
-  same key with another payload is refused with
-  `lambder/idempotency-key-reused` (409) rather than handed the first answer:
+  fingerprint of that request (its payload as posted and its guard inputs,
+  whatever order their keys arrive in), and a retry of the same request
+  replays its answer. A guard input declared `singleUseInput` stays out of
+  it, since a genuine retry carries a fresh captcha or proof token (see
+  [Guard inputs and idempotency](#guard-inputs-and-idempotency)). The same
+  key with another payload, or another guard input that counts, is refused
+  with `lambder/idempotency-key-reused` (409) rather than handed the first
+  answer:
   a corrected order after a refusal would otherwise get the stored refusal
   for the whole replay window, and an edited retry after a timeout would be
   told the first order went through while only the first was placed. A key
@@ -552,8 +654,8 @@ operation with `createIdempotencyKey()` and reuse it on retries.
       // guardInputs is Record<string, unknown> and the shape is yours to
       // assert.
       callerIdentity: (ctx, request) => {
-          const device = request.guardInputs?.device as { token?: string } | undefined;
-          return device?.token ?? null;
+          const terminal = request.guardInputs?.terminal as { token?: string } | undefined;
+          return terminal?.token ?? null;
       },
   }
   ```
@@ -565,11 +667,12 @@ operation with `createIdempotencyKey()` and reuse it on retries.
   It runs once per call, however many times the scope is needed.
   Session APIs need none of this: they already scope per user.
 
-  The identity (and a session API's sessionKey) is bounded the way a custom
-  rate-limit key is: past 1024 UTF-8 bytes as written into the scope, it is
-  replaced by its sha256 (`i:h:<hex>`), so a long credential can neither push
-  the scope past a store's key limit (a throw, which `failOpen` would turn
-  into no idempotency for that caller) nor sit in the table as it is.
+  The identity, a session API's sessionKey and the posted key are written
+  into the scope as digests, as a rate-limit key's caller half is (see
+  [What a table read shows](#what-a-table-read-shows)): a credential can
+  neither sit in the table as it is nor, however long, push the scope past a
+  store's key limit (a throw, which `failOpen` would turn into no idempotency
+  for that caller).
 - **Concurrent duplicates** of an in-flight request refuse with 409. A
   duplicate that arrives while the original is still running takes the full
   path (its rate limits are charged and its guards run) before the 409, since
@@ -610,8 +713,8 @@ operation with `createIdempotencyKey()` and reuse it on retries.
   answer, whatever a custom store does with the objects it holds.
 - **A store failure is logged**, and `failOpen` (default true) decides what
   happens next: true executes the request as if it carried no key, false
-  refuses. The log names the API, never the scope key, which carries the
-  caller's identity and their posted key.
+  refuses. The log names the API, never the scope key, which is the same for
+  every attempt of one caller.
 - **Claims are owner-checked**, so an original that stalls past the pending
   window can no longer overwrite or delete the claim a retry has since taken.
 - **A stored answer is never released.** Storing the answer can fail after it
@@ -674,16 +777,16 @@ export const accountApis = lambder.defineApiGroup("account", {
 });
 
 export const orderApis = lambder.defineApiGroup("orders", {
-    // orgPermission needs a session, so this is a session endpoint, and the
+    // staffPermission needs a session, so this is a session endpoint, and the
     // per-session writePerUser limit may apply to it.
     create: lambder.defineApi({
         input: OrderSchema,
         output: OrderResultSchema,
         rateLimit: { writePerUser: { perMin: 10 } },
-        guards: { orgPermission: "ORDERS.CREATE" },
+        guards: { staffPermission: "ORDERS.CREATE" },
         idempotency: true,   // or { ttlSeconds: 3600 }
     }, async (ctx) => {
-        const { organizationId } = ctx.guardData.orgPermission;   // typed guard output
+        const { storeId } = ctx.guardData.staffPermission;   // typed guard output
         // ...
     }),
 });

@@ -1,18 +1,24 @@
+import { spawn } from "child_process";
+import { fileURLToPath } from "url";
+import type { ContractPrinterReport, ContractPrinterRequest } from "./contractPrinterProcess.js";
 import type { LambderModuleLocation } from "./moduleLocation.js";
-import { writeApiContract, type LambderApiContractFileOptions } from "./writeApiContract.js";
+import type { LambderApiContractFileOptions } from "./writeApiContract.js";
 import { writeApiSignatures, type LambderApiSignatureFileOptions } from "./writeApiSignatures.js";
 import { writeApiOptions, type LambderApiOptionsFileOptions } from "./writeApiOptions.js";
 import { writeApiGuardParams, type LambderApiGuardParamsFileOptions } from "./writeApiGuardParams.js";
+import { writeApiSchemas, type LambderApiSchemasFileOptions } from "./writeApiSchemas.js";
 
 /*
  * Every file an app's Lambder instances are written to, in one call a
  * generator script makes with the files it owns: each instance's module
  * named once for all of them.
  *
- * The contracts are read first, through the compiler alone; then each app's
- * module is imported once, and its signatures, options and guard parameters
- * are written from the one instance. A writer that fails does not stop the
- * others, so one run names everything that is stale or broken.
+ * The contracts are read first, through the compiler alone, each in a Node
+ * process of its own (contractPrinterProcess) with a heap sized for it; then
+ * each app's module is imported once, here, and its signatures, options,
+ * guard parameters and schemas are written from the one instance. A writer that fails
+ * does not stop the others, so one run names everything that is stale or
+ * broken.
  */
 
 /** What a file's writer takes beyond where the instance is, which the app gives once for all its files. */
@@ -34,11 +40,27 @@ export type LambderApiFilesApp = {
     options?: LambderAppFile<LambderApiOptionsFileOptions>;
     /** One file per guard whose parameters a browser needs (writeApiGuardParams). */
     guardParams?: readonly LambderAppFile<LambderApiGuardParamsFileOptions>[];
+    /** The input and output schemas as JSON Schema, for a mock to validate against in development (writeApiSchemas). */
+    schemas?: LambderAppFile<LambderApiSchemasFileOptions>;
 };
 
 /** The files generateApiFiles writes: every app's, by a name the output lines use. */
 export type LambderApiFilesConfig = {
     apps: Record<string, LambderApiFilesApp>;
+};
+
+/** How generateApiFiles runs. */
+export type LambderApiFilesOptions = {
+    /** Write nothing, and answer whether each file on disk is what its writer produces now. Default: false. */
+    check?: boolean;
+    /**
+     * The heap, in megabytes, of the Node process each contract is printed
+     * in (its --max-old-space-size). Reading a contract compiles the server,
+     * twice for a write that changes the file, which in a large app takes
+     * gigabytes; the process is started for that alone, so the heap is the
+     * printing's whatever the script's own is. Default: 8192.
+     */
+    contractHeapMegabytes?: number;
 };
 
 export type LambderApiFilesResult = {
@@ -48,8 +70,23 @@ export type LambderApiFilesResult = {
     lines: string[];
 };
 
-const APP_KEYS = ["module", "exportName", "tsconfig", "contract", "signatures", "options", "guardParams"] as const;
-const FILE_KINDS = ["contract", "signatures", "options", "guardParams"] as const;
+const APP_KEYS = ["module", "exportName", "tsconfig", "contract", "signatures", "options", "guardParams", "schemas"] as const;
+const FILE_KINDS = ["contract", "signatures", "options", "guardParams", "schemas"] as const;
+
+const DEFAULT_CONTRACT_HEAP_MEGABYTES = 8192;
+
+/**
+ * How the contract printing process reports: one line on stdout starting
+ * with this, then its report as JSON. The line, not the exit status, is the
+ * answer: a process that dies before it (out of heap, say) answered nothing.
+ */
+export const CONTRACT_REPORT_PREFIX = "lambder-api-contract-printed:";
+
+/** The contract printing process's entry, beside this module in the build. */
+const CONTRACT_PRINTER_ENTRY = new URL("./contractPrinterProcess.js", import.meta.url);
+
+/** How much of a process's error output a failure repeats. */
+const STDERR_TAIL_LINES = 20;
 
 /** A config that names apps, each with its module and at least one file, and no key the generator does not read. */
 function assertConfig(config: unknown): asserts config is LambderApiFilesConfig {
@@ -63,7 +100,7 @@ function assertConfig(config: unknown): asserts config is LambderApiFilesConfig 
         if(unknownKeys.length) throw new Error(`generateApiFiles: the app "${name}" has ${unknownKeys.map((key) => `"${key}"`).join(", ")}, which the generator does not read (it reads ${APP_KEYS.join(", ")}).`);
         if(!(app as { module?: unknown }).module) throw new Error(`generateApiFiles: the app "${name}" names no module to read its instance from.`);
         if(!FILE_KINDS.some((kind) => (app as Record<string, unknown>)[kind] !== undefined)){
-            throw new Error(`generateApiFiles: the app "${name}" is written to no file; give it a contract, signatures, options or guardParams.`);
+            throw new Error(`generateApiFiles: the app "${name}" is written to no file; give it a contract, signatures, options, guardParams or schemas.`);
         }
     }
 }
@@ -80,9 +117,50 @@ const settle = async (label: string, write: () => Promise<{ ok: boolean; lines: 
 };
 
 /**
+ * writeApiContract in a Node process of its own, started with the heap given
+ * and none of this process's flags: the compiler loads no module of the app,
+ * so the script's loader is not needed there, and the heap the script runs
+ * with is not the printing's. Its result comes back as writeApiContract
+ * answers it, and what it throws is thrown here with the same messages, down
+ * the chain of causes, so a run reads the same as one in this process.
+ */
+const writeApiContractInOwnProcess = async (label: string, options: LambderApiContractFileOptions, heapMegabytes: number): Promise<{ ok: boolean; lines: string[] }> => {
+    const request: ContractPrinterRequest = { ...options, module: options.module instanceof URL ? options.module.href : options.module };
+    const child = spawn(process.execPath, [`--max-old-space-size=${heapMegabytes}`, fileURLToPath(CONTRACT_PRINTER_ENTRY), JSON.stringify(request)], { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+    const ended = await new Promise<{ status: number | null; signal: NodeJS.Signals | null } | { error: Error }>((resolveEnd) => {
+        child.once("error", (error) => resolveEnd({ error }));
+        child.once("close", (status, signal) => resolveEnd({ status, signal }));
+    });
+    if("error" in ended) return { ok: false, lines: [`✗ ${label} failed: the process to print it in could not start: ${ended.error.message}`] };
+
+    const reportLine = stdout.split("\n").findLast((line) => line.startsWith(CONTRACT_REPORT_PREFIX));
+    if(reportLine === undefined){
+        if(/JavaScript heap out of memory/i.test(stderr)){
+            return { ok: false, lines: [`✗ ${label} failed: the process printing it ran out of its ${heapMegabytes} MB heap; raise contractHeapMegabytes`] };
+        }
+        const ending = ended.signal ? `signal ${ended.signal}` : `exit status ${ended.status ?? "none"}`;
+        return {
+            ok: false,
+            lines: [
+                `✗ ${label} failed: the process printing it ended without an answer (${ending})`,
+                ...stderr.trim().split("\n").filter(Boolean).slice(-STDERR_TAIL_LINES).map((line) => `  ${line}`),
+            ],
+        };
+    }
+    const report = JSON.parse(reportLine.slice(CONTRACT_REPORT_PREFIX.length)) as ContractPrinterReport;
+    if("thrown" in report) throw report.thrown.reduceRight<Error | undefined>((cause, message) => new Error(message, cause ? { cause } : undefined), undefined);
+    return report.result;
+};
+
+/**
  * Writes every file the config names, or with `check` writes nothing and
  * answers whether each one on disk is current. Paths are relative to the
- * working directory, as each writer takes them.
+ * working directory, as each writer takes them. Each contract is printed in
+ * a Node process of its own, with a heap of `contractHeapMegabytes`.
  *
  * ```ts
  * import { generateApiFiles } from "lambder/build";
@@ -101,9 +179,13 @@ const settle = async (label: string, write: () => Promise<{ ok: boolean; lines: 
  * process.exit(result.ok ? 0 : 1);
  * ```
  */
-export const generateApiFiles = async (config: LambderApiFilesConfig, options: { check?: boolean } = {}): Promise<LambderApiFilesResult> => {
+export const generateApiFiles = async (config: LambderApiFilesConfig, options: LambderApiFilesOptions = {}): Promise<LambderApiFilesResult> => {
     assertConfig(config);
     const check = options.check ?? false;
+    const contractHeapMegabytes = options.contractHeapMegabytes ?? DEFAULT_CONTRACT_HEAP_MEGABYTES;
+    if(!Number.isInteger(contractHeapMegabytes) || contractHeapMegabytes <= 0){
+        throw new Error(`generateApiFiles: contractHeapMegabytes is ${String(contractHeapMegabytes)}; give the heap of the process each contract is printed in as a whole number of megabytes, such as ${DEFAULT_CONTRACT_HEAP_MEGABYTES}.`);
+    }
     const apps = Object.entries(config.apps);
     const runs: { ok: boolean; lines: string[] }[] = [];
 
@@ -111,11 +193,12 @@ export const generateApiFiles = async (config: LambderApiFilesConfig, options: {
     // them, so a module that fails to load still gets its contract checked.
     for(const [name, app] of apps){
         if(!app.contract) continue;
-        runs.push(await settle(`${name}: the contract`, () =>
-            writeApiContract({ ...app.contract!, module: app.module, exportName: app.exportName, tsconfig: app.tsconfig, check })));
+        const label = `${name}: the contract`;
+        runs.push(await settle(label, () =>
+            writeApiContractInOwnProcess(label, { ...app.contract!, module: app.module, exportName: app.exportName, tsconfig: app.tsconfig, check }, contractHeapMegabytes)));
     }
     // Then what is read off the instance itself, which importing the module
-    // builds once for all three.
+    // builds once for all of them.
     for(const [name, app] of apps){
         const instance = { module: app.module, exportName: app.exportName, check };
         if(app.signatures) runs.push(await settle(`${name}: the signatures`, () => writeApiSignatures({ ...app.signatures!, ...instance })));
@@ -123,6 +206,7 @@ export const generateApiFiles = async (config: LambderApiFilesConfig, options: {
         for(const guardFile of app.guardParams ?? []){
             runs.push(await settle(`${name}: the "${guardFile.guard}" guard parameters`, () => writeApiGuardParams({ ...guardFile, ...instance })));
         }
+        if(app.schemas) runs.push(await settle(`${name}: the schemas`, () => writeApiSchemas({ ...app.schemas!, ...instance })));
     }
     return { ok: runs.every((run) => run.ok), lines: runs.flatMap((run) => run.lines) };
 };

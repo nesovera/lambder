@@ -1,14 +1,17 @@
 /**
  * What the idempotency engine hands a store and what it takes back from one:
  * a scope key that fits the store's key limit whoever the caller says they
- * are, and a stored answer the call replaying it cannot write into, whatever
- * the store does with the objects it holds.
+ * are and that names nobody to a reader of the table, and a stored answer the
+ * call replaying it cannot write into, whatever the store does with the
+ * objects it holds.
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, hkdfSync } from 'node:crypto';
 import { z } from 'zod';
 import { initLambder } from '../../src/core/Lambder.js';
+import { joinKeyFields } from '../../src/shared/util/joinKeyFields.js';
+import { LambderMemorySessionStore } from '../../src/stores/LambderMemorySessionStore.js';
 import { LambderDdbIdempotencyStore } from '../../src/stores/LambderDdbIdempotencyStore.js';
 import { LambderMemoryIdempotencyStore } from '../../src/stores/LambderMemoryIdempotencyStore.js';
 import { LAMBDER_REFUSAL_CODES } from '../../src/shared/wire/LambderApiRefusal.js';
@@ -21,6 +24,16 @@ import { lambderTestApp } from '../../src/testing.js';
 import { MemoryDdb } from '../helpers.js';
 
 const KEY = 'order-key-0123456789abcdef';
+
+/** A caller's field as an app with no session salt writes it: the plain SHA-256 of its kind and value, as a reader of the table would compute it. */
+const unkeyedFieldDigest = (kind: string, value: string): string =>
+    `${kind}:${createHash('sha256').update(joinKeyFields(kind, value), 'utf8').digest('hex')}`;
+
+/** The same field in an app with a session salt: an HMAC under the subkey HKDF derives from the salt for this purpose alone. */
+const keyedFieldDigest = (salt: string, kind: string, value: string): string => {
+    const subkey = Buffer.from(hkdfSync('sha256', salt, Buffer.alloc(0), 'lambder/key-field-digest', 32));
+    return `${kind}:${createHmac('sha256', subkey).update(joinKeyFields(kind, value), 'utf8').digest('hex')}`;
+};
 
 describe('The scope key a store is handed', () => {
     /**
@@ -51,7 +64,7 @@ describe('The scope key a store is handed', () => {
         return { app, placed, partitionKeys };
     };
 
-    it('bounds a long caller identity, so the retry replays instead of failing open into a second run', async () => {
+    it('writes a long caller identity as its digest, so the retry replays instead of failing open into a second run', async () => {
         // A device token of 3 KB puts the scope past DynamoDB's 2048-byte
         // partition key limit. The store refuses such a key by throwing,
         // failOpen swallows the throw, and the retry runs the operation
@@ -71,19 +84,55 @@ describe('The scope key a store is handed', () => {
                 const [partitionKey, ...others] = partitionKeys();
                 expect(others).toEqual([]);
                 // The digest as a reader of the table would compute it.
-                expect(partitionKey).toBe(`IDEM#i:h:${createHash('sha256').update(deviceToken, 'utf8').digest('hex')}|order.place|${KEY}`);
+                expect(partitionKey).toBe(`IDEM#${joinKeyFields(unkeyedFieldDigest('i', deviceToken), 'order.place', unkeyedFieldDigest('key', KEY))}`);
             } finally {
                 errors.mockRestore();
             }
         }
     });
 
-    it('keeps an identity that fits as it is, so the table stays readable', async () => {
+    it('writes a short identity and the posted key as digests too, so a table read shows the API and never the caller', async () => {
         const { app, partitionKeys } = createDeviceShop();
 
         await app.visitor({ headers: { 'X-Device-Token': 'device-42' } }).api('order.place', { qty: 1 }, { idempotencyKey: KEY });
 
-        expect(partitionKeys()).toEqual([`IDEM#i:device-42|order.place|${KEY}`]);
+        expect(partitionKeys()).toEqual([`IDEM#${joinKeyFields(unkeyedFieldDigest('i', 'device-42'), 'order.place', unkeyedFieldDigest('key', KEY))}`]);
+        expect(partitionKeys()[0]).not.toContain('device-42');
+        expect(partitionKeys()[0]).not.toContain(KEY);
+    });
+
+    it('keys the digest with a subkey of the session salt where the app has one, so a table read cannot test a guess', async () => {
+        // A signed-in user's scope, in an app whose sessions give it a
+        // secret. The subkey is derived for this purpose alone: the session
+        // store's partition hash, the salt's own HMAC of the sessionKey, rides
+        // in the session cookie, and must not be any digest written here.
+        const createSignedInShop = (sessionSalt: string) => {
+            const table = new MemoryDdb();
+            const store = new LambderDdbIdempotencyStore({ tableName: 'test-table', client: table });
+            const shop = initLambder<{ userId: string }>().create({
+                apiPath: '/api',
+                session: { store: new LambderMemorySessionStore(), sessionSalt },
+                idempotency: { store },
+                guards: { signedIn: { session: true, handler: async () => {} } },
+            });
+            const lambder = shop.registerApiGroups(shop.defineApiGroup('order', {
+                place: shop.defineApi({ input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true, guards: 'signedIn' },
+                    async (ctx) => ({ placed: ctx.apiPayload.qty })),
+            }));
+            return { app: lambderTestApp(lambder, { idempotency: { store } }), partitionKeys: () => [...table.items.values()].map((item) => item.pk!.S!) };
+        };
+        const placeAs = async (sessionSalt: string) => {
+            const { app, partitionKeys } = createSignedInShop(sessionSalt);
+            await (await app.signIn('ada@example.com', { userId: 'ada' })).api('order.place', { qty: 1 }, { idempotencyKey: KEY });
+            return partitionKeys();
+        };
+
+        const [scope] = await placeAs('shop-salt');
+        expect(scope).toBe(`IDEM#${joinKeyFields(keyedFieldDigest('shop-salt', 's', 'ada@example.com'), 'order.place', keyedFieldDigest('shop-salt', 'key', KEY))}`);
+        expect(scope).not.toContain('ada@example.com');
+        expect(scope).not.toContain(createHmac('sha256', 'shop-salt').update('ada@example.com').digest('hex'));
+        // Another app's salt, another scope for the same caller and key.
+        expect(await placeAs('other-salt')).not.toEqual([scope]);
     });
 });
 

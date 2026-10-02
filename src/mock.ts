@@ -51,6 +51,8 @@ export type {
 export { lambderMockPoliciesFrom } from "./mock/lambderMockPoliciesFrom.js";
 export type { LambderCustomKeyedPolicyNames, LambderMockPolicyKeys } from "./mock/lambderMockPoliciesFrom.js";
 export type { LambderMockGuardShapeOf } from "./mock/LambderMockCreateOptions.js";
+// The shape of the generated schemas module (writeApiSchemas) the apiSchemas option takes.
+export type { LambderApiSchemaEntries, LambderApiSchemaEntry, LambderJsonSchema } from "./shared/wire/LambderApiSchemaEntries.js";
 export { lambderMockConsoleLogger } from "./mock/lambderMockConsoleLogger.js";
 export type { LambderMockConsoleLoggerOptions } from "./mock/lambderMockConsoleLogger.js";
 export { lambderMockMswHandler } from "./mock/lambderMockMswHandler.js";

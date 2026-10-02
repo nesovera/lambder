@@ -27,6 +27,7 @@ const HANDLER_REGISTRATIONS = {
 export const checkApiRefusals = async (options) => {
     const ts = await loadTypeScriptCompiler("checkApiRefusals reads the project");
     const requireCodes = options.requireCodes ?? true;
+    const requireTypedRefuse = options.requireTypedRefuse ?? true;
     const configPath = resolve(options.tsconfig);
     const read = ts.readConfigFile(configPath, ts.sys.readFile);
     if (read.error)
@@ -107,26 +108,41 @@ export const checkApiRefusals = async (options) => {
         return values.map((value) => ({ at, code: value }));
     };
     /**
+     * Whether a signature's declaration (one of Lambder's) is a refuse
+     * function: a function type in LambderDeclaredRefuse, which types every
+     * context's, guard's and init's refuse, or the type of something Lambder
+     * declares as `refuse`, the free refuse() and the members an emitted
+     * declaration file spells out in place of the alias. Read off the
+     * declaration rather than off the call, so a refuse the app reaches under
+     * a name of its own (an import renamed, a context's refuse held in a
+     * variable or destructured under another name, a parameter typed as one)
+     * is a raise all the same.
+     */
+    const isRefuseDeclaration = (declaration) => {
+        let node = declaration;
+        while (ts.isTypeNode(node.parent))
+            node = node.parent;
+        const holder = node.parent;
+        if (ts.isTypeAliasDeclaration(holder))
+            return holder.name.text === "LambderDeclaredRefuse";
+        return (ts.isVariableDeclaration(holder) || ts.isPropertySignature(holder) || ts.isPropertyDeclaration(holder))
+            && holder.type === node && ts.isIdentifier(holder.name) && holder.name.text === "refuse";
+    };
+    /**
      * The refusal a call or construction raises, when it is one of Lambder's
-     * refuse functions or its refusal class's constructor. The constructor is
-     * told by the signature the call resolves to rather than by the name
-     * written, so it counts constructed as itself, as a class of the app's
-     * own that declares no constructor and inherits it, or as the super() of
-     * one that declares its own, which is then raised wherever that class is
-     * constructed.
+     * refuse functions or its refusal class's constructor. Both are told by
+     * the signature the call resolves to rather than by the name written, so
+     * a refuse counts however the app names it, and the constructor counts
+     * constructed as itself, as a class of the app's own that declares no
+     * constructor and inherits it, or as the super() of one that declares
+     * its own, which is then raised wherever that class is constructed.
      */
     const raiseSitesOf = (node) => {
-        const callee = node.expression;
-        const constructs = ts.isNewExpression(node) || callee.kind === ts.SyntaxKind.SuperKeyword;
-        if (!constructs) {
-            const name = ts.isIdentifier(callee) ? callee.text : ts.isPropertyAccessExpression(callee) ? callee.name.text : null;
-            if (name !== "refuse")
-                return [];
-        }
+        const constructs = ts.isNewExpression(node) || node.expression.kind === ts.SyntaxKind.SuperKeyword;
         const declaration = checker.getResolvedSignature(node)?.declaration;
-        if (!isLambderDeclaration(declaration))
+        if (!declaration || !isLambderDeclaration(declaration))
             return [];
-        if (constructs && !(declaration && ts.isConstructorDeclaration(declaration) && declaration.parent.name?.text === "LambderApiRefusal"))
+        if (constructs ? !(ts.isConstructorDeclaration(declaration) && declaration.parent.name?.text === "LambderApiRefusal") : !isRefuseDeclaration(declaration))
             return [];
         const args = node.arguments ?? ts.factory.createNodeArray();
         return constructs ? codeOfOptions(args[1], "refusal", where(node)) : codeOfOptions(args[1], "code", where(node));
@@ -269,14 +285,20 @@ export const checkApiRefusals = async (options) => {
         }
         return [...codes];
     };
-    /** The codes an options object's `refusals` property names: one code or a list, each a literal or a constant typed as one. */
+    /**
+     * The codes an options object's `refusals` property names: one code or a
+     * list, each a literal or a constant typed as one. Null where it has no
+     * such property, which for a guard built without the vocabulary is the
+     * difference between declaring no codes (`refusals: []`) and saying
+     * nothing of what it may send.
+     */
     const ownRefusalsOf = (optionsNode) => {
         const options = optionsNode && unwrap(optionsNode);
         if (!options || !ts.isObjectLiteralExpression(options))
-            return [];
+            return null;
         const property = options.properties.find((candidate) => ts.isPropertyAssignment(candidate) && ts.isIdentifier(candidate.name) && candidate.name.text === "refusals");
         if (!property || !ts.isPropertyAssignment(property))
-            return [];
+            return null;
         const value = unwrap(property.initializer);
         const entries = ts.isArrayLiteralExpression(value) ? [...value.elements] : [value];
         return entries.flatMap((entry) => ts.isStringLiteralLike(entry) ? [entry.text] : literalsOf(checker.getTypeAtLocation(entry)) ?? []);
@@ -334,9 +356,11 @@ export const checkApiRefusals = async (options) => {
             return;
         const name = handlerNameOf(call, registration);
         const at = where(call);
-        const allowed = allowedCodesOf(handler) ?? (registration === "guard" || registration === "lambderGuard" ? ownRefusalsOfOrNull(optionsNode) : null);
+        // A guard built without the vocabulary may send the codes its own
+        // refusals option names, which is what the server checks it against.
+        const allowed = allowedCodesOf(handler) ?? (registration === "guard" || registration === "lambderGuard" ? ownRefusalsOf(optionsNode) : null);
         if (allowed === null) {
-            unchecked.push(`${name} (${at})`);
+            unchecked.push({ handler: name, at, problem: "unchecked" });
             return;
         }
         handlers += 1;
@@ -366,15 +390,10 @@ export const checkApiRefusals = async (options) => {
                 findings.push({ handler: name, at, problem: "unreadable", raisedAt: raise.at });
             }
         }
-        for (const code of ownRefusalsOf(optionsNode)) {
+        for (const code of ownRefusalsOf(optionsNode) ?? []) {
             if (!reached.has(code))
                 findings.push({ handler: name, at, problem: "unused", code });
         }
-    };
-    /** A guard's `refusals` option, or null when it has none: what a guard built without the vocabulary may send. */
-    const ownRefusalsOfOrNull = (optionsNode) => {
-        const own = ownRefusalsOf(optionsNode);
-        return own.length ? own : null;
     };
     for (const sourceFile of program.getSourceFiles()) {
         if (!isOwnFile(sourceFile))
@@ -386,16 +405,23 @@ export const checkApiRefusals = async (options) => {
         };
         visit(sourceFile);
     }
-    const uncheckedLine = unchecked.length ? [`  ${unchecked.length} ${unchecked.length === 1 ? "handler has" : "handlers have"} no typed refuse to check against: ${unchecked.join(", ")}`] : [];
+    // Found, or only listed where the caller lets them stand unchecked.
+    if (requireTypedRefuse)
+        findings.push(...unchecked);
+    const uncheckedLine = !requireTypedRefuse && unchecked.length
+        ? [`  ${unchecked.length} ${unchecked.length === 1 ? "handler has" : "handlers have"} no typed refuse to check against: ${unchecked.map(({ handler, at }) => `${handler} (${at})`).join(", ")}`]
+        : [];
     if (handlers === 0) {
-        return failed(`✗ ${options.tsconfig}: no handler Lambder hands a typed refuse was found, so nothing was checked. Do its APIs come from an init that declares its refusals (declareRefusals), and do its files resolve lambder?`, uncheckedLine);
+        const nothingChecked = `✗ ${options.tsconfig}: no handler Lambder hands a typed refuse was found, so nothing was checked. Do its APIs come from an init that declares its refusals (declareRefusals), and do its files resolve lambder?`;
+        return { ...failed(nothingChecked, [...findings.map(describeFinding), ...uncheckedLine]), findings };
     }
     // Duplicate uncoded or unreadable findings of one site through two paths say the same thing once.
     const unique = [...new Map(findings.map((finding) => [JSON.stringify(finding), finding])).values()];
     const lines = [
         unique.length === 0
             ? `✓ ${handlers} handlers reach only the refusals they may send`
-            : `✗ ${unique.length} refusal ${unique.length === 1 ? "finding" : "findings"} in ${new Set(unique.map((finding) => finding.handler)).size} of ${handlers} handlers`,
+            // Out of every handler found, the unchecked ones among them, which are never counted as checked.
+            : `✗ ${unique.length} refusal ${unique.length === 1 ? "finding" : "findings"} in ${new Set(unique.map((finding) => finding.handler)).size} of ${handlers + unchecked.length} handlers`,
         ...unique.map(describeFinding),
         ...uncheckedLine,
     ];
@@ -408,6 +434,7 @@ const describeFinding = (finding) => {
         case "uncoded": return `  ${finding.handler} (${finding.at}) can reach a refusal with no code (${finding.raisedAt})`;
         case "unreadable": return `  ${finding.handler} (${finding.at}) can reach a refusal whose code is not a string literal (${finding.raisedAt}), so which code it sends cannot be told`;
         case "untraced": return `  ${finding.handler} (${finding.at}) is handed a typed refuse, but its function cannot be found (a parameter, a dependency's value), so nothing it reaches was checked`;
+        case "unchecked": return `  ${finding.handler} (${finding.at}) is handed no typed refuse, so nothing it reaches could be checked: build it from an init that declares the refusal vocabulary (declareRefusals, on initLambderMock() as on initLambder()), or give a guard a refusals option naming the codes it may send`;
     }
 };
 const failed = (line, details = []) => ({ ok: false, handlers: 0, findings: [], lines: [line, ...details] });

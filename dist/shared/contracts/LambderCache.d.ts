@@ -22,6 +22,19 @@ export interface LambderCacheSetOptions {
     /** How long the entry lives. Default: the cache's own defaultTtlSeconds. */
     ttlSeconds?: number;
 }
+/**
+ * What getOrSet takes: a write's options, and the fill lease LambderDdbCache
+ * holds across containers while one of them loads a missing entry. A cache
+ * that holds no lease checks the lease options all the same and otherwise
+ * ignores them, so code typed against LambderCache tunes the lease for the
+ * table and runs unchanged over any cache.
+ */
+export interface LambderCacheGetOrSetOptions extends LambderCacheSetOptions {
+    /** How long one container's fill lease on a missing entry holds the others off. Default: 15. */
+    leaseSeconds?: number;
+    /** How long a container waits for another's fill before loading itself. Default: (leaseSeconds + 1) * 1000. */
+    waitForFillMs?: number;
+}
 export interface LambderCacheListOptions {
     /** Only sort keys starting with this prefix. */
     prefix?: string;
@@ -63,5 +76,5 @@ export interface LambderCache {
      * lands over it. An invalid option throws before anything is read or
      * loaded.
      */
-    getOrSet<T>(key: LambderCacheKey, loader: () => Promise<T>, options?: LambderCacheSetOptions): Promise<T>;
+    getOrSet<T>(key: LambderCacheKey, loader: () => Promise<T>, options?: LambderCacheGetOrSetOptions): Promise<T>;
 }

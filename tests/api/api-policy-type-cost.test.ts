@@ -17,7 +17,10 @@
  * And what registering endpoints costs as an app grows: every endpoint is
  * typed on its own and the contract is one mapped type over the groups, so
  * eight hundred endpoints must cost what four times two hundred do, not the
- * square.
+ * square. And the checks that walk a registration's groups, or a group's
+ * parts, one by one (a name given twice, an action two parts declare) must
+ * hold for an app of many small groups as well as for one of a few large
+ * ones, still naming what they refuse.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -80,14 +83,16 @@ const fixtureSource = (keyed: boolean): string => {
 };
 
 /**
- * An app of `endpoints` endpoints in groups of twenty-five, registered in one
- * registerApiGroups() call, with what an app's endpoints declare: an input
- * and an output of their own, a guard that needs a session or one that does
- * not, a rate limit, a handler reading its payload and its session. The
- * client reads the contract, as a typed caller does.
+ * An app of `endpoints` endpoints in groups of `groupSize` (twenty-five unless
+ * a case says otherwise), registered in one registerApiGroups() call, with
+ * what an app's endpoints declare: an input and an output of their own, a
+ * guard that needs a session or one that does not, a rate limit, a handler
+ * reading its payload and its session. The client reads the contract, as a
+ * typed caller does. `registeredTwice` names a group the call gives a second
+ * time.
  */
-const registrationSource = (endpoints: number): string => {
-    const groups = Math.ceil(endpoints / 25);
+const registrationSource = (endpoints: number, { groupSize = 25, registeredTwice }: { groupSize?: number; registeredTwice?: number } = {}): string => {
+    const groups = Math.ceil(endpoints / groupSize);
     const endpoint = (index: number) => index % 2 === 0
         ? `        e${index}: app.defineApi({ input: z.object({ id: z.string(), n${index}: z.number() }), output: z.object({ ok: z.boolean(), v${index}: z.string() }), guards: "signedIn", rateLimit: "perSession" }, async (ctx) => ({ ok: ctx.apiPayload.n${index} > 0, v${index}: ctx.session.data.userId })),`
         : `        e${index}: app.defineApi({ input: z.object({ id: z.string(), n${index}: z.number() }), output: z.object({ ok: z.boolean(), v${index}: z.string() }), guards: "anyone", rateLimit: "perIp" }, async (ctx) => ({ ok: ctx.apiPayload.n${index} > 0, v${index}: ctx.apiPayload.id })),`;
@@ -107,11 +112,11 @@ const registrationSource = (endpoints: number): string => {
         ``,
     ];
     for(let group = 0; group < groups; group += 1){
-        const indices = Array.from({ length: 25 }, (_, offset) => group * 25 + offset).filter((index) => index < endpoints);
+        const indices = Array.from({ length: groupSize }, (_, offset) => group * groupSize + offset).filter((index) => index < endpoints);
         lines.push(`const group${group} = app.defineApiGroup("g${group}", {`, ...indices.map(endpoint), `});`);
     }
     lines.push(
-        `export const lambder = app.registerApiGroups(${Array.from({ length: groups }, (_, group) => `group${group}`).join(', ')});`,
+        `export const lambder = app.registerApiGroups(${[...Array.from({ length: groups }, (_, group) => `group${group}`), ...(registeredTwice === undefined ? [] : [`group${registeredTwice}`])].join(', ')});`,
         `type Contract = typeof lambder.ApiContract;`,
         `export const read: Contract["g0.e0"]["input"] = { id: "a", n0: 1 };`,
         ``,
@@ -152,6 +157,52 @@ describe('What registering endpoints costs grows with the endpoints, no faster',
         expect(small.diagnostics).toEqual([]);
         expect(large.diagnostics).toEqual([]);
         expect(large.instantiations).toBeLessThan(small.instantiations * 4);
+    }, COMPILER_TIMEOUT_MS);
+});
+
+/**
+ * One group declared in `parts` parts of two actions each, the way a group
+ * spread across files is, with `repeatedAction` declared by a second part
+ * too when a case names one.
+ */
+const groupPartsSource = (parts: number, repeatedAction?: string): string => {
+    const lines = [
+        `import { z } from "zod";`,
+        `import { initLambder } from "../../../src/index.js";`,
+        ``,
+        `const app = initLambder().create({ apiPath: "/api" });`,
+        `const endpoint = app.defineApi({ input: z.object({}), output: z.object({ ok: z.boolean() }) }, async () => ({ ok: true }));`,
+        ``,
+    ];
+    for(let part = 0; part < parts; part += 1){
+        lines.push(`const part${part} = { a${part}: endpoint, b${part}: endpoint${part === parts - 1 && repeatedAction ? `, ${repeatedAction}: endpoint` : ''} };`);
+    }
+    lines.push(
+        `export const orders = app.defineApiGroup("orders", ${Array.from({ length: parts }, (_, part) => `part${part}`).join(', ')});`,
+        `export const lambder = app.registerApiGroups(orders);`,
+        `export const read: (typeof lambder.ApiContract)["orders.a0"]["input"] = {};`,
+        ``,
+    );
+    return lines.join('\n');
+};
+
+describe('What an app of many small groups costs: the checks over the groups run as loops, not as nested recursion', () => {
+    it('registers a hundred and fifty groups of two endpoints in one call', () => {
+        expect(checkFixture(registrationSource(300, { groupSize: 2 })).diagnostics).toEqual([]);
+    }, COMPILER_TIMEOUT_MS);
+
+    it('still refuses a group given twice among them, naming it', () => {
+        const { diagnostics } = checkFixture(registrationSource(300, { groupSize: 2, registeredTwice: 77 }));
+        expect(diagnostics.join('\n')).toMatch(/lambder: these group names are registered twice[\s\S]*"g77"/);
+    }, COMPILER_TIMEOUT_MS);
+
+    it('declares one group in a hundred and fifty parts', () => {
+        expect(checkFixture(groupPartsSource(150)).diagnostics).toEqual([]);
+    }, COMPILER_TIMEOUT_MS);
+
+    it('still refuses an action two of the parts declare, naming it', () => {
+        const { diagnostics } = checkFixture(groupPartsSource(150, 'a12'));
+        expect(diagnostics.join('\n')).toMatch(/lambder: these actions are declared by more than one part of the group[\s\S]*"a12"/);
     }, COMPILER_TIMEOUT_MS);
 });
 

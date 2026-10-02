@@ -54,10 +54,16 @@ export const assertCreateOptions = (options) => {
 };
 /** Shortest secret an origin proof takes: one a sender could guess is no proof. 32 characters of hex or base64 is 128 bits or more. */
 export const MIN_ORIGIN_PROOF_SECRET_LENGTH = 32;
-/** An origin proof that proves something: a header name, secrets long enough not to guess, and trusted headers for it to guard. */
+/** A header name as a proxy writes one. */
+const HEADER_NAME_PATTERN = /^[A-Za-z0-9-]+$/;
+/**
+ * An origin proof that proves something: a header name, secrets long enough
+ * not to guess, and proxy headers that are header names. It needs no
+ * trusted header to guard: ctx.arrivedVia is worth having on its own.
+ */
 const assertOriginProof = (options) => {
     const proof = options.originProof;
-    if (typeof proof?.header !== "string" || !/^[A-Za-z0-9-]+$/.test(proof.header)) {
+    if (typeof proof?.header !== "string" || !HEADER_NAME_PATTERN.test(proof.header)) {
         throw new Error("Lambder: originProof.header must be a header name, such as \"x-origin-proof\".");
     }
     if (!Array.isArray(proof.secrets) || proof.secrets.length === 0) {
@@ -68,11 +74,12 @@ const assertOriginProof = (options) => {
             throw new Error(`Lambder: every originProof secret must be a string of at least ${MIN_ORIGIN_PROOF_SECRET_LENGTH} characters; a shorter one could be guessed, and a guessed proof proves nothing.`);
         }
     }
-    const trusted = [...(options.trustedClientIpHeaders ?? []), ...(options.trustedHostHeaders ?? [])];
-    if (trusted.length === 0) {
-        throw new Error("Lambder: originProof guards the trustedClientIpHeaders and trustedHostHeaders, and this instance trusts none, so it would prove nothing.");
+    const proxyHeaders = proof.proxyHeaders ?? [];
+    if (!Array.isArray(proxyHeaders) || proxyHeaders.some((name) => typeof name !== "string" || !HEADER_NAME_PATTERN.test(name))) {
+        throw new Error("Lambder: originProof.proxyHeaders must list header names the proxy writes, such as [\"cf-ipcountry\"].");
     }
-    if (trusted.some((name) => name.toLowerCase() === proof.header.toLowerCase())) {
-        throw new Error(`Lambder: originProof.header "${proof.header}" is also a trusted header; the proof is its own header, which the app never reads.`);
+    const proxyWritten = [...(options.trustedClientIpHeaders ?? []), ...(options.trustedHostHeaders ?? []), ...proxyHeaders];
+    if (proxyWritten.some((name) => name.toLowerCase() === proof.header.toLowerCase())) {
+        throw new Error(`Lambder: originProof.header "${proof.header}" is also a trusted or proxy header; the proof is its own header, which the app never reads.`);
     }
 };

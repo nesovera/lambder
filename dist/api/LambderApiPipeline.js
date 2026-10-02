@@ -11,6 +11,7 @@ import { LambderApiGuardsEngine } from "./LambderApiGuards.js";
 import { LambderApiRateLimitsEngine, } from "./LambderApiRateLimits.js";
 import { LambderApiIdempotencyEngine } from "./LambderApiIdempotency.js";
 import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
+import { LambderKeyFieldDigest } from "../shared/util/LambderKeyFieldDigest.js";
 import LambderSessionController, { assertSessionCookiePrefixes, LambderSessionNotFoundError, } from "../session/LambderSessionController.js";
 import { DEFAULT_SESSION_CSRF_COOKIE_KEY, DEFAULT_SESSION_TOKEN_COOKIE_KEY } from "../shared/wire/LambderSessionCookieNames.js";
 /** An API that asks for idempotency: declared, and not the explicit `false` opt-out. */
@@ -21,11 +22,11 @@ const usesIdempotency = (definition) => definition.idempotency !== undefined && 
  * are adapters over this class; neither reimplements a step of it.
  *
  * ```
- * version floor → signature gate → restore payload → rate limits keyed per ip
- * → session (session mode) → idempotency replay → rate limits keyed per session
- * (and custom keys charged beforeGuards) → guards → input validation → guards
- * placed after it → rate limits keyed by a custom key → exec, inside the
- * idempotency claim → drain response headers → answer
+ * envelope check → version floor → signature gate → restore payload → rate
+ * limits keyed per ip → session (session mode) → idempotency replay → rate
+ * limits keyed per session (and custom keys charged beforeGuards) → guards →
+ * input validation → guards placed after it → rate limits keyed by a custom
+ * key → exec, inside the idempotency claim → drain response headers → answer
  * ```
  *
  * Each policy subsystem (rate limits, guards, idempotency) is its own
@@ -52,7 +53,7 @@ const usesIdempotency = (definition) => definition.idempotency !== undefined && 
 export class LambderApiPipeline {
     apiVersion;
     minApiVersion;
-    rateLimits = new LambderApiRateLimitsEngine();
+    rateLimits;
     guards = new LambderApiGuardsEngine();
     idempotency;
     maxRequestPayloadBytes;
@@ -75,14 +76,19 @@ export class LambderApiPipeline {
             }
             // A floor above the version this server stamps would refuse this
             // build's own clients, and the first symptom would be every tab
-            // reloading. The floor is clamped to apiVersion and the mistake
-            // reported once, at creation.
+            // reloading. Refused at creation, as every other misconfiguration
+            // is, rather than quietly read as some other floor than the one
+            // written: which of the two versions is wrong is the app's call.
             if (this.apiVersion !== null && compareDottedVersions(this.minApiVersion, this.apiVersion) > 0) {
-                console.warn(`Lambder: minApiVersion ${this.minApiVersion} is above apiVersion ${this.apiVersion}; the floor is taken as ${this.apiVersion}.`);
-                this.minApiVersion = this.apiVersion;
+                throw new Error(`Lambder: minApiVersion ${this.minApiVersion} is above apiVersion ${this.apiVersion}, so it would refuse this build's own clients. ` +
+                    `Set minApiVersion to the oldest client version still served, at most ${this.apiVersion}.`);
             }
         }
-        this.idempotency = new LambderApiIdempotencyEngine(this.apiVersion);
+        // One digest for both engines, so its subkey is derived once per
+        // instance.
+        const keyFieldDigest = new LambderKeyFieldDigest(options.atRestSecret ?? null);
+        this.rateLimits = new LambderApiRateLimitsEngine(keyFieldDigest);
+        this.idempotency = new LambderApiIdempotencyEngine(this.apiVersion, keyFieldDigest);
         this.apiSignatures = options.apiSignatures ?? null;
         this.maxRequestPayloadBytes = assertPositiveInteger(options.maxRequestPayloadBytes ?? DEFAULT_MAX_RESTORED_PAYLOAD_BYTES, "maxRequestPayloadBytes");
         this.onInvalidInput = options.onInvalidInput ?? null;
@@ -211,10 +217,15 @@ export class LambderApiPipeline {
         return refusalAnswer(checked, this.apiVersion, ctx.logList);
     }
     /**
-     * The steps that come before anything may read the request: the version
-     * floor, the signature gate, then the compressed-payload restore that
-     * every later reader (a rate-limit key slice, a guard, the input schema)
-     * relies on.
+     * The steps that come before anything may read the request: the
+     * envelope check, the version floor, the signature gate, then the
+     * compressed-payload restore that every later reader (a rate-limit key
+     * slice, a guard, the input schema) relies on.
+     *
+     * A body that is no envelope (readApiEnvelope flagged it invalidEnvelope)
+     * carries nothing to call with, no payload, version or signature, and is
+     * answered with the invalid-payload refusal, here, so every adapter
+     * refuses it alike.
      *
      * The floor refuses a request naming a version below minApiVersion,
      * whatever its signature says: the lever for a change the digest cannot
@@ -236,6 +247,8 @@ export class LambderApiPipeline {
      * ready to dispatch.
      */
     async prepare(request) {
+        if (request.invalidEnvelope !== undefined)
+            return invalidPayloadAnswer(this.apiVersion, request.invalidEnvelope);
         if (this.minApiVersion !== null && request.version !== null && compareDottedVersions(request.version, this.minApiVersion) < 0) {
             return versionExpiredAnswer(this.apiVersion);
         }
@@ -318,8 +331,12 @@ export class LambderApiPipeline {
         // Replay fast path: a completed idempotent request answers its stored
         // answer without burning the remaining rate-limit quota or re-running
         // guards. After the session read, because the replay scope is keyed
-        // per user, by the session's sessionKey.
-        const keyedCall = usesIdempotency(definition) ? await this.idempotency.resolveKeyedCall(definition.name, request, ctx) : null;
+        // per user, by the session's sessionKey. The guards engine says which
+        // posted guard inputs belong to the request's fingerprint, since only
+        // it knows which of them are single use.
+        const keyedCall = usesIdempotency(definition)
+            ? await this.idempotency.resolveKeyedCall(definition.name, request, ctx, this.guards.fingerprintedInputsOf(request, definition.guards))
+            : null;
         const replay = keyedCall ? await this.idempotency.findReplay(definition.name, keyedCall, trace) : null;
         if (replay)
             return replay;

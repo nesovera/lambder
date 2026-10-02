@@ -1,4 +1,4 @@
-import { LambderApiRefusal, isLambderRefusalCode } from "../shared/wire/LambderApiRefusal.js";
+import { LambderApiRefusal, LAMBDER_REFUSAL_CODES, isLambderRefusalCode } from "../shared/wire/LambderApiRefusal.js";
 import { describePayloadKind, isObjectPayload } from "../shared/wire/LambderObjectPayload.js";
 import { mergeNamedMaps } from "../shared/util/LambderNamedMaps.js";
 /**
@@ -23,13 +23,26 @@ export const allowedRefusalOf = (declaration) => {
     return declaration.data === undefined ? { ...leaves, data: false } : { ...leaves, data: true, schema: declaration.data };
 };
 /**
+ * Whether a `lambder/rate-limited` refusal's data is the shape a client
+ * narrows it to: the policy's name, and the whole seconds of at least one
+ * that the Retry-After header carries.
+ */
+const isRateLimitRefusalData = (data) => {
+    if (data === null || typeof data !== "object")
+        return false;
+    const { policy, retryAfterSeconds } = data;
+    return typeof policy === "string" && Number.isInteger(retryAfterSeconds) && retryAfterSeconds >= 1;
+};
+/**
  * A refusal an endpoint is not allowed to send, so it was not sent and the
  * call is answered as a crash: no code where the app requires one, a code
  * the endpoint does not declare (neither
  * in its own `refusals` option nor through a guard), data on a refusal whose
  * code declares none, no data on one whose code carries data, data its code's
- * schema rejects or that is not an object or an array, or a declared code
- * raised with a status or flag of its own, which its declaration owns.
+ * schema rejects or that is not an object or an array, a framework code
+ * without the data it carries (`lambder/rate-limited`'s policy and wait), or
+ * a declared code raised with a status or flag of its own, which its
+ * declaration owns.
  *
  * What makes a client's refusal type exact: a reader narrows `code` to the
  * endpoint's declared codes and the framework's own, and relies on this to
@@ -76,6 +89,10 @@ export class LambderApiRefusalValidationError extends Error {
             message = `Lambder: API "${apiName}" refused with the code "${String(code)}" and data its schema threw on while parsing it (a transform that threw, `
                 + "or an async step: a refusal's data is parsed synchronously), so the refusal was not sent.";
         }
+        else if ("notRateLimitData" in violation) {
+            message = `Lambder: API "${apiName}" refused with the code "${String(code)}" and data that is not { policy, retryAfterSeconds }, so the refusal was not sent. `
+                + "Refuse a rate limit through ctx.rateLimit, or throw rateLimitRefusal(), which writes the data a client narrows it by.";
+        }
         else {
             message = `Lambder: API "${apiName}" refused with the code "${String(code)}" and data that is ${violation.notObject}, and a refusal's data is an object or an array, so the refusal was not sent.`;
         }
@@ -94,8 +111,10 @@ export class LambderApiRefusalValidationError extends Error {
  * here first.
  *
  * - An uncoded refusal, or one carrying a framework code, goes out as it is,
- *   provided it carries no data. Where the app requires codes, an uncoded
- *   refusal is refused too; a framework code still passes.
+ *   provided it carries the data its code does: the policy and the seconds
+ *   to wait for `lambder/rate-limited`, none for every other. Where the app
+ *   requires codes, an uncoded refusal is refused too; a framework code
+ *   still passes.
  * - A declared code leaves with its declaration's status and flags, and
  *   with data exactly when the code carries data, parsed through
  *   the code's schema as an output is: undeclared fields stripped, defaults
@@ -111,6 +130,13 @@ export const checkedRefusal = (apiName, endpoint, thrown) => {
     if (endpoint === undefined)
         return thrown;
     const { code, data } = thrown.refusal;
+    if (code === LAMBDER_REFUSAL_CODES.rateLimited) {
+        if (data === undefined)
+            throw new LambderApiRefusalValidationError(apiName, thrown, { missingData: code });
+        if (!isRateLimitRefusalData(data))
+            throw new LambderApiRefusalValidationError(apiName, thrown, { notRateLimitData: true });
+        return thrown;
+    }
     if (code === undefined || isLambderRefusalCode(code)) {
         if (code === undefined && endpoint.codeRequired)
             throw new LambderApiRefusalValidationError(apiName, thrown, { uncoded: true });

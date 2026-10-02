@@ -222,7 +222,7 @@ export type LambderContractGuardsOf<C, K extends keyof C> = C[K] extends { guard
  * guard does not cover; a missing name needs a check of its own:
  *
  * ```ts
- * type AdminApi = LambderContractKeysWithGuard<Contract, "platformAdmin">;
+ * type AdminApi = LambderContractKeysWithGuard<Contract, "adminOnly">;
  * const ADMIN_APIS = ["admin.listUsers", "admin.deleteUser"] as const satisfies readonly AdminApi[];
  * // Fails to compile while an endpoint behind the guard is left off the list.
  * const adminApisComplete: [Exclude<AdminApi, (typeof ADMIN_APIS)[number]>] extends [never] ? true : false = true;

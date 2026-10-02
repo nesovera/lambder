@@ -1,9 +1,11 @@
 /**
  * An idempotency key belongs to one request: the payload it was first sent
- * with. A retry of that request replays its answer, whatever single-use token
- * rides beside it; the same key with another payload is refused, rather than
- * handed the first request's answer. And a key scope passed as the call's key
- * moves on by itself once an answer settles the operation, and only then.
+ * with, and the guard inputs beside it that say what the call is about (a
+ * store, a tenant). A retry of that request replays its answer, whatever
+ * single-use token a guard declared as such rides beside it; the same key
+ * with another payload or another store is refused, rather than handed the
+ * first request's answer. And a key scope passed as the call's key moves on
+ * by itself once an answer settles the operation, and only then.
  *
  * The scenario the rule exists for is a lost edit: qty 3 times out after it
  * was processed, the person edits to qty 4 and resubmits under the same key,
@@ -16,6 +18,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { z } from 'zod';
 import { initLambder } from '../../src/core/Lambder.js';
 import { LambderMemoryIdempotencyStore } from '../../src/stores/LambderMemoryIdempotencyStore.js';
+import { LambderMemorySessionStore } from '../../src/stores/LambderMemorySessionStore.js';
 import LambderCaller from '../../src/client/LambderCaller.js';
 import { LAMBDER_REFUSAL_CODES } from '../../src/shared/wire/LambderApiRefusal.js';
 import { beginIdempotentAttempt, createIdempotencyKeyScope, IDEMPOTENT_ATTEMPT_NOT_SENT, type LambderIdempotentAttemptOutcome } from '../../src/shared/wire/LambderIdempotencyKeyScope.js';
@@ -71,14 +74,94 @@ describe('A key belongs to the request it was first used for', () => {
         expect(placed).toEqual([2]);
     });
 
-    it('reads the payload alone, whatever the guard inputs beside it and the order its keys were written in', async () => {
+    it('reads the payload and the guard inputs, whatever the order their keys were written in', async () => {
         const { app } = createShop();
         const visitor = app.visitor();
 
         assertApiSuccess(await visitor.apiOutcome('order.withCoupon', { qty: 1, note: 'n' }, { idempotencyKey: KEY, guardInputs: { coupon: { code: 'A' } } }));
-        assertApiSuccess(await visitor.apiOutcome('order.withCoupon', { note: 'n', qty: 1 }, { idempotencyKey: KEY, guardInputs: { coupon: { code: 'B' } } }));
+        assertApiSuccess(await visitor.apiOutcome('order.withCoupon', { note: 'n', qty: 1 }, { idempotencyKey: KEY, guardInputs: { coupon: { code: 'A' } } }));
+        // Another coupon is another request, as another payload is.
+        assertApiFailure(await visitor.apiOutcome('order.withCoupon', { qty: 1, note: 'n' }, { idempotencyKey: KEY, guardInputs: { coupon: { code: 'B' } } }),
+            'refusal', { code: LAMBDER_REFUSAL_CODES.idempotencyKeyReused });
         assertApiFailure(await visitor.apiOutcome('order.withCoupon', { qty: 2, note: 'n' }, { idempotencyKey: KEY, guardInputs: { coupon: { code: 'A' } } }),
             'refusal', { code: LAMBDER_REFUSAL_CODES.idempotencyKeyReused });
+    });
+
+    it('refuses the same key, session and payload sent for another store, rather than replaying the first store\'s answer', async () => {
+        // A guard input that selects what the call is about. Left out of the
+        // fingerprint, the order placed in the first store would be the
+        // answer the second store's order got, and the second order would
+        // never be placed.
+        const placed: string[] = [];
+        const shop = initLambder<{ userId: string }>().create({
+            apiPath: '/api',
+            session: { store: new LambderMemorySessionStore(), sessionSalt: 'shop-salt' },
+            idempotency: { store: new LambderMemoryIdempotencyStore() },
+            guards: {
+                storeStaff: lambderGuard({
+                    session: true,
+                    guardInput: z.object({ storeId: z.string() }),
+                    handler: async (_ctx, { storeId }) => ({ storeId }),
+                }),
+            },
+        });
+        const app = lambderTestApp(shop.registerApiGroups(shop.defineApiGroup('order', {
+            place: shop.defineApi({ input: z.object({ qty: z.number() }), output: z.object({ storeId: z.string() }), idempotency: true, guards: 'storeStaff' },
+                async (ctx) => {
+                    placed.push(ctx.guardData.storeStaff.storeId);
+                    return { storeId: ctx.guardData.storeStaff.storeId };
+                }),
+        })));
+        const clerk = await app.signIn('clerk-1', { userId: 'clerk-1' });
+
+        expect(await clerk.api('order.place', { qty: 1 }, { idempotencyKey: KEY, guardInputs: { storeStaff: { storeId: 'downtown' } } })).toEqual({ storeId: 'downtown' });
+        // The retry for the same store replays.
+        expect(await clerk.api('order.place', { qty: 1 }, { idempotencyKey: KEY, guardInputs: { storeStaff: { storeId: 'downtown' } } })).toEqual({ storeId: 'downtown' });
+        assertApiFailure(await clerk.apiOutcome('order.place', { qty: 1 }, { idempotencyKey: KEY, guardInputs: { storeStaff: { storeId: 'uptown' } } }),
+            'refusal', { code: LAMBDER_REFUSAL_CODES.idempotencyKeyReused, status: 409 });
+        expect(placed).toEqual(['downtown']);
+    });
+
+    it('leaves out a guard input declared single use, so a retry with a fresh proof replays, and counts one that is not', async () => {
+        const placed: string[] = [];
+        const createProofShop = (singleUseInput: boolean) => {
+            const shop = initLambder().create({
+                apiPath: '/api',
+                idempotency: { store: new LambderMemoryIdempotencyStore() },
+                guards: { proof: lambderGuard({ guardInput: z.object({ token: z.string() }), singleUseInput, handler: async () => {} }) },
+            });
+            return lambderTestApp(shop.registerApiGroups(shop.defineApiGroup('order', {
+                place: shop.defineApi({ input: z.object({ qty: z.number() }), output: z.object({ placed: z.number() }), idempotency: true, guards: 'proof' },
+                    async (ctx) => { placed.push(`${singleUseInput}`); return { placed: ctx.apiPayload.qty }; }),
+            }))).visitor();
+        };
+
+        const proofs = createProofShop(true);
+        assertApiSuccess(await proofs.apiOutcome('order.place', { qty: 1 }, { idempotencyKey: KEY, guardInputs: { proof: { token: 't1' } } }));
+        expect(await proofs.api('order.place', { qty: 1 }, { idempotencyKey: KEY, guardInputs: { proof: { token: 't2' } } })).toEqual({ placed: 1 });
+        // The payload still counts.
+        assertApiFailure(await proofs.apiOutcome('order.place', { qty: 2 }, { idempotencyKey: KEY, guardInputs: { proof: { token: 't3' } } }),
+            'refusal', { code: LAMBDER_REFUSAL_CODES.idempotencyKeyReused });
+
+        const counted = createProofShop(false);
+        assertApiSuccess(await counted.apiOutcome('order.place', { qty: 1 }, { idempotencyKey: KEY, guardInputs: { proof: { token: 't1' } } }));
+        assertApiFailure(await counted.apiOutcome('order.place', { qty: 1 }, { idempotencyKey: KEY, guardInputs: { proof: { token: 't2' } } }),
+            'refusal', { code: LAMBDER_REFUSAL_CODES.idempotencyKeyReused });
+        expect(placed).toEqual(['true', 'false']);
+    });
+
+    it('takes singleUseInput on a guardInput guard only, and as a boolean', () => {
+        // An apiInput guard's value is a slice of the payload, which always
+        // counts: declaring it single use would promise a replay that never
+        // comes.
+        // @ts-expect-error singleUseInput belongs to a guardInput guard
+        lambderGuard({ apiInput: z.object({ token: z.string() }), singleUseInput: true, handler: async () => {} });
+        expect(() => initLambder().create({ apiPath: '/api', guards: { proof: { apiInput: z.object({ token: z.string() }), singleUseInput: true, handler: async () => {} } as never } }))
+            .toThrow(/guard "proof" declares singleUseInput without a guardInput/);
+        expect(() => initLambder().create({ apiPath: '/api', guards: { proof: { guardInput: z.object({ token: z.string() }), singleUseInput: 'yes', handler: async () => {} } as never } }))
+            .toThrow(/guard "proof" has singleUseInput yes/);
+        expect(() => initLambder().create({ apiPath: '/api', guards: { proof: lambderGuard({ guardInput: z.object({ token: z.string() }), singleUseInput: true, handler: async () => {} }) } }))
+            .not.toThrow();
     });
 
     it('tells apart payloads that differ only under a "__proto__" key', async () => {
@@ -253,6 +336,8 @@ describe('A retry after a timeout runs the operation once', () => {
                 captcha: lambderGuard({
                     runAt: 'afterInputValidation',
                     guardInput: z.object({ captchaToken: z.string() }),
+                    // A genuine retry carries a fresh token, so it is no part of the request.
+                    singleUseInput: true,
                     handler: async (_ctx, { captchaToken }) => {
                         if(spent.has(captchaToken)) refuse('Verification failed, please retry.');
                         spent.add(captchaToken);

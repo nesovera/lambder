@@ -39,13 +39,14 @@ const codeOf = (refusal: unknown): string | null => {
 /**
  * An envelope's outcome, read in the order a caller honours it: a 5xx is a
  * crash whatever the envelope says, then the three flags, then a refusal,
- * and anything else is the handler's answer.
+ * and anything else is the handler's answer. A flag a declared code sets
+ * (sessionExpired, notAuthorized) keeps that code beside it.
  */
 export const outcomeOfEnvelope = (written: object, statusCode: number): LambderCallOutcomeHint => {
     const envelope = written as LambderEnvelopeFields;
     if(statusCode >= 500) return { outcome: "crash", code: null };
     if(envelope.versionExpired) return { outcome: "versionExpired", code: null };
-    if(envelope.sessionExpired) return { outcome: "sessionExpired", code: null };
+    if(envelope.sessionExpired) return { outcome: "sessionExpired", code: codeOf(envelope.refusal) };
     if(envelope.notAuthorized) return { outcome: "notAuthorized", code: codeOf(envelope.refusal) };
     if(envelope.refusal !== undefined) return { outcome: "refusal", code: codeOf(envelope.refusal) };
     return { outcome: "success", code: null };

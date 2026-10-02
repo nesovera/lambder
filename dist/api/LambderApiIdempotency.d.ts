@@ -3,6 +3,7 @@ import type { LambderApiCallContext, LambderApiCallTrace } from "./LambderApiCal
 import type { LambderApiAnswer } from "./LambderApiAnswer.js";
 import type { LambderIdempotencyStore } from "../shared/contracts/LambderIdempotencyStore.js";
 import type { LambderApiIdempotencyOption } from "../shared/wire/LambderApiOptionValues.js";
+import type { LambderKeyFieldDigest } from "../shared/util/LambderKeyFieldDigest.js";
 import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
 export type LambderApiIdempotencyConfig = {
     /** Your idempotency store instance; may share the rate limiter's table (distinct key prefix). */
@@ -57,12 +58,14 @@ export type LambderIdempotentCall = {
 export declare class LambderApiIdempotencyEngine {
     /** Stamped on the crash answer the engine records for an answer that broke its output schema. */
     private readonly apiVersion;
+    /** What every caller-controlled field of a scope is written as. */
+    private readonly keyFieldDigest;
     private store;
     private defaultTtlSeconds;
     private defaultPendingTtlSeconds;
     private failOpen;
     private callerIdentity;
-    constructor(apiVersion: string | null);
+    constructor(apiVersion: string | null, keyFieldDigest: LambderKeyFieldDigest);
     configure(config: LambderApiIdempotencyConfig): void;
     /**
      * Puts the engine over another store, for `lambder/testing`; the replay
@@ -92,10 +95,12 @@ export declare class LambderApiIdempotencyEngine {
      * served before guards run.
      *
      * joinKeyFields escapes the fields, so no two distinct scopes collide.
-     * The identity field is the caller's (a device token in the docs' own
-     * example), so it is bounded first (boundKeyField): an over-long one
-     * would push the scope past a store's key limit, and the store's refusal
-     * is a throw that failOpen turns into no idempotency for that caller.
+     * Every field but the API name is the caller's (a session key, an
+     * identity such as the docs' device token, the posted key), so each is
+     * written as its digest (LambderKeyFieldDigest): a table read shows which
+     * API a record answers and never whose it is, and no field is long
+     * enough to push the scope past a store's key limit, whose refusal is a
+     * throw that failOpen turns into no idempotency for that caller.
      */
     private scopeOf;
     /**
@@ -105,9 +110,11 @@ export declare class LambderApiIdempotencyEngine {
      * refuses with a 400. Taken at the replay lookup, before input validation
      * replaces the payload with its parsed form, so the fingerprint is of the
      * request as it was posted, and callerIdentity (app code that may verify
-     * a token or read a store) runs once.
+     * a token or read a store) runs once. `guardInputs` are the posted guard
+     * inputs the fingerprint holds, as the guards engine picks them
+     * (fingerprintedInputsOf): the engine that knows which are single use.
      */
-    resolveKeyedCall(apiName: string, request: LambderApiRequest, ctx: LambderApiCallContext): Promise<LambderIdempotentCall | null>;
+    resolveKeyedCall(apiName: string, request: LambderApiRequest, ctx: LambderApiCallContext, guardInputs: Readonly<Record<string, unknown>>): Promise<LambderIdempotentCall | null>;
     /**
      * Replay fast path, run before guards and all rate limits except
      * `per: "ip"`: a completed record returns its stored answer, so a

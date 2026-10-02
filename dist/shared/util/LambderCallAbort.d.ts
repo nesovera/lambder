@@ -9,13 +9,22 @@
  * the two from drifting apart: a caller that believed a late answer would
  * report `ok: true` for a call its site had already abandoned.
  *
+ * Who gave up matters as much as when. A call's own timeout is a failure the
+ * callers report; the site's own signal is the site's choice (a superseded
+ * read, a view that closed), which nothing should report as something gone
+ * wrong, so the two are told apart here, once. A site signal can carry a
+ * deadline of its own, though: AbortSignal.timeout() aborts with a
+ * TimeoutError, alone or inside AbortSignal.any(), and a call it ends is
+ * timed out like one its own timeoutMs ended. Read as the site's choice, it
+ * would fail with nothing reporting it.
+ *
  * The listener on an external signal is removed in detach() rather than left
  * to `once`: a site's signal usually outlives the call (one controller per
  * page, per view, per request), so a listener per call would accumulate on it
  * for as long as the signal lives.
  */
-/** How an abandoned call is reported: its own timeout fired, or the site's signal did, which is a `network` failure like any other abort. */
-type LambderCallAbortReason = "timeout" | "network";
+/** Who gave up on a call: a deadline ended it (`timeout`: its own timeoutMs, or a site signal that aborted with a TimeoutError), or the site's own signal did (`aborted`). */
+export type LambderCallAbortReason = "timeout" | "aborted";
 /** The reason and the error to report for a call that was given up on. */
 type LambderCallAbortFailure = {
     reason: LambderCallAbortReason;
@@ -29,8 +38,12 @@ export type LambderCallAbortStage = "beforeSending" | "afterAnswering";
 type LambderCallAbort = {
     /** What the transport is handed: the chained signal when a timeout is set, the site's own otherwise, and nothing when there is neither. */
     signal: AbortSignal | undefined;
-    /** Whether this call's own timeout is what aborted it, rather than the site's signal. */
-    timedOut: () => boolean;
+    /**
+     * Who aborted the call, or null while nothing has. A transport that
+     * rejects once the call is aborted is read by this first, whatever it
+     * rejected with: only the caller knows which of the two aborted it.
+     */
+    abortReason: () => LambderCallAbortReason | null;
     /**
      * The failure to report, or null while the call still stands. Run before
      * handing the request to the transport (a call already abandoned should
@@ -55,8 +68,11 @@ export declare const createCallAbort: (options: {
  * transports a signal has nothing to cancel, and by the crash reporter's
  * time bound (LambderCrashHandling), where the app's report runs on.
  *
- * The listener is detached on either outcome, for the reason createCallAbort
- * detaches its own.
+ * A signal that aborted before the wait began rejects it at once with the
+ * signal's reason, since it fires no event for a listener added afterwards.
+ * `pending` is still attached to either way, so what it later rejects with is
+ * settled here rather than left an unhandled rejection. The listener is
+ * detached on either outcome, for the reason createCallAbort detaches its own.
  */
 export declare const stopWaitingWhenAborted: <T>(pending: Promise<T>, signal: AbortSignal | undefined) => Promise<T>;
 export {};

@@ -10,6 +10,7 @@ import { z } from 'zod';
 import Lambder, { initLambder } from '../../src/core/Lambder.js';
 import type { LambderFallbackHandler } from '../../src/core/LambderCreateOptions.js';
 import { LambderMemorySessionStore, lambderTestApp, assertApiFailure } from '../../src/testing.js';
+import { html } from '../../src/shared/LambderHtml.js';
 
 describe('Error Handling - Global Error Handler', () => {
     it('should catch errors in route handlers', async () => {
@@ -200,7 +201,7 @@ describe('Error Handling - Custom Error Responses', () => {
             apiPath: '/api'
         })
             .setGlobalErrorHandler((err, ctx, res) => {
-                return res.html(`<h1>Error</h1><p>${err.message}</p>`);
+                return res.html(html`<h1>Error</h1><p>${err.message}</p>`);
             })
             .addRoute('/page', (ctx, res) => {
                 throw new Error('Page load failed');
@@ -272,7 +273,7 @@ describe('Error Handling - Different Error Types', () => {
                 const obj: any = null;
                 // Reading through null is the TypeError the global handler must catch.
                 const _boom = obj.property.access;
-                return res.html('Never reached');
+                return res.html(html`Never reached`);
             });
 
         const handler = lambder.getHandler();
@@ -316,7 +317,7 @@ describe('Error Handling - Errors in Hooks', () => {
             throw new Error('Before render failed');
         });
 
-        lambder.addRoute('/test', (ctx, res) => res.html('Test'));
+        lambder.addRoute('/test', (ctx, res) => res.html(html`Test`));
 
         const handler = lambder.getHandler();
         const result = await handler(createMockEvent('/test'), createMockContext());
@@ -334,7 +335,7 @@ describe('Error Handling - Errors in Hooks', () => {
                 return res.raw({ statusCode: 500, body: `Hook error: ${err.message}` });
             });
 
-        lambder.addRoute('/test', (ctx, res) => res.html('Test'));
+        lambder.addRoute('/test', (ctx, res) => res.html(html`Test`));
 
         await lambder.addHook('afterRender', async (ctx, res, response) => {
             throw new Error('After render failed');
@@ -360,7 +361,7 @@ describe('Error Handling - Errors in Hooks', () => {
             return new Error('Access denied by hook');
         });
 
-        lambder.addRoute('/test', (ctx, res) => res.html('Test'));
+        lambder.addRoute('/test', (ctx, res) => res.html(html`Test`));
 
         const handler = lambder.getHandler();
         const result = await handler(createMockEvent('/test'), createMockContext());
@@ -378,7 +379,7 @@ describe('Error Handling - Errors in Hooks', () => {
                 return res.raw({ statusCode: 500, body: err.message });
             });
 
-        lambder.addRoute('/test', (ctx, res) => res.html('Test'));
+        lambder.addRoute('/test', (ctx, res) => res.html(html`Test`));
 
         await lambder.addHook('afterRender', async (ctx, res, response) => {
             return new Error('Response validation failed');
@@ -407,6 +408,10 @@ describe('Error Handling - Default Error Behavior', () => {
 
         expect(result.statusCode).toBe(500);
         expect(result.body).toBe('Internal Server Error.');
+        // Typed as the text it is, as the framework's own 404 is.
+        expect(result.multiValueHeaders?.['Content-Type']).toEqual(['text/plain; charset=utf-8']);
+        const notFound = await handler(createMockEvent('/missing'), createMockContext());
+        expect(notFound.multiValueHeaders?.['Content-Type']).toEqual(['text/plain; charset=utf-8']);
     });
 });
 
@@ -532,7 +537,7 @@ describe('Error Handling - Complex Error Scenarios', () => {
                     .then(() => {
                         throw new Error('Chain error');
                     });
-                return res.html('Never reached');
+                return res.html(html`Never reached`);
             });
 
         const handler = lambder.getHandler();
@@ -555,7 +560,7 @@ describe('Error Handling - Complex Error Scenarios', () => {
                     return res.apiRefusal({ refusal: err.message });
                 } else {
                     errorTypes.push('route');
-                    return res.html(`<h1>${err.message}</h1>`);
+                    return res.html(html`<h1>${err.message}</h1>`);
                 }
             })
             .addRoute('/route-error', (ctx, res) => {
@@ -645,6 +650,8 @@ describe('Error Handling - A session that ended while the request held it', () =
             const page = await visitor.request('GET', path);
             expect(page.statusCode).toBe(401);
             expect(page.text()).toBe('Session required.');
+            // Text, as the framework's own 404 and 500 are.
+            expect(page.headers['content-type']).toBe('text/plain; charset=utf-8');
         }
         expect(app.crashes).toEqual([]);
         expect(reported).toEqual([]);

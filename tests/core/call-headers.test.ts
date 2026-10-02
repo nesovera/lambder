@@ -20,6 +20,7 @@ import type { LambderResponse } from '../../src/core/LambderResponse.js';
 import { LambderMemorySessionStore } from '../../src/stores/LambderMemorySessionStore.js';
 import { refuse } from '../../src/shared/wire/LambderApiRefusal.js';
 import { decodeBody, createMockEvent, createApiEvent, createMockContext, testPublicFiles } from '../helpers.js';
+import { html } from '../../src/shared/LambderHtml.js';
 
 const files = () => testPublicFiles();
 
@@ -101,7 +102,7 @@ describe('Headers written during a call', () => {
 
     it('travel onto a replacement response on a route too, as they always have', async () => {
         const lambder = new Lambder({ files: files() })
-            .addRoute('/page', (ctx, res) => { ctx.setResponseHeader('X-Handler', 'ran'); return res.html('<p>hi</p>'); })
+            .addRoute('/page', (ctx, res) => { ctx.setResponseHeader('X-Handler', 'ran'); return res.html(html`<p>hi</p>`); })
             .addHook('afterRender', (ctx, res) => res.json({ replaced: true }));
 
         const result = await lambder.render(createMockEvent('/page'), createMockContext());
@@ -157,7 +158,7 @@ describe('An afterRender hook and the headers the handler wrote', () => {
         .addRoute('/page', (ctx, res) => {
             ctx.setResponseHeader('X-Owner', 'handler');
             ctx.setCookie('sid', 'from-handler', { path: '/' });
-            return res.html('page');
+            return res.html(html`page`);
         })
         .addHook('afterRender', hook);
 

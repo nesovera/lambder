@@ -16,11 +16,12 @@ import { lambderTestApp } from '../../src/testing.js';
 import { localLambdaContext, synthesizeLambdaHttpEvent, LAMBDER_PARENT_REQUEST_HEADER } from '../../src/invoke/LambderLambdaEvent.js';
 import { runInvocation } from '../../src/core/LambderInvocationScope.js';
 import type { LambderCallSummary } from '../../src/core/LambderCallSummary.js';
+import { html } from '../../src/shared/LambderHtml.js';
 
 type SessionData = { userId: string };
 
 const createShop = (options: { callSummary?: false | ((summary: LambderCallSummary) => void) } = {}) => {
-    const lambderInit = initLambder<SessionData>().declareRefusals({ 'order-closed': { status: 409 } });
+    const lambderInit = initLambder<SessionData>().declareRefusals({ 'order-closed': { status: 409 }, 'account-closed': { sessionExpired: true } });
     const app = lambderInit.create({
         apiPath: '/api',
         session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
@@ -42,7 +43,8 @@ const createShop = (options: { callSummary?: false | ((summary: LambderCallSumma
         placeOnce: app.defineApi({ input: z.object({ sku: z.string() }), output: z.object({ orderId: z.string() }), idempotency: true }, async (ctx) => ({ orderId: `o-${ctx.apiPayload.sku}` })),
         mine: app.defineApi({ input: z.object({}), output: z.object({ userId: z.string() }), guards: 'signedIn' }, async (ctx) => ({ userId: ctx.session.data.userId })),
         limited: app.defineApi({ input: z.object({}), output: z.object({ ok: z.boolean() }), rateLimit: 'oncePerMinute' }, async () => ({ ok: true })),
-    })).addRoute({ path: '/page', method: 'GET' }, (_ctx, res) => res.html('<p>hello</p>'));
+        history: app.defineApi({ input: z.object({}), output: z.object({ ok: z.boolean() }), guards: 'signedIn', refusals: 'account-closed' }, async (ctx) => ctx.refuse('This account is closed.', { code: 'account-closed' })),
+    })).addRoute({ path: '/page', method: 'GET' }, (_ctx, res) => res.html(html`<p>hello</p>`));
 };
 
 afterEach(() => { vi.restoreAllMocks(); });
@@ -92,6 +94,16 @@ describe('Call summaries: what a call records', () => {
         // Refused before the handler ran: no handler time.
         expect(app.callSummaries[2]!.handlerMs).toBeNull();
         expect(app.crashes).toHaveLength(1);
+    });
+
+    it('records the code of a declared refusal that ends the session, as it does a notAuthorized one\'s', async () => {
+        const app = lambderTestApp(createShop());
+        const member = await app.signIn('u1', { userId: 'u1' });
+        await member.apiOutcome('order.history', {});
+
+        expect(app.callSummaries.map(({ api, outcome, code }) => ({ api, outcome, code }))).toEqual([
+            { api: 'order.history', outcome: 'sessionExpired', code: 'account-closed' },
+        ]);
     });
 
     it('records a replayed idempotent answer as the answer it replays, with no handler time', async () => {

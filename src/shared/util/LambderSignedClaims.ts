@@ -1,6 +1,7 @@
 import type { z } from "zod";
 import { base64UrlToBytes, bytesToBase64Url, isBase64Url } from "./LambderBase64.js";
 import { hmacSha256Of, importHmacKey, resolveWebCrypto } from "./LambderTextDigest.js";
+import { assertPositiveInteger } from "./LambderOptionChecks.js";
 
 /*
  * Signed claims: a bearer token that is its own record.
@@ -158,4 +159,58 @@ export const randomSecret = (bytes = 32): string => {
         throw new Error("Lambder needs crypto.getRandomValues in this runtime to mint a secret. Every browser provides it; Node 20+ provides it as globalThis.crypto.");
     }
     return bytesToBase64Url(webCrypto.getRandomValues(new Uint8Array(bytes)));
+};
+
+/** The most bytes one getRandomValues call fills. */
+const MAX_RANDOM_BYTES_PER_CALL = 65536;
+
+/**
+ * The characters of an alphabet a code is drawn from, as code points, once
+ * they are 2 to 256 distinct ones; anything else throws, naming `name`. One
+ * character draws nothing random, a repeat weighs its character double, and
+ * past 256 the one byte randomCode draws per character cannot reach every
+ * character. Returns the characters so the check reads as an assignment.
+ */
+export const assertCodeAlphabet = (alphabet: unknown, name: string): string[] => {
+    const characters = typeof alphabet === "string" ? Array.from(alphabet) : [];
+    const distinct = new Set(characters).size;
+    if(characters.length < 2 || characters.length > 256 || distinct !== characters.length){
+        const found = typeof alphabet === "string" ? `${characters.length} characters, ${distinct} of them distinct` : typeof alphabet;
+        throw new Error(`Lambder: ${name} must be 2 to 256 distinct characters, got ${found}.`);
+    }
+    return characters;
+};
+
+/**
+ * A code of `length` characters drawn uniformly from `alphabet` with the
+ * runtime's cryptographic random source: the digits emailed to an address,
+ * the letters of a pairing code somebody types. One byte draws one
+ * character, and a byte at or above the largest multiple of the alphabet's
+ * size is discarded and drawn again, since `byte % alphabet.length` alone
+ * favours the alphabet's first characters. The alphabet is 2 to 256 distinct
+ * characters (code points) and `length` a positive integer; anything else
+ * throws. Synchronous, as randomSecret is.
+ */
+export const randomCode = (alphabet: string, length: number): string => {
+    const characters = assertCodeAlphabet(alphabet, "randomCode alphabet");
+    assertPositiveInteger(length, "randomCode length");
+    const webCrypto = globalThis.crypto;
+    if(typeof webCrypto?.getRandomValues !== "function"){
+        throw new Error("Lambder needs crypto.getRandomValues in this runtime to draw a code. Every browser provides it; Node 20+ provides it as globalThis.crypto.");
+    }
+    const ceiling = Math.floor(256 / characters.length) * characters.length;
+    const drawn: string[] = [];
+    // Twice the length lets one call cover the discarded bytes nearly
+    // always; an alphabet that discards close to half of them may need
+    // another, which the loop draws.
+    const buffer = new Uint8Array(Math.min(length * 2, MAX_RANDOM_BYTES_PER_CALL));
+    while(drawn.length < length){
+        webCrypto.getRandomValues(buffer);
+        for(const byte of buffer){
+            if(byte >= ceiling) continue;
+            drawn.push(characters[byte % characters.length]!);
+            if(drawn.length === length) break;
+        }
+    }
+    return drawn.join("");
 };

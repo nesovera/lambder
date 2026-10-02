@@ -23,6 +23,11 @@ export { lambderSessionStoreConformance } from "./testing/lambderSessionStoreCon
 export { lambderIdempotencyStoreConformance } from "./testing/lambderIdempotencyStoreConformance.js";
 export { lambderRateLimiterConformance } from "./testing/lambderRateLimiterConformance.js";
 export { lambderOneShotSecretStoreConformance } from "./testing/lambderOneShotSecretStoreConformance.js";
+export { lambderCacheConformance } from "./testing/lambderCacheConformance.js";
+export { lambderCacheStorageConformance } from "./testing/lambderCacheStorageConformance.js";
+// A built deployment package booted as Lambda boots it, in a fresh process,
+// for the check between packaging and deploying.
+export { bootLambdaPackage } from "./testing/bootLambdaPackage.js";
 // What a test reaches for beside the test app: the stores to inspect or to
 // hand it, a file source over fixtures, the refusal codes to assert on, and
 // the types of what a visitor and its session hand back.

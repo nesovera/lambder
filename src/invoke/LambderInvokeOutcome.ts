@@ -77,14 +77,15 @@ export type LambderInvokeEnvelopeFailure<TMessage extends LambderUncheckedRefusa
 );
 
 /**
- * Nothing usable came back: the invoke never arrived or was given up on, the
- * Lambda service answered instead of the callee, the callee answered 5xx, or
- * something around the call threw. A 5xx carries `response` when the callee
- * answered with Lambder's own envelope, which is how a crash detail and a
- * logList arrive with it.
+ * Nothing usable came back: the invoke never arrived or was given up on (by
+ * its timeout, or by the calling code through its signal), the Lambda service
+ * answered instead of the callee, the callee answered 5xx, or something
+ * around the call threw. A 5xx carries `response` when the callee answered
+ * with Lambder's own envelope, which is how a crash detail and a logList
+ * arrive with it.
  */
 export type LambderInvokeDeliveryFailure<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = LambderInvokeFailureFields<TMessage> & {
-    reason: 'network' | 'timeout' | 'server' | 'protocol' | 'unknown';
+    reason: 'network' | 'timeout' | 'aborted' | 'server' | 'protocol' | 'unknown';
     response?: LambderApiRefusalEnvelope;
     /** The callee's crash detail, when its global error handler sent one (the envelope's `crash` field). */
     crash?: LambderCrashDetail;

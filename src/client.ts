@@ -28,6 +28,7 @@ export { compareDottedVersions, isDottedVersion } from "./shared/wire/LambderVer
 export type {
     LambderApiAnswerOutcome,
     LambderApiSuccessOutcome,
+    LambderApiFailure,
     LambderApiCallFailure,
     LambderApiValidationFailure,
     LambderApiEnvelopeFailure,
@@ -59,6 +60,7 @@ export type {
     LambderApiRefusalOptions,
     LambderRefusalMessage,
     LambderPlainRefusalMessage,
+    LambderRateLimitRefusalData,
     LambderUncheckedRefusalMessage,
     LambderRefusalCode,
     LambderRefuseOptions,
@@ -97,7 +99,7 @@ export type {
 
 // The server's declared options as plain data (the generated options module's
 // entry types) and the readers a client derives its own facts from.
-export { apiGuardParam, apiGuardParamExportName } from "./shared/wire/LambderApiOptionEntries.js";
+export { apiGuardParam, apiGuardParamExportName, apisWithGuard } from "./shared/wire/LambderApiOptionEntries.js";
 export type {
     LambderApiOptionEntries,
     LambderApiOptionEntry,
@@ -135,7 +137,7 @@ export { resolveCompressionOption } from "./shared/wire/LambderCompressionOption
 export type { LambderCompressionOption, LambderCompressionSettingsBase } from "./shared/wire/LambderCompressionOption.js";
 
 // Type-safe templating (tagged templates with auto-escaping)
-export { html, xml, raw, jsonScript, escapeHtml, renderHtmlValue, LambderSafeHtml, type LambderHtmlValue } from "./shared/LambderHtml.js";
+export { html, xml, raw, jsonScript, escapeHtml, renderHtmlValue, LambderSafeHtml, type LambderHtmlValue, type LambderJsonScriptOptions } from "./shared/LambderHtml.js";
 
 // Typed translations (standalone, isomorphic)
 export { createLambderI18n } from "./shared/LambderI18n.js";
@@ -143,9 +145,13 @@ export type {
     LambderLanguageMeta,
     LambderI18nConfig,
     LambderI18nInstance,
+    LambderI18nReadonlyInstance,
     LambderI18nTranslator,
     LambderI18nExtractParams,
     LambderI18nDictionaryLoader,
+    LambderI18nDictionaryEntry,
+    LambderI18nPluralEntry,
+    LambderI18nPluralCategory,
     LambderI18nCodes,
     LambderI18nKeys,
     LambderI18nTranslatorFor,
@@ -161,7 +167,7 @@ export type { LambderBackoffTimerOptions } from "./shared/util/LambderBackoffTim
 // Signed claims tokens, for the isomorphic code that verifies them where a
 // server's secret is at hand (an edge Worker, a shared backend package);
 // never in a page, which holds no secret to verify with.
-export { LambderSignedClaims, keyedDigest, randomSecret } from "./shared/util/LambderSignedClaims.js";
+export { LambderSignedClaims, keyedDigest, randomSecret, randomCode } from "./shared/util/LambderSignedClaims.js";
 export type { LambderSignedClaimsOptions } from "./shared/util/LambderSignedClaims.js";
 export { constantTimeEquals } from "./shared/util/LambderTextDigest.js";
 

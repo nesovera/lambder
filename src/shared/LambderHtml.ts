@@ -199,14 +199,36 @@ export const xml = html;
 export const raw = (value: string): LambderSafeHtml => new LambderSafeHtml(value);
 
 /**
- * Server-preloaded state as <script type="application/json" id="..."> so an SPA
- * can hydrate without a first fetch. Escaped so the payload can't break out of
- * the script element. Read with JSON.parse(document.getElementById(id).textContent).
+ * Where jsonScript writes its data, and the id it carries. A data block
+ * (`application/json`, the default) is found by its id, so it needs one;
+ * JSON-LD (`application/ld+json`) is read by whatever crawls the page, so its
+ * id is optional.
  */
-export const jsonScript = (id: string, data: unknown): LambderSafeHtml => {
+export type LambderJsonScriptOptions =
+    | { type?: "application/json"; id: string }
+    | { type: "application/ld+json"; id?: string };
+
+/**
+ * JSON in a <script> element, escaped so the payload cannot break out of it:
+ * every `<` is written `\u003c` (so no `</script>` or `<!--` can appear), and
+ * U+2028 and U+2029 as escapes too, which JSON.parse reads back unchanged.
+ *
+ * `jsonScript(id, data)` is server-preloaded state as
+ * <script type="application/json" id="...">, so an SPA can hydrate without a
+ * first fetch; read it with JSON.parse(document.getElementById(id).textContent).
+ * `jsonScript({ type: "application/ld+json" }, data)` is structured data for
+ * search engines, with the same escaping.
+ */
+export const jsonScript = (target: string | LambderJsonScriptOptions, data: unknown): LambderSafeHtml => {
+    const { type = "application/json", id } = typeof target === "string" ? { id: target } : target;
+    // The type is written into the markup as it is, so only the two it may be get there.
+    if(type !== "application/json" && type !== "application/ld+json"){
+        throw new Error(`jsonScript: type must be "application/json" or "application/ld+json", got ${JSON.stringify(type)}.`);
+    }
     const json = JSON.stringify(data)
         .replace(/</g, "\\u003c")
         .replace(/\u2028/g, "\\u2028")
         .replace(/\u2029/g, "\\u2029");
-    return new LambderSafeHtml(`<script type="application/json" id="${escapeHtml(id)}">${json}</script>`);
+    const idAttribute = id === undefined ? "" : ` id="${escapeHtml(id)}"`;
+    return new LambderSafeHtml(`<script type="${type}"${idAttribute}>${json}</script>`);
 };

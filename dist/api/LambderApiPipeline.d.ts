@@ -39,8 +39,7 @@ export type LambderApiPipelineOptions<TCtx extends LambderApiCallContext<TSessio
      * The floor under the signature gate: a request naming a `version` below
      * it answers versionExpired whatever its signature says. Dotted numbers
      * ("1.2.10"), compared segment by segment. A floor above apiVersion is
-     * taken as apiVersion, so a mistaken floor cannot refuse the build's own
-     * clients.
+     * refused at construction, since it would refuse the build's own clients.
      */
     minApiVersion?: string | null;
     /**
@@ -60,6 +59,16 @@ export type LambderApiPipelineOptions<TCtx extends LambderApiCallContext<TSessio
         session: LambderSessionRecord<TSessionData>;
     }>>;
     idempotency?: LambderApiIdempotencyConfig;
+    /**
+     * The app's at-rest secret: the session salt, which both adapters pass
+     * when sessions are configured. A subkey derived from it for this one
+     * purpose keys the digest every caller-controlled field of a rate-limit
+     * tracker key and an idempotency scope is written as
+     * (LambderKeyFieldDigest), so a table read can neither show who called
+     * nor test a guess. Without one the digest is a plain SHA-256, which
+     * keeps the values out of the table but lets a reader test guesses.
+     */
+    atRestSecret?: string;
 };
 /** The stores `lambder/testing` puts under a built pipeline. One the pipeline has no subsystem for is left aside. */
 export type LambderPipelineBackends = {
@@ -93,11 +102,11 @@ export type LambderApiExec<TCtx> = (ctx: TCtx) => Promise<LambderApiAnswer>;
  * are adapters over this class; neither reimplements a step of it.
  *
  * ```
- * version floor → signature gate → restore payload → rate limits keyed per ip
- * → session (session mode) → idempotency replay → rate limits keyed per session
- * (and custom keys charged beforeGuards) → guards → input validation → guards
- * placed after it → rate limits keyed by a custom key → exec, inside the
- * idempotency claim → drain response headers → answer
+ * envelope check → version floor → signature gate → restore payload → rate
+ * limits keyed per ip → session (session mode) → idempotency replay → rate
+ * limits keyed per session (and custom keys charged beforeGuards) → guards →
+ * input validation → guards placed after it → rate limits keyed by a custom
+ * key → exec, inside the idempotency claim → drain response headers → answer
  * ```
  *
  * Each policy subsystem (rate limits, guards, idempotency) is its own
@@ -182,10 +191,15 @@ export declare class LambderApiPipeline<TCtx extends LambderApiCallContext<TSess
      */
     answerRefusal(apiName: string, refusals: LambderEndpointRefusals | undefined, thrown: LambderApiRefusal, ctx: TCtx): Promise<LambderApiAnswer>;
     /**
-     * The steps that come before anything may read the request: the version
-     * floor, the signature gate, then the compressed-payload restore that
-     * every later reader (a rate-limit key slice, a guard, the input schema)
-     * relies on.
+     * The steps that come before anything may read the request: the
+     * envelope check, the version floor, the signature gate, then the
+     * compressed-payload restore that every later reader (a rate-limit key
+     * slice, a guard, the input schema) relies on.
+     *
+     * A body that is no envelope (readApiEnvelope flagged it invalidEnvelope)
+     * carries nothing to call with, no payload, version or signature, and is
+     * answered with the invalid-payload refusal, here, so every adapter
+     * refuses it alike.
      *
      * The floor refuses a request naming a version below minApiVersion,
      * whatever its signature says: the lever for a change the digest cannot

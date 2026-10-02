@@ -28,7 +28,7 @@ export type LambderCallSummary = {
     coldStart: boolean;
     /** The invocation's request id, the one Lambda's own log lines for it carry. */
     requestId: string | null;
-    /** The request id of the invocation that called this one over a direct invoke (LambderInvokeCaller), which carries it; null otherwise. */
+    /** The request id of the invocation that called this one over a Lambda invoke (LambderInvokeCaller), which carries it; null otherwise. */
     parentRequestId: string | null;
 };
 

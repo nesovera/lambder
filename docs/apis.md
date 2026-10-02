@@ -189,8 +189,8 @@ contract out as a generated file instead and has its clients import that; see
 
 Each contract entry carries the API's `input` and `output`, its `guardInputs`
 when a guardInput-mode guard applies, its `guards` option exactly as
-declared (`ApiContractType["users.get"]["guards"]` is the literal
-`{ readonly orgPermission: "USERS.MANAGE" }`), and its `refusals`: every code
+declared (`ApiContractType["orders.refund"]["guards"]` is the literal
+`{ readonly staffPermission: "ORDERS.REFUND" }`), and its `refusals`: every code
 it can refuse with, its own and its guards', each mapped to `{ data }` (the
 data as it arrives) or `{}`. `refusals` is the one member that is not the
 option as written, since a reader needs the guards' codes too; see
@@ -214,10 +214,10 @@ instead of a test that reads the server source:
 
 ```typescript
 type PermissionNeededBy<K extends keyof ApiContractType> =
-    ApiContractType[K] extends { guards: { orgPermission: infer N } } ? N : never;
+    ApiContractType[K] extends { guards: { staffPermission: infer N } } ? N : never;
 
 const NEEDS = {
-    "users.get": "USERS.MANAGE",
+    "orders.refund": "ORDERS.REFUND",
 } as const satisfies { [K in keyof ApiContractType]?: PermissionNeededBy<K> };
 ```
 
@@ -234,7 +234,7 @@ refuses a name the guard does not cover; a name left off the list needs a
 check of its own:
 
 ```typescript
-type AdminApi = LambderContractKeysWithGuard<ApiContractType, "platformAdmin">;
+type AdminApi = LambderContractKeysWithGuard<ApiContractType, "adminOnly">;
 const ADMIN_APIS = ["admin.listUsers", "admin.deleteUser"] as const satisfies readonly AdminApi[];
 // Fails to compile while an endpoint behind the guard is left off the list.
 const adminApisComplete: [Exclude<AdminApi, (typeof ADMIN_APIS)[number]>] extends [never] ? true : false = true;
@@ -327,8 +327,11 @@ installs lambder): TypeScript 7 ships no compiler API, so an app on 7 gives the
 generator a 6.x of its own, in the package the generator script runs from, and
 the generator says so when it finds a 7. Reading
 the contract compiles the server once, and a write that changes the file
-compiles it twice; give a large server's generator a heap to match
-(`node --max-old-space-size=8192`).
+compiles it twice, in the process that calls `writeApiContract`; a large
+server's needs a heap to match (`node --max-old-space-size=8192`).
+[`generateApiFiles`](#generating-every-file-at-once) prints each contract in
+a process of its own with that heap, so a script calling it needs no flag
+for it.
 
 ## The options as a generated file
 
@@ -403,8 +406,10 @@ because nothing that could hold one is written.
 What reads it derives instead of copying. The tables are `as const`, so the
 readers in `lambder/client` answer with literals: `LambderApisWithGuard<typeof
 apiOptions, "store">` is the union of the APIs naming that guard,
-`LambderApisGuardedBy<typeof apiOptions, "platformAdmin">` the APIs whose
-guards option is exactly that, `LambderApisWithMode` the APIs of one mode, and
+`apisWithGuard(apiOptions, "store")` that same list as a value, in the
+table's order, `LambderApisGuardedBy<typeof apiOptions, "adminOnly">` the
+APIs whose guards option is exactly that, `LambderApisWithMode` the APIs of
+one mode, and
 `apiGuardParam(apiOptions, name, "store")` the parameter the API gave the
 guard, typed as the literal it was declared with (`true` for a guard named
 without one, `undefined` when the API does not declare it). A test's list of
@@ -502,6 +507,90 @@ a parameter of `null`, which the tag cannot carry. A guard no API declares
 writes an empty module. `check`, `header` and `semicolons` work as they do
 for the options file.
 
+### The schemas, for the mock
+
+The server validates every input against its API's zod schema and parses
+every output through its schema, which drops the fields the schema does not
+declare and fills its defaults. The contract reaches a client as types alone,
+so a mock has no schema to do the same with: without one, every payload
+reaches its handler, and an answer goes out with whatever the handler
+returned. `writeApiSchemas` writes the server's schemas out as data the mock
+rebuilds:
+
+```typescript
+import { writeApiSchemas } from "lambder/build";
+
+const result = await writeApiSchemas({
+    module: "backend/index.ts",
+    exportName: "lambder",
+    file: "web/src/mock/apiSchemas.generated.ts",
+    check: process.argv.includes("--check"),
+});
+console.log(result.lines.join("\n"));
+process.exit(result.ok ? 0 : 1);
+```
+
+```typescript
+// web/src/mock/apiSchemas.generated.ts, as written
+export const apiSchemas = {
+    "orders.place": {
+        "input": {
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "minLength": 2, "maxLength": 40 },
+                "giftWrap": { "default": false, "type": "boolean" },
+                ...
+            },
+            "required": ["name"],
+            "x-lambder-strip-unknown-keys": true
+        },
+        "output": { ... }
+    },
+    ...
+} as const;
+```
+
+The schemas come from `lambder.apiSchemaEntries()`, every API's input and
+output by name, and are written as JSON Schema (draft 2020-12) by zod's
+`z.toJSONSchema`: the input in its input form, what a client posts (a
+defaulted field optional), and the output in its output form, what a client
+receives (a defaulted field there), since a mock handler returns its answer
+as the client receives it. The module imports nothing and is the same on
+every run. A zod object drops the keys it does not declare, which JSON Schema
+has no word for, so each such object carries
+`"x-lambder-strip-unknown-keys": true` and the mock drops them too; a strict
+object carries `additionalProperties: false` and a loose one `{}`, as zod
+writes them.
+
+What JSON Schema cannot represent at all (a `z.date()`, a `bigint`, a `Map`,
+a `Set`) fails the write, naming the API, the direction and the place, since
+the mock would read it differently from the server: declare it as what it is
+on the wire, such as `z.iso.datetime()` for a date. What it represents only
+in part is written as far as it goes and listed, in the result's `losses` and
+a line each:
+
+- a refinement (`.refine()`, `.superRefine()`, `.check()`, a `z.custom()`
+  schema): the mock does not run it;
+- a transform (`.transform()`, `z.preprocess()`, a codec, `.trim()` and the
+  other rewrites, `z.coerce`, `.catch()`): the mock does not apply it, so its
+  handler reads the input as posted;
+- the second schema of an input's `.pipe()`: the mock does not check it;
+- a default a function computes on each parse: left out of the file.
+
+```text
+✓ Wrote web/src/mock/apiSchemas.generated.ts (4 APIs)
+  apiSchemas: 0 changed, 4 added, 0 removed (0 unchanged)
+  ...
+  1 API carries what JSON Schema cannot hold, which the mock does not check:
+  ! tickets.open input #/properties/seat: a refinement, which the mock does not run
+```
+
+The file names every endpoint and every field each takes and gives, which is
+what the contract's type-only import keeps out of a browser, so it is for
+development alone: [the mock](./mock.md#validating-against-the-servers-schemas)
+imports it from its setup, which a production build never loads. `check`,
+`header` and `semicolons` work as they do for the options file.
+
 ### Generating every file at once
 
 Each writer above is a function a generator script calls. A script that
@@ -521,6 +610,7 @@ const result = await generateApiFiles({
             signatures: { file: "shared/generated/apiSignatures.generated.ts" },
             options: { file: "shared/generated/apiOptions.generated.ts" },
             guardParams: [{ guard: "store", file: "web/src/generated/storeGuardParams.generated.ts" }],
+            schemas: { file: "web/src/mock/apiSchemas.generated.ts" },
         },
         imaging: {
             module: "imaging/index.ts",
@@ -537,15 +627,25 @@ process.exit(result.ok ? 0 : 1);
   file takes the options its writer takes (`header`, `quotes`,
   `semicolons`, `typeName`, `guard`). Paths are relative to the working
   directory, as each writer takes them.
-- The contracts are read first, through the compiler alone; then each
-  module is imported once, and its signatures, options and guard parameters
-  are written from that one instance.
+- The contracts are read first, through the compiler alone, each in a Node
+  process of its own; then each module is imported once, in the script's
+  process, and its signatures, options, guard parameters and schemas are
+  written from that one instance.
+- A contract's process is started with none of the script's command-line
+  flags and a heap of `contractHeapMegabytes` (default 8192, Node's
+  `--max-old-space-size`), which compiling a large server needs. The
+  compiler imports none of the app's modules, so it needs no loader, and the
+  script's own heap matters only to what it imports. Its answer is
+  `writeApiContract`'s, the lines of a contract that could not be read or a
+  stale file and the error of a writer that threw alike; a process that runs
+  out of its heap fails its contract, saying to raise the option.
 - A writer that fails does not stop the others: one call names every stale
   or broken file, and `ok` is false when any is. A config naming no apps, an
-  app written to no file, or a key the call does not read throws.
-- The script runs as each writer's does, under whatever loader the app's
-  modules need, whose flags reach the fresh process the signatures are
-  verified in.
+  app written to no file, a key the call does not read, or a
+  `contractHeapMegabytes` that is not a whole number of megabytes throws.
+- The script runs under whatever loader the app's modules need, for the
+  signatures, options and guard parameters; its flags reach the fresh
+  process the signatures are verified in.
 
 ## Groups across files, and lazy groups
 
@@ -627,8 +727,9 @@ against it, as for an eager group.
 A request under `apiPath` that nothing matched is the API's to answer: a GET
 to a call path, or a path of another depth, is answered as an unknown API
 rather than by the public files, the shell or the route fallback. A root
-`apiPath` (`"/"`) shares every path with the site, so there only `apiPath`
-itself and the calls are.
+`apiPath` (`"/"`) shares every path with the site, the site root included, so
+there only the calls are the API's, and every other request walks the
+fallback chain.
 
 `use(plugin)` hands the instance to a function that registers routes, hooks
 or actions on it and continues the chain; endpoints are registered as groups,
@@ -641,8 +742,11 @@ An API call is a POST to `{apiPath}/{group}/{action}` with
 carries the envelope (payload, version, signature, CSRF token, guard inputs,
 idempotency key), and the endpoint is the path, so a gateway, a CDN and a log
 can meter, limit and read calls per endpoint without opening the body. A
-POST of any other type is not an API call and reaches the API fallback. A
-JSON POST to `apiPath` itself whose body names an endpoint is how callers
+body that is not a JSON object (a number, a string, `true`, `null`, an array,
+or not JSON at all) carries no envelope, and is answered
+`lambder/invalid-request-payload` (400) before any hook or route sees the
+call. A POST of any other type is not an API call and reaches the API
+fallback. A JSON POST to `apiPath` itself whose body names an endpoint is how callers
 posted before endpoints had paths: it comes from a page built then, and is
 answered `versionExpired`, which reloads the page. JSON is the one type a browser
 will not send cross-origin without asking first, so this is what puts every
@@ -651,7 +755,7 @@ could otherwise post a login envelope (`enctype="text/plain"` lays out JSON
 exactly) and plant the attacker's session in a visitor's browser.
 
 ```
-version floor → signature gate → payload restore
+envelope check → version floor → signature gate → payload restore
   → rate limits keyed on the request alone (per: "ip")
   → session (endpoints whose guards need one)
   → idempotency replay lookup
@@ -824,10 +928,9 @@ numbers, so `1.2.10` is above `1.2.9`, and both `apiVersion` and
 `minApiVersion` have to be written that way: a stamp the comparison cannot
 read (`"dev"`, a commit sha) would count as zero and answer `versionExpired`
 to every client of the build that set it, so it is refused at creation
-instead. A floor above `apiVersion` is taken as `apiVersion`, with a warning,
-so a mistaken floor cannot refuse the build's own clients either: with
-`apiVersion: "1.2.0"` and `minApiVersion: "1.5.0"`, a client at `1.1.0`
-reloads and one at `1.2.0` is served.
+instead. A floor above `apiVersion` is refused at creation too, since it would
+refuse the build's own clients: `apiVersion: "1.2.0"` with
+`minApiVersion: "1.5.0"` throws.
 
 A frontend shipped with a stale map would answer `versionExpired` on a changed
 endpoint, reload, and get the same bundle back. `LambderCaller` breaks that
@@ -978,8 +1081,9 @@ is a crash rather than an answer (`LambderApiRefusalValidationError`, naming
 the code and the failing paths but never the values, with the refusal as
 thrown as its `cause`): a code the endpoint does not declare, data on a
 refusal whose code declares none, no data on one whose code carries data,
-data its code's schema rejects, a declared code raised with a status or flag
-of its own, or an uncoded refusal where the app requires codes. A refusal a
+data its code's schema rejects, `lambder/rate-limited` without its policy
+and wait, a declared code raised with a status or flag of its own, or an
+uncoded refusal where the app requires codes. A refusal a
 hook throws for an API call is checked against the endpoint the call names,
 and one for a name no API is registered under may carry a framework code or
 none. A test run over `lambder/testing` surfaces the crash at once, which is
@@ -1035,17 +1139,29 @@ console.log(result.lines.join("\n"));
 process.exit(result.ok ? 0 : 1);
 ```
 
-It names five things: a code a handler can reach and may not send, with the
+It names six things: a code a handler can reach and may not send, with the
 line that raises it; a code a handler's own `refusals` option names that
 nothing it reaches raises, which a caller would be told to handle for
 nothing; a refusal with no code, where `requireCodes` (the default) says
 codes are required; a refusal whose code is typed as any string, since
-nothing can say which code it will send; and a handler whose function it
+nothing can say which code it will send; a handler whose function it
 cannot find, such as the parameter of an app's own wrapper around
-`defineApi`, since nothing it reaches was checked. A project in which it
-finds no handler to check fails too, rather than passing with nothing
-checked. A handler that is handed no typed `refuse` (a mock guard, which the
-mock holds to its server guard's codes as it runs) is listed, not checked.
+`defineApi`, since nothing it reaches was checked; and a handler handed no
+typed `refuse`, since there is nothing to hold what it reaches to. The last
+is a guard built by an init that declared no vocabulary and given no
+`refusals` option, a mock guard from `initLambderMock()` without
+`declareRefusals` most often: declare the vocabulary on that init, or give
+the guard the codes it may send (`refusals: []` for none). A project in which
+it finds no handler to check fails too, rather than passing with nothing
+checked. `requireTypedRefuse: false` lets a handler handed no typed `refuse`
+stand, listed in the lines and not a finding. A mock guard built by a mock
+init that declared the vocabulary is checked as a server guard is, against
+its own `refusals`, which a mock given the `guardDeclarations` table holds
+to the server guard's (see [the mock
+runtime](./mock.md#declarations-policies-and-guards-from-the-generated-options)).
+A refuse counts however the app names it: imported under another name, held
+in a variable, destructured under another name, or passed as a parameter
+typed as one.
 
 A code held in a constant reads as its literal. A code a helper takes as a
 parameter reads as every code the parameter's type allows, at every call of
@@ -1060,17 +1176,18 @@ takes as long as a type check.
 
 The framework stamps the refusals it authors itself with
 `LAMBDER_REFUSAL_CODES` (exported from `lambder` and `lambder/client`) under
-the reserved `lambder/` prefix, so app codes never collide. They carry no
-data, and no API declares them: every endpoint may send them.
+the reserved `lambder/` prefix, so app codes never collide. No API declares
+them: every endpoint may send them. One carries data, `lambder/rate-limited`;
+the others carry none.
 
 | Constant | Code | Raised when |
 | --- | --- | --- |
-| `rateLimited` | `lambder/rate-limited` | A rate-limit policy refused (429) |
+| `rateLimited` | `lambder/rate-limited` | A rate-limit policy refused (429). Its data is `{ policy, retryAfterSeconds }` (`LambderRateLimitRefusalData`): the policy's name and the `Retry-After` header's seconds |
 | `duplicateInFlight` | `lambder/duplicate-in-flight` | The original of an idempotent request is still running (409) |
-| `idempotencyKeyReused` | `lambder/idempotency-key-reused` | The `idempotencyKey` was first used for a request with another payload (409) |
+| `idempotencyKeyReused` | `lambder/idempotency-key-reused` | The `idempotencyKey` was first used for a request with another payload, or another guard input that counts (409) |
 | `invalidIdempotencyKey` | `lambder/invalid-idempotency-key` | The `idempotencyKey` is malformed (400) |
 | `apiNotFound` | `lambder/api-not-found` | No API is registered under the requested name |
-| `invalidRequestPayload` | `lambder/invalid-request-payload` | A compressed request payload (`payloadGz` or `payloadBr`) is malformed, carries both fields, or exceeds `maxRequestPayloadBytes` (400) |
+| `invalidRequestPayload` | `lambder/invalid-request-payload` | The call's body is not a JSON object, or a compressed request payload (`payloadGz` or `payloadBr`) is malformed, carries both fields, or exceeds `maxRequestPayloadBytes` (400) |
 | `notMocked` | `lambder/not-mocked` | The mock runtime was asked for an endpoint registered as `notMocked` (200; the mock runtime only) |
 | `uploadEmpty` | `lambder/upload-empty` | An upload bucket was asked to sign a ticket for a file with no bytes (see [Direct uploads](./uploads.md)) |
 | `uploadTypeRejected` | `lambder/upload-type-rejected` | An upload bucket was asked to sign a ticket for a content type the rule does not accept |
@@ -1078,13 +1195,19 @@ data, and no API declares them: every endpoint may send them.
 
 A rate-limit refusal is always `lambder/rate-limited`: a policy's
 `refusal` sets its type, title and content, and a code or data there is
-refused at creation, so an `refusalHandler` treats every rate limit
-alike.
+refused at creation. Its data names the policy that refused, so a
+`refusalHandler` treats every rate limit alike or words each policy its own
+way, and the policy's name reaches every client (see [What a client
+reads](./api-policies.md#what-a-client-reads)). The code is sent only with
+that data: a `refuse()` with it and without the data is a crash, and
+`res.apiRefusal` does not take it.
 
 `LambderRefusalMessage` with no argument is the framework's codes and the
 uncoded refusal alone, so a `default: never` assertion holds over it and a
 framework code added in a later version breaks the switch rather than
-falling through it. Messages an app WRITES outside a handler take
+falling through it. `lambder/rate-limited` is an arm of its own, so its case
+reads `message.data.policy` typed, and the switch narrows the whole message:
+the assertion is `const unreachable: never = message`. Messages an app WRITES outside a handler take
 `LambderUncheckedRefusalMessage`, where any code is welcome: that is what
 `LambderApiRefusal` carries before its endpoint checks it.
 

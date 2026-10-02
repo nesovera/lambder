@@ -18,8 +18,9 @@ export type LambderGuardsOptionValue = string | readonly string[] | Readonly<Rec
 /**
  * The message a rate-limit refusal carries, as a policy or an API writes it:
  * its type, title and content. Its code is always `lambder/rate-limited` and
- * it carries no data, so a rate limit is never a code an endpoint has to
- * declare.
+ * its data always the framework's (the policy that refused and the seconds to
+ * wait, LambderRateLimitRefusalData), so a rate limit is never a code an
+ * endpoint has to declare.
  */
 export type LambderRateLimitMessage = Omit<LambderUncheckedRefusalMessage, "code" | "data">;
 

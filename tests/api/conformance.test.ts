@@ -23,7 +23,10 @@ import { LambderMemorySessionStore } from '../../src/stores/LambderMemorySession
 import { LambderMemoryRateLimiter } from '../../src/stores/LambderMemoryRateLimiter.js';
 import { LambderMemoryIdempotencyStore } from '../../src/stores/LambderMemoryIdempotencyStore.js';
 import { initLambderMock } from '../../src/mock/LambderMockApp.js';
-import { refuse } from '../../src/shared/wire/LambderApiRefusal.js';
+import { lambderMockInvokeTransport } from '../../src/mock/lambderMockInvokeTransport.js';
+import { lambderMockMswHandler, type LambderMswModule } from '../../src/mock/lambderMockMswHandler.js';
+import { decodeLambdaHttpResult, localLambdaContext, synthesizeLambdaHttpEvent } from '../../src/invoke/LambderLambdaEvent.js';
+import { LAMBDER_REFUSAL_CODES, refuse } from '../../src/shared/wire/LambderApiRefusal.js';
 
 type SessionData = { userId: string; role: 'admin' | 'member' };
 const IDEMPOTENCY_KEY = 'k-conformance-abcdefabcdef';
@@ -304,13 +307,43 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
         expect(await bothSides('1.3.0')).toEqual(['ok', 'ok']);
     });
 
-    it('rate limited: the same 429 envelope with a Retry-After', async () => {
+    it('a body that is not a JSON object: the same invalid-payload refusal from the server and from every mock adapter that reads a body', async () => {
+        const { server, mockApp } = createSides();
+        const handler = server.getHandler();
+        const invokeTransport = lambderMockInvokeTransport(mockApp);
+        let mswResolver: Parameters<LambderMswModule['http']['post']>[1] | null = null;
+        lambderMockMswHandler(mockApp, {
+            apiPath: '/api',
+            msw: { http: { post: (_path, resolver) => { mswResolver = resolver; return null; }, all: () => null }, HttpResponse: Response },
+        });
+        for(const body of ['5', '"x"', 'true', 'null', '[1,2]', 'not json']){
+            const event = synthesizeLambdaHttpEvent({ method: 'POST', path: '/api/test/ok', host: 'localhost', body, contentType: 'application/json' }, { invoke: false });
+            const onServer = await decodeLambdaHttpResult(await handler(event, localLambdaContext('conformance')), 1_000_000);
+            const seen = { status: onServer.statusCode, envelope: onServer.json() };
+            expect(seen).toEqual({
+                status: 400,
+                envelope: { apiVersion: '1', payload: null, refusal: { type: 'error', code: LAMBDER_REFUSAL_CODES.invalidRequestPayload, content: expect.stringMatching(/^Request body must be a JSON object/) } },
+            });
+            const onInvoke = (await invokeTransport(event, {})).result;
+            expect({ status: onInvoke.statusCode, envelope: JSON.parse(onInvoke.body) }).toEqual(seen);
+            const onMsw = await mswResolver!({ request: new Request('http://localhost/api/test/ok', { method: 'POST', body, headers: { 'Content-Type': 'application/json' } }) });
+            expect({ status: onMsw?.status, envelope: await onMsw?.json() }).toEqual(seen);
+        }
+    });
+
+    it('a minApiVersion above apiVersion: refused at creation on both sides', () => {
+        const refusal = /Lambder: minApiVersion 1\.5\.0 is above apiVersion 1\.2\.0/;
+        expect(() => initLambder().create({ apiPath: '/api', apiVersion: '1.2.0', minApiVersion: '1.5.0' })).toThrow(refusal);
+        expect(() => initLambderMock<{}>().create({ apiVersion: '1.2.0', minApiVersion: '1.5.0' })).toThrow(refusal);
+    });
+
+    it('rate limited: the same 429 envelope with a Retry-After, its data naming the policy and the same wait', async () => {
         const sides = createSides();
         await same(sides, 'test.limited', {});
         const blocked = await same(sides, 'test.limited', {});
         expect(blocked.seen.status).toBe(429);
         expect(Number(blocked.seen.retryAfter)).toBeGreaterThanOrEqual(1);
-        expect(blocked.seen.envelope).toMatchObject({ refusal: { code: 'lambder/rate-limited' } });
+        expect(blocked.seen.envelope).toMatchObject({ refusal: { code: 'lambder/rate-limited', data: { policy: 'tight', retryAfterSeconds: Number(blocked.seen.retryAfter) } } });
     });
 
     it('idempotent replay: the same stored answer, the handler run once on each side', async () => {
@@ -388,7 +421,7 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
         await same(sides, 'account.limitedPerCaller', {});
         const blocked = await same(sides, 'account.limitedPerCaller', {});
         expect(blocked.seen.status).toBe(429);
-        expect(blocked.seen.envelope).toMatchObject({ refusal: { code: 'lambder/rate-limited' } });
+        expect(blocked.seen.envelope).toMatchObject({ refusal: { code: 'lambder/rate-limited', data: { policy: 'perCaller' } } });
 
         // Another session is another counter, on both sides.
         await same(sides, 'account.login', { user: 'bob', role: 'member' }, { from: 'stranger' });
@@ -448,7 +481,7 @@ describe('Adapter conformance: the server and the mock answer alike', () => {
     });
 
     it('a compressed request payload: restored on both sides', async () => {
-        const notes = Array.from({ length: 300 }, (_, i) => `note-${i} on the main line`);
+        const notes = Array.from({ length: 300 }, (_, i) => `note-${i} in the stockroom`);
         const { seen } = await same(createSides({ requestCompression: true }), 'test.echo', { notes });
         expect(seen.envelope).toEqual({ apiVersion: '1', payload: { count: 300 } });
     });

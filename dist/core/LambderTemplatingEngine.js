@@ -292,9 +292,18 @@ const collectNames = (nodes, slots, conditions) => {
         }
     }
 };
+/** A name list in an error message: quoted and comma-separated, or "none". */
+const listNames = (names) => names.length === 0 ? "none" : names.map((name) => JSON.stringify(name)).join(", ");
+/**
+ * A comment-only HTML template, compiled once. TNames is the caller's
+ * statement of its slot and condition names, which types render()'s data;
+ * left out, any name compiles, and render() checks every key either way.
+ */
 export class LambderTemplatingEngine {
     nodes;
-    /** Slot names discovered at compile time (dynamic typing surface). */
+    /** Every slot and condition name: what a data key has to be one of. */
+    names;
+    /** Slot names discovered at compile time. */
     slotNames;
     /** Condition names discovered at compile time. */
     conditionNames;
@@ -306,6 +315,7 @@ export class LambderTemplatingEngine {
         collectNames(this.nodes, slots, conditions);
         this.slotNames = [...slots];
         this.conditionNames = [...conditions];
+        this.names = new Set([...slots, ...conditions]);
     }
     /** Read and parse a template file (compile once, render many times). */
     static async fromFile(filePath, options = {}) {
@@ -317,10 +327,20 @@ export class LambderTemplatingEngine {
     }
     /** True when the template declares `name` as a slot or condition. */
     has(name) {
-        return this.slotNames.includes(name) || this.conditionNames.includes(name);
+        return this.names.has(name);
     }
-    /** Render with escaped-by-default data; unknown keys ignored, omitted slots keep defaults. */
+    /**
+     * Render with escaped-by-default data; omitted slots keep their defaults.
+     * Throws for a key the template has no slot or condition for, naming it
+     * and the template's names.
+     */
     render(data = {}) {
+        const unknownKeys = Object.keys(data).filter((key) => !this.names.has(key));
+        if (unknownKeys.length > 0) {
+            throw new Error(`LambderTemplatingEngine: the data carries ${listNames(unknownKeys)}, which the template has no slot or condition for, ` +
+                `so ${unknownKeys.length === 1 ? "its value" : "their values"} would be dropped. Its slots: ${listNames(this.slotNames)}; ` +
+                `its conditions: ${listNames(this.conditionNames)}.`);
+        }
         const output = { html: "", firstDataIndex: -1 };
         renderNodes(this.nodes, data, output);
         return output.html;

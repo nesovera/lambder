@@ -35,6 +35,21 @@ export const apiGuardParam = (options, name, guard) => {
     return param;
 };
 /**
+ * The names of the APIs in a generated `apiOptions` table whose guards
+ * option names guard N, in any of its three forms: the list
+ * LambderApisWithGuard is the type of, read off the same entries, in the
+ * table's order. What a test loops over to call every API behind a guard,
+ * with no list kept by hand and no cast.
+ */
+export const apisWithGuard = (options, guard) => Object.keys(options).filter((name) => {
+    const guards = options[name].guards;
+    if (typeof guards === "string")
+        return guards === guard;
+    if (Array.isArray(guards))
+        return guards.includes(guard);
+    return guards !== undefined && Object.prototype.hasOwnProperty.call(guards, guard);
+});
+/**
  * The identifier writeApiGuardParams exports an API's parameter under: its
  * group, its action capitalized, then `GuardParam` (`orders.list` exports
  * `ordersListGuardParam`). What code that reads a generated module by API

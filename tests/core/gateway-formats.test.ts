@@ -15,13 +15,14 @@ import type { APIGatewayProxyEvent } from 'aws-lambda';
 import type { LambderResponse } from '../../src/core/LambderResponse.js';
 import type { LambderFileSource } from '../../src/shared/contracts/LambderFileSource.js';
 import { brotliBody, createMockContext, createMockEvent, createMockEventV2, decodeBody, testPublicFiles } from '../helpers.js';
+import { raw } from '../../src/shared/LambderHtml.js';
 
 const bigHtml = '<p>' + 'lambder '.repeat(500) + '</p>';
 const accepting = { Host: 'localhost', 'Accept-Encoding': 'br, gzip' };
 
 describe('Compression per event format', () => {
     const app = (options: ConstructorParameters<typeof Lambder>[0] = {}) =>
-        new Lambder({ files: testPublicFiles(), ...options }).addRoute('/big', (ctx, res) => res.html(bigHtml));
+        new Lambder({ files: testPublicFiles(), ...options }).addRoute('/big', (ctx, res) => res.html(raw(bigHtml)));
 
     it('leaves a REST API answer uncompressed and as text unless compression is named', async () => {
         const result = await app().render(createMockEvent('/big', { headers: accepting }), createMockContext());
@@ -77,7 +78,7 @@ describe('Text leaves as text, bytes as base64', () => {
 });
 
 describe('ETag before compression', () => {
-    const app = () => new Lambder({ files: testPublicFiles(), compression: true }).addRoute('/big', (ctx, res) => res.html(bigHtml));
+    const app = () => new Lambder({ files: testPublicFiles(), compression: true }).addRoute('/big', (ctx, res) => res.html(raw(bigHtml)));
 
     it('tags each representation apart, and answers a revalidation of the compressed one with a 304', async () => {
         const identity = await app().render(createMockEvent('/big'), createMockContext());
@@ -118,7 +119,7 @@ describe('A response object kept between requests', () => {
         const lambder = new Lambder({ files: testPublicFiles(), compression: true })
             .addRoute('/kept', (ctx, res) => {
                 ctx.setCookie('visitor', ctx.get.name ?? '');
-                kept ??= res.html(bigHtml);
+                kept ??= res.html(raw(bigHtml));
                 return kept;
             });
 

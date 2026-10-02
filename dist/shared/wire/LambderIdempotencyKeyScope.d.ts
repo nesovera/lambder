@@ -51,9 +51,11 @@ export declare const createIdempotencyKey: () => string;
  *   nothing about it. Keeping the key lets the next attempt replay the
  *   original's answer rather than run again.
  * - A rate limit, an expired session, a stale version, and an attempt that
- *   ended before anything was sent keep the key.
- * - Anything that is not an answer (a network failure, a timeout, a 5xx, a
- *   crash) keeps the key and marks it as possibly used, and so does a
+ *   ended before anything was sent (its signal aborted first, say) keep the
+ *   key.
+ * - Anything that is not an answer (a network failure, a timeout, a call its
+ *   signal aborted after it left, a 5xx, a crash) keeps the key and marks it
+ *   as possibly used, and so does a
  *   duplicate of an original still in flight, unless the scope has another
  *   attempt of its own still waiting for its answer (a double-tap): that
  *   attempt is the original, and its answer settles the key, a refusal

@@ -122,7 +122,7 @@ export type LambderApisWithGuard<TOptions, N extends string> = {
 }[keyof TOptions] & string;
 /**
  * The names of the APIs whose guards option is exactly TGuards: the APIs
- * behind `"platformAdmin"` alone, say, and not those that declare it beside
+ * behind `"adminOnly"` alone, say, and not those that declare it beside
  * another guard. For a list a test loops over, checked against the table in
  * both directions.
  */
@@ -153,6 +153,14 @@ export type LambderGuardParamOf<TEntry, N extends string> = TEntry extends {
  * reads instead of the source.
  */
 export declare const apiGuardParam: <TOptions extends Record<string, LambderApiOptionEntry>, K extends keyof TOptions & string, N extends string>(options: TOptions, name: K, guard: N) => LambderGuardParamOf<TOptions[K], N>;
+/**
+ * The names of the APIs in a generated `apiOptions` table whose guards
+ * option names guard N, in any of its three forms: the list
+ * LambderApisWithGuard is the type of, read off the same entries, in the
+ * table's order. What a test loops over to call every API behind a guard,
+ * with no list kept by hand and no cast.
+ */
+export declare const apisWithGuard: <TOptions extends Record<string, LambderApiOptionEntry>, N extends string>(options: TOptions, guard: N) => LambderApisWithGuard<TOptions, N>[];
 /**
  * The identifier writeApiGuardParams exports an API's parameter under: its
  * group, its action capitalized, then `GuardParam` (`orders.list` exports

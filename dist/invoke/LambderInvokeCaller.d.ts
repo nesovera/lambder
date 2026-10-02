@@ -27,6 +27,7 @@ import { type LambderApiSignatureMap } from "../shared/wire/LambderApiSignatureM
 import type { LambdaClient, LambdaClientConfig } from "@aws-sdk/client-lambda";
 import type { LambderApiContractShape, LambderContractRefusalMessage } from "../shared/wire/LambderApiContract.js";
 import { type LambderCallArgs, type LambderContractOutputOf, type LambderGuardInputsProviderOption, type LambderSharedCallOptions } from "../shared/wire/LambderCallOptions.js";
+import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
 import { type LambderCompressionOption } from "../shared/wire/LambderCompressionOption.js";
 import { type LambderInvokeSession, type LambderLambdaHttpResult } from "./LambderLambdaEvent.js";
 /**
@@ -57,7 +58,11 @@ export type LambderInvokeLogListHandler = (apiName: string, logList: unknown[]) 
 export type LambderInvokeCallCheck = (name: string, info: {
     functionName: string;
 }) => void;
-/** The onFailure option: every failed call, once, awaited before api() throws or apiOutcome() returns. */
+/**
+ * The onFailure option: every failed call, once, awaited before api() throws
+ * or apiOutcome() returns, but for a call its own signal aborted, which is the
+ * calling code's choice rather than a failure to report.
+ */
 export type LambderInvokeFailureHandler = (failure: LambderInvokeFailure, info: {
     apiName: string;
     functionName: string;
@@ -120,8 +125,11 @@ type LambderInvokeCallerBaseOptions = {
     /**
      * Called and awaited for every failed call before api() throws or
      * apiOutcome() returns, so failures are reported in one place, before the
-     * lambda answers. A throw inside it is logged and otherwise ignored, so
-     * apiOutcome() never throws.
+     * lambda answers. A call its own signal aborted is not told: the calling
+     * code gave it up. A throw inside it is logged and otherwise ignored, so
+     * apiOutcome() never throws. The error of a failure it took is marked as
+     * reported, so the instance's crash reporting does not report it again
+     * when api() throws it up through a handler.
      */
     onFailure?: LambderInvokeFailureHandler;
     /**
@@ -184,6 +192,19 @@ declare class LambderInvokeCallerCore<TContract extends LambderApiContractShape 
     #private;
     constructor(options: LambderInvokeCallerOptions<TContract, TProvidedGuards>);
     /**
+     * Points this caller, in place of the Lambda SDK, at what
+     * `lambder/testing` answers its function with: a mock app the test
+     * supplied for it, or a transport that fails every call naming the
+     * function. Keyed by a symbol no entry point exports; see
+     * registerSwappableInstance.
+     */
+    [LAMBDER_BACKEND_SWAP](twins: {
+        invokeTransport(callee: {
+            functionName: string;
+            apiPath: string;
+        }): LambderInvokeTransport;
+    }): void;
+    /**
      * The event api() would send for this call, with a plain payload. For
      * tests and boot checks that hand a built package an event file.
      */
@@ -238,7 +259,7 @@ export type LambderInvokeGroupCalls<TContract, TProvidedGuards extends string> =
     };
 };
 /**
- * A typed client of another Lambder function, over a direct Lambda invoke:
+ * A typed client of another Lambder function, over a Lambda invoke:
  * `caller.email.send(input)` for the callee's endpoint `email.send`,
  * `.outcome(input)` for its outcome, and `caller.api("email.send", input)`
  * for code that has the name as a value.

@@ -58,8 +58,8 @@ export const refusalEnvelope = (
  * server, onInvalidInput in the mock) as its envelope, once the config is
  * known to be a refusal: a refusal message or one of the three flags, so a
  * reader never takes it for the handler's output, and a message with a
- * framework code or none and no data, since it answers outside any one
- * endpoint's declared refusals. `writer` names the call in the error, and
+ * framework code that carries no data, or none, since it answers outside any
+ * one endpoint's declared refusals. `writer` names the call in the error, and
  * the logList is the config's own or the one given.
  */
 export const plainRefusalEnvelope = (
@@ -76,6 +76,12 @@ export const plainRefusalEnvelope = (
         const message = refusalMessageOf(refusal);
         if(message.code !== undefined && !isLambderRefusalCode(message.code)){
             throw new Error(`Lambder: ${writer} was given the code "${message.code}". It answers outside any one API's declared refusals, so its message carries a framework code or none.`);
+        }
+        // The one framework code that carries data names the policy that
+        // refused, which only the rate-limit engine knows, so a rate limit
+        // is answered by charging the policy (ctx.rateLimit), never by hand.
+        if(message.code === LAMBDER_REFUSAL_CODES.rateLimited){
+            throw new Error(`Lambder: ${writer} was given the code "${message.code}". A rate limit refuses with the policy that refused and the seconds to wait as its data; charge the policy with ctx.rateLimit, which refuses the call itself.`);
         }
         if(message.data !== undefined){
             throw new Error(`Lambder: ${writer} was given a message with data. Only a code an API declares carries data, and this answer is outside any one API's declaration.`);
