@@ -32,7 +32,7 @@ describe('checkApiRefusals', () => {
         const result = await checkApiRefusals({ tsconfig: `${FIXTURE}/tsconfig.json` });
         expect(result.ok).toBe(false);
         // The guards, the endpoints, the mock guards and the mock entries of the fixture, each checked, but for the one handed no typed refuse.
-        expect(result.handlers).toBe(22);
+        expect(result.handlers).toBe(23);
         expect(summaryOf(result.findings.filter((finding) => finding.problem === 'undeclared'))).toEqual([
             // A guard raising, through a helper, a code it does not name.
             { handler: 'openOrder', problem: 'undeclared', code: 'order-missing', raisedAt: at('helpers.ts', 9) },
@@ -62,10 +62,12 @@ describe('checkApiRefusals', () => {
         // orders.close reaches its two through its refuse held in a variable
         // and destructured under another name. plainOpen, from a mock with no
         // vocabulary, is held to its own empty refusals and reaches none.
+        // mockAnyoneIsStaff declares its server guard's code and raises none,
+        // as a mock that lets everyone through does.
         const handlersWithFindings = result.findings.map((finding) => finding.handler);
-        for(const handler of ['orders.get', 'staffOnly', 'mockStaffOnly', 'orders.close', 'plainOpen']) expect(handlersWithFindings).not.toContain(handler);
+        for(const handler of ['orders.get', 'staffOnly', 'mockStaffOnly', 'mockAnyoneIsStaff', 'orders.close', 'plainOpen']) expect(handlersWithFindings).not.toContain(handler);
         // Of every handler found, the unchecked one included.
-        expect(result.lines[0]).toMatch(/^✗ 18 refusal findings in 16 of 23 handlers$/);
+        expect(result.lines[0]).toMatch(/^✗ 18 refusal findings in 16 of 24 handlers$/);
     }, COMPILER_TIMEOUT_MS);
 
     it('finds a declared code nothing reaches, a refusal with no code, one whose code cannot be told, a handler it cannot follow, and one it has nothing to check against', async () => {
@@ -90,7 +92,7 @@ describe('checkApiRefusals', () => {
     it('lists a handler handed no typed refuse without failing on it, when told it may stand unchecked', async () => {
         const result = await checkApiRefusals({ tsconfig: `${FIXTURE}/tsconfig.json`, requireTypedRefuse: false });
         expect(result.findings.some((finding) => finding.problem === 'unchecked')).toBe(false);
-        expect(result.lines[0]).toMatch(/^✗ 17 refusal findings in 15 of 23 handlers$/);
+        expect(result.lines[0]).toMatch(/^✗ 17 refusal findings in 15 of 24 handlers$/);
         expect(result.lines.at(-1)).toBe(`  1 handler has no typed refuse to check against: plainSignedIn (${at('plainMock.ts', 9)})`);
     }, COMPILER_TIMEOUT_MS);
 

@@ -1159,6 +1159,9 @@ init that declared the vocabulary is checked as a server guard is, against
 its own `refusals`, which a mock given the `guardDeclarations` table holds
 to the server guard's (see [the mock
 runtime](./mock.md#declarations-policies-and-guards-from-the-generated-options)).
+A code a mock guard declares and never raises is not a finding: it stands in
+for the server guard, and refusing less than that guard does (a captcha stand-in
+that lets every token through) only lets more calls through in development.
 A refuse counts however the app names it: imported under another name, held
 in a variable, destructured under another name, or passed as a parameter
 typed as one.
