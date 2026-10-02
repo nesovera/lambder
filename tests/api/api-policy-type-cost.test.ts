@@ -124,6 +124,42 @@ const registrationSource = (endpoints: number, { groupSize = 25, registeredTwice
     return lines.join('\n');
 };
 
+/**
+ * A contract of forty endpoints over a refusal vocabulary of `codes` codes,
+ * each endpoint declaring ten of them and every fourth code carrying data, as
+ * an app that words its refusals declares them; and what a client reads of a
+ * failure: its reason and its refusal, directly and in a caller's handlers.
+ * `entry` is the module the fixture reads the client from.
+ */
+const refusalReadsSource = (codes: number, entry = '../../../src/client.js'): string => {
+    const code = (index: number) => `C${index}`;
+    const refusalEntry = (index: number) => `${code(index)}: ${index % 4 === 0 ? `{ data: { n${index}: number } }` : '{}'}`;
+    const endpoints = Array.from({ length: 40 }, (_, endpoint) => {
+        const declared = Array.from({ length: 10 }, (_, offset) => (endpoint * 10 + offset) % codes);
+        return `    "g.e${endpoint}": { input: { id: string }; output: { ok: boolean }; refusals: { ${declared.map(refusalEntry).join('; ')} } };`;
+    });
+    return [
+        `import { LambderCaller, type LambderApiFailure, type LambderApiOutcome, type LambderContractAnyRefusalMessage } from ${JSON.stringify(entry)};`,
+        ``,
+        `type Contract = {`,
+        ...endpoints,
+        `};`,
+        `type Message = LambderContractAnyRefusalMessage<Contract>;`,
+        ``,
+        `declare const failure: LambderApiFailure<Message>;`,
+        `export const reason = failure.reason;`,
+        `export const code = failure.refusal?.code;`,
+        `declare const outcome: LambderApiOutcome<unknown, Message>;`,
+        `export const ok = outcome.ok;`,
+        `export const refused = !outcome.ok && outcome.reason === "refusal" ? outcome.refusal.code : null;`,
+        `export const caller = new LambderCaller<Contract>({`,
+        `    fetchEndedHandler: ({ fetchResult }) => { if (!fetchResult.ok) void fetchResult.reason; },`,
+        `    errorHandler: (error, failed) => { void error.message; void failed.refusal?.code; },`,
+        `});`,
+        ``,
+    ].join('\n');
+};
+
 /** The fixture checked under the package's own compiler options: its diagnostics, and the type instantiations checking it took. */
 const checkFixture = (source: string): { instantiations: number; diagnostics: string[] } => {
     const config = ts.readConfigFile(join(REPO_ROOT, 'tsconfig.json'), ts.sys.readFile);
@@ -203,6 +239,12 @@ describe('What an app of many small groups costs: the checks over the groups run
     it('still refuses an action two of the parts declare, naming it', () => {
         const { diagnostics } = checkFixture(groupPartsSource(150, 'a12'));
         expect(diagnostics.join('\n')).toMatch(/lambder: these actions are declared by more than one part of the group[\s\S]*"a12"/);
+    }, COMPILER_TIMEOUT_MS);
+});
+
+describe('What reading a failure costs as a contract\'s refusal vocabulary grows', () => {
+    it('reads a failure\'s reason and refusal, and a caller\'s handlers read them, for a vocabulary of four hundred codes', () => {
+        expect(checkFixture(refusalReadsSource(400)).diagnostics).toEqual([]);
     }, COMPILER_TIMEOUT_MS);
 });
 

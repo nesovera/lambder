@@ -62,7 +62,7 @@ export type LambderRefusalCheckFinding = {
     at: string;
     /**
      * - `undeclared`: a code the handler can reach that it may not send.
-     * - `unused`: a code the handler's own `refusals` option names that nothing it reaches raises.
+     * - `unused`: a code the handler's own `refusals` option names that nothing it reaches raises. Never a mock guard's, whose codes are its server guard's.
      * - `uncoded`: a refusal with no code it can reach, where codes are required.
      * - `unreadable`: a refusal it can reach whose code is not a string literal type.
      * - `untraced`: a handler handed a typed refuse whose function cannot be
@@ -159,6 +159,22 @@ export const checkApiRefusals = async (options: LambderApiRefusalCheckOptions): 
         const parts = path.split(sep);
         if(parts.some((part, index) => part === "node_modules" && parts[index + 1] === "lambder")) return true;
         return isInside(path, lambderRoot) && !isInside(path, resolve(lambderRoot, "tests")) && !parts.slice(lambderRoot.split(sep).length).includes("node_modules");
+    };
+    /**
+     * Whether a registration is a mock guard: `guard` read off a mock init,
+     * whose builder Lambder declares in its mock entry, where a server init's
+     * is declared in its own.
+     */
+    const isMockGuard = (call: ts.CallExpression, registration: string): boolean => {
+        if(registration !== "guard" || !ts.isPropertyAccessExpression(call.expression)) return false;
+        const declaration = checker.getSymbolAtLocation(call.expression.name)?.declarations?.[0];
+        if(!declaration || !isLambderDeclaration(declaration)) return false;
+        const path = realPathOf(ts, declaration.getSourceFile().fileName);
+        const parts = path.split(sep);
+        const packageAt = parts.findIndex((part, index) => part === "lambder" && parts[index - 1] === "node_modules");
+        // The path inside the package: dist/mock/... installed, src/mock/... over its own sources.
+        const inside = packageAt >= 0 ? parts.slice(packageAt + 1) : relative(lambderRoot, path).split(sep);
+        return inside[1] === "mock";
     };
     const where = (node: ts.Node): string => {
         const sourceFile = node.getSourceFile();
@@ -462,6 +478,11 @@ export const checkApiRefusals = async (options: LambderApiRefusalCheckOptions): 
                 findings.push({ handler: name, at, problem: "unreadable", raisedAt: raise.at });
             }
         }
+        // A mock guard declares its server guard's codes, which create() holds
+        // it to against guardDeclarations. Standing in for that guard it may
+        // raise fewer of them, which only lets more through, so a code it
+        // never raises is no declaration to trim.
+        if(isMockGuard(call, registration)) return;
         for(const code of ownRefusalsOf(optionsNode) ?? []){
             if(!reached.has(code)) findings.push({ handler: name, at, problem: "unused", code });
         }

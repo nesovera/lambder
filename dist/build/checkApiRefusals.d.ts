@@ -16,7 +16,7 @@ export type LambderRefusalCheckFinding = {
     at: string;
     /**
      * - `undeclared`: a code the handler can reach that it may not send.
-     * - `unused`: a code the handler's own `refusals` option names that nothing it reaches raises.
+     * - `unused`: a code the handler's own `refusals` option names that nothing it reaches raises. Never a mock guard's, whose codes are its server guard's.
      * - `uncoded`: a refusal with no code it can reach, where codes are required.
      * - `unreadable`: a refusal it can reach whose code is not a string literal type.
      * - `untraced`: a handler handed a typed refuse whose function cannot be

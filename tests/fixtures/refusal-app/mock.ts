@@ -18,6 +18,13 @@ const mockStaffOnly = mock.guard({
     },
 });
 
+/**
+ * A mock guard standing in for staffOnly as a development mock does, letting
+ * every caller through: it declares the server guard's code and raises none,
+ * which is no unused declaration.
+ */
+export const mockAnyoneIsStaff = mock.guard({ session: true, refusals: ["not-staff"], handler: () => {} });
+
 /** A mock guard raising, through the mock's helper, a code it does not declare. */
 const mockOpenOrder = mock.guard({ handler: () => refuseShort() });
 

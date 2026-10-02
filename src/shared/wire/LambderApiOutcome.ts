@@ -54,13 +54,17 @@ export type LambderApiSuccessOutcome<T> = {
  * message the endpoint can answer with (LambderContractRefusalMessage), on
  * every arm: a refusal flagged notAuthorized arrives as that reason and still
  * carries its message.
+ *
+ * The message is declared once per arm, never here and again on the arm that
+ * requires it: an intersection reading `refusal` from both would intersect
+ * TMessage with itself, a union of every code a contract declares crossed
+ * with itself, which for a contract of a few hundred codes is past what the
+ * compiler can represent (TS2590 on any read of a failure).
  */
-type LambderApiFailureFields<TMessage extends LambderUncheckedRefusalMessage> = {
+type LambderApiFailureFields = {
     ok: false;
     /** HTTP status, when a response was received. */
     status?: number;
-    /** The envelope's refusal, when the server provided one: always the message object, a plain string having been read as one (refusalMessageOf). */
-    refusal?: TMessage;
     /** Seconds to wait before retrying, from the response's Retry-After header (rate-limit refusals send it, and so may a 503). */
     retryAfterSeconds?: number;
     /**
@@ -82,23 +86,27 @@ type LambderApiFailureFields<TMessage extends LambderUncheckedRefusalMessage> = 
  * `response` when the server answered with Lambder's own envelope, which is
  * how a crash detail and a logList arrive with it.
  */
-export type LambderApiCallFailure<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = LambderApiFailureFields<TMessage> & {
+export type LambderApiCallFailure<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = LambderApiFailureFields & {
     reason: 'network' | 'timeout' | 'aborted' | 'server' | 'unknown';
+    /** The envelope's refusal, when the server provided one: always the message object, a plain string having been read as one (refusalMessageOf). */
+    refusal?: TMessage;
     error: Error;
     response?: LambderApiRefusalEnvelope;
 };
 
 /** HTTP 422: the server rejected the input against the API's schema. Always carries the issues. */
-export type LambderApiValidationFailure<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = LambderApiFailureFields<TMessage> & {
+export type LambderApiValidationFailure<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = LambderApiFailureFields & {
     reason: 'validation';
+    /** As on a call failure. */
+    refusal?: TMessage;
     zodError: LambderValidationError;
 };
 
 /** The server answered, and the envelope itself says the call is refused. Always carries that envelope, and a `refusal` failure always carries the refusal. */
-export type LambderApiEnvelopeFailure<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = LambderApiFailureFields<TMessage> & {
+export type LambderApiEnvelopeFailure<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = LambderApiFailureFields & {
     response: LambderApiRefusalEnvelope;
 } & (
-    | { reason: 'versionExpired' | 'sessionExpired' | 'notAuthorized' }
+    | { reason: 'versionExpired' | 'sessionExpired' | 'notAuthorized'; /** As on a call failure. */ refusal?: TMessage }
     | { reason: 'refusal'; refusal: TMessage }
 );
 

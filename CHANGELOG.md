@@ -9,6 +9,28 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [15.0.2] - 2026-10-02
+
+A patch: two fixes for apps with a large contract.
+
+### Fixed
+
+- **Reading a failure compiles for a contract of hundreds of refusal codes.**
+  `failure.reason`, `failure.refusal`, `outcome.ok` and every other read of a
+  `LambderApiFailure` or `LambderApiOutcome` over a contract's refusal
+  messages failed with TS2590 ("union type too complex to represent") once
+  the vocabulary held a few hundred codes, and so did a `LambderCaller` whose
+  `fetchEndedHandler` or `errorHandler` read its argument: the refusal arm
+  declared its message both on the fields every failure shares and on the arm
+  itself, and a read of the intersection crossed the message union with
+  itself. Each arm now declares it once. The types describe the same values.
+- **`checkApiRefusals` no longer reports a mock guard's unused codes.** A mock
+  guard declares exactly its server guard's codes, which `create()` holds it
+  to against `guardDeclarations`, so one that raises fewer (a captcha stand-in
+  letting every token through) got an `unused` finding it could not act on.
+  Its codes are still checked the other way: one it raises and may not send
+  is `undeclared`.
+
 ## [15.0.1] - 2026-10-02
 
 A major. Fixes for crashes, misconfigurations that passed silently, and places
