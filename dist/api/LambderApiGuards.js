@@ -80,6 +80,13 @@ export class LambderApiGuardsEngine {
             if (runAt !== undefined && runAt !== "beforeInputValidation" && runAt !== "afterInputValidation") {
                 throw new Error(`Lambder: guard "${name}" has runAt "${String(runAt)}"; use "beforeInputValidation" (default) or "afterInputValidation".`);
             }
+            const singleUseInput = guardDef.singleUseInput;
+            if (singleUseInput !== undefined && typeof singleUseInput !== "boolean") {
+                throw new Error(`Lambder: guard "${name}" has singleUseInput ${String(singleUseInput)}; write true for a value a retry carries fresh, or leave it off.`);
+            }
+            if (singleUseInput && !guardDef.guardInput) {
+                throw new Error(`Lambder: guard "${name}" declares singleUseInput without a guardInput. Only a value the client sends beside the payload can be left out of an idempotent request's fingerprint; a slice of the payload always counts.`);
+            }
             this.guards.set(name, guardDef);
         }
     }
@@ -104,6 +111,26 @@ export class LambderApiGuardsEngine {
                 throw new Error(`Lambder: API "${apiName}" uses guard "${name}" (session: true) but is registered as public. An endpoint declaring a session guard is a session endpoint.`);
             }
         }
+    }
+    /**
+     * The posted guard inputs an idempotency fingerprint holds for an API
+     * declaring `guardsOption`: the value of each of its `guardInput` guards
+     * by name, except a guard's declared singleUseInput. Read as posted, as
+     * the payload is, before any guard parses it; a guard the client sent
+     * nothing for is left out. A null-prototype map, so a guard named
+     * "__proto__" is a key like any other.
+     */
+    fingerprintedInputsOf(request, guardsOption) {
+        const inputs = Object.create(null);
+        for (const { name } of toGuardEntries(guardsOption)) {
+            const guardDef = this.guards.get(name);
+            if (!guardDef?.guardInput || guardDef.singleUseInput)
+                continue;
+            const input = readGuardInput(request.guardInputs, name);
+            if (input !== undefined)
+                inputs[name] = input;
+        }
+        return inputs;
     }
     /**
      * Run the API's guards that run at `runAt` (see LambderGuardRunAt) in

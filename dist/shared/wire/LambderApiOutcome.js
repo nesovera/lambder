@@ -2,7 +2,7 @@
  * The one mapping from an HTTP answer to an API outcome.
  *
  * LambderCaller (a browser, over fetch) and LambderInvokeCaller (a server,
- * over a direct Lambda invoke) receive the same envelope and must read it
+ * over a Lambda invoke) receive the same envelope and must read it
  * the same way: which status is a crash, which is a rejected input, in what
  * order the envelope flags are honoured, what a non-envelope body means.
  * Both hand their answer to resolveApiOutcome and act on the result; their

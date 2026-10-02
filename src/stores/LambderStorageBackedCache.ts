@@ -1,4 +1,6 @@
-import type { LambderCache, LambderCacheKey, LambderCacheListOptions, LambderCacheSetOptions } from "../shared/contracts/LambderCache.js";
+import type {
+    LambderCache, LambderCacheGetOrSetOptions, LambderCacheKey, LambderCacheListOptions, LambderCacheSetOptions,
+} from "../shared/contracts/LambderCache.js";
 import { assertPositiveInteger } from "../shared/util/LambderOptionChecks.js";
 import { cacheMemoryKeyOf, compareCacheSortKeys, normalizeCacheKey, normalizeCachePartition, type LambderCacheAddress } from "./LambderCacheKeys.js";
 import {
@@ -135,7 +137,7 @@ export class LambderStorageBackedCache implements LambderCache {
         return limit === undefined ? sortKeys : sortKeys.slice(0, limit);
     }
 
-    async getOrSet<T>(key: LambderCacheKey, loader: () => Promise<T>, options: LambderCacheSetOptions = {}): Promise<T> {
+    async getOrSet<T>(key: LambderCacheKey, loader: () => Promise<T>, options: LambderCacheGetOrSetOptions = {}): Promise<T> {
         const address = normalizeCacheKey(key);
         const { ttlSeconds } = resolveGetOrSetOptions(options, this.defaultTtlSeconds);
         return this.filler.getOrSet(address.memoryKey, loader, async (load) => {

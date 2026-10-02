@@ -1,3 +1,4 @@
+import type { LambderCacheGetOrSetOptions } from "../shared/contracts/LambderCache.js";
 import { assertPositiveInteger } from "../shared/util/LambderOptionChecks.js";
 
 /*
@@ -73,7 +74,7 @@ export const resolveCacheTtlSeconds = (ttlSeconds: number | undefined, defaultTt
  * is refused by every cache.
  */
 export const resolveGetOrSetOptions = (
-    options: { ttlSeconds?: number, leaseSeconds?: number, waitForFillMs?: number },
+    options: LambderCacheGetOrSetOptions,
     defaultTtlSeconds: number,
 ): LambderCacheFillSettings => {
     const leaseSeconds = assertPositiveInteger(options.leaseSeconds ?? DEFAULT_LEASE_SECONDS, "leaseSeconds");

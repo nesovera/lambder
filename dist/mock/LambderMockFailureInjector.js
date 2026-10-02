@@ -8,7 +8,8 @@ const toRefusalMessage = (message, fallback) => typeof message === "string" ? { 
 /**
  * A failure the transport reports rather than an answer the caller reads:
  * an injected network failure or timeout. The caller maps a rejected
- * transport to `network`, or `timeout` when its own abort fired.
+ * transport to `network`, or to `timeout` or `aborted` when the call's own
+ * timeout or signal had aborted it.
  */
 export class LambderMockTransportError extends Error {
     reason;
@@ -112,16 +113,19 @@ export class LambderMockFailureInjector {
      * never reach the caller as answers. An injected refusal is checked
      * against the endpoint's declared codes (`endpoint`), as the pipeline
      * checks a real one, so a test cannot inject what the server could never
-     * send.
+     * send. `endsSession` says the answer tells the caller its session is
+     * over (sessionExpired, or a refusal whose code is declared so), which
+     * the runtime then makes true.
      */
     async answerFor(failure, request, endpoint) {
         switch (failure.reason) {
             case "network": throw new LambderMockTransportError("network");
             case "timeout": return await this.waitForAbort(request.signal);
-            case "server": return crashAnswer(this.apiVersion);
+            case "server": return { answer: crashAnswer(this.apiVersion), endsSession: false };
             case "refusal": {
                 const message = toRefusalMessage(failure.message, "Injected refusal.");
-                return refusalAnswer(checkedRefusal(request.apiName, endpoint, new LambderApiRefusal(message.content, { refusal: message, statusCode: failure.statusCode })), this.apiVersion);
+                const checked = checkedRefusal(request.apiName, endpoint, new LambderApiRefusal(message.content, { refusal: message, statusCode: failure.statusCode }));
+                return { answer: refusalAnswer(checked, this.apiVersion), endsSession: checked.sessionExpired === true };
             }
             case "notAuthorized": {
                 const message = toRefusalMessage(failure.message, "Injected authorization refusal.");
@@ -132,11 +136,11 @@ export class LambderMockFailureInjector {
                 if (!checked.notAuthorized) {
                     throw new Error(`LambderMockApp: the injected notAuthorized failure names the code "${String(message.code)}", which is not declared notAuthorized. Inject it as a refusal, or declare the flag on the code.`);
                 }
-                return refusalAnswer(checked, this.apiVersion);
+                return { answer: refusalAnswer(checked, this.apiVersion), endsSession: checked.sessionExpired === true };
             }
-            case "sessionExpired": return sessionExpiredAnswer(this.apiVersion);
-            case "versionExpired": return versionExpiredAnswer(this.apiVersion);
-            case "rateLimited": return refusalAnswer(rateLimitRefusal("Injected rate limit.", failure.retryAfterSeconds ?? 30, failure.message), this.apiVersion);
+            case "sessionExpired": return { answer: sessionExpiredAnswer(this.apiVersion), endsSession: true };
+            case "versionExpired": return { answer: versionExpiredAnswer(this.apiVersion), endsSession: false };
+            case "rateLimited": return { answer: refusalAnswer(rateLimitRefusal("Injected rate limit.", { policy: failure.policy ?? "injected", retryAfterSeconds: failure.retryAfterSeconds ?? 30 }, failure.message), this.apiVersion), endsSession: false };
         }
     }
     /** Clears every injected failure and puts the configured latency back. */

@@ -16,32 +16,32 @@ order the first time.
 | Page | Covers |
 | --- | --- |
 | [Routing and actions](./routing.md) | `addRoute`, matchers, path params, hooks, fallback and error handlers, crash reporting (`crashes`), gateway differences, and `addAction` for non-HTTP invocations |
-| [APIs and refusals](./apis.md) | `defineApi`, `defineApiGroup`, `lazyApiGroup` and `registerApiGroups`, the mode the guards decide, the call path, the inferred contract, `refuse()` and `LambderApiRefusal`, the signature file (`writeApiSignatures` from `lambder/build`), the contract as a generated file for a client (`writeApiContract`), the declared options as a generated file of plain data (`writeApiOptions`), one guard's parameters for a browser (`writeApiGuardParams`), and every one of them in one call (`generateApiFiles`) |
+| [APIs and refusals](./apis.md) | `defineApi`, `defineApiGroup`, `lazyApiGroup` and `registerApiGroups`, the mode the guards decide, the call path, the inferred contract, `refuse()` and `LambderApiRefusal`, the signature file (`writeApiSignatures` from `lambder/build`), the contract as a generated file for a client (`writeApiContract`), the declared options as a generated file of plain data (`writeApiOptions`), one guard's parameters for a browser (`writeApiGuardParams`), every API's input and output schema as JSON Schema for the mock (`writeApiSchemas`), and every one of them in one call (`generateApiFiles`) |
 | [Responses](./responses.md) | The render context and its response tools (headers, cookies, log entries), the resolver methods routes and hooks use, `die`, compression (per API too), ETag, and Lambda's size caps |
 | [Sessions](./sessions.md) | Sessions over a store (DynamoDB, memory, your own), cookie scope and migrations, secrets at rest, `dataSchema` and `dataRefresh`, the session controller |
 | [API policies](./api-policies.md) | Declarative rate limits, guards and idempotency, and making an authorization declaration mandatory |
-| [Secrets and retries](./secrets.md) | `LambderSignedClaims`: signed tokens that are their own record; `keyedDigest` and `randomSecret` for the secrets an app stores; `LambderOneShotSecrets`: codes and tokens handed out once and taken back once, over a store that settles their races; `LambderBackoffTimer`: waiting longer after each failure, once |
-| [Calling another lambda](./invoke.md) | `LambderInvokeCaller`: invoking a Lambder app in another function directly, with its contract, crash detail and logs |
-| [Testing](./testing.md) | `lambderTestApp`: your real instance under test in this process, memory stores put under it in place, simulated browsers in front of it, outcome assertions, time, the store conformance suites for a store of your own, and where every other kind of test lives |
+| [Secrets and retries](./secrets.md) | `LambderSignedClaims`: signed tokens that are their own record; `keyedDigest`, `randomSecret` and `randomCode` for the secrets and codes an app stores; `LambderPasswordHasher`: passwords at rest as argon2id; `LambderOneShotSecrets`: codes and tokens handed out once and taken back once, over a store that settles their races |
+| [Calling another lambda](./invoke.md) | `LambderInvokeCaller`: calling a Lambder app in another function through a Lambda invoke, with its contract, crash detail and logs |
+| [Testing](./testing.md) | `lambderTestApp`: your real instance under test in this process, memory stores put under it in place, simulated browsers in front of it, outcome assertions, a crash failing the test it happened in (`assertNoCrashesAfterEach`), time, the store conformance suites for a store of your own (the cache's two among them, `lambderCacheConformance` and `lambderCacheStorageConformance`), a built deployment package booted the way Lambda boots it (`bootLambdaPackage`), and where every other kind of test lives |
 | [The API core](./api-core.md) | `LambderApiPipeline`: the one request pipeline the server and the mock runtime run, the request and answer shapes, store interfaces, transports |
 
 ## Building a frontend
 
 | Page | Covers |
 | --- | --- |
-| [Frontend client](./client.md) | `LambderCaller`: typed calls, `apiOutcome`, timeouts, guard inputs, idempotency keys, request compression, transports |
+| [Frontend client](./client.md) | `LambderCaller`: typed calls, `apiOutcome`, timeouts, guard inputs, idempotency keys, request compression, transports; `LambderBackoffTimer`: waiting longer after each failure |
 | [Frontend hosting](./frontend-hosting.md) | File sources (local, S3, R2, HTTP), `servePublicFiles`, `serveIndexHtml`, `res.templateFile` |
 | [Direct uploads](./uploads.md) | Files the browser sends straight to S3, or to a store that takes presigned PUTs such as R2, with tickets the server signs: `LambderS3UploadBucket`, `LambderUploadRunner`, and `LambderMemoryUploadBucket` for tests and the mock |
 | [Templating](./templating.md) | `html`/`xml` tagged templates and the comment-only `LambderTemplatingEngine` |
-| [Translations](./i18n.md) | `createLambderI18n`: typed keys, component extension, language detection, on-demand languages, runtime dictionaries |
-| [The mock runtime](./mock.md) | `LambderMockApp`: your typed contract served from mock handlers over the real pipeline, in the browser and in tests |
+| [Translations](./i18n.md) | `createLambderI18n`: typed keys, plural forms and the strict check of their coverage (`checkPluralCoverage`), component extension, language detection, on-demand languages, runtime dictionaries |
+| [The mock runtime](./mock.md) | `LambderMockApp`: your typed contract served from mock handlers over the real pipeline, in the browser and in tests, each call validated against the server's schemas when it is given the generated `apiSchemas` |
 
 ## Infrastructure and stores
 
 | Page | Covers |
 | --- | --- |
 | [DynamoDB tables](./ddb-tables.md) | Table shapes, TTL and IAM for sessions, cache, rate limits and idempotency |
-| [DynamoDB cache](./ddb-cache.md) | `LambderDdbCache`: compressed values, memory layer, fill lease, grouped keys; `LambderMemoryCache`, its twin for tests; `LambderStorageBackedCache`, the same rules over an app's own storage (a SQL table, Redis) |
+| [DynamoDB cache](./ddb-cache.md) | `LambderDdbCache`: compressed values, memory layer, fill lease, grouped keys; `LambderMemoryCache`, its twin for tests; `LambderStorageBackedCache`, the same rules over an app's own storage (a SQL table, Redis); the conformance suites that hold a cache and a storage of your own to those rules |
 | [Rate limiter](./ddb-rate-limiter.md) | `LambderDdbRateLimiter`: fixed windows, atomic counting, fail-open |
 | [Idempotency store](./ddb-idempotency.md) | `LambderDdbIdempotencyStore`: claims, replays, owner tokens, stored bodies |
 

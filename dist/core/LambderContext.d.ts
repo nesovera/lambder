@@ -5,6 +5,7 @@ import { LambderAnswerHeaders } from "../shared/wire/LambderAnswerHeaders.js";
 import { type LambderResponseTools } from "../api/LambderApiCallContext.js";
 import type LambderSessionController from "../session/LambderSessionController.js";
 import type { LambderApiRateLimitPolicyConfig, LambderContextRateLimit, LambderContextRateLimitCheck, LambderRateLimitCheckResult } from "../api/LambderApiRateLimits.js";
+import type { LambderAppTypes } from "../api/LambderApiDeclarations.js";
 export type LambderHttpEvent = APIGatewayProxyEvent | APIGatewayProxyEventV2;
 /**
  * Which API Gateway payload format an event arrived in, and the format its
@@ -16,6 +17,21 @@ export type LambderHttpEventFormat = "v1" | "v2";
 /** True for API Gateway HTTP API / Lambda Function URL (payload v2) events. */
 export declare const isV2HttpEvent: (event: unknown) => event is APIGatewayProxyEventV2;
 /**
+ * How a request reached the function, as `ctx.arrivedVia` says it:
+ * - "proxy": over HTTP, carrying a valid `originProof`, so it came through
+ *   the proxy in front of the app;
+ * - "direct": over HTTP without a valid proof, sent to the gateway's own
+ *   address (an `execute-api` or `lambda-url` domain) rather than through the
+ *   proxy, so the proxy's headers on it are whatever its sender wrote and
+ *   have been taken off;
+ * - "invoke": a Lambda invoke, told by the event's `requestContext.apiId`,
+ *   which a gateway writes itself and no HTTP client can set, so only a
+ *   caller IAM let invoke the function sends one;
+ * - "unverified": over HTTP on an instance with no `originProof`, where
+ *   nothing tells a proxied request from a direct one.
+ */
+export type LambderRequestArrival = "proxy" | "direct" | "invoke" | "unverified";
+/**
  * Everything a route or API handler knows about the request. Extends the
  * API core's call context (session, guardData, responseHeaders, logList),
  * which is the part the pipeline and the session controller work on; the
@@ -24,15 +40,17 @@ export declare const isV2HttpEvent: (event: unknown) => event is APIGatewayProxy
  * and the response tools (setResponseHeader, addResponseHeader, setCookie,
  * clearCookie) that write onto whatever answer the request ends with.
  *
- * TRateLimitPolicies is the app's policies map on a handler registered with
- * defineApi, addRoute or addSessionRoute, so a policy name is
- * checked where it is charged; anywhere else (a hook, a guard) the names are
- * any string.
+ * TRateLimitPolicies is the app's policies map on an API handler (defineApi)
+ * and on a route registered by a path string (addRoute, addSessionRoute), so
+ * a policy name is checked where it is charged; anywhere else (a route
+ * matched by a RegExp, a predicate or a matcher object, a hook, a guard) the
+ * names are any string. LambderRenderContextOf names the typed form for a
+ * helper that takes one instance's context.
  */
 export type LambderRenderContext<TApiPayload = any, TPathParams extends Record<string, string> = Record<string, string>, TGuardData = {}, TSessionData = any, TRateLimitPolicies = Record<string, LambderApiRateLimitPolicyConfig>> = {
     /**
      * The Host the gateway received, or the first header named in
-     * `trustedHostHeaders` that carries a well-formed host. On a direct
+     * `trustedHostHeaders` that carries a well-formed host. On a Lambda
      * invoke, the invoking caller's `host`, whatever headers it forwarded.
      */
     host: string;
@@ -93,7 +111,7 @@ export type LambderRenderContext<TApiPayload = any, TPathParams extends Record<s
     /**
      * The address the gateway observed, or the leftmost entry of the first
      * header named in `trustedClientIpHeaders` that carries one; nothing is
-     * trusted by default, and no header on a direct invoke, whose address is
+     * trusted by default, and no header on a Lambda invoke, whose address is
      * the invoking caller's `clientIp`. One spelling per address (port and brackets
      * stripped, lowercased, length-bounded), so a `per: "ip"` limit keys one
      * counter per client.
@@ -105,6 +123,12 @@ export type LambderRenderContext<TApiPayload = any, TPathParams extends Record<s
     lambdaContext: Context;
     /** Which API Gateway payload format the event arrived in, and the response leaves in. */
     eventFormat: LambderHttpEventFormat;
+    /**
+     * How the request reached the function (see LambderRequestArrival):
+     * through the proxy with a valid `originProof`, without it, by a
+     * Lambda invoke, or, with no `originProof` configured, unverified.
+     */
+    readonly arrivedVia: LambderRequestArrival;
     /** Response headers written during the request (the response tools below, session cookies), applied onto the response at the end. */
     responseHeaders: LambderAnswerHeaders;
     /** Entries for the API envelope's logList channel: a handler pushes what it wants the caller's debug log to show. */
@@ -132,6 +156,25 @@ export type LambderRenderContext<TApiPayload = any, TPathParams extends Record<s
 export type LambderSessionRenderContext<TApiPayload = any, SessionData = any, TPathParams extends Record<string, string> = Record<string, string>, TGuardData = {}, TRateLimitPolicies = Record<string, LambderApiRateLimitPolicyConfig>> = Omit<LambderRenderContext<TApiPayload, TPathParams, TGuardData, SessionData, TRateLimitPolicies>, 'session'> & {
     session: LambderSessionRecord<SessionData>;
 };
+/** What the context helpers below read off an instance: the AppTypes property every instance carries. */
+type LambderInstanceTypes = {
+    readonly AppTypes: LambderAppTypes;
+};
+/**
+ * One instance's render context, read off `typeof lambderApp`: its session
+ * data and its rate-limit policy names, any payload, path parameters and
+ * guard data. What a helper in another file takes to be handed a context of
+ * that instance, without writing LambderRenderContext's parameters out: an
+ * API handler's, a route's, a hook's and a guard's context are each
+ * assignable to it.
+ */
+export type LambderRenderContextOf<TInstance extends LambderInstanceTypes> = LambderRenderContext<any, Record<string, string>, {}, TInstance["AppTypes"]["session"], TInstance["AppTypes"]["policies"]>;
+/**
+ * LambderRenderContextOf with the session present: what a helper takes to be
+ * handed the context of a session route, a session endpoint's handler or a
+ * guard that needs a session, each assignable to it.
+ */
+export type LambderSessionRenderContextOf<TInstance extends LambderInstanceTypes> = LambderSessionRenderContext<any, TInstance["AppTypes"]["session"], Record<string, string>, {}, TInstance["AppTypes"]["policies"]>;
 /** The members of a render context that are bound onto it rather than read from its event. */
 type LambderContextToolName = "sessionController" | "rateLimit" | "isRateLimited" | keyof LambderResponseTools;
 /** What an instance binds onto each context it renders: see bindContextTools. */
@@ -157,6 +200,15 @@ export type LambderOriginProof = {
     header: string;
     /** The values it may carry: the current secret, and during a rotation the one before it. */
     secrets: readonly string[];
+    /**
+     * Headers the proxy writes that the app reads, beside the trusted client
+     * address and host headers, such as "cf-ipcountry" or
+     * "cloudfront-viewer-country". A request without the proof carries
+     * whatever its sender wrote under these names, so they are taken off
+     * `ctx.headers` and `ctx.header()` there, as the trusted headers are.
+     * Default: none.
+     */
+    proxyHeaders?: readonly string[];
 };
 /** What createContext reads a request with: the instance's own settings for where an API call goes and which forwarded headers it trusts. */
 export type LambderContextOptions = {
@@ -166,7 +218,7 @@ export type LambderContextOptions = {
     trustedClientIpHeaders?: readonly string[];
     /** See `trustedHostHeaders` at create(). Default: none. */
     trustedHostHeaders?: readonly string[];
-    /** See `originProof` at create(). Default: none, so the trusted headers are read on every request. */
+    /** See `originProof` at create(). Default: none, so the trusted headers are read on every request and `arrivedVia` is "unverified" on all but an invoke. */
     originProof?: LambderOriginProof | null;
 };
 /** The render context for one request: everything a route handler, an API handler, a hook or a guard reads about it, built once from the Lambda event. */

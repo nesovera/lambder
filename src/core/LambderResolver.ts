@@ -1,5 +1,6 @@
-import LambderResponseBuilder from "./LambderResponseBuilder.js";
+import LambderResponseBuilder, { type LambderTemplateFileOptions } from "./LambderResponseBuilder.js";
 import type { LambderResponse } from "./LambderResponse.js";
+import type { LambderTemplateData } from "./LambderTemplatingEngine.js";
 
 type SyncDie<T extends (...args: any[]) => LambderResponse> = (...args: Parameters<T>) => never;
 type AsyncDie<T extends (...args: any[]) => Promise<LambderResponse>> = (...args: Parameters<T>) => Promise<never>;
@@ -18,7 +19,9 @@ interface DieResolverMethods {
     fileBase64: SyncDie<LambderResponseBuilder["fileBase64"]>;
     apiRefusal: SyncDie<LambderResponseBuilder["apiRefusal"]>;
     file: AsyncDie<LambderResponseBuilder["file"]>;
-    templateFile: AsyncDie<LambderResponseBuilder["templateFile"]>;
+    // Written out rather than derived: Parameters<> of a generic method fixes
+    // its names to string, and the die form takes them as res.templateFile does.
+    templateFile: <TNames extends string = string>(filePath: string, data?: LambderTemplateData<TNames>, options?: LambderTemplateFileOptions) => Promise<never>;
 }
 
 /**

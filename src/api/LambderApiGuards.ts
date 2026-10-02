@@ -68,6 +68,24 @@ export type LambderGuardPlacement = {
     runAt?: LambderGuardRunAt;
 };
 
+/** What a `guardInput` guard's value is to an idempotency key's request. */
+export type LambderGuardInputUse = {
+    /**
+     * The value can differ between attempts of one operation: a single-use
+     * proof (a captcha token, a one-time code) or a credential refreshed
+     * between attempts (a short-lived token). A genuine retry may carry a new
+     * one, so the value is left out of the fingerprint that tells one request
+     * under an idempotency key from another; counted, it would turn the retry
+     * into a 409 and the person's next attempt into a second run. Default:
+     * false, the value counts, so the same key sent with
+     * another value (another store, another tenant) is refused as another
+     * request rather than replayed the first one's answer. Only a
+     * `guardInput` guard takes it: an `apiInput` guard's value is the
+     * payload's, which always counts.
+     */
+    singleUseInput?: boolean;
+};
+
 /**
  * The refusal codes a guard may refuse with, from the app's vocabulary (the
  * `refusals` option at creation). They join the codes of every API that
@@ -92,6 +110,13 @@ export type LambderGuardRefusals<TRefusals extends readonly string[] = readonly 
  *   API's contract (`guardInputs`), so the typed caller refuses to compile a
  *   call that omits it. The API payload and handler never see the value.
  * - neither: the guard reads only the context.
+ *
+ * A `guardInput` is part of what an idempotency key's request is, beside its
+ * payload: the same key sent with another value (another store, another
+ * tenant) is another request. A guard whose value can differ between
+ * attempts of one operation (a captcha token, a one-time code, a short-lived
+ * token refreshed in between) declares `singleUseInput: true`, and its value
+ * is left out of that, since a genuine retry may carry a new one.
  *
  * Orthogonally, a guard may also:
  *
@@ -123,12 +148,12 @@ export type LambderGuardRefusals<TRefusals extends readonly string[] = readonly 
  * and read `ctx.ip` as undefined, authorizing or refusing everything.
  */
 export type LambderApiGuard<TInput extends z.ZodType = z.ZodType, TParam = any, TOutput = any, TCtx = any, TSessionCtx = TCtx> = LambderGuardPlacement & LambderGuardRefusals & (
-    | { apiInput: TInput; guardInput?: undefined; session: true; handler: LambderGuardHandler<TSessionCtx, z.output<TInput>, TParam, TOutput> }
-    | { apiInput: TInput; guardInput?: undefined; session?: false; handler: LambderGuardHandler<TCtx, z.output<TInput>, TParam, TOutput> }
-    | { guardInput: TInput; apiInput?: undefined; session: true; handler: LambderGuardHandler<TSessionCtx, z.output<TInput>, TParam, TOutput> }
-    | { guardInput: TInput; apiInput?: undefined; session?: false; handler: LambderGuardHandler<TCtx, z.output<TInput>, TParam, TOutput> }
-    | { apiInput?: undefined; guardInput?: undefined; session: true; handler: LambderGuardHandler<TSessionCtx, undefined, TParam, TOutput> }
-    | { apiInput?: undefined; guardInput?: undefined; session?: false; handler: LambderGuardHandler<TCtx, undefined, TParam, TOutput> }
+    | { apiInput: TInput; guardInput?: undefined; singleUseInput?: undefined; session: true; handler: LambderGuardHandler<TSessionCtx, z.output<TInput>, TParam, TOutput> }
+    | { apiInput: TInput; guardInput?: undefined; singleUseInput?: undefined; session?: false; handler: LambderGuardHandler<TCtx, z.output<TInput>, TParam, TOutput> }
+    | ({ guardInput: TInput; apiInput?: undefined; session: true; handler: LambderGuardHandler<TSessionCtx, z.output<TInput>, TParam, TOutput> } & LambderGuardInputUse)
+    | ({ guardInput: TInput; apiInput?: undefined; session?: false; handler: LambderGuardHandler<TCtx, z.output<TInput>, TParam, TOutput> } & LambderGuardInputUse)
+    | { apiInput?: undefined; guardInput?: undefined; singleUseInput?: undefined; session: true; handler: LambderGuardHandler<TSessionCtx, undefined, TParam, TOutput> }
+    | { apiInput?: undefined; guardInput?: undefined; singleUseInput?: undefined; session?: false; handler: LambderGuardHandler<TCtx, undefined, TParam, TOutput> }
 );
 
 /**
@@ -167,8 +192,8 @@ type LambderGuardRefusalsKnownIn<TVocabulary, TRefusals extends readonly string[
 export type LambderGuardBuilder<TCtx, TSessionCtx, TVocabulary = never, TCodesRequired extends boolean = false> = {
     <TInput extends z.ZodType, TParam = undefined, TOutput = void, const TRefusals extends readonly string[] = readonly []>(guard: { apiInput: TInput; session: true; handler: (ctx: TSessionCtx & LambderGuardRefuse<TVocabulary, TRefusals, TCodesRequired>, payload: z.output<TInput>, param: TParam) => TOutput | Promise<TOutput> } & LambderGuardPlacement & LambderGuardRefusals<TRefusals> & LambderGuardRefusalsKnownIn<TVocabulary, TRefusals> & LambderGuardAnswerCheck<TOutput>): LambderGuardOf<TOutput, { refusals?: NoInfer<TRefusals>; apiInput: TInput; guardInput?: undefined; session: true; handler: (ctx: TSessionCtx, payload: z.output<TInput>, param: TParam) => TOutput | Promise<TOutput> }>;
     <TInput extends z.ZodType, TParam = undefined, TOutput = void, const TRefusals extends readonly string[] = readonly []>(guard: { apiInput: TInput; handler: (ctx: TCtx & LambderGuardRefuse<TVocabulary, TRefusals, TCodesRequired>, payload: z.output<TInput>, param: TParam) => TOutput | Promise<TOutput> } & LambderGuardPlacement & LambderGuardRefusals<TRefusals> & LambderGuardRefusalsKnownIn<TVocabulary, TRefusals> & LambderGuardAnswerCheck<TOutput>): LambderGuardOf<TOutput, { refusals?: NoInfer<TRefusals>; apiInput: TInput; guardInput?: undefined; session?: undefined; handler: (ctx: TCtx, payload: z.output<TInput>, param: TParam) => TOutput | Promise<TOutput> }>;
-    <TInput extends z.ZodType, TParam = undefined, TOutput = void, const TRefusals extends readonly string[] = readonly []>(guard: { guardInput: TInput; session: true; handler: (ctx: TSessionCtx & LambderGuardRefuse<TVocabulary, TRefusals, TCodesRequired>, payload: z.output<TInput>, param: TParam) => TOutput | Promise<TOutput> } & LambderGuardPlacement & LambderGuardRefusals<TRefusals> & LambderGuardRefusalsKnownIn<TVocabulary, TRefusals> & LambderGuardAnswerCheck<TOutput>): LambderGuardOf<TOutput, { refusals?: NoInfer<TRefusals>; guardInput: TInput; apiInput?: undefined; session: true; handler: (ctx: TSessionCtx, payload: z.output<TInput>, param: TParam) => TOutput | Promise<TOutput> }>;
-    <TInput extends z.ZodType, TParam = undefined, TOutput = void, const TRefusals extends readonly string[] = readonly []>(guard: { guardInput: TInput; handler: (ctx: TCtx & LambderGuardRefuse<TVocabulary, TRefusals, TCodesRequired>, payload: z.output<TInput>, param: TParam) => TOutput | Promise<TOutput> } & LambderGuardPlacement & LambderGuardRefusals<TRefusals> & LambderGuardRefusalsKnownIn<TVocabulary, TRefusals> & LambderGuardAnswerCheck<TOutput>): LambderGuardOf<TOutput, { refusals?: NoInfer<TRefusals>; guardInput: TInput; apiInput?: undefined; session?: undefined; handler: (ctx: TCtx, payload: z.output<TInput>, param: TParam) => TOutput | Promise<TOutput> }>;
+    <TInput extends z.ZodType, TParam = undefined, TOutput = void, const TRefusals extends readonly string[] = readonly []>(guard: { guardInput: TInput; session: true; handler: (ctx: TSessionCtx & LambderGuardRefuse<TVocabulary, TRefusals, TCodesRequired>, payload: z.output<TInput>, param: TParam) => TOutput | Promise<TOutput> } & LambderGuardInputUse & LambderGuardPlacement & LambderGuardRefusals<TRefusals> & LambderGuardRefusalsKnownIn<TVocabulary, TRefusals> & LambderGuardAnswerCheck<TOutput>): LambderGuardOf<TOutput, { refusals?: NoInfer<TRefusals>; guardInput: TInput; apiInput?: undefined; singleUseInput?: boolean; session: true; handler: (ctx: TSessionCtx, payload: z.output<TInput>, param: TParam) => TOutput | Promise<TOutput> }>;
+    <TInput extends z.ZodType, TParam = undefined, TOutput = void, const TRefusals extends readonly string[] = readonly []>(guard: { guardInput: TInput; handler: (ctx: TCtx & LambderGuardRefuse<TVocabulary, TRefusals, TCodesRequired>, payload: z.output<TInput>, param: TParam) => TOutput | Promise<TOutput> } & LambderGuardInputUse & LambderGuardPlacement & LambderGuardRefusals<TRefusals> & LambderGuardRefusalsKnownIn<TVocabulary, TRefusals> & LambderGuardAnswerCheck<TOutput>): LambderGuardOf<TOutput, { refusals?: NoInfer<TRefusals>; guardInput: TInput; apiInput?: undefined; singleUseInput?: boolean; session?: undefined; handler: (ctx: TCtx, payload: z.output<TInput>, param: TParam) => TOutput | Promise<TOutput> }>;
     <TParam = undefined, TOutput = void, const TRefusals extends readonly string[] = readonly []>(guard: { session: true; handler: (ctx: TSessionCtx & LambderGuardRefuse<TVocabulary, TRefusals, TCodesRequired>, payload: undefined, param: TParam) => TOutput | Promise<TOutput> } & LambderGuardPlacement & LambderGuardRefusals<TRefusals> & LambderGuardRefusalsKnownIn<TVocabulary, TRefusals> & LambderGuardAnswerCheck<TOutput>): LambderGuardOf<TOutput, { refusals?: NoInfer<TRefusals>; apiInput?: undefined; guardInput?: undefined; session: true; handler: (ctx: TSessionCtx, payload: undefined, param: TParam) => TOutput | Promise<TOutput> }>;
     <TParam = undefined, TOutput = void, const TRefusals extends readonly string[] = readonly []>(guard: { handler: (ctx: TCtx & LambderGuardRefuse<TVocabulary, TRefusals, TCodesRequired>, payload: undefined, param: TParam) => TOutput | Promise<TOutput> } & LambderGuardPlacement & LambderGuardRefusals<TRefusals> & LambderGuardRefusalsKnownIn<TVocabulary, TRefusals> & LambderGuardAnswerCheck<TOutput>): LambderGuardOf<TOutput, { refusals?: NoInfer<TRefusals>; apiInput?: undefined; guardInput?: undefined; session?: undefined; handler: (ctx: TCtx, payload: undefined, param: TParam) => TOutput | Promise<TOutput> }>;
 };
@@ -355,6 +380,13 @@ export class LambderApiGuardsEngine {
             if(runAt !== undefined && runAt !== "beforeInputValidation" && runAt !== "afterInputValidation"){
                 throw new Error(`Lambder: guard "${name}" has runAt "${String(runAt)}"; use "beforeInputValidation" (default) or "afterInputValidation".`);
             }
+            const singleUseInput = guardDef.singleUseInput as unknown;
+            if(singleUseInput !== undefined && typeof singleUseInput !== "boolean"){
+                throw new Error(`Lambder: guard "${name}" has singleUseInput ${String(singleUseInput)}; write true for a value a retry carries fresh, or leave it off.`);
+            }
+            if(singleUseInput && !guardDef.guardInput){
+                throw new Error(`Lambder: guard "${name}" declares singleUseInput without a guardInput. Only a value the client sends beside the payload can be left out of an idempotent request's fingerprint; a slice of the payload always counts.`);
+            }
             this.guards.set(name, guardDef);
         }
     }
@@ -382,6 +414,25 @@ export class LambderApiGuardsEngine {
                 throw new Error(`Lambder: API "${apiName}" uses guard "${name}" (session: true) but is registered as public. An endpoint declaring a session guard is a session endpoint.`);
             }
         }
+    }
+
+    /**
+     * The posted guard inputs an idempotency fingerprint holds for an API
+     * declaring `guardsOption`: the value of each of its `guardInput` guards
+     * by name, except a guard's declared singleUseInput. Read as posted, as
+     * the payload is, before any guard parses it; a guard the client sent
+     * nothing for is left out. A null-prototype map, so a guard named
+     * "__proto__" is a key like any other.
+     */
+    fingerprintedInputsOf(request: LambderApiRequest, guardsOption: LambderGuardsOptionValue | undefined): Record<string, unknown> {
+        const inputs: Record<string, unknown> = Object.create(null);
+        for(const { name } of toGuardEntries(guardsOption)){
+            const guardDef = this.guards.get(name);
+            if(!guardDef?.guardInput || guardDef.singleUseInput) continue;
+            const input = readGuardInput(request.guardInputs, name);
+            if(input !== undefined) inputs[name] = input;
+        }
+        return inputs;
     }
 
     /**

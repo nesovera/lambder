@@ -2,10 +2,17 @@
  * Render context additions: rawBody, case-insensitive header(), client ip.
  */
 
-import { describe, it, expect } from 'vitest';
-import Lambder from '../../src/core/Lambder.js';
+import { describe, it, expect, expectTypeOf } from 'vitest';
+import { z } from 'zod';
+import Lambder, { initLambder } from '../../src/core/Lambder.js';
 import { decodeBody, createMockEvent, createMockContext, testPublicFiles } from '../helpers.js';
 import { synthesizeLambdaHttpEvent } from '../../src/invoke/LambderLambdaEvent.js';
+import { lambderTestApp } from '../../src/testing.js';
+import { LambderMemorySessionStore } from '../../src/stores/LambderMemorySessionStore.js';
+import { LambderMemoryRateLimiter } from '../../src/stores/LambderMemoryRateLimiter.js';
+import { LAMBDER_REFUSAL_CODES } from '../../src/shared/wire/LambderApiRefusal.js';
+import type { LambderRenderContextOf, LambderSessionRenderContextOf } from '../../src/core/LambderContext.js';
+import type { LambderSessionRecord } from '../../src/shared/contracts/LambderSessionStore.js';
 /** What a real v1 event carries: the address the gateway observed. */
 const gatewayIdentity = { identity: { sourceIp: '9.9.9.9' } } as any;
 
@@ -260,5 +267,88 @@ describe('Context additions', () => {
         );
         expect(result.statusCode).toBe(200);
         expect(JSON.parse(decodeBody(result))).toEqual({ proto: 'x', ctor: 'y' });
+    });
+});
+
+describe('A body that is not a JSON object', () => {
+    /** A shop with one endpoint, and one route that answers with what it read of the body. */
+    const createShop = () => {
+        const app = initLambder().create({ apiPath: '/api' });
+        return app.registerApiGroups(app.defineApiGroup('order', {
+            place: app.defineApi({ input: z.object({ sku: z.string() }), output: z.object({ ok: z.boolean() }) }, async () => ({ ok: true })),
+        })).addRoute({ path: '/webhook', method: 'POST' }, (ctx, res) => res.json({ post: ctx.post, rawBody: ctx.rawBody }));
+    };
+    const jsonBodies = ['5', '"x"', 'true', 'null', '[1,2]'];
+
+    it('answers an API call with the invalid-payload refusal, never a crash', async () => {
+        const app = lambderTestApp(createShop());
+        const visitor = app.visitor();
+        for(const body of [...jsonBodies, 'not json']){
+            const answer = await visitor.request('POST', '/api/order/place', { body, headers: { 'content-type': 'application/json' } });
+            expect(answer.statusCode).toBe(400);
+            expect(answer.json()).toMatchObject({ payload: null, refusal: { code: LAMBDER_REFUSAL_CODES.invalidRequestPayload, content: expect.stringMatching(/^Request body must be a JSON object/) } });
+        }
+        expect(app.crashes).toEqual([]);
+        expect(app.callSummaries.map(({ outcome, code }) => ({ outcome, code }))).toEqual(
+            Array.from({ length: jsonBodies.length + 1 }, () => ({ outcome: 'refusal', code: LAMBDER_REFUSAL_CODES.invalidRequestPayload })),
+        );
+    });
+
+    it('reaches a route as an empty ctx.post, the body itself kept as ctx.rawBody', async () => {
+        const visitor = lambderTestApp(createShop()).visitor();
+        for(const body of jsonBodies){
+            const answer = await visitor.request('POST', '/webhook', { body, headers: { 'content-type': 'application/json' } });
+            expect(answer.statusCode).toBe(200);
+            expect(answer.json()).toEqual({ post: {}, rawBody: body });
+        }
+        const object = await visitor.request('POST', '/webhook', { body: '{"a":1}', headers: { 'content-type': 'application/json' } });
+        expect(object.json()).toEqual({ post: { a: 1 }, rawBody: '{"a":1}' });
+    });
+});
+
+describe('One instance\'s context, named from typeof the instance', () => {
+    type Session = { userId: string };
+    const init = initLambder<Session>();
+    const shopApp = init.create({
+        apiPath: '/api',
+        session: { store: new LambderMemorySessionStore(), sessionSalt: 'salt' },
+        rateLimits: { limiter: new LambderMemoryRateLimiter(), policies: { perIp: { perMin: 5, per: 'ip' }, perCoupon: { perMin: 5 } } },
+        guards: {
+            signedIn: init.guard({ session: true, handler: async (ctx) => { greetMember(ctx); describeVisit(ctx); } }),
+            anyone: init.guard({ handler: async (ctx) => { describeVisit(ctx); } }),
+        },
+    });
+    type ShopContext = LambderRenderContextOf<typeof shopApp>;
+    type ShopSessionContext = LambderSessionRenderContextOf<typeof shopApp>;
+    // Helpers as another file would write them, typed by the instance alone.
+    const describeVisit = (ctx: ShopContext): string => `${ctx.method} ${ctx.path} by ${ctx.session?.data.userId ?? 'a stranger'}`;
+    const greetMember = (ctx: ShopSessionContext): string => `hello ${ctx.session.data.userId}`;
+
+    it('carries the session data and the policy names create() configured', () => {
+        expectTypeOf<ShopContext['session']>().toEqualTypeOf<LambderSessionRecord<Session> | null>();
+        expectTypeOf<ShopSessionContext['session']>().toEqualTypeOf<LambderSessionRecord<Session>>();
+        const charge = async (ctx: ShopContext) => {
+            await ctx.rateLimit('perIp');
+            await ctx.rateLimit('perCoupon', 'SPRING');
+            // @ts-expect-error not one of the instance's policies
+            await ctx.rateLimit('perTicket');
+        };
+        expect(typeof charge).toBe('function');
+    });
+
+    it('takes the context of every handler the instance hands one to', async () => {
+        const lambder = shopApp.registerApiGroups(shopApp.defineApiGroup('store', {
+            visit: shopApp.defineApi({ input: z.object({}), output: z.object({ seen: z.string() }), guards: 'anyone' }, async (ctx) => ({ seen: describeVisit(ctx) })),
+            greet: shopApp.defineApi({ input: z.object({}), output: z.object({ seen: z.string() }), guards: 'signedIn' }, async (ctx) => ({ seen: `${greetMember(ctx)}, ${describeVisit(ctx)}` })),
+        }))
+            .addRoute('/store/:storeId', (ctx, res) => res.text(describeVisit(ctx)))
+            .addSessionRoute('/account', (ctx, res) => res.text(greetMember(ctx)))
+            .addHook('beforeRender', async (ctx) => { describeVisit(ctx); return ctx; });
+        const app = lambderTestApp(lambder);
+        expect(await app.visitor().api('store.visit', {})).toEqual({ seen: 'POST /api/store/visit by a stranger' });
+        const member = await app.signIn('u1', { userId: 'u1' });
+        expect(await member.api('store.greet', {})).toEqual({ seen: 'hello u1, POST /api/store/greet by u1' });
+        expect((await member.request('GET', '/account')).text()).toBe('hello u1');
+        expect((await member.request('GET', '/store/7')).text()).toBe('GET /store/7 by a stranger');
     });
 });

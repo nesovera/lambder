@@ -16,7 +16,7 @@
  */
 export { lambderTestApp } from "./testing/LambderTestApp.js";
 export type { LambderTestApp, LambderTestAppOptions, LambderTestedInstance } from "./testing/LambderTestApp.js";
-export type { LambderTestVisitor, LambderTestVisitorOptions, LambderTestRequestInit } from "./testing/LambderTestVisitor.js";
+export type { LambderTestVisitor, LambderTestVisitorOptions, LambderTestRequestInit, LambderTestVisitorEndpoint, LambderTestVisitorGroupCalls } from "./testing/LambderTestVisitor.js";
 export { assertApiSuccess, assertApiFailure, assertApiRefusal } from "./shared/wire/LambderOutcomeAssertions.js";
 export type { LambderExpectedFailure } from "./shared/wire/LambderOutcomeAssertions.js";
 export { lambderSessionStoreConformance } from "./testing/lambderSessionStoreConformance.js";
@@ -27,7 +27,13 @@ export { lambderRateLimiterConformance } from "./testing/lambderRateLimiterConfo
 export type { LambderRateLimiterConformanceOptions } from "./testing/lambderRateLimiterConformance.js";
 export { lambderOneShotSecretStoreConformance } from "./testing/lambderOneShotSecretStoreConformance.js";
 export type { LambderOneShotSecretStoreConformanceOptions } from "./testing/lambderOneShotSecretStoreConformance.js";
+export { lambderCacheConformance } from "./testing/lambderCacheConformance.js";
+export type { LambderCacheConformanceOptions } from "./testing/lambderCacheConformance.js";
+export { lambderCacheStorageConformance } from "./testing/lambderCacheStorageConformance.js";
+export type { LambderCacheStorageConformanceOptions } from "./testing/lambderCacheStorageConformance.js";
 export type { LambderConformanceRunner, LambderConformanceIt, LambderConformanceExpect, LambderConformanceAssertion, LambderConformanceSetup, } from "./testing/LambderConformanceRunner.js";
+export { bootLambdaPackage } from "./testing/bootLambdaPackage.js";
+export type { LambderPackageBootOptions, LambderPackageBootCall, LambderPackageBootResult, LambderPackageBootCallResult, LambderPackageBootMeasurements, } from "./testing/bootLambdaPackage.js";
 export { LambderMemorySessionStore } from "./stores/LambderMemorySessionStore.js";
 export { LambderMemoryRateLimiter } from "./stores/LambderMemoryRateLimiter.js";
 export { LambderMemoryIdempotencyStore } from "./stores/LambderMemoryIdempotencyStore.js";

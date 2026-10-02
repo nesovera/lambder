@@ -12,24 +12,25 @@ the size guard are applied there, not per call site.
 
 | Property | Description | Example |
 | --- | --- | --- |
-| `host` | Request host: the Host the gateway received, or a header listed in [`trustedHostHeaders`](./configuration.md#trustedhostheaders) (never read on a direct invoke) | `"www.example.com"` |
+| `host` | Request host: the Host the gateway received, or a header listed in [`trustedHostHeaders`](./configuration.md#trustedhostheaders) (never read on a Lambda invoke) | `"www.example.com"` |
 | `path` | Request path, decoded exactly once whatever gateway sent it, with two escapes kept: a slash inside a segment stays `%2F`, so it is never a separator, and a percent sign stays `%25`. What routes match and files are looked up by (see [Routing](./routing.md)) | `"/hakkımızda"` |
 | `rawPath` | The path as the gateway delivered it (stage stripped): percent-encoded from a REST API or a Function URL, decoded from an HTTP API | `"/hakk%C4%B1m%C4%B1zda"` |
 | `pathParams` | Path parameters (routes) | `{ userId: "123" }` |
 | `method` | HTTP method | `"GET"`, `"POST"` |
 | `get` | Query parameters | `{ page: "1" }` |
-| `post` | POST body, parsed as JSON with a urlencoded fallback (`Record<string, unknown>`) | `{ name: "John" }` |
+| `post` | POST body as fields: a JSON object, or urlencoded fields when the body is not JSON. Always an object; a JSON body that is not an object (an array, a number) leaves it empty and is read from `rawBody` | `{ name: "John" }` |
 | `rawBody` | Decoded request body as received (webhook signatures) | `'{"a":1}'` |
-| `ip` | The address the gateway observed, or the leftmost entry of a header listed in [`trustedClientIpHeaders`](./configuration.md#trustedclientipheaders); no header is trusted by default, and none on a direct invoke | `"1.2.3.4"` |
+| `ip` | The address the gateway observed, or the leftmost entry of a header listed in [`trustedClientIpHeaders`](./configuration.md#trustedclientipheaders); no header is trusted by default, and none on a Lambda invoke | `"1.2.3.4"` |
 | `header(name)` | Case-insensitive request header lookup | `ctx.header("accept-language")` |
-| `headers` | Request headers | `{ "Content-Type": "..." }` |
+| `headers` | Request headers. With [`originProof`](./configuration.md#originproof) the proof header is never here, and on a request without a valid proof neither are the trusted headers and `proxyHeaders` | `{ "Content-Type": "..." }` |
+| `arrivedVia` | How the request reached the function: `"proxy"` (over HTTP with a valid [`originProof`](./configuration.md#originproof)), `"direct"` (over HTTP without one, sent to the gateway's own address), `"invoke"` (a [Lambda invoke](./invoke.md), told by the event's `requestContext.apiId`, which no HTTP client can set), or `"unverified"` (over HTTP with no `originProof` configured, where nothing tells the two apart). Read-only | `"proxy"` |
 | `cookie` | Cookies (the first value when a name arrived more than once) | `{ rememberMe: "true" }` |
 | `cookieList` | Every value per cookie name, in header order (a name held at several scopes arrives several times) | `{ rememberMe: ["true"] }` |
-| `event` | Raw Lambda event (`APIGatewayProxyEvent` or `APIGatewayProxyEventV2`) | |
+| `event` | Raw Lambda event (`APIGatewayProxyEvent` or `APIGatewayProxyEventV2`), as it arrived: with an origin proof configured, its headers still hold what a request without the proof wrote under the proxy's headers, which `headers` and `header()` drop | |
 | `lambdaContext` | AWS Lambda Context | |
 | `apiName` | The endpoint called, `group.action`, read off the call's path (API calls) | `"users.get"` |
 | `apiPayload` | Validated input (API calls) | `{ userId: "123" }` |
-| `guardData` | Values returned by the API's guards, keyed by guard name | `{ orgPermission: { organizationId } }` |
+| `guardData` | Values returned by the API's guards, keyed by guard name | `{ staffPermission: { storeId } }` |
 | `session` | The session record, or `null` where none was read or created. Non-null on a session endpoint (one whose guards need a session) and on `addSessionRoute` | |
 | `api` | The parsed API request on an API call, `null` on a route | |
 | `eventFormat` | Which payload format the event arrived in | `"v1"`, `"v2"` |
@@ -38,6 +39,37 @@ the size guard are applied there, not per call site.
 | `setResponseHeader`, `addResponseHeader`, `setCookie`, `clearCookie` | The response tools: write a header or a cookie onto whatever answer the request ends with (see [Headers and cookies](#headers-and-cookies)) | `ctx.setCookie("theme", "dark")` |
 | `sessionController` | The request's session controller: create, rotate, refresh and end sessions (see [Sessions](./sessions.md)) | `ctx.sessionController.createSession(userId, data)` |
 | `rateLimit(policy, key?)`, `isRateLimited(policy, key?)` | Charge a named rate-limit policy from code: refuse with a 429 when it is over, or answer the verdict (see [API policies](./api-policies.md#charging-a-policy-from-code)) | `await ctx.rateLimit("invitesPerRecipient", email)` |
+
+### Typing a helper's context
+
+A handler's `ctx` is typed where the handler is registered: an API handler's
+with its payload, guard data and refusal codes, a route's on a path string
+with its path parameters, both with the instance's session data and its
+rate-limit policy names. A route matched by a RegExp, a predicate or a
+matcher object, a hook and a guard see the policy names as any string. A
+helper in another file names the instance's context from the instance's own
+type rather than writing out `LambderRenderContext`'s parameters:
+
+```typescript
+// app.ts
+export const lambderApp = initLambder<SessionData>().create({ /* ... */ });
+export type AppContext = LambderRenderContextOf<typeof lambderApp>;
+export type AppSessionContext = LambderSessionRenderContextOf<typeof lambderApp>;
+
+// store/coupons.ts
+export const redeemCoupon = async (ctx: AppContext, coupon: string) => {
+    await ctx.rateLimit("couponsPerCode", coupon);   // one of the instance's policies
+    return ctx.session?.data.userId ?? null;           // the instance's session data
+};
+```
+
+`LambderRenderContextOf` takes any payload, path parameters and guard data, so
+an API handler's, a route's, a hook's and a guard's context can each be handed
+to it. `LambderSessionRenderContextOf` has the session present: the context of
+a session route, of an endpoint whose guards need a session, or of a guard
+with `session: true`. A guard is part of the instance's type, so the data a
+guard returns cannot come from a helper typed this way (TypeScript reports the
+instance as referencing itself); calling one for what it does is fine.
 
 ## Response methods
 
@@ -51,17 +83,43 @@ with the same build methods. All accept an options object:
 | --- | --- |
 | `res.raw(init)` | Custom HTTP response |
 | `res.json(data, options?)` | JSON response |
-| `res.text(data, options?)` | Plain text response |
-| `res.xml(data, options?)` | XML response (accepts `xml` tagged templates) |
-| `res.html(data, options?)` | HTML response (accepts `html` tagged templates) |
-| `res.status(code, body?, options?)` | Response with any status code |
+| `res.text(data, options?)` | Plain text response; with `{ statusCode }`, a message under any status |
+| `res.xml(data, options?)` | XML response; takes safe markup only (below) |
+| `res.html(data, options?)` | HTML response; takes safe HTML only (below) |
+| `res.status(code, body?, options?)` | HTML response with any status code; `body` is safe HTML, none sends an empty body |
 | `res.redirect(url, statusCode?, options?)` | Redirect, default 302. A path stays on this origin: a leading run of slashes and backslashes collapses to one slash (`//evil.example` is another host), so a Location built from the decoded `ctx.path` cannot leave the site; another host is named with its scheme. What a URL may not carry as it is (control characters, a space, a backslash, anything outside ASCII) is percent-encoded, so it cannot end the header either; `%` is left alone |
-| `res.status404(data, options?)` | 404 Not Found |
+| `res.status404(data, options?)` | HTML 404 Not Found; `data` is safe HTML |
 | `res.versionExpired(options?)` | The stale-client refusal envelope, the one the signature gate answers: `res.apiRefusal({ versionExpired: true })` |
 | `res.fileBase64(base64, mimeType, options?)` | File from base64 content |
-| `await res.file(path, options?)` | Serve a file from the `files` source (404 when missing) |
-| `await res.templateFile(path, data?, options?)` | Render an HTML file via `LambderTemplatingEngine` (cached; throws when missing) |
+| `await res.file(path, options?)` | Serve a file from the `files` source (a plain-text 404 when missing) |
+| `await res.templateFile(path, data?, options?)` | Render an HTML file via `LambderTemplatingEngine` (cached; throws when missing, and for a data key the file has no slot or condition for). `res.templateFile<"title" \| "head">(...)` types the data to the file's names. See [Templating](./templating.md#rendering-a-template-as-a-response) |
 | `res.apiRefusal(config, options?)` | An API call answered from outside its handler, always as a refusal; see below |
+
+### HTML bodies
+
+`res.html`, `res.status`, `res.status404` and `res.xml` send a body the
+browser renders as markup, so they take safe markup only: a `LambderSafeHtml`,
+which is what the `html` and `xml` tagged templates, `raw()` and
+`jsonScript()` produce (see [Templating](./templating.md)). A plain string is
+a type error, and throws when it gets there anyway, naming the tag, `raw()`
+and `res.text`. Nothing can tell markup an author wrote from text a request
+supplied, and `res.html("No match at " + ctx.path)` would run whatever
+script the path carried; the tag escapes what it interpolates:
+
+```typescript
+import { html, raw } from "lambder";
+
+lambder
+    .addRoute("/search", (ctx, res) => res.html(html`<p>No match for ${ctx.get.q}</p>`))   // escaped
+    .addRoute("/legal", (ctx, res) => res.html(raw(LEGAL_PAGE_MARKUP)))                       // trusted markup, as it is
+    .addRoute("/healthz", (ctx, res) => res.text("ok"))                                        // text is text
+    .setRouteFallbackHandler((ctx, res) => res.text("Not found", { statusCode: 404 }));
+```
+
+`raw()` is the one place markup passes unescaped, and it is meant to be seen:
+never hand it something a request supplied. A message that is not markup goes
+out with `res.text`, under any status with `{ statusCode }`, as the
+framework's own 401, 404 and 500 do.
 
 ### API answers outside a handler
 
@@ -79,7 +137,7 @@ its output or refuses.
 lambder.setGlobalErrorHandler((err, ctx, res) => {
     // An API call is answered in its envelope, which a caller reads as a failure of the server.
     if (ctx?.api) return res.apiRefusal({ refusal: "Something went wrong. Please try again." }, { statusCode: 500 });
-    return res.status(500, "Internal Server Error");
+    return res.text("Internal Server Error", { statusCode: 500 });
 });
 ```
 
@@ -105,14 +163,15 @@ Be deliberate about revealing it: the framework sets `crash` only where
 whoever the answer that carries it goes to, in the same JSON envelope as everything else, so a browser that asked
 receives the stack trace whether or not anything on the page displays it.
 `LambderCaller` not surfacing the field is a display choice in one client, not
-a gate. There is no trustworthy in-band signal to condition it on either: the
-`x-lambder-invoke` header an invoke carries is a hint for guards and hooks and
-authorizes nothing, because any client can write it.
+a gate. No header is a gate either: the `x-lambder-invoke` header an invoke
+carries is a marker any HTTP client can write, and authorizes nothing.
 
-The honest gate is deployment: a function with no HTTP trigger, reachable only
-through IAM, has no browser callers to withhold anything from, and a handler on
-a public function should decide by what the caller proved (a guard, a
-signature, an IAM-only path), not by a header. See
+Decide by what the caller proved. `ctx.arrivedVia === "invoke"` is read from
+the event's `requestContext.apiId`, which a gateway writes itself, so only a
+caller IAM lets invoke the function produces it: a handler on a function that
+also answers HTTP sets `crash` for that caller and no other. Beyond that, a
+function with no HTTP trigger at all has no browser callers to withhold
+anything from, and a guard or a signature proves what it checks. See
 [Calling a Lambder app from another lambda](./invoke.md#errors-and-logs).
 
 ## Headers and cookies
@@ -251,7 +310,7 @@ instead of the body.
 A body of base64 bytes (a PDF, an image) is what `false` is for. Compression
 takes back the quarter that base64 added, but a compressed body leaves the
 function base64-encoded, so the answer is no smaller under the ~6MB cap or to
-a caller invoking the function directly (see
+a caller reaching the function through a Lambda invoke (see
 [Calling another lambda](./invoke.md#compression)). Only a browser, behind a
 gateway that decodes the body, receives it about a quarter smaller, and pays
 for that with compression time on the server and decompression on its side.

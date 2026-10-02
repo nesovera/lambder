@@ -140,7 +140,7 @@ export declare class LambderOneShotSecrets<TKinds extends Record<string, Lambder
      * less than that ago is refused instead, with the second it may ask
      * again; of two callers racing past the cooldown, exactly one is issued.
      * `meta` is what the app wants back at redemption: an identity, an
-     * issuing organization, as small strings.
+     * issuing store, as small strings.
      *
      * A secret whose digest another scope holds is drawn again, up to
      * MAX_DRAWS times; past that the kind's alphabet and length leave too few

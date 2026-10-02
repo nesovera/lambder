@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import Lambder, { initLambder } from '../../src/core/Lambder.js';
 import { LambderLocalFileSource } from '../../src/stores/LambderLocalFileSource.js';
 import { decodeBody, brotliBody, createMockContext, createMockEventV2, testPublicFiles } from '../helpers.js';
+import { html, raw } from '../../src/shared/LambderHtml.js';
 
 
 describe('HTTP API v2 events', () => {
@@ -16,7 +17,7 @@ describe('HTTP API v2 events', () => {
         expect(Lambder.isHttpEvent({ source: 'aws.events' })).toBe(false);
 
         const lambder = new Lambder({ files: testPublicFiles() })
-            .addRoute('/hello', (ctx, res) => res.html('Hello V2'));
+            .addRoute('/hello', (ctx, res) => res.html(html`Hello V2`));
 
         const result = await lambder.getHandler()(createMockEventV2('/hello'), createMockContext());
         expect((result as any).statusCode).toBe(200);
@@ -49,7 +50,7 @@ describe('HTTP API v2 events', () => {
             .addRoute('/set', (ctx, res) => {
                 ctx.addResponseHeader('Set-Cookie', 'a=1; Path=/');
                 ctx.addResponseHeader('Set-Cookie', 'b=2; Path=/');
-                return res.html('ok', { headers: { 'X-One': 'x' } });
+                return res.html(html`ok`, { headers: { 'X-One': 'x' } });
             });
 
         const result = await lambder.render(createMockEventV2('/set'), createMockContext());
@@ -62,7 +63,7 @@ describe('HTTP API v2 events', () => {
 
     it('v1 events still emit multiValueHeaders', async () => {
         const lambder = new Lambder({ files: testPublicFiles() })
-            .addRoute('/x', (ctx, res) => res.html('v1'));
+            .addRoute('/x', (ctx, res) => res.html(html`v1`));
 
         const v1Event = {
             body: null, headers: { Host: 'localhost' }, multiValueHeaders: {}, httpMethod: 'GET',
@@ -98,7 +99,7 @@ describe('HTTP API v2 events', () => {
 
     it('strips named stage prefixes from rawPath (parity with v1 path)', async () => {
         const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/secure' })
-            .addRoute('/hello', (ctx, res) => res.html('Hello ' + ctx.path));
+            .addRoute('/hello', (ctx, res) => res.html(html`Hello ${ctx.path}`));
 
         // Named stage: rawPath includes the prefix, requestContext.stage names it.
         const staged = createMockEventV2('/prod-stage/hello');
@@ -110,7 +111,7 @@ describe('HTTP API v2 events', () => {
         const root = createMockEventV2('/prod-stage');
         root.requestContext.stage = 'prod-stage';
         const rootCtx = await new Lambder({ files: testPublicFiles() })
-            .addRoute('/', (ctx, res) => res.html('root'))
+            .addRoute('/', (ctx, res) => res.html(html`root`))
             .render(root, createMockContext());
         expect(decodeBody(rootCtx as any)).toBe('root');
 
@@ -131,7 +132,7 @@ describe('HTTP API v2 events', () => {
             .addRoute('/page', (ctx, res) => {
                 ctx.setCookie('LMDRSESSIONTKID', 'slid', { path: '/' });
                 ctx.setResponseHeader('X-Request-Id', 'abc');
-                return res.html('<p>stable content</p>');
+                return res.html(html`<p>stable content</p>`);
             });
 
         const first = await lambder.render(createMockEventV2('/page'), createMockContext());
@@ -156,7 +157,7 @@ describe('HTTP API v2 events', () => {
     it('compresses large compressible v2 responses when accepted', async () => {
         const bigHtml = `<p>${'lambder '.repeat(500)}</p>`;
         const lambder = new Lambder({ files: testPublicFiles() })
-            .addRoute('/big', (ctx, res) => res.html(bigHtml));
+            .addRoute('/big', (ctx, res) => res.html(raw(bigHtml)));
 
         const result = await lambder.render(
             createMockEventV2('/big', { headers: { 'host': 'localhost', 'accept-encoding': 'gzip, br' } }),
@@ -169,7 +170,7 @@ describe('HTTP API v2 events', () => {
 
     it('answers CORS preflight on v2 OPTIONS requests', async () => {
         const lambder = initLambder().create({ files: testPublicFiles(), cors: true })
-            .addRoute('/x', (ctx, res) => res.html('x'));
+            .addRoute('/x', (ctx, res) => res.html(html`x`));
 
         const event = createMockEventV2('/x', { headers: { 'host': 'localhost', 'origin': 'https://app.example.com' } });
         event.requestContext.http.method = 'OPTIONS';
@@ -195,7 +196,7 @@ describe('HTTP API v2 events', () => {
     it('emits the v2 shape from the global error handler and the last-resort 500', async () => {
         const lambder = new Lambder({ files: testPublicFiles() })
             .addRoute('/boom', () => { throw new Error('boom'); })
-            .setGlobalErrorHandler((err, ctx, res) => res.html('handled: ' + err.message, { statusCode: 500 }));
+            .setGlobalErrorHandler((err, ctx, res) => res.html(html`handled: ${err.message}`, { statusCode: 500 }));
 
         const handled = await lambder.render(createMockEventV2('/boom'), createMockContext());
         expect(handled.statusCode).toBe(500);

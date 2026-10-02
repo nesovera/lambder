@@ -53,12 +53,11 @@ export type LambderRateLimitResult = false | LambderRateLimitExceeded;
  * implementations disagree on a negative cap (one refuses the first attempt,
  * the other allows it), since neither is meant to be asked.
  *
- * The tracker key is bounded there too: the variable half of it (a custom
- * key handler's return, a session key) is replaced by its own sha256 once it
- * passes 1024 UTF-8 bytes as written into the key, so an implementation with
- * a key limit of its own never meets a key it has to refuse. That matters
- * because a limiter's refusal is a throw, and a throw is what failOpen
- * swallows into no limit at all.
+ * The tracker key is bounded there too: its caller's half (an address, a
+ * session key, a custom key handler's return) arrives as a digest of fixed
+ * length, so an implementation with a key limit of its own never meets a key
+ * it has to refuse. That matters because a limiter's refusal is a throw, and
+ * a throw is what failOpen swallows into no limit at all.
  *
  * A limiter that answers a run of requests with one continuing failure (the
  * DynamoDB limiter, for a flooded partition it cannot size) may throw the

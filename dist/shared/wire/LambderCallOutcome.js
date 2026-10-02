@@ -7,7 +7,8 @@ const codeOf = (refusal) => {
 /**
  * An envelope's outcome, read in the order a caller honours it: a 5xx is a
  * crash whatever the envelope says, then the three flags, then a refusal,
- * and anything else is the handler's answer.
+ * and anything else is the handler's answer. A flag a declared code sets
+ * (sessionExpired, notAuthorized) keeps that code beside it.
  */
 export const outcomeOfEnvelope = (written, statusCode) => {
     const envelope = written;
@@ -16,7 +17,7 @@ export const outcomeOfEnvelope = (written, statusCode) => {
     if (envelope.versionExpired)
         return { outcome: "versionExpired", code: null };
     if (envelope.sessionExpired)
-        return { outcome: "sessionExpired", code: null };
+        return { outcome: "sessionExpired", code: codeOf(envelope.refusal) };
     if (envelope.notAuthorized)
         return { outcome: "notAuthorized", code: codeOf(envelope.refusal) };
     if (envelope.refusal !== undefined)

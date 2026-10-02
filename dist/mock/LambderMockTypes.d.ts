@@ -250,9 +250,10 @@ export type LambderMockEntryOptions<C, K extends keyof C, S, G, TInputSchema ext
      * 422 exactly as the server would. Optional, and the mock's own: the
      * contract is type-only, and importing the server's schemas would put the
      * whole endpoint surface into the browser bundle. Restate it for endpoints
-     * whose rejection path a test exercises; without it a bad payload reaches
-     * the handler. What it parses to is pinned to the contract's input (see
-     * LambderMockInputPin).
+     * whose rejection path a test exercises; without it, or the generated
+     * `apiSchemas` table given to create() (after which this one runs), a bad
+     * payload reaches the handler. What it parses to is pinned to the
+     * contract's input (see LambderMockInputPin).
      */
     input?: TInputSchema & LambderMockInputPin<C, K, TInputSchema>;
     handler: LambderMockHandler<C, K, S, G, TVocabulary, TCodesRequired>;
@@ -377,7 +378,9 @@ export type LambderMockLatency = number | {
  * external signal, or for ever, which is what a timeout is). TMessage is the
  * endpoint's refusal message, so an injected refusal names one of its
  * declared codes with that code's data, and is checked against the
- * declaration as a real one is.
+ * declaration as a real one is. An injected rate limit names the policy its
+ * data carries (`policy`, default "injected"), so a client's per-policy
+ * wording can be tested.
  */
 export type LambderMockFailure<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = {
     reason: "network";
@@ -398,6 +401,7 @@ export type LambderMockFailure<TMessage extends LambderUncheckedRefusalMessage =
     reason: "versionExpired";
 } | {
     reason: "rateLimited";
+    policy?: string;
     retryAfterSeconds?: number;
     message?: LambderRateLimitMessage;
 };

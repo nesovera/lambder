@@ -30,10 +30,11 @@ begin(scope, { pendingTtlSeconds, fingerprint })
 ```
 
 `fingerprint` is a digest of the request the scope was claimed for (its
-payload). The store keeps it on the claim and on the settled
-record and hands it back with `"pending"` and `"done"`, and the engine refuses
-a key that arrives with a different one (`lambder/idempotency-key-reused`)
-instead of replaying another request's answer.
+payload and the guard inputs that count). The store keeps it on the claim
+and on the settled record and hands it back with `"pending"` and `"done"`,
+and the engine refuses a key that arrives with a different one
+(`lambder/idempotency-key-reused`) instead of replaying another request's
+answer.
 
 An item that keeps no `fingerprint` was not written by this store, so no
 request can be shown to be the one it belongs to. It reads as a different
@@ -100,7 +101,7 @@ Kept, the retry replays it.
 | Result | Meaning |
 | --- | --- |
 | `"stored"` | The response is recorded and will replay until its TTL |
-| `"too-large"` | Even compressed, the body exceeds the item budget. Nothing was written, and the caller should release the claim |
+| `"too-large"` | The body is past 32MB, or even compressed it exceeds the item budget. Nothing was written, and the caller should release the claim |
 | `"lost"` | The claim is no longer the caller's: the `ownerToken` does not match, or the claim itself has expired. Nothing was written |
 
 ## Stored bodies
@@ -113,9 +114,10 @@ scheme and `compression` option `LambderDdbCache` and sessions use.
 
 An empty body is never compressed, whatever `minBytes` says: there would be no
 length to verify on the way back, so a 204 or an empty 200 is stored plain and
-replays as the empty body it was. In the other direction, a stored `bodyBytes`
-larger than 32MB is a record this store did not write, and it is refused rather
-than taken as a licence to decompress that far.
+replays as the empty body it was. In the other direction, 32MB is the ceiling
+both ways: a body past it answers `"too-large"` however small it compresses,
+and a stored `bodyBytes` larger than it is a record this store did not write,
+refused rather than taken as a licence to decompress that far.
 
 The item budget is ~350KB, applied to the bytes actually stored, and DynamoDB's
 400KB item limit is what it leaves headroom under. JSON envelopes typically
@@ -128,7 +130,7 @@ with no headers rather than failing the request.
 ## Item layout
 
 ```
-pk = "<keyPrefix>#<scopeKey>"   e.g. "IDEM#s:<sessionKey>|order.create|<key>"
+pk = "<keyPrefix>#<scopeKey>"   e.g. "IDEM#s:<digest>|order.create|key:<digest>"
 sk = "idem"
 ```
 
@@ -136,21 +138,27 @@ The scope key starts with who the request is, then the API name, then the
 client's key, with every field escaped and joined by `|` so no two different
 field lists can produce one string. There are three forms of the first field:
 
-| Form | When | Example |
-| --- | --- | --- |
-| `s:<sessionKey>` | A session API: the signed-in user is the identity, so every session of one user shares the scope | `s:user_123` |
-| `i:<identity>` | A public API with `idempotency.callerIdentity` configured, which returns who the caller is (an API key, a tenant, a verified email) | `i:tenant-42` |
-| `k` | A public API with no `callerIdentity`: the key alone is the scope | `k` |
+| Form | When |
+| --- | --- |
+| `s:<digest>` | A session API: the signed-in user's sessionKey is the identity, so every session of one user shares the scope |
+| `i:<digest>` | A public API with `idempotency.callerIdentity` configured, which returns who the caller is (an API key, a tenant, a verified email) |
+| `k` | A public API with no `callerIdentity`: the key alone is the scope |
 
-An identity or a sessionKey is caller data, so the engine bounds it before a
-store sees it: past 1024 UTF-8 bytes as written into the scope (where each
-`|` and `\` is escaped to two), it is replaced by its sha256, as
-`i:h:<sha256 hex>` or `s:h:<sha256 hex>`. A device token several kilobytes
-long, the kind of credential `callerIdentity` is documented to read, would
-otherwise push the partition key past DynamoDB's limit below, and the store's
-refusal is a throw that `failOpen` turns into no idempotency for that caller.
-The digest keeps distinct callers in distinct scopes and keeps a credential
-that long out of the table; an identity that fits stays readable.
+Every field but the API name is caller data, so the engine writes each as a
+digest of fixed length, 64 hex characters after its kind (`s:`, `i:`, and
+`key:` for the client's key), whatever the value's own length. A partition
+key shows which API its record answers and never whose it is (the record's
+body is the answer as it was sent, whatever that holds): with
+sessions configured the digest is an HMAC keyed by a subkey of the
+`sessionSalt`, which no read of the table can test a guess against, and
+without them a plain SHA-256, which keeps the values out of the table but
+lets a reader test guesses (see [What a table read
+shows](./api-policies.md#what-a-table-read-shows)). And no credential, however
+long (a device token several kilobytes long is the kind `callerIdentity` is
+documented to read), pushes the partition key past DynamoDB's limit below,
+where the store's refusal would be a throw that `failOpen` turns into no
+idempotency for that caller. Changing the `sessionSalt` starts every record
+afresh.
 
 A `k` scope carries no identity, so its keys have to be unguessable: anyone who
 can present one replays the answer stored under it, and a replay happens before
@@ -158,8 +166,9 @@ guards run. `callerIdentity` is what turns that bearer token back into
 something scoped to one caller.
 
 The whole partition key, prefix included, has to fit DynamoDB's 2048-byte
-limit. Lambder's engine keeps its scopes inside it (see above); a longer key
-from a direct caller is refused by every method that touches the table, with
+limit. Lambder's engine keeps its scopes inside it (see above); a direct
+caller's key is written as given, and a longer one is refused by every
+method that touches the table, with
 an error that names the limit, rather than reaching the table and coming back
 as a `ValidationException`.
 

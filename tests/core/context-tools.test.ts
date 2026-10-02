@@ -23,6 +23,7 @@ import type { LambderApiRateLimitPolicyConfig, LambderRateLimitCheckResult } fro
 import type { LambderApiOutcome } from '../../src/shared/wire/LambderApiOutcome.js';
 import { lambderTestApp, assertApiSuccess, assertApiFailure } from '../../src/testing.js';
 import { joinKeyFields } from '../../src/shared/util/joinKeyFields.js';
+import { LambderKeyFieldDigest } from '../../src/shared/util/LambderKeyFieldDigest.js';
 import { createApiEvent, createMockContext } from '../helpers.js';
 
 type SessionData = { userId: string; role: 'admin' | 'member' };
@@ -340,6 +341,7 @@ describe('ctx.rateLimit and ctx.isRateLimited', () => {
         const app = lambderTestApp(createApp(), { rateLimits: { limiter } });
 
         await app.visitor().api('test.invite', { email: 'ada@example.com' });
-        expect(limiter.countOf(joinKeyFields('api', 'test.invite', 'invitesPerRecipient', 'custom:ada@example.com'), 'perMin')).toBe(1);
+        const recipientKey = await new LambderKeyFieldDigest('salt').digestOf('custom', 'ada@example.com');
+        expect(limiter.countOf(joinKeyFields('api', 'test.invite', 'invitesPerRecipient', recipientKey), 'perMin')).toBe(1);
     });
 });

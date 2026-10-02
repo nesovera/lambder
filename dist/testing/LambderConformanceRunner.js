@@ -9,8 +9,15 @@
  * under vitest, jest, or any runner with a jest-style `expect`, and the
  * package depends on none of them.
  */
-/** Where every case's clock starts: a fixed moment, so the records a case writes are the same on every run. */
-export const CONFORMANCE_START_MILLIS = 1_700_000_000_000;
+/**
+ * Where every case's clock starts: 2100-01-01T00:00:00Z. Fixed, so the
+ * records a case writes are the same on every run, and far in the future, so
+ * a storage that also hands its records to a native TTL (a database that
+ * deletes expired rows itself, Redis's EXPIREAT) holds every one a case
+ * writes, and a record counts as expired only when the store says so by the
+ * case's clock. In seconds it still fits 32 bits unsigned.
+ */
+export const CONFORMANCE_START_MILLIS = 4_102_444_800_000;
 /** The clock of one case: `now` for the store, `set` for the case. */
 export const conformanceClock = () => {
     let millis = CONFORMANCE_START_MILLIS;

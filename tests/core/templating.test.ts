@@ -2,11 +2,13 @@
  * Type-safe templating: html/xml tagged templates and the standalone LambderTemplatingEngine (comment-only slots and conditionals).
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, expectTypeOf, vi } from 'vitest';
+import path from 'node:path';
 import Lambder from '../../src/core/Lambder.js';
 import { html, xml, raw, jsonScript } from '../../src/shared/LambderHtml.js';
 import { LambderTemplatingEngine } from '../../src/core/LambderTemplatingEngine.js';
-import { decodeBody, createMockEvent, createMockContext, testPublicFiles } from '../helpers.js';
+import { LambderLocalFileSource } from '../../src/stores/LambderLocalFileSource.js';
+import { decodeBody, createMockEvent, createMockContext, testPublicFiles, browse } from '../helpers.js';
 describe('Type-safe templating (html/xml tagged templates)', () => {
     it('escapes interpolated values by default', () => {
         const userInput = '<script>alert("xss")</script>';
@@ -322,9 +324,37 @@ describe('LambderTemplatingEngine', () => {
         expect(template.render({ items })).toBe('');
     });
 
-    it('ignores unknown data keys (shared data across different shells)', () => {
-        const template = new LambderTemplatingEngine('<p><!--slot:a-->A<!--/slot:a--></p>');
-        expect(template.render({ a: 'x', notInShell: 'y' })).toBe('<p>x</p>');
+    /**
+     * The template is a file edited apart from the code that fills it: a
+     * slot renamed in the HTML would otherwise drop the server's value
+     * without a word.
+     */
+    it('throws for a data key the template has no slot or condition for, naming it and the template\'s names', () => {
+        const template = new LambderTemplatingEngine('<p><!--slot:a-->A<!--/slot:a--></p><!--if:b-->B<!--/if:b-->');
+        expect(() => template.render({ a: 'x', notInShell: 'y' }))
+            .toThrow('LambderTemplatingEngine: the data carries "notInShell", which the template has no slot or condition for, so its value would be dropped. Its slots: "a"; its conditions: "b".');
+        // A key whose value would keep the default is a misspelling all the same.
+        expect(() => template.render({ titel: undefined, other: 1 })).toThrow(/the data carries "titel", "other", which .* so their values would be dropped/);
+        expect(() => new LambderTemplatingEngine('<p>static</p>').render({ a: 'x' })).toThrow(/Its slots: none; its conditions: none\./);
+        expect(template.render({ a: 'x', b: true })).toBe('<p>x</p>B');
+        expect(template.has('a') && template.has('b') && !template.has('notInShell')).toBe(true);
+    });
+
+    it('types the data to names the caller states, and still checks it at render', async () => {
+        const template = new LambderTemplatingEngine<'title' | 'isBeta'>('<title><!--slot:title-->T<!--/slot:title--></title><!--if:isBeta-->beta<!--/if:isBeta-->');
+        expect(template.render({ title: 'X', isBeta: true })).toBe('<title>X</title>beta');
+        // @ts-expect-error a misspelled key is a compile error
+        expect(() => template.render({ titel: 'X' })).toThrow(/"titel"/);
+
+        // A name the caller states that the file does not have still fails at render.
+        const stale = new LambderTemplatingEngine<'title' | 'subtitle'>('<title><!--slot:title-->T<!--/slot:title--></title>');
+        expect(() => stale.render({ subtitle: 'X' })).toThrow(/"subtitle"/);
+
+        const fromFile = await LambderTemplatingEngine.fromFile<'title' | 'head' | 'showBanner'>(path.resolve('./tests/fixtures/spa/marked.html'));
+        expectTypeOf(fromFile).toEqualTypeOf<LambderTemplatingEngine<'title' | 'head' | 'showBanner'>>();
+        expect(fromFile.render({ showBanner: true })).toContain('<div class="banner">Beta</div>');
+        // @ts-expect-error a misspelled key is a compile error
+        expect(() => fromFile.render({ showBaner: true })).toThrow(/"showBaner"/);
     });
 
     it('throws on unclosed or mismatched blocks', () => {
@@ -625,3 +655,41 @@ describe('LambderTemplatingEngine', () => {
     });
 });
 
+describe('res.templateFile data', () => {
+    const spaFiles = () => new LambderLocalFileSource({ root: path.resolve('./tests/fixtures/spa') });
+
+    it('refuses a key the file has no slot or condition for, naming the file, whichever source it came from', async () => {
+        const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+        const lambder = new Lambder({ files: spaFiles() })
+            .addRoute('/renamed', (ctx, res) => res.templateFile('marked.html', { title: 'Orders', showBaner: true }))
+            .addRoute('/virtual', (ctx, res) => res.templateFile('index.html', { title: 'Orders', heading: 'x' }, { htmlVirtualSlots: true }));
+
+        const crashes = () => error.mock.calls.map((call) => String(call[1]));
+
+        expect((await browse(lambder).request('GET', '/renamed')).statusCode).toBe(500);
+        expect(crashes()).toContain(
+            'Error: Lambder: res.templateFile("marked.html"): LambderTemplatingEngine: the data carries "showBaner", which the template has no slot or condition for, ' +
+            'so its value would be dropped. Its slots: "title", "head"; its conditions: "showBanner".',
+        );
+        expect((await browse(lambder).request('GET', '/virtual')).statusCode).toBe(500);
+        expect(crashes().some((crash) => /res\.templateFile\("index\.html"\): .*"heading".*Its slots: "title", "head"/.test(crash))).toBe(true);
+        error.mockRestore();
+    });
+
+    it('types the data to the names a handler states, on res and on res.die', async () => {
+        const lambder = new Lambder({ files: spaFiles() })
+            .addRoute('/typed', (ctx, res) => res.templateFile<'title' | 'head' | 'showBanner'>('marked.html', { title: 'Orders', showBanner: true }))
+            .addRoute('/thrown', (ctx, res) => res.die.templateFile<'title' | 'head' | 'showBanner'>('marked.html', { title: 'Thrown' }))
+            .addRoute('/untyped', (ctx, res) => res.templateFile('marked.html', { title: 'Any key compiles' }))
+            // @ts-expect-error a misspelled key is a compile error
+            .addRoute('/misspelled', (ctx, res) => res.templateFile<'title' | 'head' | 'showBanner'>('marked.html', { titel: 'Orders' }))
+            // @ts-expect-error on the die form too
+            .addRoute('/misspelled-die', (ctx, res) => res.die.templateFile<'title' | 'head' | 'showBanner'>('marked.html', { titel: 'Orders' }));
+
+        const typed = await browse(lambder).request('GET', '/typed');
+        expect(typed.text()).toContain('<title>Orders</title>');
+        expect(typed.text()).toContain('<div class="banner">Beta</div>');
+        expect((await browse(lambder).request('GET', '/thrown')).text()).toContain('<title>Thrown</title>');
+        expect((await browse(lambder).request('GET', '/untyped')).text()).toContain('<title>Any key compiles</title>');
+    });
+});

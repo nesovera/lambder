@@ -44,7 +44,7 @@ describe('LambderApiRefusal - envelope mapping on API calls', () => {
             });
         const lambder = app.registerApiGroups(app.defineApiGroup('test', {
             refuse: app.defineApi(testSchema, async () => {
-                throw new LambderApiRefusal('You are not a member of an organization.');
+                throw new LambderApiRefusal('You are not on the staff of this store.');
             }),
         }));
 
@@ -54,7 +54,7 @@ describe('LambderApiRefusal - envelope mapping on API calls', () => {
         expect(result.statusCode).toBe(200);
         const body = JSON.parse(decodeBody(result));
         expect(body.payload).toBe(null);
-        expect(body.refusal).toEqual({ type: 'error', content: 'You are not a member of an organization.' });
+        expect(body.refusal).toEqual({ type: 'error', content: 'You are not on the staff of this store.' });
     });
 
     it('works from nested helpers that hold nothing of the request', async () => {
@@ -321,7 +321,8 @@ describe('LambderRefusalMessage - branching on the code', () => {
         // framework's own vocabulary is designed for.
         const describeRefusal = (message: LambderRefusalMessage): string => {
             switch(message.code){
-                case LAMBDER_REFUSAL_CODES.rateLimited: return 'slow down';
+                // The one framework code with data: the policy and the wait.
+                case LAMBDER_REFUSAL_CODES.rateLimited: return `slow down on ${message.data.policy} for ${message.data.retryAfterSeconds}s`;
                 case LAMBDER_REFUSAL_CODES.duplicateInFlight: return 'already running';
                 case LAMBDER_REFUSAL_CODES.idempotencyKeyReused: return 'another request';
                 case LAMBDER_REFUSAL_CODES.invalidIdempotencyKey: return 'bad key';
@@ -333,14 +334,22 @@ describe('LambderRefusalMessage - branching on the code', () => {
                 case LAMBDER_REFUSAL_CODES.uploadTooLarge: return 'file too large';
                 case undefined: return message.content;
                 default: {
-                    const unreachable: never = message.code;
+                    const unreachable: never = message;
                     return unreachable;
                 }
             }
         };
 
-        expect(describeRefusal({ type: 'warning', code: LAMBDER_REFUSAL_CODES.rateLimited, content: 'x' })).toBe('slow down');
+        expect(describeRefusal({ type: 'warning', code: LAMBDER_REFUSAL_CODES.rateLimited, content: 'x', data: { policy: 'checkoutPerIp', retryAfterSeconds: 30 } })).toBe('slow down on checkoutPerIp for 30s');
         expect(describeRefusal({ type: 'error', content: 'plain' })).toBe('plain');
+        // A rate limit always carries its data, and no other framework code carries any.
+        const typesOnly = () => {
+            // @ts-expect-error lambder/rate-limited without its policy and wait
+            describeRefusal({ type: 'warning', code: LAMBDER_REFUSAL_CODES.rateLimited, content: 'x' });
+            // @ts-expect-error a framework code that carries no data
+            describeRefusal({ type: 'warning', code: LAMBDER_REFUSAL_CODES.apiNotFound, content: 'x', data: { policy: 'p', retryAfterSeconds: 1 } });
+        };
+        expect(typesOnly).toBeTypeOf('function');
     });
 
     it('takes an endpoint\'s declared codes as a type argument, narrows data on the code, and keeps the switch exhaustive over them', () => {

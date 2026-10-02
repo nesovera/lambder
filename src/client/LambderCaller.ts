@@ -10,7 +10,14 @@ import {
 } from '../shared/wire/LambderRequestPayload.js';
 import { resolveCompressionOption } from '../shared/wire/LambderCompressionOption.js';
 import type { LambderApiContractShape, LambderContractAnyRefusalMessage, LambderContractRefusalMessage } from '../shared/wire/LambderApiContract.js';
-import { resolveApiOutcome, type LambderApiHttpAnswer, type LambderApiOutcome, type LambderValidationError } from '../shared/wire/LambderApiOutcome.js';
+import {
+    resolveApiOutcome,
+    type LambderApiCallFailure,
+    type LambderApiFailure,
+    type LambderApiHttpAnswer,
+    type LambderApiOutcome,
+    type LambderValidationError,
+} from '../shared/wire/LambderApiOutcome.js';
 import {
     mergeGuardInputs,
     type LambderCallArgs,
@@ -18,7 +25,7 @@ import {
     type LambderGuardInputsProviderOption,
     type LambderSharedCallOptions,
 } from '../shared/wire/LambderCallOptions.js';
-import { beginIdempotentAttempt, IDEMPOTENT_ATTEMPT_NOT_SENT } from '../shared/wire/LambderIdempotencyKeyScope.js';
+import { beginIdempotentAttempt, IDEMPOTENT_ATTEMPT_NOT_SENT, type LambderIdempotentAttemptOutcome } from '../shared/wire/LambderIdempotencyKeyScope.js';
 import { createCallAbort, type LambderCallAbortStage } from '../shared/util/LambderCallAbort.js';
 import { coerceToError } from '../shared/wire/LambderCrashDetail.js';
 import { isLambderTransportFailure, type LambderApiTransport } from '../shared/transport/LambderApiTransport.js';
@@ -28,6 +35,7 @@ import { LambderReloadLoopBreaker, RELOAD_LOOP_WINDOW_MS } from './LambderReload
 import { lambderFetchTransport } from './lambderFetchTransport.js';
 import { withApiGroupCalls, type LambderContractActionOf, type LambderContractGroupsOf, type LambderContractNamesInGroup } from '../shared/wire/LambderApiGroupCalls.js';
 import { splitApiName } from '../shared/wire/LambderApiNames.js';
+import { DEFAULT_API_PATH } from '../shared/wire/LambderDefaultApiPath.js';
 
 // The outcome vocabulary and the contract-driven option typing live in
 // src/shared/ (LambderInvokeCaller uses them too); re-exported so the client
@@ -50,13 +58,24 @@ type FetchStartEventHandler = (params: {
     activeFetchList: FetchTracker[],
 })=>void|Promise<void>;
 
-type FetchEndEventHandler = (params: {
+/**
+ * Told that a call ended, however it ended, with the outcome apiOutcome()
+ * resolves to. TMessage is what the calls it hears can refuse with, as for
+ * RefusalHandler.
+ */
+type FetchEndEventHandler<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = (params: {
     fetchParams: EventHandlerFetchParams,
-    fetchResult: any,
+    fetchResult: LambderApiOutcome<unknown, TMessage>,
     activeFetchList: FetchTracker[],
 })=>void|Promise<void>;
 
-type ErrorHandler = (err: Error) => void|Promise<void>;
+/**
+ * Told a failure no other handler takes, with the error to report and the
+ * failure outcome it came from (its reason, status, refusal and response),
+ * so a reporter can word or file it by reason without reading the message.
+ * A call its own signal aborted is never one. TMessage as for RefusalHandler.
+ */
+type ErrorHandler<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = (error: Error, failure: LambderApiFailure<TMessage>) => void|Promise<void>;
 type ValidationErrorHandler = (zodError: LambderValidationError) => (void|false)|Promise<(void|false)>;
 /**
  * Handed the refusal as its message object, a plain-string refusal
@@ -81,14 +100,15 @@ export type LambderCallOptions<TMessage extends LambderUncheckedRefusalMessage =
     refusalHandler?: RefusalHandler<TMessage>;
     apiInputValidationErrorHandler?: ValidationErrorHandler;
     notAuthorizedHandler?: NotifyHandler;
-    errorHandler?: ErrorHandler;
+    errorHandler?: ErrorHandler<TMessage>;
     logListHandler?: LambderLogListHandler;
     fetchStartedHandler?: FetchStartEventHandler;
-    fetchEndedHandler?: FetchEndEventHandler;
+    fetchEndedHandler?: FetchEndEventHandler<TMessage>;
 };
 
 type LambderCallerBaseOptions<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = {
-    apiPath: string,
+    /** Must match the server's apiPath. Default: "/api", the server's own default. */
+    apiPath?: string,
     /** Sent with every call as `version`, informational: the server stamps its own on every answer. */
     apiVersion?: string,
     /**
@@ -113,11 +133,12 @@ type LambderCallerBaseOptions<TMessage extends LambderUncheckedRefusalMessage = 
     /** Handed every refusal a call of this caller comes back with, typed with every code the contract declares. */
     refusalHandler?: RefusalHandler<TMessage>,
     notAuthorizedHandler?: NotifyHandler,
-    errorHandler?: ErrorHandler,
+    /** Handed every failure no other handler takes (see ErrorHandler), typed with every code the contract declares. */
+    errorHandler?: ErrorHandler<TMessage>,
     /** Receives each answer's logList, with the API name. Default: console.log with a `[lambder]` prefix, one line per entry. */
     logListHandler?: LambderLogListHandler,
     fetchStartedHandler?: FetchStartEventHandler,
-    fetchEndedHandler?: FetchEndEventHandler,
+    fetchEndedHandler?: FetchEndEventHandler<TMessage>,
     apiInputValidationErrorHandler?: ValidationErrorHandler,
     /** Must mirror the server's session cookie Domain, otherwise expired cookies cannot be cleared. */
     sessionCookieDomain?: string | ((hostname: string) => string | undefined | null),
@@ -180,17 +201,18 @@ class LambderCallerCore<TContract extends LambderApiContractShape = any, TProvid
     #versionExpiredHandler?: NotifyHandler;
     #sessionExpiredHandler?: NotifyHandler;
 
-    // Hears every endpoint's refusals, so held at the widest message: the
-    // constructor option types it to the contract's codes, and dispatch,
-    // generic over one endpoint's message, hands it one of those.
+    // These three hear every endpoint's calls, so they are held at the widest
+    // message: the constructor options type them to the contract's codes,
+    // and dispatch, generic over one endpoint's message, hands them one of
+    // those.
     #refusalHandler?: RefusalHandler<LambderUncheckedRefusalMessage>;
     #notAuthorizedHandler?: NotifyHandler;
-    #errorHandler?: ErrorHandler;
+    #errorHandler?: ErrorHandler<LambderUncheckedRefusalMessage>;
     #apiInputValidationErrorHandler?: ValidationErrorHandler;
     #logListHandler?: LambderLogListHandler;
 
     #fetchStartedHandler?: FetchStartEventHandler;
-    #fetchEndedHandler?: FetchEndEventHandler;
+    #fetchEndedHandler?: FetchEndEventHandler<LambderUncheckedRefusalMessage>;
     #guardInputsProvider?: (apiName: string) => unknown;
 
     #sessionTokenCookieKey = DEFAULT_SESSION_TOKEN_COOKIE_KEY;
@@ -216,7 +238,7 @@ class LambderCallerCore<TContract extends LambderApiContractShape = any, TProvid
             guardInputsProvider,
             transport,
         } = options as LambderCallerBaseOptions<LambderUncheckedRefusalMessage> & { guardInputsProvider?: (apiName: string) => unknown };
-        this.#apiPath = apiPath;
+        this.#apiPath = apiPath ?? DEFAULT_API_PATH;
         this.#apiVersion = apiVersion;
         this.#apiSignatures = apiSignatures;
         this.#timeoutMs = timeoutMs;
@@ -309,22 +331,36 @@ class LambderCallerCore<TContract extends LambderApiContractShape = any, TProvid
         };
 
         let fetchEndCalled = false;
-        const fetchEnded = async (fetchResult: any) => {
+        const fetchEnded = async (outcome: LambderApiOutcome<TOutput, TMessage>) => {
             dropFetchTracker();
             if(fetchEndCalled || !fetchEndedHandler) return;
             fetchEndCalled = true;
             await fetchEndedHandler({
                 fetchParams: { apiName, payload, headers },
-                fetchResult,
+                fetchResult: outcome,
                 activeFetchList: [...this.fetchTrackerList],
             });
         };
 
         let errorHandlerCalled = false;
-        const reportError = async (err: Error) => {
+        const reportError = async (error: Error, failure: LambderApiFailure<TMessage>) => {
             if(errorHandlerCalled || !errorHandler) return;
             errorHandlerCalled = true;
-            await errorHandler(err);
+            await errorHandler(error, failure);
+        };
+
+        /**
+         * Ends a call no answer was read for: the attempt told, the lifecycle
+         * closed, and the failure reported, unless the site's own signal is
+         * what ended it. The site gave that call up itself (a superseded
+         * read, a view that closed), and reporting it would put a "could not
+         * reach the server" in front of a person for something the page chose.
+         */
+        const unansweredOutcome = async (failure: LambderApiCallFailure<TMessage>, attemptOutcome: LambderIdempotentAttemptOutcome) => {
+            idempotentAttempt.settle(attemptOutcome);
+            await fetchEnded(failure);
+            if(failure.reason !== 'aborted') await reportError(failure.error, failure);
+            return failure;
         };
 
         // Timeout and abort wiring, shared with LambderInvokeCaller so the two
@@ -332,15 +368,13 @@ class LambderCallerCore<TContract extends LambderApiContractShape = any, TProvid
         const abort = createCallAbort({ timeoutMs: options?.timeoutMs ?? this.#timeoutMs, signal: options?.signal });
         const signal = abort.signal;
 
-        /** Reports a call that was given up on, or null while it still stands. */
+        /** Ends a call that was given up on, or null while it still stands. */
         const abandonedOutcome = async (stage: LambderCallAbortStage) => {
-            const failure = abort.abortFailure(stage);
-            if(!failure) return null;
-            idempotentAttempt.settle(stage === "beforeSending" ? IDEMPOTENT_ATTEMPT_NOT_SENT : { ok: false, reason: failure.reason });
-            await fetchEnded(failure.error);
-            await reportError(failure.error);
-            const outcome: LambderApiOutcome<TOutput, TMessage> = { ok: false, reason: failure.reason, error: failure.error };
-            return outcome;
+            const abandoned = abort.abortFailure(stage);
+            if(!abandoned) return null;
+            const failure: LambderApiCallFailure<TMessage> = { ok: false, reason: abandoned.reason, error: abandoned.error };
+            // Nothing sent tried nothing; a request that left may have run.
+            return await unansweredOutcome(failure, stage === "beforeSending" ? IDEMPOTENT_ATTEMPT_NOT_SENT : failure);
         };
 
         try {
@@ -350,8 +384,9 @@ class LambderCallerCore<TContract extends LambderApiContractShape = any, TProvid
             if(!splitApiName(apiName)){
                 idempotentAttempt.settle(IDEMPOTENT_ATTEMPT_NOT_SENT);
                 const error = new Error(`Lambder: "${apiName}" is not an endpoint name. An endpoint is named group.action, both identifiers.`);
-                await reportError(error);
-                return { ok: false, reason: 'unknown', error };
+                const failure: LambderApiCallFailure<TMessage> = { ok: false, reason: 'unknown', error };
+                await reportError(error, failure);
+                return failure;
             }
             this.fetchTrackerList.push(fetchTracker);
             if(fetchStartedHandler) await fetchStartedHandler({
@@ -408,18 +443,15 @@ class LambderCallerCore<TContract extends LambderApiContractShape = any, TProvid
                     ...(signal ? { signal } : {}),
                 });
             }catch(err){
-                const wrappedError = coerceToError(err, "Request failed");
-                // The caller's own abort wins, since only it knows about that.
-                // Otherwise a transport that named its reason is believed:
-                // "protocol" means something came back and was not an answer,
-                // which is what this caller already calls `server`.
-                const reason = abort.timedOut() ? 'timeout'
-                    : isLambderTransportFailure(err) && err.reason === 'protocol' ? 'server'
-                    : 'network';
-                idempotentAttempt.settle({ ok: false, reason });
-                await fetchEnded(wrappedError);
-                await reportError(wrappedError);
-                return { ok: false, reason, error: wrappedError };
+                // The caller's own abort wins, timeout or signal, since only it
+                // knows which aborted the call. Otherwise a transport that named
+                // its reason is believed: "protocol" means something came back
+                // and was not an answer, which is what this caller already
+                // calls `server`.
+                const reason = abort.abortReason()
+                    ?? (isLambderTransportFailure(err) && err.reason === 'protocol' ? 'server' : 'network');
+                const failure: LambderApiCallFailure<TMessage> = { ok: false, reason, error: coerceToError(err, "Request failed") };
+                return await unansweredOutcome(failure, failure);
             }
 
             // An answer that arrives after the call was given up on is not a
@@ -444,25 +476,19 @@ class LambderCallerCore<TContract extends LambderApiContractShape = any, TProvid
                 else for(const record of logList) console.log("[lambder]", record);
             }
 
+            await fetchEnded(outcome);
             if(!outcome.ok && outcome.reason === 'server'){
-                await fetchEnded(outcome.error);
-                await reportError(outcome.error);
+                await reportError(outcome.error, outcome);
                 return outcome;
             }
             if(!outcome.ok && outcome.reason === 'validation'){
-                await fetchEnded(null);
                 if(apiInputValidationErrorHandler){
                     await apiInputValidationErrorHandler(outcome.zodError);
                 }else{
-                    await reportError(new Error("API Input Validation Error", { cause: outcome.zodError }));
+                    await reportError(new Error("API Input Validation Error", { cause: outcome.zodError }), outcome);
                 }
                 return outcome;
             }
-
-            // Whatever is left carries the envelope: a success or one of the
-            // envelope's own refusals, which is why no assertion is needed.
-            const data = outcome.response;
-            await fetchEnded(data);
 
             if(!outcome.ok && outcome.reason === 'versionExpired'){
                 // A page asks for one reload at a time, however many of its
@@ -473,12 +499,12 @@ class LambderCallerCore<TContract extends LambderApiContractShape = any, TProvid
                 const decision = pageReloadLoopBreaker.recordVersionExpired(apiName, signature ?? "", version ?? "");
                 if(decision === "alreadyAsked") return outcome;
                 if(decision === "loopConfirmed"){
-                    await reportError(new Error(`Version expired again for API "${apiName}" within ${RELOAD_LOOP_WINDOW_MS / 60000} minutes of a reload: the bundle being served is still the stale one, so versionExpiredHandler was not called again.`));
+                    await reportError(new Error(`Version expired again for API "${apiName}" within ${RELOAD_LOOP_WINDOW_MS / 60000} minutes of a reload: the bundle being served is still the stale one, so versionExpiredHandler was not called again.`), outcome);
                     return outcome;
                 }
                 await pageReloadLoopBreaker.runReloadAsk(async () => {
                     if(versionExpiredHandler){ await versionExpiredHandler(); }
-                    else{ await reportError(new Error("Version Expired; Please refresh;")); }
+                    else{ await reportError(new Error("Version Expired; Please refresh;"), outcome); }
                 });
                 return outcome;
             }
@@ -499,12 +525,12 @@ class LambderCallerCore<TContract extends LambderApiContractShape = any, TProvid
                 if(heldToken !== "" && heldToken !== postedToken) return outcome;
                 this.#clearSessionCookies();
                 if(sessionExpiredHandler){ await sessionExpiredHandler(); }
-                else{ await reportError(new Error("Session Expired; Please log in again;")); }
+                else{ await reportError(new Error("Session Expired; Please log in again;"), outcome); }
                 return outcome;
             }
             if(!outcome.ok && outcome.reason === 'notAuthorized'){
                 if(notAuthorizedHandler){ await notAuthorizedHandler(); }
-                else{ await reportError(new Error("Not Authorized;")); }
+                else{ await reportError(new Error("Not Authorized;"), outcome); }
                 return outcome;
             }
             if(!outcome.ok && outcome.reason === 'refusal'){
@@ -515,12 +541,12 @@ class LambderCallerCore<TContract extends LambderApiContractShape = any, TProvid
         }catch(err){
             // Escape hatch for anything above (typically an app handler throwing):
             // dispatch never throws, so api()/apiOutcome() call sites never do.
-            const wrappedError = coerceToError(err, "The call failed before it produced an outcome");
+            const failure: LambderApiCallFailure<TMessage> = { ok: false, reason: 'unknown', error: coerceToError(err, "The call failed before it produced an outcome") };
             try {
-                await fetchEnded(wrappedError);
-                await reportError(wrappedError);
+                await fetchEnded(failure);
+                await reportError(failure.error, failure);
             } catch { /* an app handler threw again; never propagate */ }
-            return { ok: false, reason: 'unknown', error: wrappedError };
+            return failure;
         }finally{
             // Whatever ended the call before its attempt was told (a provider
             // or a handler that threw): nothing sent tried nothing, and a
@@ -556,8 +582,9 @@ class LambderCallerCore<TContract extends LambderApiContractShape = any, TProvid
      * The endpoint's output on success, `undefined` on every failure. An
      * output is always an object or an array, so the result is truthy exactly
      * when the call succeeded; the handlers configured on the caller have
-     * already been told why it did not. Use apiOutcome() to branch on the
-     * reason at the call site.
+     * already been told why it did not, unless the call's own signal aborted
+     * it, which tells none. Use apiOutcome() to branch on the reason at the
+     * call site.
      */
     async api<TApiName extends keyof TContract & string = string>(
         apiName: TApiName,

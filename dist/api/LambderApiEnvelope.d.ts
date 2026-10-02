@@ -21,8 +21,8 @@ export declare const refusalEnvelope: (apiVersion: string | null | undefined, { 
  * server, onInvalidInput in the mock) as its envelope, once the config is
  * known to be a refusal: a refusal message or one of the three flags, so a
  * reader never takes it for the handler's output, and a message with a
- * framework code or none and no data, since it answers outside any one
- * endpoint's declared refusals. `writer` names the call in the error, and
+ * framework code that carries no data, or none, since it answers outside any
+ * one endpoint's declared refusals. `writer` names the call in the error, and
  * the logList is the config's own or the one given.
  */
 export declare const plainRefusalEnvelope: (apiVersion: string | null | undefined, config: LambderApiRefusalConfig, writer: string, logList?: unknown[]) => LambderApiRefusalEnvelope;

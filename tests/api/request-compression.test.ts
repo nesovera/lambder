@@ -27,10 +27,12 @@ import { resolveCompressionOption } from '../../src/shared/wire/LambderCompressi
 import { LAMBDER_REFUSAL_CODES } from '../../src/shared/wire/LambderApiRefusal.js';
 import { lambderGuard } from '../../src/core/LambderPolicyBuilders.js';
 import { lambderRateLimitKey } from '../../src/core/LambderPolicyBuilders.js';
+import { LambderKeyFieldDigest } from '../../src/shared/util/LambderKeyFieldDigest.js';
+import { joinKeyFields } from '../../src/shared/util/joinKeyFields.js';
 import { createApiEvent, createMockContext, createMockEventV2, decodeBody } from '../helpers.js';
 
 /** A payload big and repetitive enough that gzip is a large win. */
-const bigPayload = (size = 400) => ({ notes: Array.from({ length: size }, (_, i) => `stop-${i} on the main line`) });
+const bigPayload = (size = 400) => ({ notes: Array.from({ length: size }, (_, i) => `item-${i} in the stockroom`) });
 
 /** Builds the envelope exactly as a compressing caller would; the payload must be one that shrinks. */
 const compressedApiEvent = async (apiName: string, payload: unknown, extra: Record<string, unknown> = {}) => {
@@ -527,7 +529,8 @@ describe('Request compression - round trip through the real pipeline', () => {
             createMockContext(),
         );
 
-        expect(keys).toEqual(['api|test.ingest|perTenant|custom:acme']);
+        // The tenant read off the restored payload, digested as every custom key is.
+        expect(keys).toEqual([joinKeyFields('api', 'test.ingest', 'perTenant', await new LambderKeyFieldDigest(null).digestOf('custom', 'acme'))]);
         expect(JSON.parse(decodeBody(result)).payload).toEqual({ ok: true });
     });
 });

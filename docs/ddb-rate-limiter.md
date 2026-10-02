@@ -10,7 +10,7 @@ Inside a request, charge a named policy with `ctx.rateLimit(policy, key)`
 instead of calling the limiter ([Charging a policy from
 code](./api-policies.md#charging-a-policy-from-code)): it counts on the same
 limiter, and adds what a direct call skips, which is `failOpen`, the key
-bounding described below, the standard 429 refusal, and the memory limiter
+digest described below, the standard 429 refusal, and the memory limiter
 `lambder/testing` puts under the instance.
 
 ```typescript
@@ -152,7 +152,7 @@ is what a `Retry-After` header derives from.
 ## Item layout
 
 ```
-pk = "<keyPrefix>#<trackerKey>"        e.g. "RL#1.2.3.4"
+pk = "<keyPrefix>#<trackerKey>"        e.g. "RL#api|auth.sendCode|codePerEmail|custom:3f7c...e1"
 sk = "<window>#<windowStart>"          e.g. "perMin#1700000040"
 ```
 
@@ -160,16 +160,24 @@ The `RL#` prefix means the table can be shared with `LambderDdbCache`
 (`CACHE#`) and `LambderDdbIdempotencyStore` (`IDEM#`) without key collisions. Keep
 sessions in their own table so IAM can be scoped to them separately.
 
-A tracker key is caller data, and a DynamoDB partition key stops at 2048
-bytes. Lambder's own policy engine never gets near it: the variable half of a
-key (a session key, whatever a custom handler returned) is replaced by
-`<kind>:h:<sha256 hex>` once it passes 1024 bytes as written into the key
-(where each `|` and `\` is escaped to two), so distinct callers stay on
-distinct counters and short keys stay readable in the table. Calling the
-limiter directly, a key whose `RL#<trackerKey>` passes 2048 bytes is refused
-here with an error naming the byte count, before any window is counted: left
-to DynamoDB it would come back as a `ValidationException`, which a caller
-failing open on storage errors turns into no limit at all.
+A tracker key is caller data. Lambder's own policy engine writes the
+caller's half of every key it builds (the address, the session key, whatever
+a custom handler returned) as `<kind>:<64 hex>`, a digest of fixed length,
+after the readable API and policy names. So a read of the table shows which
+API and policy each counter belongs to and what kind of key it counts, and
+never who: with sessions configured the digest is an HMAC keyed by a subkey
+of the `sessionSalt`, which no read of the table can test a guess against,
+and without them a plain SHA-256, which keeps the values out of the table but
+lets a reader test guesses (see [What a table read
+shows](./api-policies.md#what-a-table-read-shows)). Changing the
+`sessionSalt` starts every counter afresh.
+
+A DynamoDB partition key stops at 2048 bytes, which the engine's keys never
+get near. Calling the limiter directly, the key is written as given, and one
+whose `RL#<trackerKey>` passes 2048 bytes is refused here with an error
+naming the byte count, before any window is counted: left to DynamoDB it
+would come back as a `ValidationException`, which a caller failing open on
+storage errors turns into no limit at all.
 
 ## Table setup
 

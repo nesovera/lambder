@@ -8,25 +8,28 @@ requests too. Both are registered on the created instance and dispatched by
 ## Adding routes
 
 ```typescript
+import { html } from "lambder";
+
 lambder
     // A simple path
     .addRoute("/hello-world", (ctx, res) => {
-        return res.html("Hello World");
+        return res.html(html`Hello World`);
     })
     // Path parameters, typed from the pattern
     .addRoute("/user/:userId", async (ctx, res) => {
         const user = await getUser(ctx.pathParams.userId);
-        if (!user) return res.status404("Not found");
-        // html`` (from "lambder") escapes what it interpolates; a plain template string would not.
+        if (!user) return res.status404(html`<p>No such user.</p>`);
+        // html`` escapes what it interpolates, and an HTML response takes nothing
+        // else: a plain string is a type error and throws (see Responses).
         return res.html(html`Hello ${user.name}`);
     })
     // A regular expression
     .addRoute(/\/hello-regex/, (ctx, res) => {
-        return res.html("Hello Regex");
+        return res.html(html`Hello Regex`);
     })
     // A predicate, which can route on any context value
     .addRoute((ctx) => ctx.path === "/hello-fn-route", (ctx, res) => {
-        return res.html("Hello from a function route");
+        return res.html(html`Hello from a function route`);
     })
     // A structured matcher: path, host, method and an extra condition
     .addRoute({ path: "/stripe-webhook", method: "POST" }, (ctx, res) => {
@@ -63,7 +66,7 @@ The matcher object's fields:
 `ctx.session` is typed from the instance's session data type. When no valid
 session exists, the request short-circuits: API calls get the protocol's
 `{ sessionExpired: true }` envelope, routes get
-`setSessionExpiredRouteHandler`'s response, and without one, a plain 401.
+`setSessionExpiredRouteHandler`'s response, and without one, a plain-text 401.
 
 ```typescript
 lambder
@@ -100,7 +103,7 @@ Both file slots are covered in [Frontend hosting](./frontend-hosting.md).
 lambder
     .servePublicFiles()
     .serveIndexHtml()
-    .setRouteFallbackHandler((ctx, res) => res.status404("Not Found"));
+    .setRouteFallbackHandler((ctx, res) => res.status404(html`<h1>Not found</h1>`));
 ```
 
 ## Fallback and error handlers
@@ -209,12 +212,17 @@ own 500 with `console.error`, so it is never silent: that invocation succeeds
 the stack as text on a route. It governs the framework's answer only; a global
 error handler writes its own answer and calls `describeCrash` itself if it
 wants to. A reveal that throws counts as no. By default nobody is shown
-anything.
+anything. `reveal: (ctx) => ctx.arrivedVia === "invoke"` shows a crash to a
+lambda invoking this one and to no HTTP caller: `arrivedVia` is read from the
+event's `requestContext.apiId`, which a gateway writes itself, so only a
+caller IAM lets invoke the function gets `"invoke"` (see
+[Responses](./responses.md#render-context-ctx)).
 
 ## Hooks
 
 Hooks run at fixed points in the request lifecycle. Each takes an optional
-priority (lower runs first, default 0).
+priority (lower runs first, default 0); hooks of one priority run in the
+order they were added.
 
 | Event | Signature | Purpose |
 | --- | --- | --- |
@@ -286,7 +294,7 @@ lambder
     // HTTP interception: ctx is present, and the action must return a response via tools.res
     .addAction(
         (event, ctx) => ctx !== null && ctx.host.endsWith("dev.example.com") && ctx.cookie.dev !== "atlas",
-        async (event, { res }) => res!.status404("Not found"),
+        async (event, { res }) => res!.text("Not found", { statusCode: 404 }),
     );
 
 export const handler = lambder.getHandler();
@@ -313,7 +321,10 @@ Route modules are plain functions over the instance, applied with `use()`,
 which hands the instance to the function (routes, hooks and actions) and
 continues the chain. Endpoints are values instead: a module exports its
 groups, and the entry registers them. See
-[APIs](./apis.md#groups-across-files-and-lazy-groups).
+[APIs](./apis.md#groups-across-files-and-lazy-groups). A helper such a module
+shares between its handlers types its `ctx` from the instance with
+`LambderRenderContextOf<typeof lambderApp>` (see
+[Typing a helper's context](./responses.md#typing-a-helpers-context)).
 
 ## Event formats
 

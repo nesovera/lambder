@@ -76,8 +76,9 @@ export const isLambderTransportFailure = (err: unknown): err is LambderTransport
  *   status means. Rejecting on a status would throw away the envelope a
  *   refusal, a validation failure or a crash arrived in.
  * - **A rejection is a transport failure.** The caller reports it as
- *   `network`, as `timeout` when its own abort fired, or as the reason a
- *   thrown LambderTransportFailure names. That failure's `cause` carries the
+ *   `network`, as `timeout` or `aborted` when the call's own timeout or
+ *   signal had aborted it, or as the reason a thrown LambderTransportFailure
+ *   names. That failure's `cause` carries the
  *   real error through to the caller's `outcome.error`.
  * - **`request.signal` must be honoured**, by rejecting as soon as it aborts.
  *   Without that, the caller's `timeoutMs` and per-call `signal` mean

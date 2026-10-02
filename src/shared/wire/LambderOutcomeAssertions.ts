@@ -30,8 +30,8 @@ type LambderFailureReasonOf<TOutcome> = TOutcome extends { ok: false; reason: in
 /**
  * The failure arms that can carry one of the given reasons, each narrowed to
  * it. Per arm rather than through Extract: one arm may carry several reasons
- * (`network`, `timeout`, `server` and `unknown` share theirs), and Extract
- * would drop that arm for any single one of them.
+ * (`network`, `timeout`, `aborted`, `server` and `unknown` share theirs), and
+ * Extract would drop that arm for any single one of them.
  */
 type LambderFailureWithReason<TOutcome, TReason> = TOutcome extends { ok: false; reason: infer TArmReason }
     ? [TReason & TArmReason] extends [never] ? never : TOutcome & { reason: TReason & TArmReason }
@@ -47,9 +47,10 @@ type LambderRefusalCodeOf<TOutcome> = LambderRefusalMessageOf<TOutcome> extends 
 
 /**
  * The arm of a refusal message that carries code C: the declared code's own
- * arm, with its data. A framework code has no arm of its own (it shares the
- * uncoded one), and neither does any code of a message typed as any code, so
- * those are the message with the code pinned.
+ * arm, with its data, and so `lambder/rate-limited`'s. A framework code that
+ * carries no data has no arm of its own (it shares the uncoded one), and
+ * neither does any code of a message typed as any code, so those are the
+ * message with the code pinned.
  */
 type LambderRefusalWithCode<TMessage, TCode> =
     [Extract<TMessage, { code: TCode }>] extends [never] ? TMessage & { code: TCode } : Extract<TMessage, { code: TCode }>;
@@ -124,7 +125,7 @@ export function assertApiSuccess<TOutcome extends LambderOutcomeShape>(outcome: 
  * `error` after the rest) reads directly on the next line.
  *
  * ```typescript
- * assertApiFailure(await member.apiOutcome("org.delete", { id }), "notAuthorized");
+ * assertApiFailure(await clerk.apiOutcome("store.delete", { id }), "notAuthorized");
  * assertApiFailure(await guest.apiOutcome("signup", form), "refusal", { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
  * ```
  */

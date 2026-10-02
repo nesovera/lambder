@@ -13,14 +13,14 @@ export { LambderCookieJar, parseSetCookie } from "./shared/transport/LambderCook
 export { LambderExpiringMap, LambderExpiringMapFullError } from "./shared/util/LambderExpiringMap.js";
 // Waiting longer after each failure, once: what the upload runner and an app's own retrying code climb.
 export { LambderBackoffTimer } from "./shared/util/LambderBackoffTimer.js";
-// Signed claims tokens, and the keyed digest and random secret for the secrets an app stores.
-export { LambderSignedClaims, keyedDigest, randomSecret } from "./shared/util/LambderSignedClaims.js";
+// Signed claims tokens, and the keyed digest, random secret and random code for the secrets an app stores.
+export { LambderSignedClaims, keyedDigest, randomSecret, randomCode } from "./shared/util/LambderSignedClaims.js";
 export { constantTimeEquals } from "./shared/util/LambderTextDigest.js";
 export { lambderHandlerTransport } from "./invoke/lambderHandlerTransport.js";
 export { synthesizeLambdaHttpEvent, decodeLambdaHttpResult, localLambdaContext, LAMBDER_INVOKE_HEADER, LAMBDER_INVOKED_BY_HEADER, LAMBDER_PARENT_REQUEST_HEADER, LAMBDER_INVOKE_PROTOCOL, } from "./invoke/LambderLambdaEvent.js";
 // The API core: the request, answer, envelope and pipeline both the server and the mock runtime run
 export { LambderApiPipeline } from "./api/LambderApiPipeline.js";
-export { readApiEnvelope, restoreCompressedPayload } from "./api/LambderApiRequest.js";
+export { readApiEnvelope, readApiEnvelopeText, restoreCompressedPayload } from "./api/LambderApiRequest.js";
 export { toHttpAnswer } from "./api/LambderApiAnswer.js";
 export { LambderAnswerHeaders, getAnswerHeader, setAnswerHeader, addAnswerHeader } from "./shared/wire/LambderAnswerHeaders.js";
 export { createApiCallContext } from "./api/LambderApiCallContext.js";
@@ -50,7 +50,7 @@ export { LambderMemorySessionStore } from "./stores/LambderMemorySessionStore.js
 export { LambderWebCrypto, LambderPlainSessionCrypto, isWebCryptoAvailable } from "./session/LambderSessionCrypto.js";
 export { LambderDdbSessionStore } from "./stores/LambderDdbSessionStore.js";
 // Response model
-export { LambderResponse, finalizeResponse, answerFromResponse, responseFromAnswer, } from "./core/LambderResponse.js";
+export { LambderResponse, } from "./core/LambderResponse.js";
 // Type-safe templating (tagged templates with auto-escaping)
 export { html, xml, raw, jsonScript, escapeHtml, renderHtmlValue, LambderSafeHtml } from "./shared/LambderHtml.js";
 // Comment-based HTML templating engine (build-pipeline-safe slots and conditionals, standalone)
@@ -81,6 +81,8 @@ export { LambderStorageBackedCache } from "./stores/LambderStorageBackedCache.js
 export { RATE_LIMIT_WINDOWS } from "./shared/contracts/LambderRateLimiter.js";
 export { LambderDdbRateLimiter } from "./stores/LambderDdbRateLimiter.js";
 export { LambderMemoryRateLimiter } from "./stores/LambderMemoryRateLimiter.js";
+// Passwords at rest: argon2id PHC strings through node:crypto
+export { LambderPasswordHasher } from "./secrets/LambderPasswordHasher.js";
 // One-shot secrets: codes and tokens handed out once and taken back once, the
 // store interface they live in, and the DynamoDB and in-memory stores
 export { LambderOneShotSecrets } from "./secrets/LambderOneShotSecrets.js";
@@ -97,7 +99,7 @@ export { LambderApiRefusalValidationError } from "./api/LambderApiRefusals.js";
 export { lambderRateLimitKeyBuilder, rateLimitRefusal, DEFAULT_RATE_LIMIT_REFUSAL } from "./api/LambderApiRateLimits.js";
 // The declared options as plain data: what apiOptionEntries() reports and
 // writeApiOptions writes, and the readers over the generated tables.
-export { apiGuardParam, apiGuardParamExportName } from "./shared/wire/LambderApiOptionEntries.js";
+export { apiGuardParam, apiGuardParamExportName, apisWithGuard } from "./shared/wire/LambderApiOptionEntries.js";
 // Typed translations (standalone, isomorphic)
 export { createLambderI18n } from "./shared/LambderI18n.js";
 export { resolveApiOutcome } from "./shared/wire/LambderApiOutcome.js";

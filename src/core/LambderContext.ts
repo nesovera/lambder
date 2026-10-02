@@ -18,6 +18,7 @@ import type {
     LambderContextRateLimitCheck,
     LambderRateLimitCheckResult,
 } from "../api/LambderApiRateLimits.js";
+import type { LambderAppTypes } from "../api/LambderApiDeclarations.js";
 
 export type LambderHttpEvent = APIGatewayProxyEvent | APIGatewayProxyEventV2;
 
@@ -36,6 +37,22 @@ export const isV2HttpEvent = (event: unknown): event is APIGatewayProxyEventV2 =
     && !!(event as APIGatewayProxyEventV2).requestContext?.http;
 
 /**
+ * How a request reached the function, as `ctx.arrivedVia` says it:
+ * - "proxy": over HTTP, carrying a valid `originProof`, so it came through
+ *   the proxy in front of the app;
+ * - "direct": over HTTP without a valid proof, sent to the gateway's own
+ *   address (an `execute-api` or `lambda-url` domain) rather than through the
+ *   proxy, so the proxy's headers on it are whatever its sender wrote and
+ *   have been taken off;
+ * - "invoke": a Lambda invoke, told by the event's `requestContext.apiId`,
+ *   which a gateway writes itself and no HTTP client can set, so only a
+ *   caller IAM let invoke the function sends one;
+ * - "unverified": over HTTP on an instance with no `originProof`, where
+ *   nothing tells a proxied request from a direct one.
+ */
+export type LambderRequestArrival = "proxy" | "direct" | "invoke" | "unverified";
+
+/**
  * Everything a route or API handler knows about the request. Extends the
  * API core's call context (session, guardData, responseHeaders, logList),
  * which is the part the pipeline and the session controller work on; the
@@ -44,10 +61,12 @@ export const isV2HttpEvent = (event: unknown): event is APIGatewayProxyEventV2 =
  * and the response tools (setResponseHeader, addResponseHeader, setCookie,
  * clearCookie) that write onto whatever answer the request ends with.
  *
- * TRateLimitPolicies is the app's policies map on a handler registered with
- * defineApi, addRoute or addSessionRoute, so a policy name is
- * checked where it is charged; anywhere else (a hook, a guard) the names are
- * any string.
+ * TRateLimitPolicies is the app's policies map on an API handler (defineApi)
+ * and on a route registered by a path string (addRoute, addSessionRoute), so
+ * a policy name is checked where it is charged; anywhere else (a route
+ * matched by a RegExp, a predicate or a matcher object, a hook, a guard) the
+ * names are any string. LambderRenderContextOf names the typed form for a
+ * helper that takes one instance's context.
  */
 export type LambderRenderContext<
     TApiPayload = any,
@@ -58,7 +77,7 @@ export type LambderRenderContext<
 > = {
     /**
      * The Host the gateway received, or the first header named in
-     * `trustedHostHeaders` that carries a well-formed host. On a direct
+     * `trustedHostHeaders` that carries a well-formed host. On a Lambda
      * invoke, the invoking caller's `host`, whatever headers it forwarded.
      */
     host: string;
@@ -119,7 +138,7 @@ export type LambderRenderContext<
     /**
      * The address the gateway observed, or the leftmost entry of the first
      * header named in `trustedClientIpHeaders` that carries one; nothing is
-     * trusted by default, and no header on a direct invoke, whose address is
+     * trusted by default, and no header on a Lambda invoke, whose address is
      * the invoking caller's `clientIp`. One spelling per address (port and brackets
      * stripped, lowercased, length-bounded), so a `per: "ip"` limit keys one
      * counter per client.
@@ -131,6 +150,12 @@ export type LambderRenderContext<
     lambdaContext: Context;
     /** Which API Gateway payload format the event arrived in, and the response leaves in. */
     eventFormat: LambderHttpEventFormat;
+    /**
+     * How the request reached the function (see LambderRequestArrival):
+     * through the proxy with a valid `originProof`, without it, by a
+     * Lambda invoke, or, with no `originProof` configured, unverified.
+     */
+    readonly arrivedVia: LambderRequestArrival;
     /** Response headers written during the request (the response tools below, session cookies), applied onto the response at the end. */
     responseHeaders: LambderAnswerHeaders;
     /** Entries for the API envelope's logList channel: a handler pushes what it wants the caller's debug log to show. */
@@ -163,6 +188,28 @@ export type LambderSessionRenderContext<
     TGuardData = {},
     TRateLimitPolicies = Record<string, LambderApiRateLimitPolicyConfig>,
 > = Omit<LambderRenderContext<TApiPayload, TPathParams, TGuardData, SessionData, TRateLimitPolicies>, 'session'> & { session: LambderSessionRecord<SessionData> };
+
+/** What the context helpers below read off an instance: the AppTypes property every instance carries. */
+type LambderInstanceTypes = { readonly AppTypes: LambderAppTypes };
+
+/**
+ * One instance's render context, read off `typeof lambderApp`: its session
+ * data and its rate-limit policy names, any payload, path parameters and
+ * guard data. What a helper in another file takes to be handed a context of
+ * that instance, without writing LambderRenderContext's parameters out: an
+ * API handler's, a route's, a hook's and a guard's context are each
+ * assignable to it.
+ */
+export type LambderRenderContextOf<TInstance extends LambderInstanceTypes> =
+    LambderRenderContext<any, Record<string, string>, {}, TInstance["AppTypes"]["session"], TInstance["AppTypes"]["policies"]>;
+
+/**
+ * LambderRenderContextOf with the session present: what a helper takes to be
+ * handed the context of a session route, a session endpoint's handler or a
+ * guard that needs a session, each assignable to it.
+ */
+export type LambderSessionRenderContextOf<TInstance extends LambderInstanceTypes> =
+    LambderSessionRenderContext<any, TInstance["AppTypes"]["session"], Record<string, string>, {}, TInstance["AppTypes"]["policies"]>;
 
 /** The members of a render context that are bound onto it rather than read from its event. */
 type LambderContextToolName = "sessionController" | "rateLimit" | "isRateLimited" | keyof LambderResponseTools;
@@ -223,6 +270,15 @@ export type LambderOriginProof = {
     header: string;
     /** The values it may carry: the current secret, and during a rotation the one before it. */
     secrets: readonly string[];
+    /**
+     * Headers the proxy writes that the app reads, beside the trusted client
+     * address and host headers, such as "cf-ipcountry" or
+     * "cloudfront-viewer-country". A request without the proof carries
+     * whatever its sender wrote under these names, so they are taken off
+     * `ctx.headers` and `ctx.header()` there, as the trusted headers are.
+     * Default: none.
+     */
+    proxyHeaders?: readonly string[];
 };
 
 /** What createContext reads a request with: the instance's own settings for where an API call goes and which forwarded headers it trusts. */
@@ -233,7 +289,7 @@ export type LambderContextOptions = {
     trustedClientIpHeaders?: readonly string[];
     /** See `trustedHostHeaders` at create(). Default: none. */
     trustedHostHeaders?: readonly string[];
-    /** See `originProof` at create(). Default: none, so the trusted headers are read on every request. */
+    /** See `originProof` at create(). Default: none, so the trusted headers are read on every request and `arrivedVia` is "unverified" on all but an invoke. */
     originProof?: LambderOriginProof | null;
 };
 
@@ -331,26 +387,31 @@ export const createContext = (
     // The origin proof is read, then taken off the headers the app reads
     // (ctx.headers, ctx.header()), so no handler, hook or log of them meets
     // the secret; the raw event keeps it. A request that does not carry it
-    // came to the origin some other way than through the proxy, and the
-    // proxy's headers on it are whatever its sender wrote.
+    // came to the origin some other way than through the proxy, and every
+    // header the proxy writes is, on it, whatever its sender wrote: those
+    // are taken off too, so a handler reading one (a country, a viewer's
+    // address) reads what the proxy said or nothing.
     let proven = true;
     if(originProof){
-        const proofHeader = originProof.header.toLowerCase();
-        const presented = lowercasedHeaders[proofHeader] ?? "";
+        const presented = lowercasedHeaders[originProof.header.toLowerCase()] ?? "";
         proven = originProof.secrets.some((secret) => constantTimeEquals(presented, secret));
-        delete lowercasedHeaders[proofHeader];
-        headers = Object.fromEntries(Object.entries(headers).filter(([name]) => name.toLowerCase() !== proofHeader));
+        const senderWritten = proven ? [] : [...trustedClientIpHeaders, ...trustedHostHeaders, ...(originProof.proxyHeaders ?? [])];
+        const removed = new Set([originProof.header, ...senderWritten].map((name) => name.toLowerCase()));
+        for(const name of removed) delete lowercasedHeaders[name];
+        headers = Object.fromEntries(Object.entries(headers).filter(([name]) => !removed.has(name.toLowerCase())));
     }
     const header = (name: string): string | undefined => lowercasedHeaders[name.toLowerCase()];
 
     // A trusted forwarding header is trusted because a proxy in front of this
-    // function writes it. A direct invoke has no such proxy: its headers are
+    // function writes it. A Lambda invoke has no such proxy: its headers are
     // whatever the invoking code passed on, and a gateway lambda forwarding a
     // browser's request passes on the browser's own. So on an invoke the
     // address and the host are the ones the invoker named (clientIp and host,
-    // delivered as sourceIp and Host), and no header is read for either.
+    // delivered as sourceIp and Host), and no header is read for either. An
+    // invoke is told by the apiId, which a gateway writes itself.
     const invokedDirectly = event.requestContext?.apiId === LAMBDER_INVOKE_API_ID;
     const readsForwarding = proven && !invokedDirectly;
+    const arrivedVia: LambderRequestArrival = invokedDirectly ? "invoke" : !originProof ? "unverified" : proven ? "proxy" : "direct";
 
     // The first trusted header carrying a well-formed host, leftmost entry,
     // else the host the gateway saw. Behind CloudFront a Function URL sees
@@ -364,19 +425,27 @@ export const createContext = (
 
     const ip = resolveClientIp(lowercasedHeaders, sourceIp, readsForwarding ? trustedClientIpHeaders : []);
 
-    // Decode body: keep the raw string, then parse as JSON with urlencoded fallback.
+    // Decode body: keep the raw string, then read it as a JSON object, or as
+    // urlencoded fields when it is not JSON. ctx.post is an object whatever
+    // the body was: a JSON number, string, boolean, null or array is not
+    // fields, and every reader (a handler, a hook, the API path writing the
+    // restored payload onto it) indexes into it. Such a body stays readable
+    // as ctx.rawBody. What it means for an API call is readApiEnvelope's to
+    // say, from the parse itself.
     const rawBody = event.isBase64Encoded
         ? (event.body ? base64ToText(event.body) : "")
         : (event.body || "");
+    let posted: unknown;
+    let bodyNotJson = false;
     let post: Record<string, unknown> = {};
-    try { post = JSON.parse(rawBody || "{}") || {}; }
-    catch(e){
-        const params = new URLSearchParams(rawBody);
-        post = {};
-        for(const [key, value] of params.entries()){
+    try { posted = JSON.parse(rawBody || "{}"); }
+    catch {
+        bodyNotJson = true;
+        for(const [key, value] of new URLSearchParams(rawBody).entries()){
             post[key] = value;
         }
     }
+    if(posted !== null && typeof posted === "object" && !Array.isArray(posted)) post = posted as Record<string, unknown>;
 
     // A JSON POST to `{apiPath}/{group}/{action}` is a call to that endpoint;
     // the core reads the envelope, and everything downstream reads ctx.api.
@@ -388,7 +457,7 @@ export const createContext = (
     const isJsonPost = method === "POST" && !!apiPath && isApiCallContentType(lowercasedHeaders);
     const calledName = isJsonPost ? apiNameOfCallPath(apiPath, path) : null;
     const requestInfo = { headers: lowercasedHeaders, cookies: cookieList, ip, host };
-    const api = calledName !== null ? readApiEnvelope(post, requestInfo, calledName)
+    const api = calledName !== null ? readApiEnvelope(posted, requestInfo, calledName, bodyNotJson ? { bodyNotJson: true } : {})
         : isJsonPost && path === apiPath && typeof post.apiName === "string" && post.apiName !== ""
             ? readApiEnvelope(post, requestInfo, post.apiName, { retiredPath: true })
             : null;
@@ -404,7 +473,8 @@ export const createContext = (
         headers, rawBody, ip, header,
         lambdaContext,
         eventFormat,
+        arrivedVia,
         responseHeaders: new LambderAnswerHeaders(),
         logList: [],
     }, UNBOUND_CONTEXT_TOOLS);
-}
+};

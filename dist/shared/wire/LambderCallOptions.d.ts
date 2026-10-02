@@ -82,10 +82,10 @@ export type LambderProvidedGuardInputs<TContract, TProvided extends string> = Is
     }[keyof TContract];
 };
 /**
- * Supplies guardInputs for every call from one place (the organization the
- * UI is on, a device token), keyed by guard name; per-call guardInputs merge
+ * Supplies guardInputs for every call from one place (the store the UI is
+ * on, a terminal token), keyed by guard name; per-call guardInputs merge
  * on top. Name the guards it covers in the caller's second type parameter,
- * `new LambderCaller<Contract, "orgPermission">`, and calls to APIs whose
+ * `new LambderCaller<Contract, "staffPermission">`, and calls to APIs whose
  * guardInput guards are all covered do not require the options argument.
  * May be async; a throw fails the call as an unknown error before anything
  * is sent.

@@ -183,7 +183,22 @@ describe('LambderDdbIdempotencyStore, items it did not write', () => {
             bodyBytes: { N: String(Number.MAX_SAFE_INTEGER) },
         });
 
-        await expect(store.peek('s')).rejects.toThrow(/replay limit/);
+        await expect(store.peek('s')).rejects.toThrow(/declares 9007199254740991 bytes of text, over the 33554432-byte limit/);
+    });
+
+    it('answers "too-large" for a body past the ceiling it restores under, however small it compresses, and writes nothing', async () => {
+        // 32 MiB of one character Brotli crushes to a few hundred bytes, well
+        // inside the item budget. Stored, it would be a record the store
+        // refuses to read back for its whole TTL, so every replay of the key
+        // would fail rather than replay or run.
+        const client = new MemoryDdb();
+        const store = new LambderDdbIdempotencyStore({ tableName: 'test-table', client, now: testClock });
+        const claim = await store.begin('s', { pendingTtlSeconds: 60, fingerprint: 'request-1' });
+        if(claim.state !== 'new') throw new Error('expected the scope to be claimable');
+
+        const body = 'a'.repeat(32 * 1024 * 1024 + 1);
+        expect(await store.complete('s', claim.ownerToken, { statusCode: 200, headers: {}, body, fingerprint: 'request-1', ttlSeconds: 60 })).toBe('too-large');
+        expect(await store.peek('s')).toBeNull();
     });
 });
 

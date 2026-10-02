@@ -1,4 +1,4 @@
-import type { LambderCache, LambderCacheKey, LambderCacheListOptions, LambderCacheSetOptions } from "../shared/contracts/LambderCache.js";
+import type { LambderCache, LambderCacheGetOrSetOptions, LambderCacheKey, LambderCacheListOptions, LambderCacheSetOptions } from "../shared/contracts/LambderCache.js";
 export interface LambderMemoryCacheOptions {
     /** Default: one year, as LambderDdbCache's. */
     defaultTtlSeconds?: number;
@@ -41,7 +41,7 @@ export declare class LambderMemoryCache implements LambderCache {
     delete(key: LambderCacheKey): Promise<boolean>;
     deletePartition(partition: string): Promise<number>;
     listSortKeys(partition: string, options?: LambderCacheListOptions): Promise<string[]>;
-    getOrSet<T>(key: LambderCacheKey, loader: () => Promise<T>, options?: LambderCacheSetOptions): Promise<T>;
+    getOrSet<T>(key: LambderCacheKey, loader: () => Promise<T>, options?: LambderCacheGetOrSetOptions): Promise<T>;
     /** Forgets every entry; a fill in flight meanwhile stores nothing. */
     reset(): void;
     /** Stores the value and hands back what was stored, the parse of its JSON. */

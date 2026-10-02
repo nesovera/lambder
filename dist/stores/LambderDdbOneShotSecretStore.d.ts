@@ -1,5 +1,6 @@
 import type { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import type { LambderOneShotIssueOutcome, LambderOneShotSecretDraft, LambderOneShotSecretRecord, LambderOneShotSecretStore } from "../shared/contracts/LambderOneShotSecretStore.js";
+import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
 export interface LambderDdbOneShotSecretStoreOptions {
     tableName: string;
     /** Region the client is created for on first use; the SDK's default chain otherwise. */
@@ -44,6 +45,16 @@ export declare class LambderDdbOneShotSecretStore implements LambderOneShotSecre
     readonly keyPrefix: string;
     private readonly ready;
     constructor(options: LambderDdbOneShotSecretStoreOptions);
+    /**
+     * Puts a memory twin under this store in place, for `lambder/testing`:
+     * every LambderOneShotSecretStore member answers from the twin from then
+     * on, so the LambderOneShotSecrets built over this store issues and
+     * verifies in memory. Keyed by a symbol no entry point exports; see
+     * registerSwappableInstance.
+     */
+    [LAMBDER_BACKEND_SWAP](twins: {
+        oneShotSecretStore(): LambderOneShotSecretStore;
+    }): void;
     private scopeKey;
     private digestKey;
     /**

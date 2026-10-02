@@ -9,6 +9,413 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [15.0.1] - 2026-10-02
+
+A major. Fixes for crashes, misconfigurations that passed silently, and places
+where the mock and the test kit drifted from the server; and capabilities apps
+were writing for themselves: an `aborted` outcome for a call the page cancels,
+upload retries that keep their ticket, request provenance under the origin
+proof, digested key fields at rest, guard inputs in the idempotency identity,
+plural forms, typed template data, dev-only schemas the mock validates against,
+a test app that keeps an app's own caches, one-shot secret stores, upload
+buckets and invoke callers off AWS by default, a boot check for
+a built deployment package, and argon2id password hashing. Every break is
+named under Changed.
+
+### Added
+
+- **`randomCode(alphabet, length)`**, from `lambder` and `lambder/client`
+  beside `randomSecret`: a code a person types or reads out, drawn evenly from
+  the alphabet with the cryptographic random source. Bytes past the largest
+  multiple of the alphabet's size are discarded rather than folded in with a
+  modulo, which favors the first characters. An alphabet that is not 2 to 256
+  distinct characters, or a length that is not a positive integer, throws.
+  `LambderOneShotSecrets` draws its codes with it.
+- **`LambderPasswordHasher`**, from `lambder`: passwords at rest as argon2id
+  through node's own `crypto.argon2` (Node 24.7 and later), in the PHC string
+  every argon2 library reads and writes, so no native addon ships in the
+  deployment package. `hash(password)` writes argon2id under the instance's
+  cost (`memoryKib`, `passes`, `parallelism`; default 64 MiB, 3, 4) with a
+  fresh salt. `verify(stored, password)` reads the variant and cost from the
+  stored string, so it verifies argon2id, argon2i and argon2d strings other
+  libraries wrote, parameters in any order, and answers false rather than
+  throwing for anything that is not one (`null` for an account with no
+  password, `undefined` for one that does not exist), still computing one hash
+  under the instance's cost so the time taken does not say which accounts
+  exist. A cost has ceilings, for what an instance writes and what it
+  verifies alike: 2 GiB of memory, 4 GiB of memory over all passes, 255 lanes;
+  a stored string over them matches no password rather than stalling every
+  sign-in on its account. `needsRehash(stored)` says when a stored hash was
+  written under another variant or cost, so a raised cost reaches old
+  passwords at their next sign-in. A runtime without argon2 throws at
+  construction rather than failing every sign-in. New type:
+  `LambderPasswordHasherOptions`.
+- **`fetchSession({ refreshData: true })` and
+  `fetchSessionIfExists({ refreshData: true })`** on the session controller,
+  and `renewSession(session, { refreshData: true })` on the manager: renew the
+  session's data on that read whatever its deadline, running the `dataRefresh`
+  callback and the store write once. A read followed by `refreshSessionData()`
+  ran both twice whenever the data was due. Without `dataRefresh` they throw.
+- **`LambderRenderContextOf<typeof app>` and
+  `LambderSessionRenderContextOf<typeof app>`** name one instance's render
+  context, with its session data and rate-limit policy names, for typing a
+  helper in another file without writing out `LambderRenderContext`'s
+  parameters. Contexts from API handlers, routes, hooks and guards are all
+  assignable to them.
+- **`apisWithGuard(apiOptions, guard)`**, from `lambder` and `lambder/client`:
+  the names of the APIs whose guards option names a guard, typed as
+  `LambderApisWithGuard` and in the table's order, so a test can loop over the
+  APIs behind a guard without casting the generated table.
+- **`lambderCacheConformance` and `lambderCacheStorageConformance`**
+  (`lambder/testing`), with their options types: the rules every `LambderCache`
+  keeps, and the rules for the `LambderCacheStorage` under
+  `LambderStorageBackedCache`. An app that writes its own cache or storage
+  checks it against the rules Lambder's own meet. The storage suite targets
+  the usual database slips: jsonb reordering keys, case-insensitive or
+  space-padding collations, LIKE wildcards in a listing prefix, partitions
+  matched by prefix.
+- **`LambderI18nReadonlyInstance<TContract>`**: the reading members of any
+  LambderI18n instance of one contract, whatever its language set, without the
+  members that switch languages, load or register dictionaries, touch the
+  document or build extensions. Code that only reads translations takes any
+  such instance without restating its members.
+- **`jsonScript({ type: "application/ld+json" }, data)`** writes JSON-LD with
+  the same escaping (`<`, U+2028, U+2029) as the hydration form.
+  `jsonScript(id, data)` is unchanged, the options form `{ id, type? }` writes
+  `application/json`, and any other type is refused. New type:
+  `LambderJsonScriptOptions`.
+- **`LambderBackoffTimer.retries`**: the retries `retry` and `wait` have
+  scheduled since the last `reset()`, so a loop that gives up after so many
+  reads the timer instead of keeping a counter. `LambderUploadRunner` counts
+  its storage retries this way.
+- **`LambderMockApp.pageCookieJar`**: the page's cookie jar, owned by the
+  runtime and emptied by `reset()` (see Changed).
+- **`readApiEnvelopeText(text, info, apiName)`**: `readApiEnvelope` for an
+  adapter that holds only the body's text. An empty text is an empty
+  envelope; text that is not JSON is flagged as no envelope (see Fixed).
+- **`ctx.arrivedVia`** (`LambderRequestArrival`): how the request reached the
+  function. `"proxy"` with a valid origin proof, `"direct"` when the proof is
+  configured and missing or wrong, `"invoke"` for a Lambda invoke (read from
+  the event's `requestContext.apiId`, which no HTTP client can set), and
+  `"unverified"` when no proof is configured. An invoke-only endpoint checks
+  it rather than the `x-lambder-invoke` header, which any client can send.
+- **`originProof.proxyHeaders`**: headers only the proxy may write. On a
+  request without a valid proof they are removed from `ctx.headers`,
+  `ctx.header()` and the API request's headers, with the trusted client-IP and
+  host headers, so a handler reads the proxy's value or nothing. An origin
+  proof with no trusted headers is accepted, since `arrivedVia` is useful on
+  its own.
+- **`lambder/rate-limited` carries typed data**, `{ policy, retryAfterSeconds }`
+  (`LambderRateLimitRefusalData`), from the server and the mock alike, as its
+  own arm of `LambderRefusalMessage`, so a client narrows `message.data` and
+  words each limit its own way. The policy's name reaches every client, so
+  name policies fit to show. The mock's injected rate limit takes `policy`.
+- **Plural forms in LambderI18n.** An entry may be a plural entry keyed by
+  `Intl.PluralRules` category with `other` required,
+  `{ one: "{count} item", other: "{count} items" }`, and `t(key, { count })`
+  picks the form under the rules of the text's language, so a language with
+  six categories (Arabic) translates as well as English. A plural key needs a
+  numeric `count` at compile time beside its tokens. The default language's
+  entry decides a key's kind: a text key takes texts, a plural key takes
+  plural entries or a plain text standing for `other`. Malformed entries are
+  refused where a dictionary arrives. Category coverage depends on each
+  runtime's CLDR data, so it never fails at runtime: a count whose category an
+  entry lacks shows its `other` form. **`checkPluralCoverage()`** is the strict
+  check for tests and builds: it loads every language and rejects with every
+  gap by key, language and missing categories. New types:
+  `LambderI18nDictionaryEntry`, `LambderI18nPluralEntry`,
+  `LambderI18nPluralCategory`.
+- **Typed template data.** `LambderTemplatingEngine<TNames>`,
+  `fromFile<TNames>` and `res.templateFile<TNames>(...)` (and on `res.die`)
+  type the data by the template's slot and condition names, so a misspelled
+  key is a compile error; `LambderTemplateData` takes the names. New type
+  `LambderTemplateFileOptions`. The runtime check is under Changed.
+- **`writeApiSchemas`** (`lambder/build`, and `schemas` in `generateApiFiles`):
+  every API's input schema as a client posts it and output schema as a client
+  receives it, as JSON Schema in a module of plain data, for the mock in
+  development. It lists every refinement, transform, pipe, computed default and
+  string check the file cannot carry (a regex's flags, a URL's protocol or
+  hostname rule), never writes a check the mock would read back stricter than
+  the server (a guid as a uuid, an email under its own pattern), and throws,
+  naming the API and field, for anything JSON Schema cannot represent. The schemas come from the new instance method
+  `apiSchemaEntries()`. New types: `LambderApiSchemasSource`,
+  `LambderApiSchemasFileOptions`, `LambderApiSchemasFileResult`,
+  `LambderApiSchemaLoss`.
+- **The mock's `apiSchemas` option** takes that module. The mock then validates
+  every call's input against the server's schema and refuses it as the server
+  does (422, or what `onInvalidInput` answers), hands the handler the payload
+  with undeclared keys dropped and defaults filled, and parses every answer
+  through the output schema, so fields the server strips no longer reach the
+  client in development. Each schema is rebuilt with `z.fromJSONSchema` the
+  first time it is needed; an entry's own `input` schema applies after it. The
+  module names every endpoint, so import it only from the mock's setup. New
+  types (`lambder/mock`): `LambderApiSchemaEntries`, `LambderApiSchemaEntry`,
+  `LambderJsonSchema`.
+- **`bootLambdaPackage(options)`** (`lambder/testing`): boots a built
+  deployment package in a fresh node process as Lambda does, hands the handler
+  API calls (`{ api, payload }`, turned into gateway or invoke events) or raw
+  events, and reports each answer (an outcome for an API call), the import
+  time and memory, and the phase and call that failed. Imports the package
+  makes are held to the package, so a dependency it does not carry fails here
+  rather than after a deploy; what the runtime supplies (the AWS SDK by
+  default) resolves from an install outside it. The process sees only `PATH`
+  and the given `env`. Needs Node 22.15 or later. New types:
+  `LambderPackageBootOptions`, `LambderPackageBootCall`,
+  `LambderPackageBootResult`, `LambderPackageBootCallResult`,
+  `LambderPackageBootMeasurements`.
+- **`testApp.assertNoCrashesAfterEach(afterEach)`** fails any test the app
+  crashed in, listing each crash with its stack, in place of a crash check
+  repeated in every test file. **`testApp.memoryTwinOf(store)`** hands back the
+  in-memory copy a swapped store answers from, to seed or inspect it. New
+  types `LambderTestVisitorEndpoint` and `LambderTestVisitorGroupCalls`.
+- **`LambderApiFailure`**, from `lambder/client` and `lambder`: the failure
+  side of an API outcome, which `errorHandler` now receives (see Changed).
+
+### Changed
+
+- **Breaking: a `minApiVersion` above `apiVersion` throws at creation**, on
+  the server and in the mock, like every other misconfiguration. It was
+  clamped to `apiVersion` with a console warning.
+- **Breaking (types): `lambder.apiPath`, `lambder.apiVersion` and
+  `lambder.files` are `readonly`.** The pipeline, crash handling and public
+  files keep what they were built with, so a later write left the instance
+  disagreeing with itself.
+- **Breaking (types): `LambderCache.getOrSet` takes
+  `LambderCacheGetOrSetOptions`**, which adds `leaseSeconds` and
+  `waitForFillMs` to `ttlSeconds`, so code typed against the interface can tune
+  the DynamoDB cache's fill lease. The type was `LambderDdbCacheGetOrSetOptions`;
+  that name is gone. Every cache already checked these options at runtime.
+- **Breaking (types): `LambderSessionManager.expireSessionDataAllByKey()`
+  returns `Promise<void>`**, as the controller's does, in place of a boolean
+  that was always `true`.
+- **Breaking (API core): `readApiEnvelope` takes the parsed body as
+  `unknown`** and a `bodyNotJson` flag, and flags a body that is not a plain
+  object on the request's new `invalidEnvelope` field. A `null` body is
+  flagged where it read as an empty envelope; an absent body still reads as
+  an empty one.
+- **The session controller's `endSessionAll()` and `deleteSessionAllByKey()`
+  return `Promise<boolean>`**, passing on the manager's answer: false means a
+  session rotating in a tight loop raced every pass of the delete and may
+  still stand, so run `deleteSessionAllByKey()` again. The password-change
+  recipe in the sessions docs checks it.
+- **Breaking (mock): with no jar, `signIn` and `signOut` use
+  `pageCookieJar`, and `lambderMockMswHandler` uses it unless given
+  `cookieJar`.** `signIn(key, data)` alone now signs the page in behind the
+  MSW worker; the session used to go to no jar and every call answered
+  `sessionExpired`.
+- **Breaking (mock): `mock.guard` from a mock that declared a refusal
+  vocabulary is bound to it**, as the server init's `guard` is: `ctx.refuse` is
+  typed to the guard's own `refusals`, and a code outside the vocabulary fails
+  to compile and throws when the guard is built. `checkApiRefusals` checks
+  these guards rather than listing them as unchecked.
+- **Breaking (testing): `lambderTestApp` throws when `session.store`,
+  `rateLimits.limiter` or `idempotency.store` is given for an app created
+  without that subsystem**, as it already did for `files`. The store was
+  silently dropped and the suite ran over nothing.
+- **Breaking: `LambderBackoffTimer` refuses at construction** a `baseMs` of 0
+  or less (every wait was 0 ms), a `baseMs` or `maxMs` above 2147483647 ms
+  (which `setTimeout` fires at once), and an unknown `jitter`.
+  `LambderUploadRunner` therefore refuses a `storageRetry.baseDelayMs` of 0
+  when it is built.
+- **LambderI18n compares language codes case-insensitively**, as BCP 47 tags
+  are, and always answers with the code as registered: a browser's `pt-br`, a
+  detector's `PT-BR` and `setLanguage("pt-br")` select a registered `pt-BR`,
+  as do `forLanguage`, `loadLanguage` and `registerDictionary`.
+  `isLanguageCode` stays exact, since it narrows its argument. Breaking only
+  for a config that registers two codes differing only in case, which
+  `createLambderI18n` refuses.
+- **`LambderCaller`'s `apiPath` is optional** and defaults to `"/api"`, the
+  server's own default, from the constant `LambderInvokeCaller` uses.
+- **`LambderDdbIdempotencyStore.complete()` answers `"too-large"` for a body
+  over 32 MB**, however small it compresses. Such a body was stored and then
+  refused on every replay.
+- **One-shot secret alphabets are counted in code points**, so an alphabet
+  of characters outside the basic plane is accepted, where it was refused as
+  not distinct.
+- **`addHook("created", fn, priority)` honors the priority** like the other
+  hooks: lower runs first, and hooks of one priority run in the order they
+  were added.
+
+- **Breaking: `res.html`, `res.status`, `res.status404` and `res.xml` (and
+  `res.die.*`) take safe markup only**, what `html`/`xml`, `raw()` and
+  `jsonScript()` build. A plain string is a compile error and throws, naming
+  the tag, `raw()` and `res.text`, so a route cannot reflect request text into
+  a page unescaped. Plain text goes out with `res.text(body, { statusCode })`.
+  The framework's own 401 for a session route without a session and
+  `res.file`'s 404 are `text/plain`.
+- **Breaking: rendering a template with a data key it has no slot or
+  condition for throws**, naming the key and the template's names;
+  `res.templateFile` also names the file. A slot renamed in the HTML dropped
+  the server's content silently.
+- **Breaking: `finalizeResponse`, `answerFromResponse`, `responseFromAnswer`
+  and `LambderFinalizeOptions` are no longer exported.** They take internal
+  options no consumer could build.
+- **Breaking: a call aborted through its own `signal` fails with the new reason
+  `aborted`**, on `LambderCaller` and `LambderInvokeCaller`, in place of
+  `network`, and is never handed to `errorHandler` or `onFailure`, so a page
+  can cancel a superseded read without a "could not reach the server" alert.
+  `fetchEndedHandler` still hears it, a `timeout` is still reported, and
+  whichever aborted the call first names it. A signal that aborts with a
+  `TimeoutError` (`AbortSignal.timeout()`, alone or inside `AbortSignal.any()`)
+  carries a deadline rather than the page's choice, and fails the call as
+  `timeout`. A key scope treats an aborted call as not sent before sending and
+  possibly used after. The upload runner's `cancelled` reason is `aborted` too.
+- **`errorHandler` is called as `(error, failure)`**, `failure` being the
+  call's typed failure (`LambderApiFailure`), the reload-loop and
+  missing-handler cases included; a one-argument handler keeps working.
+  **Breaking:** `fetchEndedHandler`'s `fetchResult` is the call's outcome, the
+  object `apiOutcome()` resolves to, in place of an envelope, an Error or null.
+- **Breaking: `LambderUploadRunner`'s `requestTicket` and `confirmUpload`
+  return the caller's outcome** (`caller.x.y.outcome()`), and the runner
+  retries their `network`, `timeout` and `server` failures on its backoff timer
+  with the same ticket, so a dropped confirm after the bytes are stored no
+  longer ends the upload or leaves an orphan object. Each step gets every
+  attempt. The ticket endpoint's output, which carries `ticket`, is handed to
+  `confirmUpload` in place of `{ ticket, reference }`, and `LambderUploadError`
+  carries the failed call's outcome as `callFailure`. A retried call may
+  follow one that ran and lost its answer, so a confirm with an effect beyond
+  marking its record is declared idempotent and called with one key per
+  upload (`confirm-${invoiceId}`); the uploads docs show it.
+- **A `LambderInvokeError` whose failure `onFailure` already received is not
+  reported again** by the calling instance's `crashes.report`; the request is
+  still answered as a crash. Apps drop their `isLambderInvokeError` skip.
+- **Breaking: `rateLimitRefusal(detail, { policy, retryAfterSeconds }, words?)`**
+  replaces `(detail, retryAfterSeconds, message?)`, and
+  `DEFAULT_RATE_LIMIT_REFUSAL` is the default words alone. A refusal carrying
+  `lambder/rate-limited` without its data is a crash, and `res.apiRefusal`
+  refuses the code. An exhaustive switch over `LambderRefusalMessage` asserts
+  `never` on the message rather than on `message.code`.
+- **Breaking: caller-controlled key fields are digests at rest.** Every
+  caller-controlled field of a rate-limit tracker key and an idempotency scope
+  (the address, session key, custom key, `callerIdentity`, posted idempotency
+  key) is written as a fixed-length digest at any length; it was readable up
+  to 1,024 bytes, so emails and tokens sat in partition keys. With sessions
+  configured it is an HMAC under an HKDF subkey of the `sessionSalt`; without
+  them a plain SHA-256, which a table reader can test guesses against. API and
+  policy names stay readable. Counters and idempotency records start afresh
+  once on upgrade, and again whenever `sessionSalt` changes.
+- **Breaking: a `guardInput` guard's value counts in an idempotency key's
+  request**, beside the payload: the same key with another store or tenant is
+  409 `lambder/idempotency-key-reused`, where it replayed the first answer. A
+  guard whose input can differ between attempts of one operation declares
+  `singleUseInput: true`, so a retry still replays: a single-use proof (a fresh
+  captcha token, a one-time code) or a credential refreshed between attempts
+  (a short-lived token). Apps with such guards add it; without it the retry is
+  refused and the person's next attempt runs the operation again.
+- **Breaking: `LambderDdbSessionStore` takes a `DynamoDBClient`**, like every
+  other DynamoDB store, and `@aws-sdk/lib-dynamodb` is no longer a peer
+  dependency. The store writes and reads attribute values itself, in the shape
+  the document client wrote, so existing tables read unchanged; without a
+  client it shares the per-region default client with the other stores. Pass
+  the `DynamoDBClient` a document client was built from.
+- **Breaking: `checkApiRefusals` fails on a handler it could not check**, a
+  finding of the new kind `unchecked`, where it was printed and passed. The
+  line says to declare the vocabulary on that init or give the guard its
+  codes; `requireTypedRefuse: false` lists such handlers without failing. A
+  guard with an explicit `refusals: []` is checked against no codes.
+- **Breaking (mock): the MSW adapter's bookkeeping is off `LambderMockApp`.**
+  `hasRegisteredEntry`, `notePassthrough` and `mirrorCookiesIntoDocument` sit
+  behind a door only the package's adapter names, `adoptCookieJar` is gone, and
+  `lambderMockMswHandler` takes a `LambderMockApp` and refuses anything else.
+- **Breaking (mock): a mock guard declares exactly the refusal codes the
+  server's guard of its name declares in `guardDeclarations`**: a different
+  list is a compile error at the `guards` option, naming the codes, and
+  `create()` throws for one the compiler could not compare.
+- **Breaking (testing): `lambderTestApp` swaps the Lambder classes an app
+  builds itself**, built before the test app or after it. Each
+  `LambderDdbCache`, `LambderDdbOneShotSecretStore` and `LambderS3UploadBucket`
+  answers from an in-memory copy built with its own settings, and each
+  `LambderInvokeCaller` built without its own transport is answered by the
+  mock app the new `invokeMocks` option gives for its function; with none,
+  every call fails naming the function, so a test never reaches AWS without a
+  hand-written fake. `reset()` empties the copies.
+- **Breaking (testing): a visitor's plain call returns the output and throws
+  on any failure**, naming the endpoint and describing what came back as
+  `assertApiSuccess` does, the app's crash included; it returned `undefined`,
+  which surfaced later as a read of `undefined`. `.outcome()` is for a test
+  that expects a failure.
+- **`generateApiFiles` prints each contract in a Node process of its own**,
+  with a heap of `contractHeapMegabytes` (default 8192) and none of the
+  script's command-line flags, so one call serves a large app whatever loader
+  its script runs under. A process that runs out of heap fails its contract
+  and says to raise the option. New type: `LambderApiFilesOptions`.
+
+### Fixed
+
+- **A JSON body that is not an object no longer crashes an API call.** A body
+  of `5`, `"x"`, `true`, `null`, an array, or no JSON at all is answered with
+  the `lambder/invalid-request-payload` refusal (400), the same way by the
+  server and by every mock adapter that reads a raw body (the MSW handler and
+  the mock invoke transport). The server crashed on it; the mock answered 422,
+  or the MSW handler passed a non-JSON body on to the network. The rule lives
+  once in the API core: `readApiEnvelope` flags such a body on the request as
+  `invalidEnvelope`, and the pipeline's `prepare()` refuses it before the
+  version floor, the signature gate or anything else reads the call. On the
+  server `ctx.post` is always a plain object: a JSON body that is not an
+  object leaves it empty, a body that is not JSON fills it with its form
+  fields, and either stays readable as `ctx.rawBody`.
+- **With `apiPath: "/"`, a request to the site root walks the fallback
+  chain** (public files, the index shell, the route fallback) rather than
+  getting the API not-found envelope; only an actual API call is the API's. A
+  non-root `apiPath` is unchanged.
+- **The framework's plain-text 500 for a crashed route carries
+  `Content-Type: text/plain; charset=utf-8`**, as its 404 does.
+- **The call summary records the code of a `sessionExpired` refusal** raised
+  with a declared code, as it does for `notAuthorized`.
+- **The compile-time checks for a group name given twice and an action
+  declared by two parts of a group evaluate as loops**, so an app of many
+  small groups (150 or more) compiles; they hit TypeScript's instantiation
+  depth limit.
+- **`LambderDdbSessionStore` caps session data at 32 MB of JSON and refuses
+  data too large for a DynamoDB item**, on create and update, before writing,
+  with an error naming the size and the limit, in place of DynamoDB's raw
+  `ValidationException` (a 500 at sign-in with nothing to act on). A stored
+  record declaring more than 32 MB reads as no session and is never
+  decompressed. Existing records read as before; the session, idempotency and
+  cache stores share one implementation of the compressed-or-plain attribute.
+- **`regenerateSession()` compares stored data with stored data.** It
+  compared the request's schema output with the record as stored, so with a
+  schema that strips keys every rotation saw a change that never happened,
+  wrote it back and handed the request unstripped data, and with a schema
+  that transforms it threw. It reads the stored record first (one more store
+  read per rotation), carries it over as stored, and gives the request the
+  schema's output.
+- **`LambderInvokeCaller` leaves the key of a call whose signal had already
+  aborted before it was sent unused**, as `LambderCaller` does and as it
+  already did for an event over the invoke cap: a refusal after it moves the
+  scope on to a new key.
+- **`stopWaitingWhenAborted` rejects at once for a signal that had already
+  aborted**, and still handles a later rejection of the work.
+- **A call's timeout firing after its signal had already aborted it no longer
+  reports the call as `timeout`.**
+- **The conformance suites' clock starts at 2100-01-01**, so a store whose
+  database deletes expired rows itself (a DynamoDB TTL, Redis `EXPIREAT`) runs
+  the suites with that deletion on.
+- **`LambderS3FileSource` does not remember a failed `@aws-sdk/client-s3`
+  load**: a read after the package is installed in the same process succeeds,
+  as it does for the other stores and buckets.
+- **`checkApiRefusals` recognizes a raise by the refuse function the call
+  resolves to**, including the forms written out in installed declaration
+  files. A refuse reached under a renamed import, a variable, a destructured
+  name or a typed parameter is checked; it was skipped, so an undeclared code
+  passed and a declared one read as unused. A project that passed may now
+  report findings.
+- **An injected `sessionExpired`, or an injected refusal whose code is
+  declared `sessionExpired`, ends the session the call carries**, as on the
+  server. The next call was still signed in.
+- **The mock's `reset()` expires cookies mirrored into `document.cookie` at
+  the Domain and Path each was set with**; a cookie set under a cookie domain
+  survived it.
+- **Docs:** the templating and frontend-hosting examples work as raw files in
+  a development browser (the title through `htmlVirtualSlots`, the if/else
+  example without two `<body>` tags); the mock docs say refusal data is parsed
+  under `declareRefusals` and that the server's hooks do not run in the mock;
+  the testing docs name the one-shot secret store and the upload bucket among
+  the classes an app swaps itself; `docs/invoke.md`'s reporter example
+  compiles; the i18n docs import from `lambder/client`; `LambderBackoffTimer`
+  is documented with the client; the `initLambder` documentation is one block
+  on the declaration, so editors show it on hover.
+
 ## [14.1.1] - 2026-09-30
 
 A minor: a refusal code can declare the `sessionExpired` flag, and

@@ -1,9 +1,9 @@
 import { LambderMockTransportError } from "./LambderMockFailureInjector.js";
 import { apiNameOfCallPath } from "../shared/wire/LambderApiNames.js";
-import { readApiEnvelope, cookieValuesByName, isApiCallContentType, lowercaseHeaderNames } from "../api/LambderApiRequest.js";
+import { readApiEnvelopeText, cookieValuesByName, isApiCallContentType, lowercaseHeaderNames } from "../api/LambderApiRequest.js";
 import { getAnswerHeader } from "../shared/wire/LambderAnswerHeaders.js";
-import { LambderCookieJar } from "../shared/transport/LambderCookieJar.js";
 import { normalizeClientIp } from "../shared/util/LambderClientIp.js";
+import { LAMBDER_MOCK_ADAPTER_DOOR } from "./LambderMockAdapterDoor.js";
 /**
  * ONE MSW request handler for the whole API path, over the mock app: the
  * opt-in that makes mocked calls appear in the browser's network panel as
@@ -17,7 +17,9 @@ import { normalizeClientIp } from "../shared/util/LambderClientIp.js";
  * them, losing every cookie after the first. So the answer's cookies go into
  * the jar, the next request carries them back, and the ones a page's scripts
  * may see are mirrored into document.cookie. The Set-Cookie headers still
- * travel on the response, where the network panel shows them.
+ * travel on the response, where the network panel shows them. The jar is the
+ * runtime's page jar unless one is given, the one signIn plants into when it
+ * is given none, so `mockApp.signIn(key, data)` signs the page in.
  *
  * A request's cookies are therefore the jar's and document.cookie's, never
  * its Cookie header: MSW fills that from its own store, which captures the
@@ -39,12 +41,17 @@ export const lambderMockMswHandler = (mockApp, options) => {
     if (!msw?.http || !msw?.HttpResponse) {
         throw new Error('lambderMockMswHandler requires the msw module: lambderMockMswHandler(mockApp, { apiPath, msw: await import("msw") }). Install it with: npm install msw --save-dev');
     }
-    const jar = options.cookieJar ?? new LambderCookieJar();
-    // A jar the app passed stays the app's; the one built here is the
-    // runtime's, so its reset() empties it along with the sessions those
-    // cookies name.
-    if (!options.cookieJar)
-        mockApp.adoptCookieJar(jar);
+    // The runtime's bookkeeping is reached through the door a LambderMockApp
+    // carries; anything else would fail on its first call rather than here.
+    const door = mockApp?.[LAMBDER_MOCK_ADAPTER_DOOR];
+    if (typeof door?.hasRegisteredEntry !== "function") {
+        throw new Error("lambderMockMswHandler serves a LambderMockApp: pass the app initLambderMock().create() built, as lambderMockMswHandler(mockApp, { apiPath, msw }).");
+    }
+    // The page's jar unless the app passes its own: a jar of this adapter's
+    // alone would hold the session of the calls it serves and never the one
+    // signIn planted, and every session call behind the worker after a
+    // signIn would answer sessionExpired.
+    const jar = options.cookieJar ?? mockApp.pageCookieJar;
     // The runtime's default, not one of this adapter's own, so the direct
     // transport and the service worker agree on ctx.request.ip and a per-IP
     // rate limit counts one client as one. Normalized the way every other
@@ -54,13 +61,6 @@ export const lambderMockMswHandler = (mockApp, options) => {
     // Every call goes to `{apiPath}/{group}/{action}`; the endpoint is read
     // off the path as the server reads it (apiNameOfCallPath).
     const handler = msw.http.post(`${apiPath.replace(/\/+$/, "")}/:group/:action`, async ({ request }) => {
-        let post;
-        try {
-            post = await request.clone().json();
-        }
-        catch {
-            return undefined;
-        }
         // Through the one header map every adapter builds, on
         // Object.create(null): on a plain object, a header literally named
         // __proto__ would be dropped here though the server keeps it as an own
@@ -68,8 +68,8 @@ export const lambderMockMswHandler = (mockApp, options) => {
         // function where every other adapter gives undefined.
         const headers = lowercaseHeaderNames(Object.fromEntries(request.headers));
         // A POST of another type is no API call on the server either: it
-        // goes on to MSW's other handlers and the network, as a non-envelope
-        // body does below, rather than working here and not in production.
+        // goes on to MSW's other handlers and the network, rather than
+        // working here and not in production.
         if (!isApiCallContentType(headers))
             return undefined;
         // The cookies travel as `cookies` below, as the direct transport's do.
@@ -97,15 +97,18 @@ export const lambderMockMswHandler = (mockApp, options) => {
         const apiName = apiNameOfCallPath(new URL(apiPath, url).pathname, url.pathname);
         if (apiName === null)
             return undefined;
-        const parsed = readApiEnvelope(post, {
+        // Read from the text, as the server reads it: a body that is not a
+        // JSON object, or not JSON, is a call the pipeline refuses as the
+        // server does, not one handed on to the network.
+        const parsed = readApiEnvelopeText(await request.clone().text(), {
             headers, cookies, ip: clientIp, host: url.host, signal: request.signal,
         }, apiName);
         // Returning undefined hands the request back to MSW, which tries its
         // other handlers and then the network. Noted on the runtime first:
         // a passthrough that leaves no event and no call-log row is a
         // mistyped endpoint name reaching the real backend in silence.
-        if (options.onUnmocked === "passthrough" && !mockApp.hasRegisteredEntry(parsed.apiName)) {
-            mockApp.notePassthrough(parsed);
+        if (options.onUnmocked === "passthrough" && !door.hasRegisteredEntry(parsed.apiName)) {
+            door.notePassthrough(parsed);
             return undefined;
         }
         let answer;
@@ -126,7 +129,7 @@ export const lambderMockMswHandler = (mockApp, options) => {
         // this every session call fails its CSRF check. Done by the runtime,
         // which owns the one mirror implementation and remembers what was
         // planted for reset().
-        mockApp.mirrorCookiesIntoDocument(setCookies);
+        door.mirrorCookiesIntoDocument(setCookies);
         const responseHeaders = new Headers();
         for (const [key, values] of Object.entries(answer.headers)) {
             for (const value of values)

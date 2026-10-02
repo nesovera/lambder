@@ -332,8 +332,10 @@ const MAY_IMPORT: Record<string, readonly string[]> = {
     invoke: ['shared', 'session', 'api', 'invoke', 'core'],
     // testing/ sits on top of the server: it puts a built instance under test
     // through the typed caller and the in-process transport, over the memory
-    // stores. Nothing imports it back, which its own gate above pins.
-    testing: ['shared', 'stores', 'session', 'api', 'client', 'core', 'invoke', 'testing'],
+    // stores, and answers the app's own invoke callers from mock apps through
+    // the mock runtime's invoke transport. Nothing imports it back, which its
+    // own gate above pins.
+    testing: ['shared', 'stores', 'session', 'api', 'client', 'core', 'mock', 'invoke', 'testing'],
     // build/ is what a generator script runs at build time over an app's
     // instance, which it takes structurally, so it names no core/ module.
     // Nothing imports it back, which its own gate above pins.
@@ -485,7 +487,7 @@ const entryExportNames = (entryFile: string) => {
 const EXPORT_NAME_PREFIXES = [
     'Lambder', 'LAMBDER_', 'DEFAULT_', 'API_', 'RATE_LIMIT_', 'COMPRESSED_',
     'Api', 'Condition', 'Http', 'PathParams', 'Route',
-    'accepts', 'addAnswer', 'answer', 'apiNot', 'assertApi', 'buildApi', 'buildTransport',
+    'accepts', 'addAnswer', 'answer', 'apiNot', 'assertApi', 'bootLambda', 'buildApi', 'buildTransport',
     'compress', 'crash', 'create', 'decode', 'describe', 'envelope', 'error',
     'escapeHtml', 'finalize', 'getAnswer', 'html', 'init', 'invalid', 'is',
     'jsonScript', 'lambder', 'local', 'parse', 'raw', 'read', 'refusal',

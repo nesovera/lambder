@@ -5,11 +5,12 @@
 import { describe, it, expect } from 'vitest';
 import Lambder from '../../src/core/Lambder.js';
 import { browse, testPublicFiles } from '../helpers.js';
+import { html } from '../../src/shared/LambderHtml.js';
 describe('Structured route matchers', () => {
     it('matches on method', async () => {
         const lambder = new Lambder({ files: testPublicFiles() })
-            .addRoute({ path: '/hook', method: 'POST' }, (ctx, res) => res.html('posted'))
-            .addRoute({ path: '/hook', method: 'GET' }, (ctx, res) => res.html('got'));
+            .addRoute({ path: '/hook', method: 'POST' }, (ctx, res) => res.html(html`posted`))
+            .addRoute({ path: '/hook', method: 'GET' }, (ctx, res) => res.html(html`got`));
 
         const postResult = await browse(lambder).request('POST', '/hook');
         expect(postResult.text()).toBe('posted');
@@ -20,7 +21,7 @@ describe('Structured route matchers', () => {
 
     it('HEAD requests match GET routes and return no body', async () => {
         const lambder = new Lambder({ files: testPublicFiles() })
-            .addRoute({ path: '/page', method: 'GET' }, (ctx, res) => res.html('page body'));
+            .addRoute({ path: '/page', method: 'GET' }, (ctx, res) => res.html(html`page body`));
 
         const result = await browse(lambder).request('HEAD', '/page');
         expect(result.statusCode).toBe(200);
@@ -29,8 +30,8 @@ describe('Structured route matchers', () => {
 
     it('matches on host', async () => {
         const lambder = new Lambder({ files: testPublicFiles() })
-            .addRoute({ path: '/x', host: 'admin.example.com' }, (ctx, res) => res.html('admin'))
-            .addRoute({ path: '/x', host: /\.example\.com$/ }, (ctx, res) => res.html('any sub'));
+            .addRoute({ path: '/x', host: 'admin.example.com' }, (ctx, res) => res.html(html`admin`))
+            .addRoute({ path: '/x', host: /\.example\.com$/ }, (ctx, res) => res.html(html`any sub`));
 
         const adminResult = await browse(lambder, { host: 'admin.example.com' }).request('GET', '/x');
         expect(adminResult.text()).toBe('admin');

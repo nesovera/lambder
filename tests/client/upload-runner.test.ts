@@ -8,15 +8,21 @@
  * as S3 does, and one PUT tickets, as a store without POST policies does.
  */
 
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import * as msw from 'msw';
 import { setupServer } from 'msw/node';
+import { z } from 'zod';
 import { LambderMemoryUploadBucket } from '../../src/stores/LambderMemoryUploadBucket.js';
 import { lambderMockUploadMswHandler } from '../../src/mock/lambderMockUploadMswHandler.js';
 import { LambderUploadError, LambderUploadRunner, type LambderUploadProgress, type LambderUploadRunnerOptions } from '../../src/client/LambderUploadRunner.js';
 import { LambderUploadFileFactsSchema, LambderUploadTicketSchema } from '../../src/shared/wire/LambderUploadSchemas.js';
 import { sha256Base64Of } from '../../src/shared/util/LambderTextDigest.js';
+import type { LambderApiOutcome } from '../../src/shared/wire/LambderApiOutcome.js';
 import type { LambderUploadFileFacts, LambderUploadRule, LambderUploadTicket } from '../../src/shared/contracts/LambderUploadBucket.js';
+import LambderCaller from '../../src/client/LambderCaller.js';
+import { initLambder } from '../../src/core/Lambder.js';
+import { refuse } from '../../src/shared/wire/LambderApiRefusal.js';
+import { lambderHandlerTransport } from '../../src/invoke/lambderHandlerTransport.js';
 
 let clock = 1_790_000_000_000;
 const bucket = new LambderMemoryUploadBucket({ now: () => clock });
@@ -36,35 +42,61 @@ afterAll(() => server.close());
 const PDF_RULE: LambderUploadRule = { maxBytes: 1024, mimeTypes: ['application/pdf'] };
 const invoice = (text = '%PDF-1.4 invoice 1042') => new File([new TextEncoder().encode(text)], 'Invoice 1042.pdf', { type: 'application/pdf' });
 
+/** What the ticket endpoints below answer: the ticket, and the key the confirm endpoint finds the upload by. */
+type IssuedTicket = { ticket: LambderUploadTicket; objectKey: string };
+
+/** An endpoint's output as the success outcome a caller's `.outcome()` resolves to. */
+const answered = <T,>(payload: T): LambderApiOutcome<T> => ({ ok: true, payload, response: { apiVersion: '1', payload } });
+
+/** An endpoint's refusal, as a caller's outcome carries it. */
+const refusedWith = (content: string, code?: string): LambderApiOutcome<never> => {
+    const refusal = { type: 'error' as const, content, ...(code !== undefined ? { code } : {}) };
+    return { ok: false, reason: 'refusal', status: 200, refusal, response: { apiVersion: '1', payload: null, refusal } };
+};
+
+/** A call that got no usable answer, or that its signal aborted, as a caller reports it. */
+const unanswered = (reason: 'network' | 'timeout' | 'server' | 'aborted'): LambderApiOutcome<never> =>
+    ({ ok: false, reason, ...(reason === 'server' ? { status: 503 } : {}), error: new Error(`the call failed as ${reason}`) });
+
+type Options = LambderUploadRunnerOptions<IssuedTicket, { objectKey: string }>;
+
 /**
- * A runner over the memory bucket, standing in for an app's ticket and
- * confirm endpoints the way a mock's handlers do. `issueFor` lets a case
- * sign a ticket for other facts than the runner sent.
+ * An app's ticket and confirm endpoints over the memory bucket, as a mock's
+ * handlers write them, counting the calls that reach them. `issueFor` lets a
+ * case sign a ticket for other facts than the runner sent.
  */
-const runnerFor = (overrides: Partial<LambderUploadRunnerOptions<string, { objectKey: string }>> & { issueFor?: (facts: LambderUploadFileFacts) => LambderUploadFileFacts } = {}) => {
+const bucketEndpoints = (issueFor?: (facts: LambderUploadFileFacts) => LambderUploadFileFacts) => {
     const factsByKey = new Map<string, LambderUploadFileFacts>();
     const calls = { requestTicket: 0, confirmUpload: 0 };
-    const runner = new LambderUploadRunner<string, { objectKey: string }>({
+    const requestTicket: Options['requestTicket'] = async (fileFacts) => {
+        calls.requestTicket++;
+        // What an app's endpoint declares its input and output with.
+        const facts = LambderUploadFileFactsSchema.parse(issueFor?.(fileFacts) ?? fileFacts);
+        const objectKey = `stores/store-7/invoices/${calls.requestTicket}.pdf`;
+        factsByKey.set(objectKey, facts);
+        const ticket = LambderUploadTicketSchema.parse(await bucket.issueUploadTicket({ objectKey, fileFacts: facts, uploadRule: PDF_RULE }));
+        return answered({ ticket, objectKey });
+    };
+    const confirmUpload: Options['confirmUpload'] = async ({ objectKey }) => {
+        calls.confirmUpload++;
+        const verdict = await bucket.verifyUploadedObject({ objectKey, fileFacts: factsByKey.get(objectKey)! });
+        if(!verdict.verified) return refusedWith(verdict.reason);
+        return answered({ objectKey });
+    };
+    return { calls, requestTicket, confirmUpload };
+};
+
+/** A runner over the memory bucket's endpoints, a case's own taking their place where it names them. */
+const runnerFor = (overrides: Partial<Options> & { issueFor?: (facts: LambderUploadFileFacts) => LambderUploadFileFacts; endpoints?: ReturnType<typeof bucketEndpoints> } = {}) => {
+    const { issueFor, endpoints = bucketEndpoints(issueFor), ...options } = overrides;
+    const runner = new LambderUploadRunner<IssuedTicket, { objectKey: string }>({
         uploadRule: PDF_RULE,
-        requestTicket: async (fileFacts) => {
-            calls.requestTicket++;
-            // What an app's endpoint declares its input and output with.
-            const facts = LambderUploadFileFactsSchema.parse(overrides.issueFor?.(fileFacts) ?? fileFacts);
-            const objectKey = `stores/store-7/invoices/${calls.requestTicket}.pdf`;
-            factsByKey.set(objectKey, facts);
-            const ticket = LambderUploadTicketSchema.parse(await bucket.issueUploadTicket({ objectKey, fileFacts: facts, uploadRule: PDF_RULE }));
-            return { ticket, reference: objectKey };
-        },
-        confirmUpload: async (objectKey) => {
-            calls.confirmUpload++;
-            const verdict = await bucket.verifyUploadedObject({ objectKey, fileFacts: factsByKey.get(objectKey)! });
-            if(!verdict.verified) throw new Error(verdict.reason);
-            return { objectKey };
-        },
+        requestTicket: endpoints.requestTicket,
+        confirmUpload: endpoints.confirmUpload,
         storageRetry: { attempts: 3, baseDelayMs: 1, maxDelayMs: 1 },
-        ...overrides,
+        ...options,
     });
-    return { runner, calls };
+    return { runner, calls: endpoints.calls };
 };
 
 /** A POST ticket's form fields, for a case that posts by hand. */
@@ -126,7 +158,7 @@ describe('LambderUploadRunner over a memory bucket', () => {
 
     it('asks for a new ticket when storage says the first one expired, and keeps going', async () => {
         let issued = 0;
-        const runner = new LambderUploadRunner<string, string>({
+        const runner = new LambderUploadRunner<IssuedTicket, string>({
             uploadRule: PDF_RULE,
             requestTicket: async (fileFacts) => {
                 issued++;
@@ -134,9 +166,9 @@ describe('LambderUploadRunner over a memory bucket', () => {
                 const ticket = await bucket.issueUploadTicket({ objectKey, fileFacts, uploadRule: PDF_RULE });
                 // The first ticket runs out before its post arrives.
                 if(issued === 1) clock += 601_000;
-                return { ticket, reference: objectKey };
+                return answered({ ticket, objectKey });
             },
-            confirmUpload: async (objectKey) => objectKey,
+            confirmUpload: async ({ objectKey }) => answered(objectKey),
         });
 
         expect(await runner.upload(invoice())).toBe('stores/store-7/invoices/2.pdf');
@@ -168,22 +200,22 @@ describe('LambderUploadRunner over a memory bucket', () => {
         expect(calls.confirmUpload).toBe(0);
     });
 
-    it('stops when the caller cancels, before the ticket or between it and the post', async () => {
-        const cancelledEarly = new AbortController();
-        cancelledEarly.abort();
+    it('stops when the caller aborts, before the ticket or between it and the post', async () => {
+        const abortedEarly = new AbortController();
+        abortedEarly.abort();
         const { runner, calls } = runnerFor();
-        expect((await failureOf(runner.upload(invoice(), { signal: cancelledEarly.signal }))).reason).toBe('cancelled');
+        expect((await failureOf(runner.upload(invoice(), { signal: abortedEarly.signal }))).reason).toBe('aborted');
         expect(calls.requestTicket).toBe(0);
 
-        const cancelledWhileAsking = new AbortController();
+        const abortedWhileAsking = new AbortController();
         const { runner: second } = runnerFor({
             requestTicket: async (fileFacts) => {
                 const ticket = await bucket.issueUploadTicket({ objectKey: 'stores/store-7/invoices/late.pdf', fileFacts, uploadRule: PDF_RULE });
-                cancelledWhileAsking.abort();
-                return { ticket, reference: 'stores/store-7/invoices/late.pdf' };
+                abortedWhileAsking.abort();
+                return answered({ ticket, objectKey: 'stores/store-7/invoices/late.pdf' });
             },
         });
-        expect((await failureOf(second.upload(invoice(), { signal: cancelledWhileAsking.signal }))).reason).toBe('cancelled');
+        expect((await failureOf(second.upload(invoice(), { signal: abortedWhileAsking.signal }))).reason).toBe('aborted');
         expect(bucket.listObjectKeys()).toEqual([]);
     });
 
@@ -196,7 +228,7 @@ describe('LambderUploadRunner over a memory bucket', () => {
             return msw.HttpResponse.error();
         }));
 
-        expect((await failureOf(runner.upload(invoice(), { signal: controller.signal }))).reason).toBe('cancelled');
+        expect((await failureOf(runner.upload(invoice(), { signal: controller.signal }))).reason).toBe('aborted');
     });
 
     it('tries storage again after S3 says the connection timed out, as its own SDK does', async () => {
@@ -212,16 +244,16 @@ describe('LambderUploadRunner over a memory bucket', () => {
 
     it('renews an expired ticket without spending an attempt at storage, and gives up after two renewals', async () => {
         let issued = 0;
-        const expiring = (expireEvery: boolean) => new LambderUploadRunner<string, string>({
+        const expiring = (expireEvery: boolean) => new LambderUploadRunner<IssuedTicket, string>({
             uploadRule: PDF_RULE,
             requestTicket: async (fileFacts) => {
                 issued++;
                 const objectKey = `stores/store-7/invoices/${issued}.pdf`;
                 const ticket = await bucket.issueUploadTicket({ objectKey, fileFacts, uploadRule: PDF_RULE });
                 if(expireEvery || issued === 1) clock += 601_000;
-                return { ticket, reference: objectKey };
+                return answered({ ticket, objectKey });
             },
-            confirmUpload: async (objectKey) => objectKey,
+            confirmUpload: async ({ objectKey }) => answered(objectKey),
             // One attempt at storage: a renewal must not use it up.
             storageRetry: { attempts: 1 },
         });
@@ -244,6 +276,10 @@ describe('LambderUploadRunner over a memory bucket', () => {
 
         expect(await runner.upload(invoice())).toEqual({ objectKey: 'stores/store-7/invoices/2.pdf' });
         expect(calls.requestTicket).toBe(2);
+    });
+
+    it('refuses a storageRetry whose waits would be no pause at all where the runner is built, not on the first upload', () => {
+        expect(() => runnerFor({ storageRetry: { attempts: 3, baseDelayMs: 0, maxDelayMs: 0 } })).toThrow(/baseMs must be a number above 0/);
     });
 
     it('waits a random time before every try at storage, the first included, under a ceiling that doubles', async () => {
@@ -273,31 +309,197 @@ describe('LambderUploadRunner over a memory bucket', () => {
         expect(calls.requestTicket).toBe(0);
     });
 
-    it('hands the upload\'s signal to the app\'s calls, and reads their failure after a cancel as the cancel', async () => {
+    it('hands the upload\'s signal to the app\'s calls, and reads their failure after an abort as the abort', async () => {
         const controller = new AbortController();
         const seen: (AbortSignal | undefined)[] = [];
         const { runner } = runnerFor({
-            confirmUpload: async (_objectKey, { signal }) => {
+            confirmUpload: async (_issued, { signal }) => {
                 seen.push(signal);
                 controller.abort();
-                throw new DOMException('The operation was aborted.', 'AbortError');
+                return unanswered('aborted');
             },
         });
 
-        expect((await failureOf(runner.upload(invoice(), { signal: controller.signal }))).reason).toBe('cancelled');
+        const failure = await failureOf(runner.upload(invoice(), { signal: controller.signal }));
+        expect(failure.reason).toBe('aborted');
+        expect(failure.callFailure).toMatchObject({ reason: 'aborted' });
         expect(seen).toEqual([controller.signal]);
+
+        // A call that throws once the upload is aborted is read as the abort too.
+        const thrownAfterAbort = new AbortController();
+        const { runner: throwing } = runnerFor({
+            confirmUpload: async () => {
+                thrownAfterAbort.abort();
+                throw new DOMException('The operation was aborted.', 'AbortError');
+            },
+        });
+        expect((await failureOf(throwing.upload(invoice(), { signal: thrownAfterAbort.signal }))).reason).toBe('aborted');
     });
 
-    it('names the endpoint that said no: the ticket or the confirmation', async () => {
-        const { runner: noTicket } = runnerFor({ requestTicket: async () => { throw new Error('refused'); } });
+    it('names the endpoint that said no, the ticket or the confirmation, and carries what it said', async () => {
+        let ticketCalls = 0;
+        const { runner: noTicket } = runnerFor({ requestTicket: async () => { ticketCalls++; return refusedWith('Uploads are closed for this store.', 'uploads-closed'); } });
         const refused = await failureOf(noTicket.upload(invoice()));
         expect(refused.reason).toBe('ticketRefused');
-        expect((refused.cause as Error).message).toBe('refused');
+        expect(refused.message).toBe('ticketRefused: refusal: Uploads are closed for this store.');
+        expect(refused.callFailure?.refusal).toMatchObject({ code: 'uploads-closed' });
+        // A refusal is the endpoint's answer, and asking again would get it again.
+        expect(ticketCalls).toBe(1);
 
-        const { runner: noConfirm } = runnerFor({ confirmUpload: async () => { throw new Error('not confirmed'); } });
-        expect((await failureOf(noConfirm.upload(invoice()))).reason).toBe('confirmRefused');
+        let confirmCalls = 0;
+        const { runner: noConfirm } = runnerFor({ confirmUpload: async () => { confirmCalls++; return refusedWith('The invoice was withdrawn.'); } });
+        const notConfirmed = await failureOf(noConfirm.upload(invoice()));
+        expect(notConfirmed.reason).toBe('confirmRefused');
+        expect(notConfirmed.callFailure).toMatchObject({ reason: 'refusal', refusal: { content: 'The invoice was withdrawn.' } });
+        expect(confirmCalls).toBe(1);
+
+        // An app function that throws rather than answering is its own code failing, which no retry cures.
+        const { runner: throwing } = runnerFor({ requestTicket: async () => { throw new Error('ticket code broke'); } });
+        const thrown = await failureOf(throwing.upload(invoice()));
+        expect(thrown.reason).toBe('ticketRefused');
+        expect((thrown.cause as Error).message).toBe('ticket code broke');
+        expect(thrown.callFailure).toBeUndefined();
+    });
+
+    it('asks for the ticket again after a call that got no answer, a timeout or a 5xx, and never after a rejected input', async () => {
+        const failures: LambderApiOutcome<never>[] = [unanswered('network'), unanswered('timeout'), unanswered('server')];
+        let asked = 0;
+        const endpoints = bucketEndpoints();
+        const { runner } = runnerFor({
+            endpoints,
+            storageRetry: { attempts: 4, baseDelayMs: 1, maxDelayMs: 1 },
+            requestTicket: async (fileFacts, call) => {
+                asked++;
+                return failures.shift() ?? await endpoints.requestTicket(fileFacts, call);
+            },
+        });
+
+        expect(await runner.upload(invoice())).toEqual({ objectKey: 'stores/store-7/invoices/1.pdf' });
+        expect(asked).toBe(4);
+        expect(endpoints.calls.requestTicket).toBe(1);
+
+        let invalidCalls = 0;
+        const { runner: invalid } = runnerFor({
+            requestTicket: async () => {
+                invalidCalls++;
+                return { ok: false, reason: 'validation', status: 422, zodError: { name: 'ZodError', message: 'storeId: Invalid UUID', issues: [] } };
+            },
+        });
+        const rejected = await failureOf(invalid.upload(invoice()));
+        expect(rejected.reason).toBe('ticketRefused');
+        expect(rejected.callFailure?.reason).toBe('validation');
+        expect(invalidCalls).toBe(1);
+    });
+
+    it('confirms the stored bytes again after a dropped call, with the same ticket, leaving no second object behind', async () => {
+        const confirmedWith: IssuedTicket[] = [];
+        let drops = 2;
+        const endpoints = bucketEndpoints();
+        const { runner } = runnerFor({
+            endpoints,
+            confirmUpload: async (issued, call) => {
+                confirmedWith.push(issued);
+                return drops-- > 0 ? unanswered('network') : await endpoints.confirmUpload(issued, call);
+            },
+        });
+
+        expect(await runner.upload(invoice())).toEqual({ objectKey: 'stores/store-7/invoices/1.pdf' });
+        expect(endpoints.calls.requestTicket).toBe(1);
+        expect(confirmedWith).toHaveLength(3);
+        expect(new Set(confirmedWith).size).toBe(1);
+        expect(bucket.listObjectKeys()).toEqual(['stores/store-7/invoices/1.pdf']);
+    });
+
+    it('gives up as networkFailed once every attempt at a call has gone unanswered, with the last failure on the error', async () => {
+        let confirms = 0;
+        const { runner } = runnerFor({ confirmUpload: async () => { confirms++; return unanswered('server'); } });
+
+        const failure = await failureOf(runner.upload(invoice()));
+        expect(failure.reason).toBe('networkFailed');
+        expect(failure.callFailure).toMatchObject({ reason: 'server', status: 503 });
+        expect((failure.cause as Error).message).toBe('the call failed as server');
+        expect(confirms).toBe(3);
+    });
+
+    it('gives each step every attempt: retries spent at storage do not shorten the confirm\'s', async () => {
+        let posts = 0;
+        const dropPost = () => {
+            posts++;
+            return msw.HttpResponse.error();
+        };
+        server.use(msw.http.post(bucket.baseUrl, dropPost, { once: true }), msw.http.post(bucket.baseUrl, dropPost, { once: true }));
+        let drops = 2;
+        const endpoints = bucketEndpoints();
+        const { runner } = runnerFor({
+            endpoints,
+            confirmUpload: async (issued, call) => drops-- > 0 ? unanswered('timeout') : await endpoints.confirmUpload(issued, call),
+        });
+
+        // Three attempts a step: two failed posts and then two dropped confirms still upload.
+        expect(await runner.upload(invoice())).toEqual({ objectKey: 'stores/store-7/invoices/1.pdf' });
+        expect(posts).toBe(2);
+        expect(endpoints.calls.confirmUpload).toBe(1);
+    });
+
+    it('stops during the wait before another try at a call', async () => {
+        const controller = new AbortController();
+        const { runner } = runnerFor({
+            storageRetry: { attempts: 3, baseDelayMs: 60_000, maxDelayMs: 60_000 },
+            requestTicket: async () => {
+                setTimeout(() => controller.abort(), 10);
+                return unanswered('network');
+            },
+        });
+
+        expect((await failureOf(runner.upload(invoice(), { signal: controller.signal }))).reason).toBe('aborted');
+    });
+
+    it('takes a caller\'s outcomes as they come, over a real server\'s ticket and confirm endpoints', async () => {
+        const app = initLambder().create({ apiPath: '/api' });
+        const factsById = new Map<string, LambderUploadFileFacts & { objectKey: string }>();
+        let ticketCalls = 0;
+        const shop = app.registerApiGroups(app.defineApiGroup('invoices', {
+            requestUpload: app.defineApi({
+                input: z.object({ storeId: z.string(), fileFacts: LambderUploadFileFactsSchema }),
+                output: z.object({ ticket: LambderUploadTicketSchema, invoiceId: z.string() }),
+            }, async ({ apiPayload }) => {
+                ticketCalls++;
+                if(apiPayload.storeId === 'store-closed') refuse('Uploads are closed for this store.');
+                const invoiceId = `invoice-${ticketCalls}`;
+                const objectKey = `stores/${apiPayload.storeId}/invoices/${invoiceId}.pdf`;
+                const ticket = await bucket.issueUploadTicket({ objectKey, fileFacts: apiPayload.fileFacts, uploadRule: PDF_RULE });
+                factsById.set(invoiceId, { ...apiPayload.fileFacts, objectKey });
+                return { ticket, invoiceId };
+            }),
+            confirmUpload: app.defineApi({
+                input: z.object({ invoiceId: z.string() }),
+                output: z.object({ invoiceId: z.string(), fileName: z.string() }),
+            }, async ({ apiPayload }) => {
+                const stored = factsById.get(apiPayload.invoiceId);
+                if(!stored) refuse('Invoice not found.');
+                const verdict = await bucket.verifyUploadedObject({ objectKey: stored.objectKey, fileFacts: stored });
+                if(!verdict.verified) refuse('The upload did not arrive.');
+                return { invoiceId: apiPayload.invoiceId, fileName: stored.fileName };
+            }),
+        }));
+        const caller = new LambderCaller<typeof shop.ApiContract>({ transport: lambderHandlerTransport(shop.getHandler()) });
+        const runnerForStore = (storeId: string) => new LambderUploadRunner({
+            uploadRule: PDF_RULE,
+            requestTicket: (fileFacts, { signal }) => caller.invoices.requestUpload.outcome({ storeId, fileFacts }, { signal }),
+            confirmUpload: ({ invoiceId }, { signal }) => caller.invoices.confirmUpload.outcome({ invoiceId }, { signal }),
+        });
+
+        const receipt = await runnerForStore('store-7').upload(invoice());
+        expectTypeOf(receipt).toEqualTypeOf<{ invoiceId: string; fileName: string }>();
+        expect(receipt).toEqual({ invoiceId: 'invoice-1', fileName: 'Invoice 1042.pdf' });
+        expect(bucket.listObjectKeys()).toEqual(['stores/store-7/invoices/invoice-1.pdf']);
+
+        const closed = await failureOf(runnerForStore('store-closed').upload(invoice()));
+        expect(closed.reason).toBe('ticketRefused');
+        expect(closed.callFailure?.refusal?.content).toBe('Uploads are closed for this store.');
     });
 });
+
 
 /**
  * The browser's path: an XMLHttpRequest stand-in that hands its post to the
@@ -487,9 +689,9 @@ describe('LambderMemoryUploadBucket', () => {
                     objectKey, fileFacts, uploadRule: PDF_RULE,
                     object: { tags: { retention: '30d' }, metadata: { invoice: '1042' }, cacheControl: 'private, max-age=60', contentDisposition: { disposition: 'inline', fileName: 'Invoice 1042.pdf' } },
                 });
-                return { ticket, reference: objectKey };
+                return answered({ ticket, objectKey });
             },
-            confirmUpload: async (objectKey) => ({ objectKey }),
+            confirmUpload: async ({ objectKey }) => answered({ objectKey }),
         });
         await runner.upload(file);
 
@@ -535,14 +737,14 @@ describe('LambderMemoryUploadBucket', () => {
 
 describe('LambderUploadRunner over a bucket that signs PUT tickets', () => {
     /** A runner over the PUT bucket, its endpoints as the POST one's. */
-    const putRunner = (object?: Parameters<LambderMemoryUploadBucket['issueUploadTicket']>[0]['object']) => new LambderUploadRunner<string, { objectKey: string }>({
+    const putRunner = (object?: Parameters<LambderMemoryUploadBucket['issueUploadTicket']>[0]['object']) => new LambderUploadRunner<IssuedTicket, { objectKey: string }>({
         uploadRule: PDF_RULE,
         requestTicket: async (fileFacts) => {
             const objectKey = 'stores/store-7/invoices/put.pdf';
             const ticket = LambderUploadTicketSchema.parse(await putBucket.issueUploadTicket({ objectKey, fileFacts, uploadRule: PDF_RULE, object }));
-            return { ticket, reference: objectKey };
+            return answered({ ticket, objectKey });
         },
-        confirmUpload: async (objectKey) => ({ objectKey }),
+        confirmUpload: async ({ objectKey }) => answered({ objectKey }),
     });
 
     it('puts the bytes under the ticket\'s URL with its headers, and keeps what the object carries', async () => {
@@ -575,13 +777,13 @@ describe('LambderUploadRunner over a bucket that signs PUT tickets', () => {
 
     it('is refused by storage when the bytes are not the ones the ticket was signed for', async () => {
         const other = await sha256Base64Of(new TextEncoder().encode('another file'));
-        const runner = new LambderUploadRunner<string, string>({
+        const runner = new LambderUploadRunner<IssuedTicket, string>({
             uploadRule: PDF_RULE,
             requestTicket: async (fileFacts) => {
                 const ticket = await putBucket.issueUploadTicket({ objectKey: 'a.pdf', fileFacts: { ...fileFacts, sha256Base64: other }, uploadRule: PDF_RULE });
-                return { ticket, reference: 'a.pdf' };
+                return answered({ ticket, objectKey: 'a.pdf' });
             },
-            confirmUpload: async (objectKey) => objectKey,
+            confirmUpload: async ({ objectKey }) => answered(objectKey),
         });
 
         const failure = await failureOf(runner.upload(invoice()));
@@ -592,15 +794,15 @@ describe('LambderUploadRunner over a bucket that signs PUT tickets', () => {
 
     it('asks for a new ticket when storage says the URL expired', async () => {
         let issued = 0;
-        const runner = new LambderUploadRunner<string, string>({
+        const runner = new LambderUploadRunner<IssuedTicket, string>({
             uploadRule: PDF_RULE,
             requestTicket: async (fileFacts) => {
                 issued++;
                 const ticket = await putBucket.issueUploadTicket({ objectKey: `renewed-${issued}.pdf`, fileFacts, uploadRule: PDF_RULE });
                 if(issued === 1) clock += 601_000;
-                return { ticket, reference: `renewed-${issued}.pdf` };
+                return answered({ ticket, objectKey: `renewed-${issued}.pdf` });
             },
-            confirmUpload: async (objectKey) => objectKey,
+            confirmUpload: async ({ objectKey }) => answered(objectKey),
         });
 
         expect(await runner.upload(invoice())).toBe('renewed-2.pdf');

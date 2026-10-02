@@ -35,6 +35,13 @@ All five follow the same chain, so they land in the same region unless told
 otherwise. Name `region` only for a table that lives somewhere other than the
 function.
 
+## Which client
+
+All five speak DynamoDB's item-level API through `@aws-sdk/client-dynamodb`,
+the one package they need, loaded on first use. Each takes an optional
+`client`, a `DynamoDBClient`; left out, every store for one region shares one
+client, so one connection pool and one credential lookup on a cold container.
+
 ## Table creation
 
 The same definition works for every one of them; only the name changes.
@@ -118,7 +125,9 @@ A session-table policy, for example:
 
 ## Session record structure
 
-Each session is stored as:
+Each session is stored as below, shown as plain JSON: on the table the hashes,
+`csrfTokenHash` and `sessionKey` are strings (`S`), the times, counts and
+`dataBytes` numbers (`N`), and `dataBr` a binary (`B`).
 
 ```json
 {
@@ -143,9 +152,22 @@ sha256 is the right construction here.
 
 Session data is Brotli-compressed by default, `dataBr` beside its JSON byte
 length `dataBytes`; with the store's `compression` off, or below its
-`minBytes`, the data is a plain `data` map attribute instead. Records written
-under either setting read back, so the setting can be switched on or off on a
-live table. Sessions configured with `dataRefresh` also carry `dataExpiresAt`.
+`minBytes`, the data is a plain `data` attribute instead, its JSON as
+attribute values: an object as a map (`M`), an array as a list (`L`), strings,
+numbers, booleans and `null` as `S`, `N`, `BOOL` and `NULL`. That is the item
+`@aws-sdk/lib-dynamodb`'s document client writes for the same data, so a table
+that client wrote reads unchanged. Records written under either setting read
+back, so the setting can be switched on or off on a live table. Sessions
+configured with `dataRefresh` also carry `dataExpiresAt`.
+
+A record has to fit DynamoDB's 400KB item limit, and the data is the part of
+it that grows. As stored (compressed, or the plain map as DynamoDB sizes it),
+it may take 392KB, which leaves the record's other attributes 8KB; its JSON
+may be 32MB at most, which is also the length a stored `dataBytes` is trusted
+up to. A create or an update whose data is past either refuses before it
+writes, with an error naming the size and the limit, rather than reaching the
+table and coming back as a `ValidationException` that names neither. A record
+declaring more than 32MB reads as no session rather than being decompressed.
 
 `dataVersion` starts at 0 and goes up by one, through an `ADD` in the same
 `UpdateItem`, on every write of the data or of `dataExpiresAt`. The store's
@@ -207,7 +229,7 @@ write, so the chunks of two versions never mix. A grouped key puts
 
 ## Capacity
 
-`PAY_PER_REQUEST` is the right default for all four: session and policy traffic
+`PAY_PER_REQUEST` is the right default for all five: session and policy traffic
 follows request traffic, and none of these tables has a steady baseline worth
 provisioning for. Three things to keep in mind if you switch to provisioned
 capacity:

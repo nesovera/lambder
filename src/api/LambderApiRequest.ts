@@ -54,6 +54,13 @@ export type LambderApiRequest = {
      * expired, which reloads it.
      */
     retiredPath?: true;
+    /**
+     * Set when the call's body is no envelope: not a JSON object (a number,
+     * a string, a boolean, null, an array) or not JSON at all. The
+     * client-facing reason, which the pipeline answers with the
+     * invalid-payload refusal (prepare) before anything reads the call.
+     */
+    invalidEnvelope?: string;
     /** The caller's apiVersion, informational; null when it sent none. */
     version: string | null;
     /** The signature the caller carries for this endpoint (see LambderApiSignatureMap), for the signature gate; null when it sent none. */
@@ -118,25 +125,43 @@ export type LambderApiRequestInfo = {
 export const isApiCallContentType = (lowercasedHeaders: Record<string, string | undefined>): boolean =>
     (lowercasedHeaders["content-type"] ?? "").split(";")[0]!.trim().toLowerCase() === "application/json";
 
+/** The one shape an API call's body may take: a JSON object, the envelope every Lambder caller posts. */
+const isEnvelopeObject = (value: unknown): value is Record<string, unknown> =>
+    value !== null && typeof value === "object" && !Array.isArray(value);
+
+/** Why a body that did parse is no envelope, client-facing: its kind, never its value. */
+const notAnEnvelopeMessage = (posted: unknown): string =>
+    `Request body must be a JSON object, got ${Array.isArray(posted) ? "an array" : posted === null ? "null" : `a ${typeof posted}`}.`;
+
 /**
  * Reads the posted envelope of a call to `apiName` into a request; the name
  * comes from where the call was posted, never from the body. Everything is
  * taken as posted: a malformed idempotencyKey or guardInputs value is the
  * engines' to refuse, with the client-facing message they already give.
+ *
+ * `posted` is the body as JSON parsed it; undefined (no body) reads as an
+ * empty envelope. A body that is not a JSON object, or one the adapter could
+ * not parse (`bodyNotJson`), is flagged on the request as invalidEnvelope
+ * and read as an empty envelope, so every adapter refuses it alike, in the
+ * pipeline, rather than each deciding what such a body means.
  */
 export const readApiEnvelope = (
-    post: Record<string, unknown> | null | undefined,
+    posted: unknown,
     info: LambderApiRequestInfo,
     apiName: string,
-    flags: { retiredPath?: true } = {},
+    flags: { retiredPath?: true; bodyNotJson?: true } = {},
 ): LambderApiRequest => {
-    post ??= {};
+    const invalidEnvelope = flags.bodyNotJson ? "Request body must be a JSON object, and it is not valid JSON."
+        : posted === undefined || isEnvelopeObject(posted) ? null
+        : notAnEnvelopeMessage(posted);
+    const post: Record<string, unknown> = isEnvelopeObject(posted) ? posted : {};
     const hasGzip = post[COMPRESSED_PAYLOAD_GZ_FIELD] !== undefined;
     const hasBrotli = post[COMPRESSED_PAYLOAD_BR_FIELD] !== undefined;
     const guardInputs = post.guardInputs;
     return {
         apiName,
         ...(flags.retiredPath ? { retiredPath: true as const } : {}),
+        ...(invalidEnvelope !== null ? { invalidEnvelope } : {}),
         version: typeof post.version === "string" ? post.version : null,
         signature: typeof post.signature === "string" ? post.signature : null,
         token: typeof post.token === "string" ? post.token : "",
@@ -156,6 +181,22 @@ export const readApiEnvelope = (
         host: info.host,
         ...(info.signal ? { signal: info.signal } : {}),
     };
+};
+
+/**
+ * readApiEnvelope over a body's text, for an adapter that holds the text and
+ * nothing parsed from it: an empty body reads as an empty envelope, and text
+ * that is not JSON is flagged as no envelope, as the server flags it.
+ */
+export const readApiEnvelopeText = (
+    text: string,
+    info: LambderApiRequestInfo,
+    apiName: string,
+): LambderApiRequest => {
+    let posted: unknown;
+    try { posted = JSON.parse(text || "{}"); }
+    catch { return readApiEnvelope(undefined, info, apiName, { bodyNotJson: true }); }
+    return readApiEnvelope(posted, info, apiName);
 };
 
 /** Outcome of restoring a compressed request payload; the message is client-facing. */

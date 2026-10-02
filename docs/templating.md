@@ -35,6 +35,9 @@ const head = html`${raw('<meta charset="utf-8">')}`;
 // jsonScript() embeds JSON safely for client hydration:
 const state = html`${jsonScript("app-data", preloadedState)}`;
 
+// ...and structured data for search engines, with the same escaping:
+const ld = html`${jsonScript({ type: "application/ld+json" }, { "@context": "https://schema.org", "@type": "Store", name: "Hudson Street Books" })}`;
+
 // Works for XML too (xml is an alias of html):
 return res.xml(xml`<?xml version="1.0" encoding="UTF-8"?>
 <urlset>${urls.map((loc) => xml`<url><loc>${loc}</loc></url>`)}</urlset>`);
@@ -109,6 +112,12 @@ applies the same rules: sitemaps, feeds and SVG attributes work as written,
 and SVG, which runs script, keeps its `on` attributes and `<script>` refused
 and its links checked.
 
+What these build is a `LambderSafeHtml`, and it is the only body `res.html`,
+`res.status`, `res.status404` and `res.xml` take: a plain string there is a
+compile error and throws, so a page is either built by a tag, marked trusted
+with `raw()` where it can be seen, or sent as text with `res.text` (see
+[Responses](./responses.md#html-bodies)).
+
 Exports: `html`, `xml`, `raw`, `jsonScript`, `escapeHtml`, `renderHtmlValue`,
 `LambderSafeHtml`, `LambderHtmlValue`.
 
@@ -116,18 +125,30 @@ Exports: `html`, `xml`, `raw`, `jsonScript`, `escapeHtml`, `renderHtmlValue`,
 
 A standalone, comment-only HTML template engine. Every construct is an HTML
 comment, so templates survive HTML build pipelines (Vite, for instance)
-untouched, and during frontend development the browser simply renders the
-default content because the markers are invisible. It can template anything:
-SPA shells, emails, error pages.
+untouched, and where the browser reads a marker as a comment, between
+elements, it shows nothing of it during frontend development and renders the
+default content (what it shows elsewhere is under [The raw file in a
+browser](#the-raw-file-in-a-browser)). It can template anything: SPA shells,
+emails, error pages.
 
 **Syntax** (everything is an HTML comment):
 
 ```html
-<title><!--slot:title-->Default Title<!--/slot:title--></title>   <!-- replaceable region -->
-<!--slot:head/-->                                                  <!-- insert-only point -->
-<!--if:isRtl--><body dir="rtl"><!--else--><body><!--/if:isRtl-->   <!-- conditional -->
-<!--if:!minimal--><nav>...</nav><!--/if:!minimal-->                <!-- negated conditional -->
+<html lang="en" dir="<!--slot:dir-->ltr<!--/slot:dir-->">     <!-- a slot inside a quoted attribute value -->
+<!--slot:head/-->                                           <!-- insert-only point -->
+<h1><!--slot:heading-->Welcome<!--/slot:heading--></h1>     <!-- replaceable region -->
+<!--if:signedIn--><a href="/account">Your account</a><!--else--><a href="/sign-in">Sign in</a><!--/if:signedIn-->
+                                                            <!-- conditional, each branch whole elements -->
+<!--if:!minimal--><nav>...</nav><!--/if:!minimal-->         <!-- negated conditional -->
 ```
+
+The page title is not written with markers: `<title>`'s content is text to
+a browser, so a marker there would show in the tab during development. Leave
+the title plain (`<title>My App</title>`) and compile with
+`htmlVirtualSlots: true`, which makes the `<title>` element's content the slot
+`title`, and the position before `</head>` the insert-only slot `head`, for a
+file that does not declare slots by those names itself. It works beside the
+file's own markers.
 
 **Usage** (standalone, importable directly from `lambder`):
 
@@ -135,20 +156,40 @@ SPA shells, emails, error pages.
 import { LambderTemplatingEngine, html, jsonScript } from "lambder";
 
 // Compile once (throws early on unclosed/mismatched blocks) ...
-const template = await LambderTemplatingEngine.fromFile("./templates/page.html");
+const template = await LambderTemplatingEngine.fromFile("./templates/page.html", { htmlVirtualSlots: true });
 // ... render many times, per request:
 const output = template.render({
     title: userInput,                                         // plain values are escaped (XSS-safe)
     head: html`<link rel="canonical" href="${canonicalUrl}" />
         ${jsonScript("app-data", preloadedState)}`,           // html`...`/raw()/jsonScript() inserted verbatim
-    isRtl: lang === "ar",                                     // condition names use truthiness
+    signedIn: session !== null,                               // condition names use truthiness
+    dir: lang === "ar" ? "rtl" : "ltr",
 });
 
-// Runtime introspection (dynamically typed by design):
-template.slotNames;       // e.g. ["title", "head"]
-template.conditionNames;  // e.g. ["isRtl", "minimal"]
+// The names it declares:
+template.slotNames;       // e.g. ["dir", "title", "head", "heading"]
+template.conditionNames;  // e.g. ["signedIn", "minimal"]
 template.has("title");    // true
+
+// A key it has no slot or condition for throws, naming the key and these names:
+template.render({ titel: "About us" });   // Error: ... the data carries "titel" ...
 ```
+
+The template is a file edited apart from the code that fills it, so every
+render checks the data's keys against it: a slot renamed in the HTML fails the
+render instead of dropping the server's content without a word. Code that
+knows the names can state them, and the data is then typed to them, so a
+misspelled key is a compile error as well:
+
+```typescript
+type PageNames = "dir" | "title" | "head" | "heading" | "signedIn" | "minimal";
+const page = await LambderTemplatingEngine.fromFile<PageNames>("./templates/page.html", { htmlVirtualSlots: true });
+page.render({ titel: "About us" });   // compile error: "titel" is not one of PageNames
+```
+
+The type parameter (on the constructor, `fromFile` and `res.templateFile`) is
+optional, and it is the caller's statement about a file the compiler never
+reads, so the render-time check holds either way.
 
 Rules:
 
@@ -160,12 +201,16 @@ Rules:
   page.seoTitle })` with a `seoTitle` that comes back `null` ships an empty
   `<title>`; write `page.seoTitle ?? undefined` when a missing value should
   fall back to the shell's own default
-- Unknown data keys are ignored, so one data object can serve several
-  templates with different slots
+- A data key the template has no slot or condition for throws, naming the
+  key and the template's slots and conditions. Code that fills several
+  templates from one object picks each one's keys with `has()`
 - Blocks nest freely; there are intentionally no loops or inline expressions:
   build dynamic lists server-side with `html` and pass them into a slot
-- Attribute-position values (`<html lang="...">`, say) are handled with
-  if/else around whole-tag variants (see [Branches](#branches))
+- Attribute values (`<html dir="...">`, say) take a slot inside the quoted
+  value; an if/else around whole-tag variants works rendered, and in a raw
+  file only where both variants read as valid HTML side by side (see [The
+  raw file in a browser](#the-raw-file-in-a-browser) and
+  [Branches](#branches))
 - Compile-time rejection of slots in unquoted attribute positions, where an
   attribute name goes inside a tag (`<input <!--slot:x/-->>`), inside
   `<script>` and `<style>`, and inside a comment right before a `-`, `!` or
@@ -223,6 +268,32 @@ compiles, while
 refused, since one branch of the first block still ends inside the name
 `checked` when the second block starts.
 
+### The raw file in a browser
+
+During frontend development the file is served as it is, with nothing
+rendering it, so a browser reads each marker as whatever the HTML parser
+makes of it where it stands. Between elements that is a comment, which shows
+nothing, and a slot's default content renders. Elsewhere it is not:
+
+- **Inside `<title>` or `<textarea>`**, whose content is text, a marker is
+  text and shows: the tab would read `<!--slot:title-->My App<!--/slot:title-->`.
+  The title takes the virtual slot instead (`htmlVirtualSlots`, above).
+- **Inside a quoted attribute value**, a marker is part of the value. That is
+  harmless where nothing shows the value (`dir="<!--slot:dir-->ltr<!--/slot:dir-->"`
+  is a direction the browser does not know, so it lays the page out left to
+  right), and visible where something does (a `title` or `alt` attribute).
+- **Inside a tag**, where an attribute name goes (a conditional boolean
+  attribute, `<input <!--if:checked-->checked<!--/if:checked--> name="a">`),
+  the tag ends at the marker's `-->` and the rest of it shows as text. Such a
+  template renders correctly and is broken raw.
+- **An if/else** has nothing to choose a branch, so both render. Give each
+  branch whole elements that read as valid HTML side by side, as the link in
+  the syntax above does. Two variants of one start tag do not:
+  `<!--if:isRtl--><body dir="rtl"><!--else--><body><!--/if:isRtl-->` renders
+  raw as a single `<body dir="rtl">`, the parser merging the second `<body>`
+  into the first, so the page is laid out right to left in development
+  whatever the data. Vary the attribute with a slot inside its value instead.
+
 ## Rendering a template as a response
 
 Inside a handler, `res.templateFile(path, data?, options?)` reads the file
@@ -235,8 +306,12 @@ lambder.addRoute("/about", async (ctx, res) => {
 });
 ```
 
-Files without template markers can opt into virtual slots (`title` is the
-`<title>` element, `head` is the position before `</head>`) with
-`{ htmlVirtualSlots: true }`. See
+The data is checked against the file as above, and the error names the file.
+`res.templateFile<"title" | "heading">("about.html", data)` types the data to
+the file's names.
+
+`{ htmlVirtualSlots: true }` gives a file the virtual slots (`title` is the
+`<title>` element's content, `head` the position before `</head>`), beside
+its own markers or without any. See
 [Frontend hosting](./frontend-hosting.md#templated-shells) for the app-shell
 recipe and the multi-tenant variant.

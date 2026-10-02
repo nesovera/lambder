@@ -2,10 +2,16 @@ import { type LambderEndpointRefusals } from "../api/LambderApiRefusals.js";
 import type { LambderApiAnswer } from "../api/LambderApiAnswer.js";
 import type { LambderApiRequest } from "../api/LambderApiRequest.js";
 import type { LambderMockFailure, LambderMockFailureReason, LambderMockLatency } from "./LambderMockTypes.js";
+/** What an injected failure answers, and whether that answer ends the session the call carries. */
+type LambderMockInjectionResult = {
+    answer: LambderApiAnswer;
+    endsSession: boolean;
+};
 /**
  * A failure the transport reports rather than an answer the caller reads:
  * an injected network failure or timeout. The caller maps a rejected
- * transport to `network`, or `timeout` when its own abort fired.
+ * transport to `network`, or to `timeout` or `aborted` when the call's own
+ * timeout or signal had aborted it.
  */
 export declare class LambderMockTransportError extends Error {
     readonly reason: "network" | "timeout" | "offline";
@@ -56,9 +62,12 @@ export declare class LambderMockFailureInjector {
      * never reach the caller as answers. An injected refusal is checked
      * against the endpoint's declared codes (`endpoint`), as the pipeline
      * checks a real one, so a test cannot inject what the server could never
-     * send.
+     * send. `endsSession` says the answer tells the caller its session is
+     * over (sessionExpired, or a refusal whose code is declared so), which
+     * the runtime then makes true.
      */
-    answerFor(failure: LambderMockFailure, request: LambderApiRequest, endpoint: LambderEndpointRefusals | undefined): Promise<LambderApiAnswer>;
+    answerFor(failure: LambderMockFailure, request: LambderApiRequest, endpoint: LambderEndpointRefusals | undefined): Promise<LambderMockInjectionResult>;
     /** Clears every injected failure and puts the configured latency back. */
     reset(): void;
 }
+export {};

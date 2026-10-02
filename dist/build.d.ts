@@ -19,8 +19,10 @@ export type { LambderApiOptionsFileOptions, LambderApiOptionsFileResult, } from 
 export { writeApiGuardParams } from "./build/writeApiGuardParams.js";
 export type { LambderApiGuardParamsFileOptions, LambderApiGuardParamsFileResult, } from "./build/writeApiGuardParams.js";
 export type { LambderApiOptionsSource, LambderNameChanges } from "./build/generatedTables.js";
+export { writeApiSchemas } from "./build/writeApiSchemas.js";
+export type { LambderApiSchemasSource, LambderApiSchemasFileOptions, LambderApiSchemasFileResult, LambderApiSchemaLoss, } from "./build/writeApiSchemas.js";
 export { checkApiRefusals } from "./build/checkApiRefusals.js";
 export type { LambderApiRefusalCheckOptions, LambderApiRefusalCheckResult, LambderRefusalCheckFinding, } from "./build/checkApiRefusals.js";
 export { generateApiFiles } from "./build/generateApiFiles.js";
-export type { LambderApiFilesConfig, LambderApiFilesApp, LambderApiFilesResult } from "./build/generateApiFiles.js";
+export type { LambderApiFilesConfig, LambderApiFilesApp, LambderApiFilesOptions, LambderApiFilesResult } from "./build/generateApiFiles.js";
 export type { LambderModuleLocation } from "./build/moduleLocation.js";

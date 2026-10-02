@@ -22,6 +22,11 @@ export declare class LambderCrashHandling {
      * with it as unfinished, and either way the request goes on to be
      * answered. The report itself cannot be cancelled and runs on; only the
      * wait ends.
+     *
+     * An error already reported where it arose (an invoke failure its
+     * caller's onFailure took, which api() then threw) is not handed over
+     * again: it is still a crash, answered as one, but reporting it here
+     * would record the one failure twice.
      */
     report(error: Error, site: LambderCrashSite): Promise<void>;
     /**

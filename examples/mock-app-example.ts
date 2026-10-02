@@ -21,21 +21,21 @@ type Permission = "ORDERS.CREATE" | "ORDERS.VIEW";
 
 type SessionData = {
     userId: string;
-    memberships: { organizationId: string; permissions: Permission[] }[];
+    staffRoles: { storeId: string; permissions: Permission[] }[];
 };
 
 type ApiContractType = {
     "user.get": { input: { userId: string }; output: { id: string; name: string }; mode: "public"; refusals: { "app/not-found": {} } };
     "account.login": { input: { email: string }; output: { ok: boolean }; mode: "public"; rateLimit: "authPerIp" };
-    "account.logout": { input: {}; output: { ok: boolean }; mode: "session"; guards: "sessionOnly" };
+    "account.logout": { input: {}; output: { ok: boolean }; mode: "session"; guards: "signedIn" };
     "order.create": {
         input: { qty: number };
-        output: { orderId: string; organizationId: string; qty: number };
+        output: { orderId: string; storeId: string; qty: number };
         mode: "session";
         // The codes the server declares for it, its guard's included.
-        refusals: { "app/not-a-member": {} };
-        guards: { orgPermission: Permission };
-        guardInputs: { orgPermission: { organizationId: string } };
+        refusals: { "app/not-staff": {} };
+        guards: { staffPermission: Permission };
+        guardInputs: { staffPermission: { storeId: string } };
         idempotency: true;
     };
     "admin.exportOrders": { input: { month: string }; output: unknown; mode: "public" };
@@ -56,17 +56,17 @@ export const mockApp = mock.create({
     guards: {
         // One mock guard per guard name the contract declares; the compiler
         // checks the map against the contract.
-        orgPermission: mock.guard({
-            guardInput: z.object({ organizationId: z.string() }),
+        staffPermission: mock.guard({
+            guardInput: z.object({ storeId: z.string() }),
             session: true,
-            handler: (ctx, { organizationId }, permission: Permission) => {
-                const member = ctx.session.data.memberships.find((m) => m.organizationId === organizationId);
-                if (!member) refuse("You do not belong to this organization.", { code: "app/not-a-member", notAuthorized: true });
-                if (!member.permissions.includes(permission)) refuse("Not allowed.", { notAuthorized: true });
-                return member;
+            handler: (ctx, { storeId }, permission: Permission) => {
+                const role = ctx.session.data.staffRoles.find((r) => r.storeId === storeId);
+                if (!role) refuse("You are not on this store's staff.", { code: "app/not-staff", notAuthorized: true });
+                if (!role.permissions.includes(permission)) refuse("Not allowed.", { notAuthorized: true });
+                return role;
             },
         }),
-        sessionOnly: mock.guard({ session: true, handler: () => {} }),
+        signedIn: mock.guard({ session: true, handler: () => {} }),
     },
 });
 
@@ -78,7 +78,7 @@ const users = [{
     id: "u1",
     email: "ada@example.com",
     name: "Ada",
-    memberships: [{ organizationId: "org1", permissions: ["ORDERS.CREATE"] as Permission[] }],
+    staffRoles: [{ storeId: "store-1", permissions: ["ORDERS.CREATE"] as Permission[] }],
 }];
 
 export const userMocks = mockApp.apiSlice(
@@ -90,18 +90,18 @@ export const userMocks = mockApp.apiSlice(
     }),
     mockApp.api("account.login", { rateLimit: "authPerIp", handler: async ({ payload, sessionController }) => {
         const user = users.find((u) => u.email === payload.email) ?? refuse("Wrong email or password.");
-        await sessionController.createSession(user.id, { userId: user.id, memberships: user.memberships });
+        await sessionController.createSession(user.id, { userId: user.id, staffRoles: user.staffRoles });
         return { ok: true };
     } }),
     // Its session guard, restated, is what makes the entry a session endpoint, as on the server.
-    mockApp.api("account.logout", { guards: "sessionOnly", handler: async ({ sessionController }) => { await sessionController.endSession(); return { ok: true }; } }),
+    mockApp.api("account.logout", { guards: "signedIn", handler: async ({ sessionController }) => { await sessionController.endSession(); return { ok: true }; } }),
 );
 
 export const orderMocks = mockApp.apiSlice(
     mockApp.api("order.create", {
-        guards: { orgPermission: "ORDERS.CREATE" },   // pinned to the server's declaration
+        guards: { staffPermission: "ORDERS.CREATE" },   // pinned to the server's declaration
         idempotency: true,
-        handler: async ({ payload, guardData }) => ({ orderId: "o_1", organizationId: guardData.orgPermission.organizationId, ...payload }),
+        handler: async ({ payload, guardData }) => ({ orderId: "o_1", storeId: guardData.staffPermission.storeId, ...payload }),
     }),
     mockApp.notMocked("admin.exportOrders", "operator endpoint, no client calls it"),
 );
@@ -127,15 +127,15 @@ export const attachMocksInDevelopment = (isDevelopment: boolean) => {
 
 export const exampleTest = async () => {
     const jar = new LambderCookieJar();
-    await mockApp.signIn("u1", { userId: "u1", memberships: users[0]!.memberships }, { jar });
-    const signedIn = new LambderCaller<ApiContractType>({ apiPath: "/api", transport: mockApp.transport({ cookies: jar }) });
+    await mockApp.signIn("u1", { userId: "u1", staffRoles: users[0]!.staffRoles }, { jar });
+    const clerk = new LambderCaller<ApiContractType>({ apiPath: "/api", transport: mockApp.transport({ cookies: jar }) });
 
     // The contract declares idempotency for this endpoint, so the call owes a key.
-    const order = await signedIn.api("order.create", { qty: 2 }, { guardInputs: { orgPermission: { organizationId: "org1" } }, idempotencyKey: "order-2f8c41d6e9a7" });
-    console.log(order);   // { orderId: "o_1", organizationId: "org1", qty: 2 }
+    const order = await clerk.api("order.create", { qty: 2 }, { guardInputs: { staffPermission: { storeId: "store-1" } }, idempotencyKey: "order-2f8c41d6e9a7" });
+    console.log(order);   // { orderId: "o_1", storeId: "store-1", qty: 2 }
 
     mockApp.failNext("order.create", "network");
-    const outcome = await signedIn.apiOutcome("order.create", { qty: 2 }, { guardInputs: { orgPermission: { organizationId: "org1" } }, idempotencyKey: "order-9b3e07a5c4d1" });
+    const outcome = await clerk.apiOutcome("order.create", { qty: 2 }, { guardInputs: { staffPermission: { storeId: "store-1" } }, idempotencyKey: "order-9b3e07a5c4d1" });
     console.log(outcome.ok ? "ok" : outcome.reason);   // "network"
 
     console.log(mockApp.calls.at(-1)?.outcome);   // "injected"

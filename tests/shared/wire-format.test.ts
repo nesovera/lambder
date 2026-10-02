@@ -35,13 +35,13 @@ describe('The request envelope', () => {
             token: 'csrf-token',
             siteHost: 'app.example.com',
             payload: { userId: '1' },
-            guardInputs: { org: { organizationId: 'o-1' } },
+            guardInputs: { store: { storeId: 's-1' } },
             idempotencyKey: 'k-abcdefabcdefabcdef',
         });
 
         expect(JSON.stringify(envelope)).toBe(
             '{"version":"3","token":"csrf-token","siteHost":"app.example.com"'
-            + ',"payload":{"userId":"1"},"guardInputs":{"org":{"organizationId":"o-1"}},"idempotencyKey":"k-abcdefabcdefabcdef"}',
+            + ',"payload":{"userId":"1"},"guardInputs":{"store":{"storeId":"s-1"}},"idempotencyKey":"k-abcdefabcdefabcdef"}',
         );
         // The endpoint is the path the envelope is posted to, not a field of it.
         expect(apiCallPath('/api', 'user.get')).toBe('/api/user/get');

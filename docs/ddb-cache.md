@@ -80,7 +80,7 @@ The `meta` item holds either the entry's value (its manifest) or, while a `getOr
 ### What to know before grouping
 
 - **`#` is escaped, not refused.** The store separates its own key segments with `#`, so a caller's `~` is stored as `~0` and `#` as `~1`. Keys come back exactly as written. Two consequences: an escaped key ranges in encoded order, so sort keys containing `#` or `~` sort into the `~` range rather than where the raw byte would put them, and the 900-byte sort key limit applies to the ESCAPED form.
-- **Partitions concentrate traffic.** Every plain key gets its own partition today, which spreads load perfectly. Grouping deliberately puts entries together, and one DynamoDB partition serves 3000 RCU / 1000 WCU. Group by something whose members are read at a human scale (one store, one organization), not by something that funnels your whole read volume into one key.
+- **Partitions concentrate traffic.** Every plain key gets its own partition today, which spreads load perfectly. Grouping deliberately puts entries together, and one DynamoDB partition serves 3000 RCU / 1000 WCU. Group by something whose members are read at a human scale (one store, one customer), not by something that funnels your whole read volume into one key.
 - **Listing reads the whole partition.** `listSortKeys` projects only the sort key, the expiry and the version, but DynamoDB charges for the items it reads, chunk items included, so a partition holding chunked (multi-hundred-KB) values is expensive to list. `prefix` narrows the range that is read; `limit` caps the results, not the read. Grouping small values is cheap; grouping large ones, list sparingly.
 - **Other containers keep their memory copies.** `deletePartition`, like `delete`, clears the in-memory layer of the container that calls it. Copies held by other warm Lambda containers still serve until their own TTL expires.
 
@@ -123,7 +123,9 @@ Required IAM actions on the table: `dynamodb:GetItem`, `PutItem`, `DeleteItem`, 
 | `client` | shared default | Supply your own `DynamoDBClient`. Left out, every DynamoDB store for one region shares one client, so one connection pool |
 | `now` | `Date.now` | The clock entries are expired against, for tests |
 
-`set` and `getOrSet` take per-call options too:
+`set` and `getOrSet` take per-call options too (`LambderCacheSetOptions` and
+`LambderCacheGetOrSetOptions`, both on the `LambderCache` interface, so code
+typed against it can tune the lease):
 
 | Option | Default | Description |
 | --- | --- | --- |
@@ -145,7 +147,7 @@ Required IAM actions on the table: `dynamodb:GetItem`, `PutItem`, `DeleteItem`, 
 
 `key` is a string or `{ pk, sk }` ([Grouped keys](#grouped-keys)); `deletePartition` and `listSortKeys` take the `pk` part on its own.
 
-Exported types: `LambderCacheKey`, `LambderCacheSetOptions`, `LambderCacheListOptions` (shared with `LambderMemoryCache` and `LambderStorageBackedCache`), `LambderDdbCacheOptions`, `LambderDdbCacheGetOrSetOptions`, `LambderCompressionOption`.
+Exported types: `LambderCacheKey`, `LambderCacheSetOptions`, `LambderCacheGetOrSetOptions`, `LambderCacheListOptions` (shared with `LambderMemoryCache` and `LambderStorageBackedCache`), `LambderDdbCacheOptions`, `LambderCompressionOption`.
 
 ## The LambderCache interface and the memory twin
 
@@ -161,13 +163,18 @@ export const geoCache: LambderCache = process.env.NODE_ENV === "test"
     : new LambderDdbCache({ tableName: "myapp-cache", namespace: "geo" });
 ```
 
-A cache the app constructs itself is the app's, so `lambder/testing` does not
-swap it (see [Testing](./testing.md#what-the-app-constructs-itself)); the
-memory twin is what a test swaps it for, by whatever means the app's tests
-already use for its own modules.
+Under `lambder/testing` the swap needs no branch like this one: a
+`LambderDdbCache` the app builds answers from a `LambderMemoryCache` of its
+own, which the test app puts under it in place, built with the cache's own
+`defaultTtlSeconds`, `maxValueBytes` and `now` (see
+[Testing](./testing.md#what-the-app-constructs-itself)). Typed against the
+interface, code that takes a cache is also testable on its own, over a
+memory cache handed to it.
 
-`LambderMemoryCache` keeps the same rules, and a conformance suite drives every
-cache here through them: it refuses the keys and values the table refuses, stores a
+`LambderMemoryCache` keeps the same rules, and a conformance suite
+(`lambderCacheConformance` from `lambder/testing`, see
+[Testing](./testing.md#a-store-of-your-own)) drives every cache here through
+them: it refuses the keys and values the table refuses, stores a
 value's JSON and hands back a fresh parse of it, expires entries on the same
 TTL (the expiry second itself included), lists sort keys in the table's order
 (UTF-8 bytes, escaped as above), counts only live entries in what `delete` and
@@ -190,8 +197,8 @@ the ones closest to expiring first.
 | `now` | `Date.now` | The clock entries are expired against |
 
 `reset()` forgets every entry. Exported types: `LambderCache`,
-`LambderCacheSetOptions`, `LambderCacheListOptions`,
-`LambderMemoryCacheOptions`.
+`LambderCacheSetOptions`, `LambderCacheGetOrSetOptions`,
+`LambderCacheListOptions`, `LambderMemoryCacheOptions`.
 
 ## A cache over your own storage
 
@@ -203,6 +210,16 @@ the JSON round trip, the TTL, the listing order, the live-only counts, and
 `getOrSet`'s single-flight, its fail-open and a write winning over a fill in
 progress. The conformance suite that drives the table and the memory twin
 drives it too, so it answers as `LambderMemoryCache` does.
+
+The storage's own rules are a suite too, `lambderCacheStorageConformance` from
+`lambder/testing`: run it over your storage, and `lambderCacheConformance` over
+a `LambderStorageBackedCache` on top of it (see
+[Testing](./testing.md#a-store-of-your-own)). Its cases lean on where a storage
+over a database usually slips: a `jsonb` column that reorders the JSON, a
+collation that takes `"a"` and `"A"` (or `"a "`) for one key, a `like` that
+reads `_` and `%` in a listing prefix as wildcards, and a partition matched by
+prefix rather than exactly. Both suites date what they write far in the
+future, so a storage with a native TTL (below) runs them with it on.
 
 ```typescript
 interface LambderCacheStoredEntry {

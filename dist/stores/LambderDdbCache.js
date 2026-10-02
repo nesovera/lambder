@@ -2,12 +2,15 @@ import { createDynamoClientLoader, isConditionalCheckFailure } from "./LambderDd
 import { getCrypto } from "../shared/util/LambderNodeModules.js";
 import { LambderExpiringMap } from "../shared/util/LambderExpiringMap.js";
 import { assertPositiveInteger } from "../shared/util/LambderOptionChecks.js";
-import { compressText, restoreText, LambderCompressionError } from "../shared/wire/LambderCompressionCodec.js";
+import { LambderCompressionError } from "../shared/wire/LambderCompressionCodec.js";
 import { resolveCompressionOption, } from "../shared/wire/LambderCompressionOption.js";
 import { LRUCache } from "lru-cache";
 import { cacheMemoryKeyOf, decodeCacheSortKey, encodeCacheSortKey, normalizeCacheKey, normalizeCachePartition, } from "./LambderCacheKeys.js";
 import { DEFAULT_MAX_VALUE_BYTES, DEFAULT_TTL_SECONDS, resolveCacheTtlSeconds, resolveGetOrSetOptions, serializeCacheValue, } from "./LambderCacheValues.js";
 import { LambderCacheFiller } from "./LambderCacheFiller.js";
+import { restoreStoredText, storedTextOf } from "./LambderStoredText.js";
+import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
+import { delegateToTwin, registerSwappableInstance } from "../shared/util/LambderSwappableInstances.js";
 const DEFAULT_CHUNK_BYTES = 350 * 1024;
 const MAX_SAFE_CHUNK_BYTES = 380 * 1024;
 const DEFAULT_MEMORY_BYTES = 16 * 1024 * 1024;
@@ -155,6 +158,10 @@ class LocalWriteLedger {
         return Math.floor(this.now() / 1000) + RECENT_WRITE_SECONDS;
     }
 }
+/** Every LambderCache member, which the swap door hands to a memory twin. */
+const CACHE_MEMBERS = {
+    get: true, has: true, set: true, delete: true, deletePartition: true, listSortKeys: true, getOrSet: true,
+};
 /**
  * Persistent JSON cache backed by DynamoDB.
  *
@@ -235,6 +242,18 @@ export class LambderDdbCache {
         this.localWrites = new LocalWriteLedger(this.now);
         this.ready = createDynamoClientLoader({ user: "LambderDdbCache", region: options.region, client: options.client });
         this.filler = new LambderCacheFiller(`DynamoDB cache failed open in ${this.namespace}`);
+        registerSwappableInstance(this);
+    }
+    /**
+     * Puts a memory twin under this cache in place, for `lambder/testing`:
+     * every LambderCache member answers from the twin from then on. The twin
+     * is built with this cache's own default TTL, size limit and clock, so a
+     * test meets the rules this cache was configured with. Keyed by a symbol
+     * no entry point exports; see registerSwappableInstance.
+     */
+    [LAMBDER_BACKEND_SWAP](twins) {
+        const twin = twins.cache({ defaultTtlSeconds: this.defaultTtlSeconds, maxValueBytes: this.maxValueBytes, now: this.now });
+        delegateToTwin(this, twin, CACHE_MEMBERS);
     }
     async get(key) {
         return await this.getByAddress(normalizeCacheKey(key));
@@ -358,9 +377,7 @@ export class LambderDdbCache {
     async setByAddress(address, value, ttlSeconds, leaseOwner) {
         const { json, utf8 } = serializeCacheValue(value, this.maxValueBytes);
         const input = Buffer.from(utf8.buffer, utf8.byteOffset, utf8.byteLength);
-        const brotli = this.compression && input.length >= this.compression.minBytes ? this.compression : null;
-        const encoding = brotli ? "br" : "identity";
-        const stored = brotli ? await compressText(input, "br", brotli.quality) : input;
+        const { encoding, stored } = await storedTextOf(input, this.compression);
         if (stored.length > this.maxValueBytes) {
             throw new Error(`Stored cache value exceeds maxValueBytes (${stored.length} > ${this.maxValueBytes})`);
         }
@@ -881,9 +898,11 @@ export class LambderDdbCache {
             }
         }
     }
-    /** The JSON text of a stored payload. */
+    /** The JSON text of a stored payload, restored under maxValueBytes, the most this cache writes. */
     async decode(stored, encoding, uncompressedBytes) {
-        return encoding === "br" ? await restoreText(stored, "br", { declaredBytes: uncompressedBytes }) : stored.toString("utf8");
+        if (encoding === "identity")
+            return stored.toString("utf8");
+        return await restoreStoredText(stored, uncompressedBytes, { user: "LambderDdbCache", maxTextBytes: this.maxValueBytes });
     }
     remember(key, stored, encoding, uncompressedBytes, expiresAt) {
         if (!this.memory)

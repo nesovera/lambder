@@ -33,6 +33,14 @@ export type {
     LambderApiGuardParamsFileResult,
 } from "./build/writeApiGuardParams.js";
 export type { LambderApiOptionsSource, LambderNameChanges } from "./build/generatedTables.js";
+// Development only: the schemas a mock validates its calls against.
+export { writeApiSchemas } from "./build/writeApiSchemas.js";
+export type {
+    LambderApiSchemasSource,
+    LambderApiSchemasFileOptions,
+    LambderApiSchemasFileResult,
+    LambderApiSchemaLoss,
+} from "./build/writeApiSchemas.js";
 export { checkApiRefusals } from "./build/checkApiRefusals.js";
 export type {
     LambderApiRefusalCheckOptions,
@@ -40,5 +48,5 @@ export type {
     LambderRefusalCheckFinding,
 } from "./build/checkApiRefusals.js";
 export { generateApiFiles } from "./build/generateApiFiles.js";
-export type { LambderApiFilesConfig, LambderApiFilesApp, LambderApiFilesResult } from "./build/generateApiFiles.js";
+export type { LambderApiFilesConfig, LambderApiFilesApp, LambderApiFilesOptions, LambderApiFilesResult } from "./build/generateApiFiles.js";
 export type { LambderModuleLocation } from "./build/moduleLocation.js";

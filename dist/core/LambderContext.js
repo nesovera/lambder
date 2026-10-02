@@ -131,25 +131,31 @@ export const createContext = (event, lambdaContext, { apiPath = DEFAULT_API_PATH
     // The origin proof is read, then taken off the headers the app reads
     // (ctx.headers, ctx.header()), so no handler, hook or log of them meets
     // the secret; the raw event keeps it. A request that does not carry it
-    // came to the origin some other way than through the proxy, and the
-    // proxy's headers on it are whatever its sender wrote.
+    // came to the origin some other way than through the proxy, and every
+    // header the proxy writes is, on it, whatever its sender wrote: those
+    // are taken off too, so a handler reading one (a country, a viewer's
+    // address) reads what the proxy said or nothing.
     let proven = true;
     if (originProof) {
-        const proofHeader = originProof.header.toLowerCase();
-        const presented = lowercasedHeaders[proofHeader] ?? "";
+        const presented = lowercasedHeaders[originProof.header.toLowerCase()] ?? "";
         proven = originProof.secrets.some((secret) => constantTimeEquals(presented, secret));
-        delete lowercasedHeaders[proofHeader];
-        headers = Object.fromEntries(Object.entries(headers).filter(([name]) => name.toLowerCase() !== proofHeader));
+        const senderWritten = proven ? [] : [...trustedClientIpHeaders, ...trustedHostHeaders, ...(originProof.proxyHeaders ?? [])];
+        const removed = new Set([originProof.header, ...senderWritten].map((name) => name.toLowerCase()));
+        for (const name of removed)
+            delete lowercasedHeaders[name];
+        headers = Object.fromEntries(Object.entries(headers).filter(([name]) => !removed.has(name.toLowerCase())));
     }
     const header = (name) => lowercasedHeaders[name.toLowerCase()];
     // A trusted forwarding header is trusted because a proxy in front of this
-    // function writes it. A direct invoke has no such proxy: its headers are
+    // function writes it. A Lambda invoke has no such proxy: its headers are
     // whatever the invoking code passed on, and a gateway lambda forwarding a
     // browser's request passes on the browser's own. So on an invoke the
     // address and the host are the ones the invoker named (clientIp and host,
-    // delivered as sourceIp and Host), and no header is read for either.
+    // delivered as sourceIp and Host), and no header is read for either. An
+    // invoke is told by the apiId, which a gateway writes itself.
     const invokedDirectly = event.requestContext?.apiId === LAMBDER_INVOKE_API_ID;
     const readsForwarding = proven && !invokedDirectly;
+    const arrivedVia = invokedDirectly ? "invoke" : !originProof ? "unverified" : proven ? "proxy" : "direct";
     // The first trusted header carrying a well-formed host, leftmost entry,
     // else the host the gateway saw. Behind CloudFront a Function URL sees
     // its own lambda-url domain, since CloudFront sends an origin its own
@@ -163,21 +169,30 @@ export const createContext = (event, lambdaContext, { apiPath = DEFAULT_API_PATH
         }
     }
     const ip = resolveClientIp(lowercasedHeaders, sourceIp, readsForwarding ? trustedClientIpHeaders : []);
-    // Decode body: keep the raw string, then parse as JSON with urlencoded fallback.
+    // Decode body: keep the raw string, then read it as a JSON object, or as
+    // urlencoded fields when it is not JSON. ctx.post is an object whatever
+    // the body was: a JSON number, string, boolean, null or array is not
+    // fields, and every reader (a handler, a hook, the API path writing the
+    // restored payload onto it) indexes into it. Such a body stays readable
+    // as ctx.rawBody. What it means for an API call is readApiEnvelope's to
+    // say, from the parse itself.
     const rawBody = event.isBase64Encoded
         ? (event.body ? base64ToText(event.body) : "")
         : (event.body || "");
+    let posted;
+    let bodyNotJson = false;
     let post = {};
     try {
-        post = JSON.parse(rawBody || "{}") || {};
+        posted = JSON.parse(rawBody || "{}");
     }
-    catch (e) {
-        const params = new URLSearchParams(rawBody);
-        post = {};
-        for (const [key, value] of params.entries()) {
+    catch {
+        bodyNotJson = true;
+        for (const [key, value] of new URLSearchParams(rawBody).entries()) {
             post[key] = value;
         }
     }
+    if (posted !== null && typeof posted === "object" && !Array.isArray(posted))
+        post = posted;
     // A JSON POST to `{apiPath}/{group}/{action}` is a call to that endpoint;
     // the core reads the envelope, and everything downstream reads ctx.api.
     // JSON only (isApiCallContentType): any site can submit a plain HTML form
@@ -188,7 +203,7 @@ export const createContext = (event, lambdaContext, { apiPath = DEFAULT_API_PATH
     const isJsonPost = method === "POST" && !!apiPath && isApiCallContentType(lowercasedHeaders);
     const calledName = isJsonPost ? apiNameOfCallPath(apiPath, path) : null;
     const requestInfo = { headers: lowercasedHeaders, cookies: cookieList, ip, host };
-    const api = calledName !== null ? readApiEnvelope(post, requestInfo, calledName)
+    const api = calledName !== null ? readApiEnvelope(posted, requestInfo, calledName, bodyNotJson ? { bodyNotJson: true } : {})
         : isJsonPost && path === apiPath && typeof post.apiName === "string" && post.apiName !== ""
             ? readApiEnvelope(post, requestInfo, post.apiName, { retiredPath: true })
             : null;
@@ -203,6 +218,7 @@ export const createContext = (event, lambdaContext, { apiPath = DEFAULT_API_PATH
         headers, rawBody, ip, header,
         lambdaContext,
         eventFormat,
+        arrivedVia,
         responseHeaders: new LambderAnswerHeaders(),
         logList: [],
     }, UNBOUND_CONTEXT_TOOLS);

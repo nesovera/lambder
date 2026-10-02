@@ -78,11 +78,12 @@ type LambderApiHandlerContext<TApp extends LambderAppTypes, TPayload, TGuardsOpt
  * ```
  */
 export default class Lambder<TApp extends LambderAppTypes = LambderPlainAppTypes, _TContract extends Record<string, any> = {}> {
-    apiPath: string;
+    /** Where API calls go: `{apiPath}/{group}/{action}`. */
+    readonly apiPath: string;
     /** Stamped on every API answer's envelope as apiVersion. Informational: a client's staleness is judged per endpoint by its signature, see apiSignatures(). */
-    apiVersion: null | string;
+    readonly apiVersion: null | string;
     /** The instance's file reader (source + caches), or null without the files option. */
-    files: LambderFiles | null;
+    readonly files: LambderFiles | null;
     /**
      * Type property for extracting the API contract: every registered API's
      * input, output, mode and declared options, as a client calls it.
@@ -125,7 +126,6 @@ export default class Lambder<TApp extends LambderAppTypes = LambderPlainAppTypes
     /** Every API's refusals option as written, for apiOptionEntries(); its definition holds the resolved set. */
     private readonly refusalOptions;
     private hookList;
-    private createdHooks;
     private initPromise;
     private globalErrorHandler;
     private routeFallbackHandler;
@@ -411,6 +411,17 @@ export default class Lambder<TApp extends LambderAppTypes = LambderPlainAppTypes
      * endpoint and never moves when registrations are reordered.
      */
     apiOptionEntries(): Promise<LambderApiOptionEntries>;
+    /**
+     * Every registered API's input and output schemas by name, sorted by
+     * name: what writeApiSchemas (lambder/build) writes as JSON Schema to a
+     * module the mock validates its calls against. A build-time view, as
+     * apiSignatureEntries() is: it comes off the server instance, which a
+     * generator imports and a client never does.
+     */
+    apiSchemaEntries(): Promise<Record<string, {
+        input: z.ZodType;
+        output: z.ZodType;
+    }>>;
     getResponseBuilder(ctx?: LambderRenderContext): LambderResponseBuilder;
     private getResolver;
     getHandler(): LambderHandler;
@@ -510,8 +521,8 @@ export default class Lambder<TApp extends LambderAppTypes = LambderPlainAppTypes
      * The answer to a request that needed a session and has none, whether it
      * never had one or it ended while the request held it: an API call gets
      * the protocol's sessionExpired envelope, as the pipeline gives a session
-     * API, and anything else the setSessionExpiredRouteHandler answer, a 401
-     * by default.
+     * API, and anything else the setSessionExpiredRouteHandler answer, a
+     * plain-text 401 by default, as the framework's own 404 and 500 are.
      */
     private sessionMissingResponse;
     /**
@@ -569,13 +580,21 @@ export default class Lambder<TApp extends LambderAppTypes = LambderPlainAppTypes
      */
     private apiErrorResponse;
 }
+/** The options create() takes: the constructor's, less the two declareRefusals() supplies. */
+export type LambderInitCreateOptions<TSessionData> = Omit<LambderCreateOptions<TSessionData>, "refusals" | "requireRefusalCodes">;
 /**
- * The canonical way to create an instance: fix the session data type first,
- * then create with the full configuration in one declaration. The policy,
- * guard and idempotency types are inferred from the options, so the instance
- * is born fully typed, and the endpoints declared with its defineApi are
- * typed against it. There are no ordering rules, and nothing can be
- * half-configured.
+ * The entry point of an app, and the canonical way to create an instance:
+ * fix the session data type first, then create with the full configuration
+ * in one declaration. The policy, guard and idempotency types are inferred
+ * from the options, so the instance is born fully typed, and the endpoints
+ * declared with its defineApi are typed against it. There are no ordering
+ * rules, and nothing can be half-configured.
+ *
+ * Beside create() it hands out the builders that share the session data
+ * type (guard, rateLimitKey, refuse). `declareRefusals()` binds the app's
+ * refusal vocabulary too, so a guard's ctx.refuse and the init's own refuse
+ * are typed to it before any instance exists, and create() gives it to the
+ * instance for every API's refusals option to name codes from.
  *
  * ```typescript
  * // app.ts (imports no api modules, so modules can import from it)
@@ -603,15 +622,6 @@ export default class Lambder<TApp extends LambderAppTypes = LambderPlainAppTypes
  * widen the inferred policy and guard types to their {} defaults. Fixing the
  * session type in the first call lets the second infer everything else.
  * `new Lambder(options)` serves untyped or session-data-free instances.
- */
-/** The options create() takes: the constructor's, less the two declareRefusals() supplies. */
-export type LambderInitCreateOptions<TSessionData> = Omit<LambderCreateOptions<TSessionData>, "refusals" | "requireRefusalCodes">;
-/**
- * The entry point of an app: binds the session data type, and hands out the
- * builders and create() that share it. `declareRefusals()` binds the app's
- * refusal vocabulary too, so a guard's ctx.refuse and the init's own refuse
- * are typed to it before any instance exists, and create() gives it to the
- * instance for every API's refusals option to name codes from.
  */
 export declare const initLambder: <TSessionData = any>() => {
     /**

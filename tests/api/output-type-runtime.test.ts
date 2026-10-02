@@ -539,7 +539,7 @@ describe('Output parsing at runtime: what a success payload reaches the wire as'
         expect(invalid.response.payload).toBe(null);
         assertApiFailure(await visitor.apiOutcome('user.get', { id: 'blocked' }), 'notAuthorized');
         assertApiFailure(await visitor.apiOutcome('user.get', { id: 'forged' }), 'server');
-        expect(await visitor.api('user.get', { id: 'forged' })).toBeUndefined();
+        await expect(visitor.api('user.get', { id: 'forged' })).rejects.toThrow(/^user\.get: .*reason "server"/);
         expect(await visitor.api('user.get', { id: 'u1' })).toEqual({ id: 'u1', name: 'Ada' });
     });
 });

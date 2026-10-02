@@ -50,14 +50,19 @@ import { refuse, LAMBDER_REFUSAL_CODES, type LambderUncheckedRefusalMessage, typ
 import { compressPayloadBrotli, compressPayloadGzip } from '../../src/shared/wire/LambderRequestPayload.js';
 import { LambderTransportFailure } from '../../src/shared/transport/LambderApiTransport.js';
 import { assertApiFailure } from '../../src/shared/wire/LambderOutcomeAssertions.js';
+import { createIdempotencyKeyScope } from '../../src/shared/wire/LambderIdempotencyKeyScope.js';
+import { isErrorReported } from '../../src/shared/util/LambderErrorReportMark.js';
+import type { LambderCrashSite } from '../../src/core/LambderCreateOptions.js';
+import { lambderHandlerTransport } from '../../src/invoke/lambderHandlerTransport.js';
 import { createApiEvent, createMockContext, brotliBody, decodeBody, DEFAULT_GATEWAY_SOURCE_IP } from '../helpers.js';
 
 /** A payload big and repetitive enough that Brotli is a large win. */
-const bigPayload = (size = 400) => ({ notes: Array.from({ length: size }, (_, i) => `stop-${i} on the main line`) });
+const bigPayload = (size = 400) => ({ notes: Array.from({ length: size }, (_, i) => `item-${i} in the stockroom`) });
 
 /**
  * The callee: an ordinary app with the shapes the caller has to handle. The
- * invokeOnly guard is an app's own convention: a marker check, not security.
+ * invokeOnly guard is an app's own convention: a marker check, not security,
+ * which the browser-path comparisons below pass by sending the marker.
  */
 const createCallee = () => {
     const app = initLambder().declareRefusals({ 'app/no': { status: 403 } }).create({
@@ -154,7 +159,7 @@ describe('LambderInvokeCaller - the synthesized event', () => {
         // The address rides in requestContext.http.sourceIp and nowhere else:
         // no forwarding header is the event's own to write.
         expect(event.headers['x-forwarded-for']).toBeUndefined();
-        // What tells the callee this is a direct invoke: an id no gateway writes.
+        // What tells the callee this is a Lambda invoke: an id no gateway writes.
         expect(event.requestContext.apiId).toBe('lambder-invoke');
         expect(event.headers['x-custom']).toBe('yes');
         // The body is LambderCaller's envelope.
@@ -578,7 +583,7 @@ describe('LambderInvokeCaller - compression', () => {
         const answer = await caller.api('test.big', bigPayload());
 
         expect(answer?.count).toBe(400);
-        expect(answer?.notes[399]).toBe('stop-399 on the main line');
+        expect(answer?.notes[399]).toBe('item-399 in the stockroom');
         const raw = seen[0]!.result;
         expect(raw.headers['Content-Encoding']).toBe('br');
         expect(raw.isBase64Encoded).toBe(true);
@@ -694,6 +699,136 @@ describe('LambderInvokeCaller - onFailure is the single reporting point', () => 
         const [failure] = onFailure.mock.calls[1]!;
         expect(failure.reason === 'server' && failure.crash?.message).toBe('boom');
         expect(failure.error).toBeInstanceOf(LambderInvokeError);
+    });
+});
+
+describe('The invoke-only guard the docs teach', () => {
+    it('runs an API for an invoke and refuses a browser that forges the marker header', async () => {
+        const app = initLambder().create({
+            apiPath: '/api',
+            guards: {
+                arrivedByInvoke: lambderGuard({ handler: async (ctx) => {
+                    if(ctx.arrivedVia !== 'invoke') refuse('This function is reached by invoke only.');
+                } }),
+            },
+        });
+        const mailer = app.registerApiGroups(app.defineApiGroup('email', {
+            send: app.defineApi({ input: z.object({ to: z.string() }), output: z.object({ messageId: z.string() }), guards: 'arrivedByInvoke' },
+                async (ctx) => ({ messageId: `sent-to-${ctx.apiPayload.to}` })),
+        }));
+
+        const invoker = new LambderInvokeCaller<typeof mailer.ApiContract>({ functionName: 'mailer-fn', transport: LambderInvokeCaller.localTransport(mailer.getHandler()) });
+        expect(await invoker.email.send({ to: 'orders@shop.test' })).toEqual({ messageId: 'sent-to-orders@shop.test' });
+
+        const browser = new LambderCaller<typeof mailer.ApiContract>({ transport: lambderHandlerTransport(mailer.getHandler()) });
+        const forged = await browser.email.send.outcome({ to: 'orders@shop.test' }, { headers: { [LAMBDER_INVOKE_HEADER]: '1' } });
+        assertApiFailure(forged, 'refusal');
+        expect(forged.refusal.content).toBe('This function is reached by invoke only.');
+    });
+});
+
+describe('LambderInvokeCaller - a call its own signal aborted', () => {
+    /** A transport that answers only when its signal aborts it, as the SDK's does. */
+    const hanging: LambderInvokeTransport = (_event, { signal }) => new Promise((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+    });
+
+    it('fails as aborted and is not handed to onFailure, while its own timeout is still a reported failure', async () => {
+        const onFailure = vi.fn();
+        const caller = new LambderInvokeCaller<Contract>({ functionName: 'callee-fn', transport: hanging, onFailure, timeoutMs: 5_000 });
+        const controller = new AbortController();
+
+        const pending = caller.apiOutcome('test.echo', { text: 'superseded' }, { signal: controller.signal });
+        controller.abort();
+        const aborted = await pending;
+        assertApiFailure(aborted, 'aborted');
+        expectTypeOf(aborted.error).toEqualTypeOf<LambderInvokeError>();
+        expect(aborted.error.message).toContain('(aborted)');
+        // api() still throws it, since its caller gave nothing else to return.
+        const thrown = await caller.api('test.echo', { text: 'superseded' }, { signal: AbortSignal.abort() }).then(() => null, (err: unknown) => err);
+        expect(isLambderInvokeError(thrown) && thrown.reason).toBe('aborted');
+        expect(onFailure).not.toHaveBeenCalled();
+
+        const timedOut = await caller.apiOutcome('test.echo', { text: 'slow' }, { timeoutMs: 10 });
+        assertApiFailure(timedOut, 'timeout');
+        expect(onFailure).toHaveBeenCalledOnce();
+    });
+
+    it('stays aborted when the timeout fires after the signal, through a transport that answers late', async () => {
+        // The first abort names the call: a timer still running after the
+        // site gave up must not turn the site's choice into a timeout.
+        const deafToAbort: LambderInvokeTransport = async () => {
+            await new Promise((resolve) => setTimeout(resolve, 40));
+            return { functionError: null, result: { statusCode: 200, headers: {}, body: JSON.stringify({ apiVersion: null, payload: { ok: true } }) } };
+        };
+        const caller = new LambderInvokeCaller<Contract>({ functionName: 'callee-fn', transport: deafToAbort, timeoutMs: 20 });
+        const controller = new AbortController();
+        setTimeout(() => controller.abort(), 5);
+
+        assertApiFailure(await caller.apiOutcome('test.echo', { text: 'hi' }, { signal: controller.signal }), 'aborted');
+    });
+
+    it('keeps the key of a call aborted after it was sent as possibly used, so a refusal after it does not move the scope on', async () => {
+        const callee = createCallee();
+        const inner = LambderInvokeCaller.localTransport(callee.getHandler());
+        const controller = new AbortController();
+        const caller = callerFor(callee, {
+            // The callee has the event by the time the call is given up on.
+            transport: async (event, options) => { controller.abort(); return await inner(event, options); },
+        });
+        const scope = createIdempotencyKeyScope();
+        const firstKey = scope.current;
+
+        assertApiFailure(await caller.apiOutcome('test.refuse', {}, { signal: controller.signal, idempotencyKey: scope }), 'aborted');
+        assertApiFailure(await callerFor(callee).apiOutcome('test.refuse', {}, { idempotencyKey: scope }), 'refusal');
+        expect(scope.current).toBe(firstKey);
+    });
+});
+
+describe('LambderInvokeCaller - a failure onFailure reported is not reported again as a crash', () => {
+    /**
+     * A gateway app whose endpoint calls the callee with api() and lets its
+     * failure propagate, as a dependency's failure should, under a crash
+     * reporter that records what it is told, and a browser calling it. Not
+     * through lambderTestApp, which answers every invoke caller in the
+     * process from its own mocks once one is built.
+     */
+    const gatewayOver = (caller: ReturnType<typeof callerFor>) => {
+        const crashes: { message: string; site: LambderCrashSite['kind'] }[] = [];
+        const app = initLambder().create({ apiPath: '/api', crashes: { report: (error, site) => { crashes.push({ message: error.message, site: site.kind }); } } });
+        const gateway = app.registerApiGroups(app.defineApiGroup('orders', {
+            place: app.defineApi({ input: z.object({}), output: z.object({}) }, async () => {
+                await caller.api('test.refuse', {});
+                return {};
+            }),
+        }));
+        const visitor = new LambderCaller<typeof gateway.ApiContract>({ transport: lambderHandlerTransport(gateway.getHandler()) });
+        return { visitor, crashes };
+    };
+
+    it('marks the error once onFailure took it, and the crash reporting skips it while the call still answers 500', async () => {
+        const reported: LambderInvokeFailure[] = [];
+        const caller = callerFor(createCallee(), { onFailure: (failure) => { reported.push(failure); } });
+        const { visitor, crashes } = gatewayOver(caller);
+
+        assertApiFailure(await visitor.apiOutcome('orders.place', {}), 'server', { status: 500 });
+        expect(reported.map((failure) => failure.reason)).toEqual(['refusal']);
+        expect(isErrorReported(reported[0]!.error)).toBe(true);
+        expect(crashes).toEqual([]);
+    });
+
+    it('leaves it unmarked, and reported as the crash it is, when nothing reported it', async () => {
+        const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+        try {
+            for(const options of [{}, { onFailure: async () => { throw new Error('reporter down'); } }]){
+                const { visitor, crashes } = gatewayOver(callerFor(createCallee(), options));
+
+                assertApiFailure(await visitor.apiOutcome('orders.place', {}), 'server', { status: 500 });
+                expect(crashes).toEqual([{ message: 'callee-fn test.refuse failed (refusal): No.', site: 'api' }]);
+            }
+        } finally {
+            consoleError.mockRestore();
+        }
     });
 });
 
@@ -904,7 +1039,7 @@ describe('LambderInvokeCaller - the transport\'s own failures', () => {
         expect(outcome.error.message).toContain('did not answer with an HTTP response object');
     });
 
-    it('timeoutMs aborts the wait with reason timeout; an already-aborted external signal is network', async () => {
+    it('timeoutMs aborts the wait with reason timeout; an already-aborted external signal is aborted', async () => {
         const hanging: LambderInvokeTransport = (_event, { signal }) => new Promise((_resolve, reject) => {
             if(signal?.aborted){ reject(new Error('aborted before sending')); return; }
             signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
@@ -917,7 +1052,7 @@ describe('LambderInvokeCaller - the transport\'s own failures', () => {
         const controller = new AbortController();
         controller.abort();
         const external = await caller.apiOutcome('test.echo', {}, { signal: controller.signal });
-        assertApiFailure(external, 'network');
+        assertApiFailure(external, 'aborted');
     });
 
     it('request() throws the same LambderInvokeError for a crash or a rejected send', async () => {
@@ -1242,7 +1377,7 @@ describe('LambderInvokeCaller - an external abort signal is not accumulated on',
         const outcome = await pending;
         expect(outcome.ok).toBe(false);
         if(outcome.ok) throw new Error('unreachable');
-        expect(outcome.reason).toBe('network');
+        expect(outcome.reason).toBe('aborted');
         expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
     });
 });
@@ -1307,7 +1442,7 @@ describe('LambderInvokeCaller - an answer that arrives after the call was given 
 
         const outcome = await caller.apiOutcome('test.echo', { text: 'hi' }, { signal: controller.signal });
 
-        assertApiFailure(outcome, 'network');
+        assertApiFailure(outcome, 'aborted');
         expect(transportCalls).toBe(0);
     });
 
@@ -1324,8 +1459,26 @@ describe('LambderInvokeCaller - an answer that arrives after the call was given 
 
         const outcome = await caller.apiOutcome('test.echo', { text: 'hi' }, { signal: controller.signal });
 
-        assertApiFailure(outcome, 'network');
+        assertApiFailure(outcome, 'aborted');
         expect(handlerRan).toBe(false);
+    });
+
+    it('leaves the key of a call given up on before it was sent unused, so a refusal after it moves the scope on', async () => {
+        // A key an attempt may have used outlives the refusal that follows
+        // it. The aborted call never reached the transport, so it used
+        // nothing, and the refusal after it settles the operation as it
+        // would on the browser caller.
+        const caller = callerFor(createCallee());
+        const scope = createIdempotencyKeyScope();
+        const firstKey = scope.current;
+        const controller = new AbortController();
+        controller.abort();
+
+        assertApiFailure(await caller.apiOutcome('test.refuse', {}, { signal: controller.signal, idempotencyKey: scope }), 'aborted');
+        expect(scope.current).toBe(firstKey);
+
+        assertApiFailure(await caller.apiOutcome('test.refuse', {}, { idempotencyKey: scope }), 'refusal');
+        expect(scope.current).not.toBe(firstKey);
     });
 });
 

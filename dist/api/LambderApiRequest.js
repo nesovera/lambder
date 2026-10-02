@@ -42,20 +42,34 @@ export const lowercaseHeaderNames = (headers) => {
  * read the same rule here.
  */
 export const isApiCallContentType = (lowercasedHeaders) => (lowercasedHeaders["content-type"] ?? "").split(";")[0].trim().toLowerCase() === "application/json";
+/** The one shape an API call's body may take: a JSON object, the envelope every Lambder caller posts. */
+const isEnvelopeObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+/** Why a body that did parse is no envelope, client-facing: its kind, never its value. */
+const notAnEnvelopeMessage = (posted) => `Request body must be a JSON object, got ${Array.isArray(posted) ? "an array" : posted === null ? "null" : `a ${typeof posted}`}.`;
 /**
  * Reads the posted envelope of a call to `apiName` into a request; the name
  * comes from where the call was posted, never from the body. Everything is
  * taken as posted: a malformed idempotencyKey or guardInputs value is the
  * engines' to refuse, with the client-facing message they already give.
+ *
+ * `posted` is the body as JSON parsed it; undefined (no body) reads as an
+ * empty envelope. A body that is not a JSON object, or one the adapter could
+ * not parse (`bodyNotJson`), is flagged on the request as invalidEnvelope
+ * and read as an empty envelope, so every adapter refuses it alike, in the
+ * pipeline, rather than each deciding what such a body means.
  */
-export const readApiEnvelope = (post, info, apiName, flags = {}) => {
-    post ??= {};
+export const readApiEnvelope = (posted, info, apiName, flags = {}) => {
+    const invalidEnvelope = flags.bodyNotJson ? "Request body must be a JSON object, and it is not valid JSON."
+        : posted === undefined || isEnvelopeObject(posted) ? null
+            : notAnEnvelopeMessage(posted);
+    const post = isEnvelopeObject(posted) ? posted : {};
     const hasGzip = post[COMPRESSED_PAYLOAD_GZ_FIELD] !== undefined;
     const hasBrotli = post[COMPRESSED_PAYLOAD_BR_FIELD] !== undefined;
     const guardInputs = post.guardInputs;
     return {
         apiName,
         ...(flags.retiredPath ? { retiredPath: true } : {}),
+        ...(invalidEnvelope !== null ? { invalidEnvelope } : {}),
         version: typeof post.version === "string" ? post.version : null,
         signature: typeof post.signature === "string" ? post.signature : null,
         token: typeof post.token === "string" ? post.token : "",
@@ -75,6 +89,21 @@ export const readApiEnvelope = (post, info, apiName, flags = {}) => {
         host: info.host,
         ...(info.signal ? { signal: info.signal } : {}),
     };
+};
+/**
+ * readApiEnvelope over a body's text, for an adapter that holds the text and
+ * nothing parsed from it: an empty body reads as an empty envelope, and text
+ * that is not JSON is flagged as no envelope, as the server flags it.
+ */
+export const readApiEnvelopeText = (text, info, apiName) => {
+    let posted;
+    try {
+        posted = JSON.parse(text || "{}");
+    }
+    catch {
+        return readApiEnvelope(undefined, info, apiName, { bodyNotJson: true });
+    }
+    return readApiEnvelope(posted, info, apiName);
 };
 /**
  * Restores a payload the caller sent compressed (`payloadGz` or `payloadBr`,

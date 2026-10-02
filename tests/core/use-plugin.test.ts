@@ -352,8 +352,8 @@ describe('Plugin System - Policy generics survive use()', () => {
     // a plugin typed with its own derived type. This block is checked by
     // `npm run typecheck`; vitest alone would not see a regression here.
     const guards = {
-        orgPermission: lambderGuard({ session: true, handler: (_ctx, _payload, permission: string) => ({ permission }) }),
-        sessionOnly: lambderGuard({ session: true, handler: () => {} }),
+        staffPermission: lambderGuard({ session: true, handler: (_ctx, _payload, permission: string) => ({ permission }) }),
+        signedIn: lambderGuard({ session: true, handler: () => {} }),
         // requireApiGuards holds a public endpoint to a guard too.
         anyone: lambderGuard({ handler: () => {} }),
     };
@@ -373,7 +373,7 @@ describe('Plugin System - Policy generics survive use()', () => {
         const plugin = (l: App) => l.addSessionRoute('/secure/me', async (ctx, res) => res.json({ userId: ctx.session.data.userId }));
         const app = makeApp().use(plugin);
         const secure = app.registerApiGroups(app.defineApiGroup('secure', {
-            me: app.defineApi({ input: z.object({}), output: z.object({ ok: z.boolean() }), guards: 'sessionOnly' }, async (_ctx) => ({ ok: true })),
+            me: app.defineApi({ input: z.object({}), output: z.object({ ok: z.boolean() }), guards: 'signedIn' }, async (_ctx) => ({ ok: true })),
         }));
         expectTypeOf<typeof secure.ApiContract>().toHaveProperty('secure.me');
         // The route the plugin registered and the endpoint the group did are on the same instance.

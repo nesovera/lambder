@@ -7,6 +7,7 @@ import {
     PutItemCommand,
     GetItemCommand,
     DeleteItemCommand,
+    QueryCommand,
     TransactWriteItemsCommand,
     type AttributeValue,
 } from '@aws-sdk/client-dynamodb';
@@ -307,57 +308,59 @@ export class MemoryDdb extends DynamoDBClient {
 }
 
 // ---------------------------------------------------------------------------
-// An in-memory DynamoDB DOCUMENT client, for the stores that speak lib-dynamodb
-// rather than the low-level client: plain JS values, no AttributeValue wrapping.
-// Enough of the API for the session store's get, put, delete, partition query
-// and conditional update, so one conformance suite can drive the DynamoDB
-// session store beside the in-memory one.
+// An in-memory DynamoDB session table: enough of the item-level API for the
+// session store's get, put, delete, partition query and conditional update,
+// so one conformance suite can drive the DynamoDB session store beside the
+// in-memory one.
 // ---------------------------------------------------------------------------
 
 /**
  * Keyed by the table's own key attribute NAMES, which the store configures, so
- * this double works whichever names a test gives it.
+ * this double works whichever names a test gives it. Items are held as the
+ * attribute values the store sent, so what a test reads back is the item's
+ * shape on the table.
  */
-export class MemoryDdbDocument {
-    readonly items = new Map<string, Record<string, any>>();
+export class MemoryDdbSessionTable extends DynamoDBClient {
+    readonly items = new Map<string, Item>();
     failAll = false;
 
-    constructor(private readonly partitionKey = "pk", private readonly sortKey = "sk"){}
+    constructor(private readonly partitionKey = "pk", private readonly sortKey = "sk"){
+        super({ region: "us-east-1", credentials: { accessKeyId: "test", secretAccessKey: "test" } });
+    }
 
-    private keyOf(source: Record<string, any>): string {
-        return `${String(source[this.partitionKey])}|${String(source[this.sortKey])}`;
+    private keyOf(source: Item): string {
+        return `${String(source[this.partitionKey]?.S)}|${String(source[this.sortKey]?.S)}`;
     }
 
     async send(command: any): Promise<any> {
         if(this.failAll) throw new Error("ddb down");
-        const input = command?.input ?? {};
-        const name = command?.constructor?.name ?? "";
+        const input = command.input;
 
-        if(name.startsWith("Put")){
-            if(!this.conditionHolds(input, this.items.get(this.keyOf(input.Item)))) throw this.conditionalFailure();
+        if(command instanceof PutItemCommand){
+            if(!this.conditionHolds(input, this.items.get(this.keyOf(input.Item)))) throw conditionalFailure();
             this.items.set(this.keyOf(input.Item), { ...input.Item });
             return {};
         }
-        if(name.startsWith("Get")){
+        if(command instanceof GetItemCommand){
             const item = this.items.get(this.keyOf(input.Key));
             return item ? { Item: { ...item } } : {};
         }
-        if(name.startsWith("Delete")){
+        if(command instanceof DeleteItemCommand){
             const key = this.keyOf(input.Key);
             const removed = this.items.get(key);
             this.items.delete(key);
             return removed && input.ReturnValues === "ALL_OLD" ? { Attributes: { ...removed } } : {};
         }
-        if(name.startsWith("Query")){
+        if(command instanceof QueryCommand){
             // Only the shape the session store sends: one partition, equality.
             const partitionAttribute = input.ExpressionAttributeNames?.["#pk"] ?? this.partitionKey;
-            const wanted = input.ExpressionAttributeValues?.[":pv"];
+            const wanted = input.ExpressionAttributeValues?.[":pv"]?.S;
             const Items = [...this.items.values()]
-                .filter((item) => item[partitionAttribute] === wanted)
+                .filter((item) => item[partitionAttribute]?.S === wanted)
                 .map((item) => ({ ...item }));
             return { Items };
         }
-        if(name.startsWith("Update")){
+        if(command instanceof UpdateItemCommand){
             const key = this.keyOf(input.Key);
             const existing = this.items.get(key);
             // attribute_exists on the sort key is how the store asks "is this
@@ -366,26 +369,26 @@ export class MemoryDdbDocument {
             // A refusal hands back the item it found when asked to, as DynamoDB
             // does, so the store can tell a moved record from a missing one.
             if(!this.conditionHolds(input, existing)){
-                throw Object.assign(this.conditionalFailure(), existing && input.ReturnValuesOnConditionCheckFailure === "ALL_OLD" ? { Item: { ...existing } } : {});
+                throw Object.assign(conditionalFailure(), existing && input.ReturnValuesOnConditionCheckFailure === "ALL_OLD" ? { Item: { ...existing } } : {});
             }
-            const names = input.ExpressionAttributeNames ?? {};
-            const values = input.ExpressionAttributeValues ?? {};
-            const updated: Record<string, any> = { ...(existing ?? input.Key) };
+            const names: Record<string, string> = input.ExpressionAttributeNames ?? {};
+            const values: Item = input.ExpressionAttributeValues ?? {};
+            const updated: Item = { ...(existing ?? input.Key) };
             const expression: string = input.UpdateExpression ?? "";
             const clauseOf = (keyword: string) => new RegExp(`${keyword}\\s+(.*?)(?=\\s+(?:SET|REMOVE|ADD)\\s|$)`).exec(expression)?.[1];
             const setClause = clauseOf("SET");
             const removeClause = clauseOf("REMOVE");
             const addClause = clauseOf("ADD");
-            if(!setClause && !removeClause && !addClause) throw new Error("MemoryDdbDocument: unsupported UpdateExpression " + expression);
+            if(!setClause && !removeClause && !addClause) throw new Error("MemoryDdbSessionTable: unsupported UpdateExpression " + expression);
             for(const assignment of setClause?.split(",") ?? []){
                 const [attribute, value] = assignment.split("=").map((part) => part.trim());
-                updated[names[attribute!] ?? attribute!] = values[value!];
+                updated[names[attribute!] ?? attribute!] = values[value!]!;
             }
             // ADD on a number: an absent attribute counts from zero.
             for(const addition of addClause?.split(",") ?? []){
                 const [attribute, value] = addition.trim().split(/\s+/);
                 const target = names[attribute!] ?? attribute!;
-                updated[target] = (updated[target] ?? 0) + values[value!];
+                updated[target] = { N: String(Number(updated[target]?.N ?? 0) + Number(values[value!]?.N)) };
             }
             for(const attribute of removeClause?.split(",").map((part) => part.trim()) ?? []){
                 delete updated[names[attribute] ?? attribute];
@@ -393,28 +396,25 @@ export class MemoryDdbDocument {
             this.items.set(key, updated);
             return {};
         }
-        throw new Error("MemoryDdbDocument: unhandled command " + name);
+        throw new Error("MemoryDdbSessionTable: unhandled command " + command?.constructor?.name);
     }
 
     /** The condition shapes the session store writes: attribute_exists, attribute_not_exists and equality, joined by AND. */
-    private conditionHolds(input: Record<string, any>, existing: Record<string, any> | undefined): boolean {
+    private conditionHolds(input: Record<string, any>, existing: Item | undefined): boolean {
         const condition: string | undefined = input.ConditionExpression;
         if(!condition) return true;
-        const names = input.ExpressionAttributeNames ?? {};
-        const values = input.ExpressionAttributeValues ?? {};
+        const names: Record<string, string> = input.ExpressionAttributeNames ?? {};
+        const values: Item = input.ExpressionAttributeValues ?? {};
         return condition.split(/\s+AND\s+/).every((clause) => {
             const exists = /^attribute_exists\((#\w+)\)$/.exec(clause);
             if(exists) return existing !== undefined && existing[names[exists[1]!] ?? exists[1]!] !== undefined;
             const absent = /^attribute_not_exists\((#\w+)\)$/.exec(clause);
             if(absent) return existing === undefined || existing[names[absent[1]!] ?? absent[1]!] === undefined;
+            // Equality of two attribute values, as DynamoDB compares them: same type, same value.
             const equal = /^(#\w+)\s*=\s*(:\w+)$/.exec(clause);
-            if(equal) return existing !== undefined && existing[names[equal[1]!] ?? equal[1]!] === values[equal[2]!];
-            throw new Error("MemoryDdbDocument: unsupported ConditionExpression " + condition);
+            if(equal) return existing !== undefined && JSON.stringify(existing[names[equal[1]!] ?? equal[1]!]) === JSON.stringify(values[equal[2]!]);
+            throw new Error("MemoryDdbSessionTable: unsupported ConditionExpression " + condition);
         });
-    }
-
-    private conditionalFailure(): Error {
-        return Object.assign(new Error("conditional request failed"), { name: "ConditionalCheckFailedException" });
     }
 }
 

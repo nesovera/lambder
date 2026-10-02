@@ -7,7 +7,9 @@
  * retry. So the timer holds exactly one wait of either kind: `retry` and
  * `wait` climb the ladder, `after` waits a fixed time without climbing it, and
  * scheduling any of them replaces whatever was waiting. A caller says what to
- * run and when it worked, and never keeps a handle and a counter of its own.
+ * run and when it worked, and never keeps a handle and a counter of its own:
+ * `retries` is how many times it has been asked to try again since the last
+ * reset, so a loop that gives up after so many reads it there.
  *
  * The ladder: a retry waits the base plus a share of a ceiling that grows by
  * `factor` with every failed attempt, the whole never past `maxMs`. With full
@@ -22,15 +24,17 @@
  */
 export type LambderBackoffTimerOptions = {
     /**
-     * The shortest retry wait, in milliseconds. The first after a reset falls
-     * between it and twice it (exactly twice with `jitter: "none"`), so even
-     * the first retries of many clients spread out. Default: 1000.
+     * The shortest retry wait, in milliseconds, above 0: every wait is a
+     * multiple of it, so 0 would retry with no pause. The first after a reset
+     * falls between it and twice it (exactly twice with `jitter: "none"`), so
+     * even the first retries of many clients spread out. Default: 1000.
      */
     baseMs?: number;
     /**
      * The longest any retry wait is, in milliseconds, however many attempts
-     * have failed; at least `baseMs`. Default: 60000, or `baseMs` when that is
-     * longer.
+     * have failed; at least `baseMs`, and at most 2147483647 (about 24.8
+     * days), the longest delay setTimeout keeps. Default: 60000, or `baseMs`
+     * when that is longer.
      */
     maxMs?: number;
     /** How much the ceiling grows with each failed attempt. Default: 2. */
@@ -47,7 +51,7 @@ export declare class LambderBackoffTimer {
     private readonly maxMs;
     private readonly factor;
     private readonly jitter;
-    private attempts;
+    private retriesSinceReset;
     private timer;
     /** Settles the promise of a `wait` that cancel() or a replacement drops, so no `await` is left hanging. */
     private dropPending;
@@ -55,13 +59,20 @@ export declare class LambderBackoffTimer {
     /** True while a wait of any kind is pending. False again by the time it runs. */
     get pending(): boolean;
     /**
-     * Runs `run` after the next rung of the ladder, counting one more failed
-     * attempt. Replaces whatever was waiting.
+     * How many retries `retry` and `wait` have scheduled since the last reset
+     * (or since the timer was built), a dropped one included: the rung the
+     * next one climbs from. A loop that gives up after so many retries reads
+     * it here rather than keeping a counter of its own.
+     */
+    get retries(): number;
+    /**
+     * Runs `run` after the next rung of the ladder, counting one more retry.
+     * Replaces whatever was waiting.
      */
     retry(run: () => void): void;
     /**
-     * Resolves after the next rung of the ladder, counting one more failed
-     * attempt: the `retry` for code that awaits rather than calls back.
+     * Resolves after the next rung of the ladder, counting one more retry:
+     * the `retry` for code that awaits rather than calls back.
      * Replaces whatever was waiting. Rejects at once with the signal's reason
      * when `signal` aborts, and with an Error when cancel() or a later wait
      * drops it before it ran, so an await on it always settles.
@@ -72,11 +83,11 @@ export declare class LambderBackoffTimer {
      * climbs. Replaces whatever was waiting.
      */
     after(delayMs: number, run: () => void): void;
-    /** The attempt worked: the next failure waits the shortest time again. A pending wait is left alone. */
+    /** The attempt worked: the next failure waits the shortest time again, and `retries` is 0. A pending wait is left alone. */
     reset(): void;
     /** Drops the pending wait (the caller is trying right now, or going away), keeping the count. */
     cancel(): void;
-    /** The next wait on the ladder, in milliseconds, counting one more failed attempt. */
+    /** The next wait on the ladder, in milliseconds, counting one more retry. */
     private nextRung;
     private schedule;
 }

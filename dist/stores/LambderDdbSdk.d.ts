@@ -1,24 +1,27 @@
 /**
  * The DynamoDB SDK, loaded on first use.
  *
- * `@aws-sdk/client-dynamodb` and `@aws-sdk/lib-dynamodb` are optional peer
- * dependencies: an app that uses no DynamoDB store should neither install
- * them nor pay for loading them, and a module-level import would cost every
- * cold start and make every bundled Lambder app reference both packages. So
- * the session manager and the stores import their types only and take the
+ * `@aws-sdk/client-dynamodb` is an optional peer dependency: an app that uses
+ * no DynamoDB store should neither install it nor pay for loading it, and a
+ * module-level import would cost every cold start and make every bundled
+ * Lambder app reference it. So the stores import its types only and take the
  * classes from here the first time they touch the table, as
- * LambderS3FileSource and LambderInvokeCaller do. One loader per package,
- * memoized for the container's life; a missing package fails that first call
- * with the install hint rather than failing the import of lambder itself.
+ * LambderS3FileSource and LambderInvokeCaller do. One loader, memoized for
+ * the container's life; a missing package fails that first call with the
+ * install hint rather than failing the import of lambder itself.
+ *
+ * Every store speaks the item-level API, attribute values and all, so they
+ * take one client type and need one package. The session store, the one
+ * whose items hold an app's JSON, converts it with marshallJsonValue and
+ * unmarshallJsonValue below, so no store needs `@aws-sdk/lib-dynamodb`.
  *
  * The facts about DynamoDB itself that every store must agree on live here
- * too: a conditional write's refusal is an answer rather than a failure, and
- * a partition key has a limit that keys built from caller data can pass.
+ * too: a conditional write's refusal is an answer rather than a failure, a
+ * partition key and an item each have a limit that caller data can pass, and
+ * a number attribute read back may be missing or not a number.
  */
-import type { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import type { AttributeValue, DynamoDBClient } from "@aws-sdk/client-dynamodb";
 type LambderDynamoClientSdk = typeof import("@aws-sdk/client-dynamodb");
-type LambderDynamoDocumentSdk = typeof import("@aws-sdk/lib-dynamodb");
 /** What every DynamoDB-backed store needs before it can touch its table: the SDK, and a client made with it. */
 export type LambderDynamoClientReady = {
     client: DynamoDBClient;
@@ -42,22 +45,6 @@ export declare const createDynamoClientLoader: (options: {
     region?: string;
     client?: DynamoDBClient;
 }) => (() => Promise<LambderDynamoClientReady>);
-/** What the session store needs before its first table call: the document SDK, and a document client made with it. */
-export type LambderDynamoDocumentClientReady = {
-    client: DynamoDBDocumentClient;
-    sdk: LambderDynamoDocumentSdk;
-};
-/**
- * The document-client twin of createDynamoClientLoader, for the one store
- * that speaks the document API. A supplied client is taken as is, and then
- * only `@aws-sdk/lib-dynamodb` is loaded: the item-level package is needed
- * only to construct a client of our own.
- */
-export declare const createDynamoDocumentClientLoader: (options: {
-    user: string;
-    region?: string;
-    client?: DynamoDBDocumentClient;
-}) => (() => Promise<LambderDynamoDocumentClientReady>);
 /**
  * Whether DynamoDB refused a write because its condition did not hold, which
  * is how every conditional write here reports the thing it was testing for: a
@@ -106,4 +93,47 @@ export declare const assertPartitionKeyFits: (options: {
     partitionKey: string;
     remedy: string;
 }) => string;
+/** DynamoDB's own limit on one item, its attribute names and values together: 400 KB. */
+export declare const MAX_ITEM_BYTES: number;
+/**
+ * The size DynamoDB counts for one attribute value against its item limit: a
+ * string's UTF-8 bytes, a binary's bytes, one byte for a boolean or null, a
+ * byte per two significant digits of a number and one more, and for a map
+ * or a list three bytes plus, per element, one byte, its name (a map's) and
+ * its value. These are the rules DynamoDB states for its item limit, so a
+ * store can refuse an item by its size before the table answers it with a
+ * ValidationException, which is not a ConditionalCheckFailedException and
+ * so escapes as a store error that names nothing the app can act on. The
+ * set types are sized nowhere because no store writes one.
+ */
+export declare const attributeValueBytes: (value: AttributeValue) => number;
+/**
+ * A JSON value as the attribute DynamoDB keeps it: a string as `S`, a number
+ * as `N` in its shortest round-trip text, a boolean as `BOOL`, null as
+ * `NULL`, an array as `L` and an object as `M`. This is what
+ * `@aws-sdk/lib-dynamodb`'s document client writes for the same value, so an
+ * item written either way reads back through unmarshallJsonValue.
+ *
+ * JSON only, as the name says: anything JSON.parse cannot hand back (an
+ * undefined, a non-finite number, a function, a Set, a class instance) is
+ * refused rather than guessed at. Map entries are built with
+ * Object.fromEntries so that a `__proto__` key, which JSON.parse keeps as an
+ * own key, stays an entry rather than setting the prototype of the map.
+ */
+export declare const marshallJsonValue: (value: unknown) => AttributeValue;
+/**
+ * The JSON value an attribute holds: the inverse of marshallJsonValue, and
+ * the reading of what the document client wrote for one. A number reads as
+ * the JS number its text names, as JSON.parse would read the same text. An
+ * attribute JSON has no form for (a binary, a set) throws: it was not
+ * written from JSON, so it is not this store's.
+ */
+export declare const unmarshallJsonValue: (attribute: AttributeValue) => unknown;
+/**
+ * A number attribute as stored, or the fallback when it is missing or not a
+ * number. `Number(undefined)` and `Number("nope")` are both NaN, which every
+ * later comparison answers false to: a NaN expiry reads as "not expired" and
+ * a NaN status code reaches the client as one.
+ */
+export declare const storedNumber: (raw: string | undefined, fallback: number) => number;
 export {};

@@ -1,6 +1,7 @@
 import { type LambderApiRequest } from "../api/LambderApiRequest.js";
 import type { LambderApiAnswer } from "../api/LambderApiAnswer.js";
-import { LambderCookieJar } from "../shared/transport/LambderCookieJar.js";
+import type { LambderCookieJar } from "../shared/transport/LambderCookieJar.js";
+import { LAMBDER_MOCK_ADAPTER_DOOR, type LambderMockAdapterDoor } from "./LambderMockAdapterDoor.js";
 /** What a resolver of Lambder's adapters is: msw's, answering a Response, or `undefined` to hand the request on. */
 type LambderMswResolver = (info: {
     request: Request;
@@ -26,21 +27,23 @@ export type LambderMswModule = {
         error(): Response;
     };
 };
-/** What the adapter needs from the mock app: a parsed request in, an answer out, and the runtime's own bookkeeping. */
+/**
+ * What the adapter needs from the mock app: a parsed request in, an answer
+ * out, and the runtime's own bookkeeping behind the adapter door, which a
+ * LambderMockApp carries and nothing outside the package can name (see
+ * LAMBDER_MOCK_ADAPTER_DOOR). So in practice the target is a LambderMockApp.
+ */
 export type LambderMockMswTarget = {
     handleRequest(request: LambderApiRequest): Promise<LambderApiAnswer>;
+    /** Whether a name has an entry, a call handed on to the network, and an answer's readable cookies for the page. */
+    readonly [LAMBDER_MOCK_ADAPTER_DOOR]: LambderMockAdapterDoor;
     /**
-     * Whether this name would be answered from the registry, overrides and a
-     * registered rest entry included; asked once per request, so not a list to
-     * scan.
+     * The page's cookie jar, which this adapter carries its calls' cookies in
+     * unless it is given its own: the jar signIn and signOut use when given
+     * none, so a session signIn starts is the one these calls send, and the
+     * one reset() empties.
      */
-    hasRegisteredEntry(apiName: string): boolean;
-    /** Records a request this adapter handed on rather than answering. */
-    notePassthrough(request: LambderApiRequest): void;
-    /** Mirrors an answer's readable cookies into document.cookie, and remembers them for reset(). */
-    mirrorCookiesIntoDocument(setCookies: readonly string[]): void;
-    /** Takes the jar this adapter built as the runtime's own, so reset() empties it too. */
-    adoptCookieJar(jar: LambderCookieJar): void;
+    readonly pageCookieJar: LambderCookieJar;
     /** The IP a call carrying none is read as arriving from, so this adapter and the direct transport report one address. */
     readonly defaultClientIp: string;
     /**
@@ -66,7 +69,9 @@ export type LambderMockMswTarget = {
  * them, losing every cookie after the first. So the answer's cookies go into
  * the jar, the next request carries them back, and the ones a page's scripts
  * may see are mirrored into document.cookie. The Set-Cookie headers still
- * travel on the response, where the network panel shows them.
+ * travel on the response, where the network panel shows them. The jar is the
+ * runtime's page jar unless one is given, the one signIn plants into when it
+ * is given none, so `mockApp.signIn(key, data)` signs the page in.
  *
  * A request's cookies are therefore the jar's and document.cookie's, never
  * its Cookie header: MSW fills that from its own store, which captures the
@@ -86,6 +91,7 @@ export type LambderMockMswTarget = {
 export declare const lambderMockMswHandler: <M extends LambderMswModule>(mockApp: LambderMockMswTarget, options: {
     msw: M;
     apiPath: string;
+    /** The jar this adapter's calls carry their cookies in. Default: the runtime's pageCookieJar. One passed here stays the app's, and reset() leaves it alone. */
     cookieJar?: LambderCookieJar;
     /**
      * What happens to a call the runtime has no entry for. "refuse"

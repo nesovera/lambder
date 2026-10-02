@@ -80,4 +80,17 @@ describe('The mock on a page without crypto.subtle', () => {
         expect(retry.ok && retry.payload).toEqual({ ticketId: 1 });
         expect(sold).toBe(1);
     });
+
+    it('counts a rate limit per caller, its key fields written as they are where there is nothing to digest them with', async () => {
+        type Contract = { 'ticket.hold': { input: { seat: string }; output: { held: boolean }; mode: 'public'; rateLimit: 'holdsPerSeat' } };
+        const mock = initLambderMock<Contract>();
+        const app = mock.create({ rateLimits: { policies: { holdsPerSeat: { perMin: 1, per: mock.rateLimitKey({ apiInput: z.object({ seat: z.string() }), handler: (_ctx, { seat }) => seat }) } } } });
+        app.register(app.apiSlice(app.api('ticket.hold', { rateLimit: 'holdsPerSeat', handler: async () => ({ held: true }) })));
+        const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false, transport: app.transport() });
+
+        expect((await caller.apiOutcome('ticket.hold', { seat: 'A1' })).ok).toBe(true);
+        expect((await caller.apiOutcome('ticket.hold', { seat: 'B2' })).ok).toBe(true);
+        const refused = await caller.apiOutcome('ticket.hold', { seat: 'A1' });
+        expect(!refused.ok && refused.refusal).toMatchObject({ code: 'lambder/rate-limited', data: { policy: 'holdsPerSeat' } });
+    });
 });

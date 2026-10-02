@@ -20,6 +20,8 @@ import { LambderMockFailureInjector, LambderMockTransportError } from "./Lambder
 import { LambderMockCallRecorder } from "./LambderMockCallRecorder.js";
 import { LambderMockEntryRegistry } from "./LambderMockEntryRegistry.js";
 import { LambderMockBrowserCookies } from "./LambderMockBrowserCookies.js";
+import { LambderMockApiSchemas } from "./LambderMockApiSchemas.js";
+import { LAMBDER_MOCK_ADAPTER_DOOR } from "./LambderMockAdapterDoor.js";
 import { LambderMemoryRateLimiter } from "../stores/LambderMemoryRateLimiter.js";
 import { LambderMemoryIdempotencyStore } from "../stores/LambderMemoryIdempotencyStore.js";
 import { LambderMemorySessionStore } from "../stores/LambderMemorySessionStore.js";
@@ -33,6 +35,8 @@ import { DEFAULT_SESSION_CSRF_COOKIE_KEY, DEFAULT_SESSION_TOKEN_COOKIE_KEY } fro
 const transportCarrying = (transport, jar) => Object.assign(transport, { cookieJar: jar });
 const DEFAULT_CALL_LOG_SIZE = 200;
 const DEFAULT_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
+/** The salt the mock's sessions are keyed with, and so its policy keys' digest, when the app names none. */
+const DEFAULT_MOCK_SESSION_SALT = "lambder-mock";
 /**
  * The host the runtime's cookies belong to when the app names none: the page
  * the mock is running in, or "localhost" where there is no page (a Node test).
@@ -74,6 +78,29 @@ export class LambderMockApp {
     /** The host this runtime's cookies belong to (see the cookieHost option). */
     cookieHost;
     /**
+     * The page's cookie jar: where the browser this runtime serves keeps the
+     * cookies no page script can read, the HttpOnly session cookie among
+     * them. signIn and signOut plant into it and clear it when they are given
+     * no jar, and the MSW adapter carries its calls' cookies in it when it is
+     * given none, so the session signIn starts is the one the page's next
+     * call through the worker sends. The runtime's own: reset() empties it.
+     */
+    pageCookieJar = new LambderCookieJar();
+    /**
+     * What the MSW adapter asks of the runtime and tells it beyond handing it
+     * a call, behind a key no entry point exports (see
+     * LAMBDER_MOCK_ADAPTER_DOOR): the adapter's bookkeeping, not the app's.
+     */
+    [LAMBDER_MOCK_ADAPTER_DOOR] = {
+        hasRegisteredEntry: (apiName) => this.entryFor(apiName) !== null || this.registry.restNotMockedReason !== null,
+        notePassthrough: (request) => {
+            const facts = this.callFacts(this.recorder.nextCallId(), request, null);
+            this.emit(this.requestEvent(facts.id, request, null, facts.startedAt));
+            this.recorder.settle(facts, { answer: null, outcome: "passthrough", guardsRun: [] });
+        },
+        mirrorCookiesIntoDocument: (setCookies) => this.browserCookies.mirrorSetCookies(setCookies),
+    };
+    /**
      * The API core, every protocol step of it. Private: the mock's surface is
      * the app, and a consumer reaching past it would be configuring the
      * server's pipeline through a development tool. The adapters use the
@@ -93,6 +120,8 @@ export class LambderMockApp {
     registry = new LambderMockEntryRegistry();
     /** The server's declared options per API, when create() was given the generated table; the entries' declarations come from here. */
     apiOptions;
+    /** The server's schemas, when create() was given the generated table: every entry's input is validated, and every answer parsed, through them. */
+    apiSchemas;
     /** The mock's own guards as create() was given them: which of them need a session, for an entry's mode without the apiOptions table. */
     mockGuards;
     /** The server's guard declarations, when create() was given the generated table: the refusal codes a declared guard adds to an entry. */
@@ -108,8 +137,24 @@ export class LambderMockApp {
     declared = null) {
         this.apiVersion = options.apiVersion ?? null;
         this.apiOptions = options.apiOptions ?? null;
+        this.apiSchemas = options.apiSchemas ? new LambderMockApiSchemas(options.apiSchemas) : null;
         this.mockGuards = options.guards ?? null;
         this.guardDeclarations = options.guardDeclarations ?? null;
+        // A mock guard stands in for the server's guard of its name, so it
+        // declares the codes that guard declares: its own refusals type its
+        // ctx.refuse and are what checkApiRefusals holds it to. The compiler
+        // compares literal lists at the guards option; this catches a list
+        // typed as any string and a caller the compiler did not see.
+        for (const [name, guard] of Object.entries(options.guards ?? {})) {
+            if (!this.guardDeclarations || !Object.prototype.hasOwnProperty.call(this.guardDeclarations, name))
+                continue;
+            const own = new Set(Array.isArray(guard?.refusals) ? guard.refusals : []);
+            const declared = new Set(this.guardDeclarations[name].refusals ?? []);
+            if (own.size !== declared.size || [...declared].some((code) => !own.has(code))) {
+                const listed = (codes) => codes.size ? [...codes].map((code) => `"${code}"`).join(", ") : "none";
+                throw new Error(`LambderMockApp: the mock guard "${name}" declares the refusals ${listed(own)}, and the server's guard of that name declares ${listed(declared)} in the guardDeclarations table. A mock guard declares exactly the server guard's codes: regenerate the table, or give the mock guard refusals: [${[...declared].map((code) => `"${code}"`).join(", ")}].`);
+            }
+        }
         this.refusalVocabulary = declared?.vocabulary ?? null;
         this.requireRefusalCodes = declared?.requireCodes ?? false;
         if (this.requireRefusalCodes && !this.apiOptions) {
@@ -117,6 +162,7 @@ export class LambderMockApp {
         }
         this.failures = new LambderMockFailureInjector({ apiVersion: this.apiVersion, latency: options.latency ?? 0 });
         this.recorder = new LambderMockCallRecorder({ callLogSize: options.callLogSize ?? DEFAULT_CALL_LOG_SIZE });
+        this.browserCookies.adoptJar(this.pageCookieJar);
         // The loopback address when nothing names a client, as for a request
         // from the page itself (the in-process handler transport's default
         // too). Normalized once here because the direct transport, the MSW
@@ -160,7 +206,7 @@ export class LambderMockApp {
                 ? {
                     manager: new LambderSessionManager({
                         store: sessionOptions.store ?? memorySessionStore,
-                        sessionSalt: sessionOptions.sessionSalt ?? "lambder-mock",
+                        sessionSalt: sessionOptions.sessionSalt ?? DEFAULT_MOCK_SESSION_SALT,
                         enableSlidingExpiration: sessionOptions.enableSlidingExpiration,
                         slidingWriteIntervalSeconds: sessionOptions.slidingWriteIntervalSeconds,
                         // As given: the manager refuses dataRefresh without
@@ -202,6 +248,9 @@ export class LambderMockApp {
                     callerIdentity: idempotencyOptions.callerIdentity,
                 }
                 : undefined,
+            // As on the server: with sessions on, their salt keys the digest
+            // of the caller's fields in rate-limit and idempotency keys.
+            atRestSecret: sessionOptions ? sessionOptions.sessionSalt ?? DEFAULT_MOCK_SESSION_SALT : undefined,
         });
     }
     // -----------------------------------------------------------------------
@@ -291,6 +340,18 @@ export class LambderMockApp {
             return null;
         return this.apiOptions[name].mode;
     }
+    /**
+     * The schema an entry's input is validated with: the server's, from the
+     * apiSchemas table when create() was given it, then the entry's own where
+     * it restates one, run on what the server's leaves (the payload stripped
+     * and defaulted as on the server). Either alone where only one is given.
+     */
+    entryInputOf(name, own) {
+        if (!this.apiSchemas)
+            return own;
+        const server = this.apiSchemas.inputOf(name);
+        return own ? server.pipe(own) : server;
+    }
     buildEntry(name, input) {
         const options = (typeof input === "function" ? { handler: input } : input);
         const declared = this.declaredOptionsOf(name);
@@ -316,7 +377,7 @@ export class LambderMockApp {
             // validator that is not a zod schema reach the 422 body as
             // `zodError: { name: undefined, message: undefined, issues:
             // undefined }`, a refusal a client cannot read.
-            input: options.input,
+            input: this.entryInputOf(name, options.input),
         };
         this.assertEntryRegistration(definition);
         const handler = options.handler;
@@ -441,18 +502,6 @@ export class LambderMockApp {
     get registeredNames() {
         return this.registry.names;
     }
-    /**
-     * Whether a call to this name would be answered from the registry, which
-     * is what an adapter asks before passing one on.
-     *
-     * True for every name once a rest entry is registered, since it answers
-     * whatever nothing else claimed. That makes a rest entry and the MSW
-     * adapter's `onUnmocked: "passthrough"` alternatives rather than layers:
-     * with one registered, nothing is handed on to the network.
-     */
-    hasRegisteredEntry(apiName) {
-        return this.entryFor(apiName) !== null || this.registry.restNotMockedReason !== null;
-    }
     entryFor(apiName) {
         return this.registry.entryFor(apiName);
     }
@@ -475,7 +524,7 @@ export class LambderMockApp {
     // -----------------------------------------------------------------------
     // Control surface
     // -----------------------------------------------------------------------
-    /** The next call to the endpoint fails this way; several calls queue in order. An injected refusal names one of the endpoint's declared codes, its data as a handler raises it (see LambderMockRefusalsOf), and is checked and sent as a real one is. */
+    /** The next call to the endpoint fails this way; several calls queue in order. An injected refusal names one of the endpoint's declared codes, its data as a handler raises it (see LambderMockRefusalsOf), and is checked and sent as a real one is. An injected sessionExpired, or a refusal whose code is declared so, ends the session the call carries, as the server's does. */
     failNext(apiName, failure) {
         this.failures.failNext(apiName, failure);
     }
@@ -493,13 +542,14 @@ export class LambderMockApp {
     /**
      * Rewinds the runtime: sessions, rate-limit counters, replay records,
      * overrides, injected failures, the offline switch, the configured
-     * latency, the call log and its numbering, the cookies its own transports
-     * hold, then onReset, so the app rewinds its own data too.
+     * latency, the call log and its numbering, the cookies its own jars hold,
+     * then onReset, so the app rewinds its own data too.
      *
      * The cookies matter as much as the sessions: a jar still holding the
      * token of an emptied store's session reads as signed in until an answer
-     * says sessionExpired. So every jar transport() built for itself is
-     * emptied, and the cookies a "document" transport mirrored are expired.
+     * says sessionExpired. So the page's jar and every jar transport() built
+     * for itself are emptied, and the cookies mirrored into document.cookie
+     * are expired at the scope each was set at.
      *
      * The registry survives, being configuration rather than accumulated
      * state. Subscriptions survive too, being how a test watches the runtime;
@@ -539,9 +589,10 @@ export class LambderMockApp {
     /**
      * Starts a session without a login endpoint: creates it through the
      * session controller, the way a login handler does, plants its cookies
-     * into the jar when one is given, so the jar's transport is signed in
-     * from its next call, and mirrors the readable ones into document.cookie
-     * the way an answer's cookies are. Returns the raw tokens too.
+     * into the jar given, or the page's (pageCookieJar) when none is, so that
+     * jar's transport or the MSW adapter is signed in from its next call, and
+     * mirrors the readable ones into document.cookie the way an answer's
+     * cookies are. Returns the raw tokens too.
      */
     async signIn(sessionKey, data, options = {}) {
         this.assertSessionsConfigured("signIn()");
@@ -560,7 +611,7 @@ export class LambderMockApp {
         // every Domain against the sending host and refuses one it cannot
         // check, so unscoped, the session cookie of an app that configures a
         // cookie domain would be dropped silently.
-        options.jar?.storeSetCookies(setCookies, { host });
+        (options.jar ?? this.pageCookieJar).storeSetCookies(setCookies, { host });
         // Through the same mirror every other cookie writer uses. Behind the
         // MSW adapter the page's caller reads its CSRF token from
         // document.cookie, not the jar, so a signIn that only filled a jar
@@ -571,8 +622,8 @@ export class LambderMockApp {
     }
     /**
      * Ends every session of the subject ("log this subject out everywhere")
-     * and clears what signIn planted: the cookies in the jar given, and the
-     * copies in document.cookie.
+     * and clears what signIn planted: the cookies in the jar given, or the
+     * page's when none is, and the copies in document.cookie.
      *
      * Symmetric on purpose, the way reset() is. The records alone leave the
      * jar and the page carrying a token for a session that no longer exists,
@@ -589,7 +640,7 @@ export class LambderMockApp {
             serializeClearCookie(this.tokenCookieKey, { ...this.sessionCookieOptions, httpOnly: true }, host),
             serializeClearCookie(this.csrfCookieKey, this.sessionCookieOptions, host),
         ];
-        options.jar?.storeSetCookies(cleared, { host });
+        (options.jar ?? this.pageCookieJar).storeSetCookies(cleared, { host });
         this.browserCookies.mirrorSetCookies(cleared);
     }
     /** Marks the subject's session data stale, so the next read renews it through dataRefresh. */
@@ -672,18 +723,6 @@ export class LambderMockApp {
             at,
         };
     }
-    /**
-     * Records a call an adapter handed on instead of answering: the MSW
-     * adapter's passthrough. Without it a name the registry does not know
-     * leaves no trace at all, and a mistyped endpoint reaches the real
-     * network with nothing in the call log or on the subscription to say so,
-     * which is the one failure the log exists to make visible.
-     */
-    notePassthrough(request) {
-        const facts = this.callFacts(this.recorder.nextCallId(), request, null);
-        this.emit(this.requestEvent(facts.id, request, null, facts.startedAt));
-        this.recorder.settle(facts, { answer: null, outcome: "passthrough", guardsRun: [] });
-    }
     /** What every record of one call repeats (see LambderMockCallFacts). */
     callFacts(id, request, mode) {
         return { id, apiName: request.apiName, mode, startedAt: Date.now(), request };
@@ -732,7 +771,21 @@ export class LambderMockApp {
             // normally.
             const failure = this.failures.take(request.apiName);
             if (failure) {
-                answer = await this.failures.answerFor(failure, request, entry?.definition.refusals);
+                const injected = await this.failures.answerFor(failure, request, entry?.definition.refusals);
+                // An answer saying the session is over ends the session the
+                // call carries, as on the server: there sessionExpired means
+                // the read found none, and a refusal flagged so deletes it.
+                // Left alive, the caller's next call would be signed in.
+                // The cookies stay, as there.
+                if (injected.endsSession && this.pipeline.hasSessions) {
+                    const manager = this.pipeline.sessionManager;
+                    for (const token of request.cookies[this.tokenCookieKey] ?? []) {
+                        const session = await manager.lookupSession(token);
+                        if (session)
+                            await manager.deleteSession(session);
+                    }
+                }
+                answer = injected.answer;
                 outcome = "injected";
             }
             else if (prepared) {
@@ -748,7 +801,11 @@ export class LambderMockApp {
                     ? async (callCtx) => {
                         // The payload the handler sees is the restored one.
                         callCtx.payload = request.payload;
-                        const payload = await handler(callCtx);
+                        const returned = await handler(callCtx);
+                        // Through the server's output schema when create() was
+                        // given the table, as the server sends every answer:
+                        // what it does not declare dropped, its defaults filled.
+                        const payload = this.apiSchemas ? this.apiSchemas.parseOutput(request.apiName, returned) : returned;
                         // The server's rule, where the server applies it: an
                         // answer is an object or an array, and a handler that
                         // returns anything else has broken its contract.
@@ -870,28 +927,9 @@ export class LambderMockApp {
         // would keep it out of document.cookie.
         return transportCarrying(async (request) => {
             const answer = await withJar(request);
-            this.mirrorCookiesIntoDocument(answer.setCookies ?? []);
+            this.browserCookies.mirrorSetCookies(answer.setCookies ?? []);
             return answer;
         }, jar);
-    }
-    /**
-     * Mirrors an answer's non-HttpOnly cookies into document.cookie and
-     * remembers them, so reset() expires them again. The direct transport's
-     * "document" mode and the MSW adapter both come through here: one
-     * implementation of the mirror, one record of what was planted.
-     */
-    mirrorCookiesIntoDocument(setCookies) {
-        this.browserCookies.mirrorSetCookies(setCookies);
-    }
-    /**
-     * Takes a jar an adapter built for itself as the runtime's own, so reset()
-     * empties it with the rest. The MSW adapter's jar holds the session
-     * cookies of calls that never touch transport(); left full after a reset,
-     * the next request would carry a token for a session the emptied store no
-     * longer has.
-     */
-    adoptCookieJar(jar) {
-        this.browserCookies.adoptJar(jar);
     }
     /** caller.setTransport(mockApp.transport(options)); returns the transport, its jar on it. */
     attach(caller, options = {}) {
@@ -918,8 +956,15 @@ export class LambderMockApp {
  */
 /** The mock init bound to one vocabulary (or none): the builders, refuse and create() that share it. */
 const lambderMockInitOf = (declared) => ({
-    /** Builds a mock guard: the server guard's shape, the handler seeing the mock's contexts. */
-    guard: lambderGuardBuilder(),
+    /**
+     * Builds a mock guard: the server guard's shape, the handler seeing the
+     * mock's contexts. Bound to the vocabulary the mock declared, as the
+     * server init's builder is to the server's: its ctx.refuse is typed to the
+     * guard's own `refusals`, data in the schema's input form, and a code the
+     * vocabulary does not hold is refused as the guard is built. A mock that
+     * declared none checks nothing here.
+     */
+    guard: lambderGuardBuilder(declared ? declared.vocabulary : undefined),
     /**
      * Builds a mock rate-limit key, the counterpart of `guard`. Bound to the
      * mock's own call context, because the server's lambderRateLimitKey() is

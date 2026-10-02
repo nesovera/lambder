@@ -10,9 +10,14 @@ import { HtmlPositionReader, URL_ATTRIBUTE_NAMES, safeUrlValue, valueLanguageOf,
  * uses it internally to render HTML files from the files source per request.
  *
  * Every construct is an HTML comment. That is the whole point: templates
- * survive HTML build pipelines (e.g. Vite) untouched, and are invisible in the
- * browser during frontend development, where the default content between the
- * markers renders as-is.
+ * survive HTML build pipelines (e.g. Vite) untouched, and between elements,
+ * where a browser reads a marker as a comment, the raw file shows nothing of
+ * it during frontend development and the default content between the
+ * markers renders as-is. Elsewhere the raw file shows the marker: as text
+ * inside <title> or <textarea> (so a title takes the htmlVirtualSlots slot
+ * instead), as part of the value inside an attribute value, as the end of
+ * the tag inside a tag. And with nothing to choose a branch, both branches
+ * of an if/else render.
  *
  * Syntax:
  *
@@ -28,8 +33,10 @@ import { HtmlPositionReader, URL_ATTRIBUTE_NAMES, safeUrlValue, valueLanguageOf,
  * Blocks nest freely (ifs in slots, slots in ifs). There are intentionally no
  * loops or inline expressions: dynamic lists are built server-side with the
  * html`...` tagged template and passed in as a slot value. Attribute-position
- * values (e.g. <html lang="...">) are handled with if/else around whole-tag
- * variants, or with a slot inside a quoted value: refused in an event
+ * values (e.g. <html lang="...">) are handled with a slot inside the quoted
+ * value, which keeps the raw file valid in a browser, or with if/else around
+ * whole-tag variants, whose branches a browser shows both of. A slot in a
+ * value is refused in an event
  * handler, `style` or `srcdoc`, whose values the browser reads as another
  * language, and checked in a URL attribute, whose value renders as
  * `about:invalid` when a slot gave it a scheme other than http, https,
@@ -38,8 +45,7 @@ import { HtmlPositionReader, URL_ATTRIBUTE_NAMES, safeUrlValue, valueLanguageOf,
  * same tag, value or element) before the next slot or block, so a slot's
  * position never depends on the data.
  *
- * Data is dynamically typed: one Record<string, LambderHtmlValue> shared by
- * slots and conditions.
+ * Data is one object of values by name, shared by slots and conditions.
  *   - strings/numbers are HTML-escaped on insertion (XSS-safe by default)
  *   - html`...` / raw() / jsonScript() values are inserted verbatim, never
  *     escaped again (an html`...` value placed its own interpolations when it
@@ -49,13 +55,21 @@ import { HtmlPositionReader, URL_ATTRIBUTE_NAMES, safeUrlValue, valueLanguageOf,
  *     default content; `null`, `false` and `""` render it empty, so write
  *     `value ?? undefined` when a missing value should fall back to the
  *     default instead
- *   - unknown data keys are ignored, so one data object can serve several
- *     templates with different slots
+ *   - a key the template has no slot or condition for throws, naming the
+ *     key and the template's names: the template is a file edited apart from
+ *     the code that fills it, and a slot renamed there would otherwise drop
+ *     the server's content without a word
+ *
+ * The names can be typed as well: `LambderTemplatingEngine<"title" | "head">`
+ * (and `res.templateFile<"title" | "head">(...)`) types the data to them, so
+ * a misspelled key is a compile error. The type is the caller's statement
+ * about a file the compiler never reads, so the render-time check stays.
  *
  * Templates are parsed once (construction throws on unclosed or mismatched
  * blocks with a descriptive message); render() is a cheap tree walk, safe to
  * call per request. Discovered names are exposed on `slotNames` and
- * `conditionNames` for runtime validation.
+ * `conditionNames`, and `has()` asks for one, so code that fills several
+ * templates from one object can pick each one's keys.
  *
  * @example
  * ```typescript
@@ -78,7 +92,12 @@ import { HtmlPositionReader, URL_ATTRIBUTE_NAMES, safeUrlValue, valueLanguageOf,
  * ```
  */
 
-export type LambderTemplateData = Record<string, LambderHtmlValue>;
+/**
+ * What a template renders with: a value per slot or condition name. TNames,
+ * when given, is the template's names, so a key outside them is a compile
+ * error; left out, any name is accepted here and checked at render.
+ */
+export type LambderTemplateData<TNames extends string = string> = { [Name in TNames]?: LambderHtmlValue };
 
 type TemplateNode =
     | { type: "text", value: string }
@@ -429,9 +448,19 @@ export type LambderTemplatingEngineOptions = {
     htmlVirtualSlots?: boolean;
 };
 
-export class LambderTemplatingEngine {
+/** A name list in an error message: quoted and comma-separated, or "none". */
+const listNames = (names: readonly string[]): string => names.length === 0 ? "none" : names.map((name) => JSON.stringify(name)).join(", ");
+
+/**
+ * A comment-only HTML template, compiled once. TNames is the caller's
+ * statement of its slot and condition names, which types render()'s data;
+ * left out, any name compiles, and render() checks every key either way.
+ */
+export class LambderTemplatingEngine<TNames extends string = string> {
     private nodes: TemplateNode[];
-    /** Slot names discovered at compile time (dynamic typing surface). */
+    /** Every slot and condition name: what a data key has to be one of. */
+    private names: ReadonlySet<string>;
+    /** Slot names discovered at compile time. */
     readonly slotNames: readonly string[];
     /** Condition names discovered at compile time. */
     readonly conditionNames: readonly string[];
@@ -444,23 +473,36 @@ export class LambderTemplatingEngine {
         collectNames(this.nodes, slots, conditions);
         this.slotNames = [...slots];
         this.conditionNames = [...conditions];
+        this.names = new Set([...slots, ...conditions]);
     }
 
     /** Read and parse a template file (compile once, render many times). */
-    static async fromFile(filePath: string, options: LambderTemplatingEngineOptions = {}): Promise<LambderTemplatingEngine> {
+    static async fromFile<TNames extends string = string>(filePath: string, options: LambderTemplatingEngineOptions = {}): Promise<LambderTemplatingEngine<TNames>> {
         const fs = await getFS();
         if(!fs) throw new Error("Lambder: LambderTemplatingEngine.fromFile requires a Node.js environment.");
         const source = await fs.promises.readFile(filePath, "utf8");
-        return new LambderTemplatingEngine(source, options);
+        return new LambderTemplatingEngine<TNames>(source, options);
     }
 
     /** True when the template declares `name` as a slot or condition. */
     has(name: string): boolean {
-        return this.slotNames.includes(name) || this.conditionNames.includes(name);
+        return this.names.has(name);
     }
 
-    /** Render with escaped-by-default data; unknown keys ignored, omitted slots keep defaults. */
-    render(data: LambderTemplateData = {}): string {
+    /**
+     * Render with escaped-by-default data; omitted slots keep their defaults.
+     * Throws for a key the template has no slot or condition for, naming it
+     * and the template's names.
+     */
+    render(data: LambderTemplateData<TNames> = {}): string {
+        const unknownKeys = Object.keys(data).filter((key) => !this.names.has(key));
+        if(unknownKeys.length > 0){
+            throw new Error(
+                `LambderTemplatingEngine: the data carries ${listNames(unknownKeys)}, which the template has no slot or condition for, ` +
+                `so ${unknownKeys.length === 1 ? "its value" : "their values"} would be dropped. Its slots: ${listNames(this.slotNames)}; ` +
+                `its conditions: ${listNames(this.conditionNames)}.`,
+            );
+        }
         const output: RenderOutput = { html: "", firstDataIndex: -1 };
         renderNodes(this.nodes, data, output);
         return output.html;

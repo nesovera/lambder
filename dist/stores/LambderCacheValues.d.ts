@@ -1,3 +1,4 @@
+import type { LambderCacheGetOrSetOptions } from "../shared/contracts/LambderCache.js";
 /** How long an entry lives when neither the call nor the cache names a TTL: one year. */
 export declare const DEFAULT_TTL_SECONDS: number;
 /** Largest value a cache accepts unless told otherwise, in UTF-8 bytes of its JSON: 32 MiB. */
@@ -38,8 +39,4 @@ export declare const resolveCacheTtlSeconds: (ttlSeconds: number | undefined, de
  * but check them all the same, so an options object that the table refuses
  * is refused by every cache.
  */
-export declare const resolveGetOrSetOptions: (options: {
-    ttlSeconds?: number;
-    leaseSeconds?: number;
-    waitForFillMs?: number;
-}, defaultTtlSeconds: number) => LambderCacheFillSettings;
+export declare const resolveGetOrSetOptions: (options: LambderCacheGetOrSetOptions, defaultTtlSeconds: number) => LambderCacheFillSettings;

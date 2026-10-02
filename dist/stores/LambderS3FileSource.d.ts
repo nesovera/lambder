@@ -43,8 +43,9 @@ export declare class LambderS3FileSource implements LambderFileSource {
     private readonly clientConfig;
     private readonly notFoundErrorNames;
     private client;
-    private sdk;
+    private clientSdk;
     constructor({ bucket, prefix, client, clientConfig, notFoundErrorNames }: LambderS3FileSourceOptions);
-    private loadSdk;
     read(relativePath: string): Promise<LambderFile | null>;
+    /** The SDK, loaded on the first read, and the client: the one supplied, or one made from clientConfig. */
+    private s3;
 }

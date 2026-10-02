@@ -18,6 +18,7 @@ import type { LambderFileSource } from '../../src/shared/contracts/LambderFileSo
 import type { LambderFilesOption } from '../../src/core/LambderFiles.js';
 import type { APIGatewayProxyEvent, Context } from 'aws-lambda';
 import path from 'path';
+import { html } from '../../src/shared/LambderHtml.js';
 
 const createMockEvent = (path: string, method: string = 'GET'): APIGatewayProxyEvent => ({
     body: null,
@@ -143,7 +144,7 @@ describe('File Serving with Fallback', () => {
             apiPath: '/api'
         })
             .addRoute('/specific', (ctx, res) => {
-                return res.html('Specific Route');
+                return res.html(html`Specific Route`);
             })
             .addRoute('/(.*)', async (ctx, res) => {
                 const file = await res.file(ctx.path);

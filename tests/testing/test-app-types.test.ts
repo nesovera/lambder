@@ -48,8 +48,12 @@ describe('lambderTestApp: what the instance types', () => {
 
         const visitor = app.visitor();
         expectTypeOf(visitor).toEqualTypeOf<LambderTestVisitor<typeof server.ApiContract, SessionData, never>>();
-        expectTypeOf(await visitor.api('test.echo', { text: 'hi' })).toEqualTypeOf<{ text: string } | undefined>();
-        expectTypeOf(await visitor.test.echo({ text: 'hi' })).toEqualTypeOf<{ text: string } | undefined>();
+        // The output alone: a failure throws rather than reading as undefined.
+        expectTypeOf(await visitor.api('test.echo', { text: 'hi' })).toEqualTypeOf<{ text: string }>();
+        expectTypeOf(await visitor.test.echo({ text: 'hi' })).toEqualTypeOf<{ text: string }>();
+        expectTypeOf(await visitor.test.echo.outcome({ text: 'hi' })).toEqualTypeOf<Awaited<ReturnType<typeof visitor.caller.test.echo.outcome>>>();
+        // The caller underneath is a LambderCaller as any frontend has one, undefined on a failure.
+        expectTypeOf(await visitor.caller.api('test.echo', { text: 'hi' })).toEqualTypeOf<{ text: string } | undefined>();
         // @ts-expect-error not an action of this group
         await visitor.test.nope({}).catch(() => {});
 

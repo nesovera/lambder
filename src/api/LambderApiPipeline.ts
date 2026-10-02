@@ -34,6 +34,7 @@ import type { LambderSessionRecord, LambderSessionStore } from "../shared/contra
 import type { LambderRateLimiter } from "../shared/contracts/LambderRateLimiter.js";
 import type { LambderIdempotencyStore } from "../shared/contracts/LambderIdempotencyStore.js";
 import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
+import { LambderKeyFieldDigest } from "../shared/util/LambderKeyFieldDigest.js";
 import type LambderSessionManager from "../session/LambderSessionManager.js";
 import LambderSessionController, {
     assertSessionCookiePrefixes,
@@ -68,8 +69,7 @@ export type LambderApiPipelineOptions<TCtx extends LambderApiCallContext<TSessio
      * The floor under the signature gate: a request naming a `version` below
      * it answers versionExpired whatever its signature says. Dotted numbers
      * ("1.2.10"), compared segment by segment. A floor above apiVersion is
-     * taken as apiVersion, so a mistaken floor cannot refuse the build's own
-     * clients.
+     * refused at construction, since it would refuse the build's own clients.
      */
     minApiVersion?: string | null;
     /**
@@ -97,6 +97,16 @@ export type LambderApiPipelineOptions<TCtx extends LambderApiCallContext<TSessio
     // its session context type here.
     guards?: Record<string, LambderApiGuard<any, any, any, TCtx, TCtx & { session: LambderSessionRecord<TSessionData> }>>;
     idempotency?: LambderApiIdempotencyConfig;
+    /**
+     * The app's at-rest secret: the session salt, which both adapters pass
+     * when sessions are configured. A subkey derived from it for this one
+     * purpose keys the digest every caller-controlled field of a rate-limit
+     * tracker key and an idempotency scope is written as
+     * (LambderKeyFieldDigest), so a table read can neither show who called
+     * nor test a guess. Without one the digest is a plain SHA-256, which
+     * keeps the values out of the table but lets a reader test guesses.
+     */
+    atRestSecret?: string;
 };
 
 /** The stores `lambder/testing` puts under a built pipeline. One the pipeline has no subsystem for is left aside. */
@@ -136,11 +146,11 @@ const usesIdempotency = (definition: LambderApiDefinition): definition is Lambde
  * are adapters over this class; neither reimplements a step of it.
  *
  * ```
- * version floor → signature gate → restore payload → rate limits keyed per ip
- * → session (session mode) → idempotency replay → rate limits keyed per session
- * (and custom keys charged beforeGuards) → guards → input validation → guards
- * placed after it → rate limits keyed by a custom key → exec, inside the
- * idempotency claim → drain response headers → answer
+ * envelope check → version floor → signature gate → restore payload → rate
+ * limits keyed per ip → session (session mode) → idempotency replay → rate
+ * limits keyed per session (and custom keys charged beforeGuards) → guards →
+ * input validation → guards placed after it → rate limits keyed by a custom
+ * key → exec, inside the idempotency claim → drain response headers → answer
  * ```
  *
  * Each policy subsystem (rate limits, guards, idempotency) is its own
@@ -167,7 +177,7 @@ const usesIdempotency = (definition: LambderApiDefinition): definition is Lambde
 export class LambderApiPipeline<TCtx extends LambderApiCallContext<TSessionData>, TSessionData = any> {
     readonly apiVersion: string | null;
     readonly minApiVersion: string | null;
-    private readonly rateLimits = new LambderApiRateLimitsEngine();
+    private readonly rateLimits: LambderApiRateLimitsEngine;
     private readonly guards = new LambderApiGuardsEngine();
     private readonly idempotency: LambderApiIdempotencyEngine;
     private readonly maxRequestPayloadBytes: number;
@@ -191,14 +201,21 @@ export class LambderApiPipeline<TCtx extends LambderApiCallContext<TSessionData>
             }
             // A floor above the version this server stamps would refuse this
             // build's own clients, and the first symptom would be every tab
-            // reloading. The floor is clamped to apiVersion and the mistake
-            // reported once, at creation.
+            // reloading. Refused at creation, as every other misconfiguration
+            // is, rather than quietly read as some other floor than the one
+            // written: which of the two versions is wrong is the app's call.
             if(this.apiVersion !== null && compareDottedVersions(this.minApiVersion, this.apiVersion) > 0){
-                console.warn(`Lambder: minApiVersion ${this.minApiVersion} is above apiVersion ${this.apiVersion}; the floor is taken as ${this.apiVersion}.`);
-                this.minApiVersion = this.apiVersion;
+                throw new Error(
+                    `Lambder: minApiVersion ${this.minApiVersion} is above apiVersion ${this.apiVersion}, so it would refuse this build's own clients. ` +
+                    `Set minApiVersion to the oldest client version still served, at most ${this.apiVersion}.`
+                );
             }
         }
-        this.idempotency = new LambderApiIdempotencyEngine(this.apiVersion);
+        // One digest for both engines, so its subkey is derived once per
+        // instance.
+        const keyFieldDigest = new LambderKeyFieldDigest(options.atRestSecret ?? null);
+        this.rateLimits = new LambderApiRateLimitsEngine(keyFieldDigest);
+        this.idempotency = new LambderApiIdempotencyEngine(this.apiVersion, keyFieldDigest);
         this.apiSignatures = options.apiSignatures ?? null;
         this.maxRequestPayloadBytes = assertPositiveInteger(options.maxRequestPayloadBytes ?? DEFAULT_MAX_RESTORED_PAYLOAD_BYTES, "maxRequestPayloadBytes");
         this.onInvalidInput = options.onInvalidInput ?? null;
@@ -330,10 +347,15 @@ export class LambderApiPipeline<TCtx extends LambderApiCallContext<TSessionData>
     }
 
     /**
-     * The steps that come before anything may read the request: the version
-     * floor, the signature gate, then the compressed-payload restore that
-     * every later reader (a rate-limit key slice, a guard, the input schema)
-     * relies on.
+     * The steps that come before anything may read the request: the
+     * envelope check, the version floor, the signature gate, then the
+     * compressed-payload restore that every later reader (a rate-limit key
+     * slice, a guard, the input schema) relies on.
+     *
+     * A body that is no envelope (readApiEnvelope flagged it invalidEnvelope)
+     * carries nothing to call with, no payload, version or signature, and is
+     * answered with the invalid-payload refusal, here, so every adapter
+     * refuses it alike.
      *
      * The floor refuses a request naming a version below minApiVersion,
      * whatever its signature says: the lever for a change the digest cannot
@@ -355,6 +377,7 @@ export class LambderApiPipeline<TCtx extends LambderApiCallContext<TSessionData>
      * ready to dispatch.
      */
     async prepare(request: LambderApiRequest): Promise<LambderApiAnswer | null> {
+        if(request.invalidEnvelope !== undefined) return invalidPayloadAnswer(this.apiVersion, request.invalidEnvelope);
         if(this.minApiVersion !== null && request.version !== null && compareDottedVersions(request.version, this.minApiVersion) < 0){
             return versionExpiredAnswer(this.apiVersion);
         }
@@ -439,8 +462,12 @@ export class LambderApiPipeline<TCtx extends LambderApiCallContext<TSessionData>
         // Replay fast path: a completed idempotent request answers its stored
         // answer without burning the remaining rate-limit quota or re-running
         // guards. After the session read, because the replay scope is keyed
-        // per user, by the session's sessionKey.
-        const keyedCall = usesIdempotency(definition) ? await this.idempotency.resolveKeyedCall(definition.name, request, ctx) : null;
+        // per user, by the session's sessionKey. The guards engine says which
+        // posted guard inputs belong to the request's fingerprint, since only
+        // it knows which of them are single use.
+        const keyedCall = usesIdempotency(definition)
+            ? await this.idempotency.resolveKeyedCall(definition.name, request, ctx, this.guards.fingerprintedInputsOf(request, definition.guards))
+            : null;
         const replay = keyedCall ? await this.idempotency.findReplay(definition.name, keyedCall, trace) : null;
         if(replay) return replay;
 

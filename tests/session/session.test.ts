@@ -10,7 +10,7 @@
  * end without the AWS SDK mocked.
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, expectTypeOf, beforeEach, afterEach, vi } from 'vitest';
 import { z } from 'zod';
 import type { APIGatewayProxyEvent, Context } from 'aws-lambda';
 import { decodeBody, testPublicFiles } from '../helpers.js';
@@ -28,6 +28,7 @@ import Lambder, { initLambder } from '../../src/core/Lambder.js';
 import { apiCallPath } from '../../src/shared/wire/LambderApiNames.js';
 import type { LambderRenderContext, LambderSessionRenderContext } from '../../src/core/LambderContext.js';
 import { LambderAnswerHeaders } from '../../src/shared/wire/LambderAnswerHeaders.js';
+import { html } from '../../src/shared/LambderHtml.js';
 
 const nowSec = () => Math.floor(Date.now() / 1000);
 const webCrypto = new LambderWebCrypto();
@@ -116,7 +117,7 @@ describe('Session Type Safety', () => {
             },
             api: null, apiName: null, apiPayload: {},
             guardData: {}, headers: {}, rawBody: '', ip: '', header: () => undefined,
-            event: {} as any, lambdaContext: {} as any, eventFormat: 'v1' as const,
+            event: {} as any, lambdaContext: {} as any, eventFormat: 'v1' as const, arrivedVia: 'unverified' as const,
             responseHeaders: new LambderAnswerHeaders(), logList: [],
             sessionController: {} as any, rateLimit: async () => {}, isRateLimited: async () => false as const,
             setResponseHeader: () => {}, addResponseHeader: () => {}, setCookie: () => {}, clearCookie: () => {},
@@ -621,10 +622,15 @@ describe('LambderSessionController over the memory store', () => {
         const controller = controllerFor({ sessionToken: [token] });
         await controller.fetchSession();
 
-        await controller.endSessionAll();
+        expect(await controller.endSessionAll()).toBe(true);
 
         expect(ctx.session).toBeNull();
         expect(store.list().map((record) => record.sessionKey)).toEqual(['user-456']);
+    });
+
+    it('a read that asks for fresh data throws without dataRefresh, rather than answer data it did not renew', async () => {
+        const { token } = await plantRecord(store);
+        await expect(controllerFor({ sessionToken: [token] }).fetchSessionIfExists({ refreshData: true })).rejects.toThrow('dataRefresh is not configured');
     });
 
     it('a token cookie that is not the minted format is no session, and never a store read', async () => {
@@ -775,7 +781,7 @@ describe('Session Endpoint Protection', () => {
         guards: { signedIn: lambderGuard({ session: true, handler: () => {} }) },
     }).setGlobalErrorHandler((err, ctx, responseBuilder) => {
         if (ctx?.api) return responseBuilder.apiRefusal({ refusal: err.message });
-        return responseBuilder.html(`<h1>Error: ${err.message}</h1>`);
+        return responseBuilder.html(html`<h1>Error: ${err.message}</h1>`);
     });
 
     // With an apiName, `path` is the apiPath and the call goes to the endpoint's own path under it.
@@ -807,7 +813,7 @@ describe('Session Endpoint Protection', () => {
 
     describe('addSessionRoute', () => {
         it('answers 401 when no session exists', async () => {
-            lambder.addSessionRoute('/protected', async (ctx, resolver) => resolver.html('<h1>Protected Page</h1>'));
+            lambder.addSessionRoute('/protected', async (ctx, resolver) => resolver.html(html`<h1>Protected Page</h1>`));
             const response = await lambder.render(createMockEvent('/protected', 'GET', 'deadbeef:facade'), createMockContext());
             expect(response.statusCode).toBe(401);
             expect(decodeBody(response)).toContain('Session required');
@@ -815,7 +821,7 @@ describe('Session Endpoint Protection', () => {
 
         it('runs the handler with the session when the cookie names a live one', async () => {
             const { token } = await plantRecord(store);
-            lambder.addSessionRoute('/protected', async (ctx, resolver) => resolver.html(`<h1>Protected ${ctx.session.data.userId}</h1>`));
+            lambder.addSessionRoute('/protected', async (ctx, resolver) => resolver.html(html`<h1>Protected ${ctx.session.data.userId}</h1>`));
             const response = await lambder.render(createMockEvent('/protected', 'GET', token), createMockContext());
             expect(response.statusCode).toBe(200);
             expect(decodeBody(response)).toContain('Protected 123');
@@ -823,7 +829,7 @@ describe('Session Endpoint Protection', () => {
 
         it('answers 401 when the session is expired', async () => {
             const { token } = await plantRecord(store, { expiresAt: nowSec() - 3600, createdAt: nowSec() - 7200 });
-            lambder.addSessionRoute('/protected', async (ctx, resolver) => resolver.html('<h1>Protected Page</h1>'));
+            lambder.addSessionRoute('/protected', async (ctx, resolver) => resolver.html(html`<h1>Protected Page</h1>`));
             const response = await lambder.render(createMockEvent('/protected', 'GET', token), createMockContext());
             expect(response.statusCode).toBe(401);
         });
@@ -879,19 +885,19 @@ describe('Session Endpoint Protection', () => {
                 apiPath: '/api',
                 session: { store, sessionSalt: 'test-salt' },
                 guards: {
-                    orgPermission: lambderGuard({
+                    staffPermission: lambderGuard({
                         session: true,
                         handler: (ctx, _payload, permission: string) => ({ subject: ctx.session.sessionKey, permission }),
                     }),
                 },
             });
-            guarded.registerApiGroups(guarded.defineApiGroup('org', {
-                action: guarded.defineApi({ input: z.any(), output: z.any(), guards: { orgPermission: 'ORG.MANAGE' } },
-                    async (ctx) => ctx.guardData.orgPermission),
+            guarded.registerApiGroups(guarded.defineApiGroup('staff', {
+                action: guarded.defineApi({ input: z.any(), output: z.any(), guards: { staffPermission: 'ORDERS.REFUND' } },
+                    async (ctx) => ctx.guardData.staffPermission),
             }));
 
-            const response = await guarded.render(createMockEvent('/api', 'POST', token, 'org.action'), createMockContext());
-            expect(JSON.parse(decodeBody(response) || '{}').payload).toEqual({ subject: 'user-123', permission: 'ORG.MANAGE' });
+            const response = await guarded.render(createMockEvent('/api', 'POST', token, 'staff.action'), createMockContext());
+            expect(JSON.parse(decodeBody(response) || '{}').payload).toEqual({ subject: 'user-123', permission: 'ORDERS.REFUND' });
         });
 
         it('the named opt-out guard under requireApiGuards lets the handler run on the session alone', async () => {
@@ -900,11 +906,11 @@ describe('Session Endpoint Protection', () => {
                 files: new LambderLocalFileSource({ root: '/public' }),
                 apiPath: '/api',
                 session: { store, sessionSalt: 'test-salt' },
-                guards: { sessionOnly: lambderGuard({ session: true, handler: () => {} }) },
+                guards: { signedIn: lambderGuard({ session: true, handler: () => {} }) },
                 requireApiGuards: true,
             });
             strict.registerApiGroups(strict.defineApiGroup('me', {
-                session: strict.defineApi({ input: z.any(), output: z.any(), guards: 'sessionOnly' },
+                session: strict.defineApi({ input: z.any(), output: z.any(), guards: 'signedIn' },
                     async (ctx) => ({ userId: ctx.session.data.userId })),
             }));
 
@@ -959,14 +965,14 @@ describe('Session Endpoint Protection', () => {
 
         it('a rotation after the session ended mints nothing and sets no cookies', async () => {
             const { token } = await plantRecord(store);
-            lambder.registerApiGroups(lambder.defineApiGroup('org', {
+            lambder.registerApiGroups(lambder.defineApiGroup('store', {
                 switch: lambder.defineApi({ input: z.any(), output: z.any(), guards: 'signedIn' }, async (ctx) => {
                     await store.delete(ctx.session.sessionKeyHash, ctx.session.secretHash);
                     await ctx.sessionController.regenerateSession();
                     return { switched: true };
                 }),
             }));
-            const response = await lambder.render(createMockEvent('/api', 'POST', token, 'org.switch'), createMockContext());
+            const response = await lambder.render(createMockEvent('/api', 'POST', token, 'store.switch'), createMockContext());
             expect(JSON.parse(decodeBody(response) || '{}').sessionExpired).toBe(true);
             expect(response.multiValueHeaders?.['Set-Cookie'] ?? []).toEqual([]);
             expect(store.size).toBe(0);
@@ -1159,6 +1165,45 @@ describe('LambderSessionManager dataRefresh', () => {
         expect(refresh).toHaveBeenCalledOnce();
         expect(refreshed?.data).toEqual({ role: 'admin' });
         expect(store.list()[0]!.data).toEqual({ role: 'admin' });
+    });
+
+    it('renews fresh data on a read that asks for it, running the callback once and writing once', async () => {
+        const refresh = vi.fn(async () => ({ role: 'admin' }));
+        const manager = makeManager(refresh);
+        const { token } = await plantRecord(store, { data: { role: 'user' }, dataExpiresAt: nowSec() + 600 });
+        const update = vi.spyOn(store, 'update');
+
+        const session = await manager.renewSession((await manager.lookupSession(token))!, { refreshData: true });
+
+        expect(refresh).toHaveBeenCalledOnce();
+        expect(update).toHaveBeenCalledOnce();
+        expect(session?.data).toEqual({ role: 'admin' });
+        expect(session?.dataExpiresAt).toBeGreaterThanOrEqual(nowSec() + 599);
+        expect(session?.dataVersion).toBe(1);
+        expect(store.list()[0]).toMatchObject({ data: { role: 'admin' }, dataVersion: 1 });
+        vi.restoreAllMocks();
+    });
+
+    it('writes a renewal a read asked for only over the data it was computed from', async () => {
+        let release: () => void = () => {};
+        let refreshStarted: () => void = () => {};
+        const gate = new Promise<void>((resolve) => { release = resolve; });
+        const started = new Promise<void>((resolve) => { refreshStarted = resolve; });
+        const manager = makeManager(async () => { refreshStarted(); await gate; return { role: 'from-refresh' }; });
+        const { record, token } = await plantRecord(store, { data: { role: 'user' }, dataExpiresAt: nowSec() + 600 });
+
+        const reading = manager.renewSession((await manager.lookupSession(token))!, { refreshData: true });
+        await started;
+        await manager.updateSessionData(record, { role: 'chosen-by-the-app' });
+        release();
+
+        expect((await reading)?.data).toEqual({ role: 'from-refresh' });
+        expect(store.list()[0]!.data).toEqual({ role: 'chosen-by-the-app' });
+    });
+
+    it('refuses a read that asks for fresh data when dataRefresh is not configured', async () => {
+        const { record } = await plantRecord(store);
+        await expect(makePlainManager().renewSession(record, { refreshData: true })).rejects.toThrow('dataRefresh is not configured');
     });
 
     it('refreshSessionData throws when dataRefresh is not configured', async () => {
@@ -1401,6 +1446,75 @@ describe('LambderSessionManager dataSchema', () => {
         expect(store.list().find((record) => record.sessionKey === 'user-2')!.data).toEqual({ name: 'Linus' });
     });
 
+    describe('regenerateSession', () => {
+        it('carries a record whose data has a key the schema strips as stored, and hands the request the schema\'s reading', async () => {
+            // The request holds the stripped data and the record the full
+            // data: compared with each other, every rotation would see a
+            // write that never happened, and hand the request the stored keys.
+            const manager = new LambderSessionManager({ store, sessionSalt: SALT, dataSchema: roleData });
+            const { token } = await plantRecord(store, { data: { role: 'user', teamId: 't1', legacyFlag: true } });
+            const session = (await readSession(manager, token))!;
+            const update = vi.spyOn(store, 'update');
+
+            const rotated = (await manager.regenerateSession(session))!;
+
+            expect(update).not.toHaveBeenCalled();
+            expect(rotated.session.data).toEqual({ role: 'user', teamId: 't1' });
+            expect(store.list()).toHaveLength(1);
+            expect(store.list()[0]!.data).toEqual({ role: 'user', teamId: 't1', legacyFlag: true });
+            expect((await readSession(manager, rotated.sessionToken))?.data).toEqual({ role: 'user', teamId: 't1' });
+            vi.restoreAllMocks();
+        });
+
+        it('hands the request the schema\'s reading of data another request wrote during the rotation', async () => {
+            const manager = new LambderSessionManager({ store, sessionSalt: SALT, dataSchema: roleData });
+            const { token } = await plantRecord(store, { data: { role: 'user', teamId: 't1', legacyFlag: true } });
+            const session = (await readSession(manager, token))!;
+            const remove = store.delete.bind(store);
+            vi.spyOn(store, 'delete').mockImplementationOnce(async (sessionKeyHash, secretHash) => {
+                await store.update(sessionKeyHash, secretHash, { data: { role: 'admin', teamId: 't1', legacyFlag: true } });
+                return await remove(sessionKeyHash, secretHash);
+            });
+
+            const rotated = (await manager.regenerateSession(session))!;
+
+            expect(rotated.session.data).toEqual({ role: 'admin', teamId: 't1' });
+            expect(rotated.session.dataVersion).toBe(store.list()[0]!.dataVersion);
+            expect(store.list()[0]!.data).toEqual({ role: 'admin', teamId: 't1', legacyFlag: true });
+            vi.restoreAllMocks();
+        });
+
+        it('rotates a session whose schema transforms, carrying the shape the record holds', async () => {
+            const renamed = z.object({ name: z.string() }).transform(({ name }) => ({ displayName: name }));
+            const manager = new LambderSessionManager({ store, sessionSalt: SALT, dataSchema: renamed });
+            const { token } = await plantRecord(store, { data: { name: 'Grace' } });
+            const session = (await readSession(manager, token))!;
+
+            const rotated = (await manager.regenerateSession(session))!;
+
+            expect(rotated.session.data).toEqual({ displayName: 'Grace' });
+            expect(store.list()[0]!.data).toEqual({ name: 'Grace' });
+            expect((await readSession(manager, rotated.sessionToken))?.data).toEqual({ displayName: 'Grace' });
+        });
+
+        it('keeps the request on the data it held when the record holds data the schema refuses, and leaves that to the next read', async () => {
+            // Written by something that did not check it (an older deploy);
+            // carried as stored, it is the next read's to refresh.
+            const refresh = vi.fn(async () => ({ role: 'user' as const, teamId: 't9' }));
+            const manager = new LambderSessionManager({ store, sessionSalt: SALT, dataSchema: roleData, dataRefresh: { ttlSeconds: 600, refresh } });
+            const { record, token } = await plantRecord(store, { data: { role: 'user', teamId: 't1' }, dataExpiresAt: nowSec() + 600 });
+            const session = (await readSession(manager, token))!;
+            await store.update(record.sessionKeyHash, record.secretHash, { data: { role: 'owner' } });
+
+            const rotated = (await manager.regenerateSession(session))!;
+
+            expect(rotated.session.data).toEqual({ role: 'user', teamId: 't1' });
+            expect(store.list()[0]!.data).toEqual({ role: 'owner' });
+            expect((await readSession(manager, rotated.sessionToken))?.data).toEqual({ role: 'user', teamId: 't9' });
+            expect(refresh).toHaveBeenCalledOnce();
+        });
+    });
+
     it('refuses dataRefresh without a schema, at compile time and at construction', () => {
         // @ts-expect-error dataRefresh needs dataSchema
         expect(() => new LambderSessionManager({ store, sessionSalt: SALT, dataRefresh: { ttlSeconds: 600, refresh: async (s) => s.data } }))
@@ -1460,6 +1574,31 @@ describe('LambderSessionController dataRefresh', () => {
         expect(ctx.session).toBeNull();
     });
 
+    it('fetchSessionIfExists and fetchSession renew the data on a read that asks for it, the callback and the write once', async () => {
+        // A page that wants its data fresh reads it fresh in one call: a read
+        // and then refreshSessionData would run the callback twice and write
+        // twice whenever the data was due.
+        const refresh = vi.fn(async () => ({ role: 'admin' }));
+        const { token } = await plantRecord(store, { data: { role: 'user' }, dataExpiresAt: nowSec() - 10 });
+        const { controller, ctx } = makeController(refresh, token);
+        const update = vi.spyOn(store, 'update');
+
+        const session = await controller.fetchSessionIfExists({ refreshData: true });
+
+        expect(refresh).toHaveBeenCalledOnce();
+        expect(update).toHaveBeenCalledOnce();
+        expect(session?.data).toEqual({ role: 'admin' });
+        expect(ctx.session?.data).toEqual({ role: 'admin' });
+
+        // Fresh now, and renewed all the same when the read asks.
+        refresh.mockResolvedValueOnce({ role: 'owner' });
+        expect((await controller.fetchSession({ refreshData: true })).data).toEqual({ role: 'owner' });
+        expect(refresh).toHaveBeenCalledTimes(2);
+        expect(update).toHaveBeenCalledTimes(2);
+        expect(store.list()[0]!.data).toEqual({ role: 'owner' });
+        vi.restoreAllMocks();
+    });
+
     it('fetchSessionIfExists rethrows dataRefresh failures instead of reporting no session', async () => {
         const { token } = await plantRecord(store, { dataExpiresAt: nowSec() - 10 });
         const { controller } = makeController(async () => { throw new Error('db down'); }, token);
@@ -1490,7 +1629,9 @@ describe('LambderSessionManager expireSessionDataAllByKey', () => {
         await manager.createSession('user-123', {});
         const other = await manager.createSession('user-999', {});
 
-        await expect(manager.expireSessionDataAllByKey('user-123')).resolves.toBe(true);
+        await expect(manager.expireSessionDataAllByKey('user-123')).resolves.toBeUndefined();
+        // Nothing to answer: every session listed is marked, or the store's failure propagates.
+        expectTypeOf(manager.expireSessionDataAllByKey).returns.toEqualTypeOf<Promise<void>>();
 
         for(const record of store.list()){
             if(record.sessionKey === 'user-123') expect(record.dataExpiresAt).toBeLessThanOrEqual(nowSec());
@@ -1503,7 +1644,7 @@ describe('LambderSessionManager expireSessionDataAllByKey', () => {
         await manager.createSession('user-123', {});
         const listed = store.listSecretHashes.bind(store);
         vi.spyOn(store, 'listSecretHashes').mockImplementation(async (hash) => { const hashes = await listed(hash); store.reset(); return hashes; });
-        await expect(manager.expireSessionDataAllByKey('user-123')).resolves.toBe(true);
+        await expect(manager.expireSessionDataAllByKey('user-123')).resolves.toBeUndefined();
 
         vi.spyOn(store, 'update').mockRejectedValue(new Error('store down'));
         vi.spyOn(store, 'listSecretHashes').mockResolvedValue(['x']);
@@ -1610,6 +1751,39 @@ describe('Rotation racing "log out everywhere"', () => {
 
         // Run again once the rotations stop, it clears what was left.
         expect(await manager.deleteSessionAll(current)).toBe(true);
+        expect(store.size).toBe(0);
+        vi.restoreAllMocks();
+    });
+
+    it('the controller hands that answer on from endSessionAll and deleteSessionAllByKey', async () => {
+        // A password change has to be able to tell that a stolen session
+        // rotating in a loop outlived the delete, so the answer reaches it.
+        const store = new InterleavingStore();
+        const manager = new LambderSessionManager<RaceData>({ store, sessionSalt: SALT });
+        const own = await manager.createSession('user-1', { userId: 'user-1' });
+        let stolen = (await manager.createSession('user-1', { userId: 'user-1' })).session;
+        const ctx = createApiCallContext<RaceData>();
+        const controller = new LambderSessionController<RaceData>({
+            manager, tokenCookieKey: 'sessionToken', csrfCookieKey: 'csrfToken', ctx,
+            request: { host: 'localhost', cookies: { sessionToken: [own.sessionToken] }, csrfToken: own.csrfToken },
+        });
+        await controller.fetchSession();
+        const rotateAfterEveryList = async () => {
+            const rotated = await manager.regenerateSession(stolen);
+            if(rotated) stolen = rotated.session;
+            store.afterNextList = rotateAfterEveryList;
+        };
+        store.afterNextList = rotateAfterEveryList;
+        vi.spyOn(console, 'error').mockImplementation(() => {});
+
+        expect(await controller.endSessionAll()).toBe(false);
+        expect(ctx.session).toBeNull();
+        expect(await controller.deleteSessionAllByKey('user-1')).toBe(false);
+        expect(store.size).toBe(1);
+
+        // Once the rotations stop, running it again by key clears what was left.
+        store.afterNextList = null;
+        expect(await controller.deleteSessionAllByKey('user-1')).toBe(true);
         expect(store.size).toBe(0);
         vi.restoreAllMocks();
     });

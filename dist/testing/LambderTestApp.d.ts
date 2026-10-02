@@ -10,6 +10,13 @@ import type { LambderSessionStore } from "../shared/contracts/LambderSessionStor
 import { LAMBDER_BACKEND_SWAP, LAMBDER_CRASH_WATCH } from "../shared/util/LambderTestingDoors.js";
 import type { LambderApiContractShape } from "../shared/wire/LambderApiContract.js";
 import type { LambderCallSummary } from "../core/LambderCallSummary.js";
+import { LambderMemoryCache } from "../stores/LambderMemoryCache.js";
+import { LambderMemoryOneShotSecretStore } from "../stores/LambderMemoryOneShotSecretStore.js";
+import { LambderMemoryUploadBucket } from "../stores/LambderMemoryUploadBucket.js";
+import type { LambderDdbCache } from "../stores/LambderDdbCache.js";
+import type { LambderDdbOneShotSecretStore } from "../stores/LambderDdbOneShotSecretStore.js";
+import type { LambderS3UploadBucket } from "../stores/LambderS3UploadBucket.js";
+import type { LambderMockApp } from "../mock/LambderMockApp.js";
 import { LambderTestVisitor, type LambderTestVisitorArgs, type LambderTestVisitorOptions } from "./LambderTestVisitor.js";
 /**
  * What a test app may be told. Nothing is required: `lambderTestApp(lambder)`
@@ -17,7 +24,9 @@ import { LambderTestVisitor, type LambderTestVisitorArgs, type LambderTestVisito
  *
  * The stores sit where create() takes them (`session.store`,
  * `rateLimits.limiter`, `idempotency.store`, `files`), naming only the part a
- * test replaces; everything else the app configured there stays in force.
+ * test replaces; everything else the app configured there stays in force. One
+ * given for a subsystem the app was created without throws, naming the
+ * option.
  */
 export type LambderTestAppOptions = {
     /** The host visitors browse unless they name their own. Default: "localhost". An app that scopes its session cookie to a domain needs a host under it. */
@@ -44,6 +53,16 @@ export type LambderTestAppOptions = {
     };
     /** Default: the app's own source, which suits one that reads a local folder. Pass a LambderLocalFileSource over fixtures for an app whose production source is S3 or HTTP. */
     files?: LambderFileSource;
+    /**
+     * The mock apps that answer the app's invoke callers, by the function
+     * name each caller was built with. A LambderInvokeCaller built without a
+     * transport is answered by the mock its function has here, through
+     * lambderMockInvokeTransport; with none, every call it makes fails,
+     * naming the function. Default: none.
+     */
+    invokeMocks?: {
+        [functionName: string]: Pick<LambderMockApp<any>, "handleRequest">;
+    };
 };
 /**
  * A Lambder instance as a test app takes it: any instance, read for its
@@ -72,6 +91,15 @@ export type LambderTestedInstance<TSessionData, TContract> = Pick<Lambder<any, a
  * What the app reaches on its own (its database, a mailer) is the app's to
  * replace.
  *
+ * The Lambder classes an app builds itself, beside the instance, are put
+ * under test too, wherever they were built: each LambderDdbCache,
+ * LambderDdbOneShotSecretStore and LambderS3UploadBucket answers from a
+ * memory twin of its own (see memoryTwinOf), and each LambderInvokeCaller
+ * built without a transport from the mock app `invokeMocks` names for its
+ * function. Those classes register themselves as they are constructed, so
+ * one built before the test app and one built after (in a handler, say) are
+ * both reached.
+ *
  * The sibling of LambderMockApp, which serves a contract from mock handlers:
  * the same verbs (`signIn`, `signOut`, `expireSessionData`, `reset`) over the
  * real handlers.
@@ -82,6 +110,8 @@ export type LambderTestedInstance<TSessionData, TContract> = Pick<Lambder<any, a
  *
  * One test app per instance: a second one puts its own stores under the same
  * instance and takes over its crash watch, so the first stops seeing either.
+ * The app's own classes are the process's rather than an instance's, so the
+ * test app created last puts its twins under every one of them.
  */
 export declare class LambderTestApp<TContract extends LambderApiContractShape = any, TSessionData = any> {
     /** The instance's handler: what `event()` and every visitor call. */
@@ -98,6 +128,8 @@ export declare class LambderTestApp<TContract extends LambderApiContractShape = 
     private readonly wiring;
     /** The memory stores this test app made itself, which reset() empties. One the test supplied is the test's: nothing here knows what else holds it. */
     private readonly ownStores;
+    /** The twin under each of the app's own stores, by the store, for memoryTwinOf and reset. */
+    private readonly memoryTwins;
     private visitorCount;
     private resetCount;
     private readonly crashList;
@@ -126,6 +158,31 @@ export declare class LambderTestApp<TContract extends LambderApiContractShape = 
      * have been handed, collected here instead of written to stdout.
      */
     get callSummaries(): readonly LambderCallSummary[];
+    /**
+     * Fails every test that leaves a crash behind: installs, through the
+     * runner's own `afterEach`, a check that throws when `crashes` is not
+     * empty, listing each crash with its stack. The crashes it reports are
+     * forgotten, so the next test starts clean whether or not it resets. A
+     * test that provokes a crash on purpose asserts on `crashes` and ends
+     * with `reset()`.
+     *
+     * ```typescript
+     * const app = lambderTestApp(lambder);
+     * app.assertNoCrashesAfterEach(afterEach);
+     * ```
+     */
+    assertNoCrashesAfterEach(afterEach: (check: () => void) => unknown): void;
+    /**
+     * The memory twin under one of the app's own stores, to seed, inspect or
+     * drive: what the app's LambderDdbCache, LambderDdbOneShotSecretStore or
+     * LambderS3UploadBucket answers from under this test app. An upload
+     * test hands the bucket twin's handleStorageRequest the request a
+     * client would send to the ticket's URL. Throws for anything this test
+     * app put no twin under.
+     */
+    memoryTwinOf(cache: LambderDdbCache): LambderMemoryCache;
+    memoryTwinOf(store: LambderDdbOneShotSecretStore): LambderMemoryOneShotSecretStore;
+    memoryTwinOf(bucket: LambderS3UploadBucket): LambderMemoryUploadBucket;
     /** The session manager, for tests that inspect or manipulate sessions directly. Throws when the app has no sessions. */
     get sessionManager(): LambderSessionManager<TSessionData>;
     /**
@@ -140,8 +197,8 @@ export declare class LambderTestApp<TContract extends LambderApiContractShape = 
      * no login endpoint has to exist or be called.
      *
      * ```typescript
-     * const admin = await app.signIn("user:ada", { userId: "ada", role: "admin" });
-     * expect(await admin.api("org.rename", { name })).toEqual({ ok: true });
+     * const owner = await app.signIn("user:ada", { userId: "ada", role: "owner" });
+     * expect(await owner.api("store.rename", { name })).toEqual({ ok: true });
      * ```
      */
     signIn<TProvidedGuards extends string = never>(sessionKey: string, data: TSessionData, ...[options]: LambderTestVisitorArgs<LambderTestVisitorOptions<TContract, TProvidedGuards> & {
@@ -168,10 +225,11 @@ export declare class LambderTestApp<TContract extends LambderApiContractShape = 
     event(event: unknown, context?: Partial<Context>): Promise<unknown>;
     /**
      * Rewinds what accumulated: sessions, rate-limit counters and replay
-     * records in the stores this test app made, the crashes and call
-     * summaries it recorded, and the cookies of every visitor it created
-     * (each empties its jar the next time it is used). For a beforeEach. The
-     * app's own data (its database) is the app's to rewind.
+     * records in the stores this test app made, the memory twins under the
+     * app's own stores, the crashes and call summaries it recorded, and the
+     * cookies of every visitor it created (each empties its jar the next
+     * time it is used). For a beforeEach. The app's own data (its database)
+     * is the app's to rewind, and so are the invoke mocks.
      */
     reset(): void;
 }

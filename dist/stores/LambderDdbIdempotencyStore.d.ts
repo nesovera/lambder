@@ -75,8 +75,9 @@ export declare class LambderDdbIdempotencyStore implements LambderIdempotencySto
     /**
      * A stored item's response body: plain (`body`) or Brotli (`bodyBr` +
      * `bodyBytes`). The stored length is the decompression budget, so it is
-     * checked here the way the headers are: a record declaring more than this
-     * store ever writes is unusable, not an invitation to allocate it.
+     * checked against the ceiling the way the headers are checked: a record
+     * declaring more than this store ever writes is unusable, not an
+     * invitation to allocate it.
      */
     private static readItemBody;
     /** A stored answer as the engine reads it, with every field of the record checked rather than cast. */
@@ -113,8 +114,9 @@ export declare class LambderDdbIdempotencyStore implements LambderIdempotencySto
      * compression off, stay plain. Returns:
      *
      * - "stored": the record is in place and will replay.
-     * - "too-large": even compressed, the body exceeds the item budget;
-     *   nothing was written and the caller should release the claim.
+     * - "too-large": the body is past the store's ceiling, or even
+     *   compressed it exceeds the item budget; nothing was written and the
+     *   caller should release the claim.
      * - "lost": the ownerToken no longer matches, i.e. the claim expired and
      *   a retry took the scope over; nothing was written.
      */

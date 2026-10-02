@@ -18,6 +18,8 @@ import type { LambderRateLimiter, LambderRateLimitPolicy } from '../../src/share
 import { lambderGuard, lambderRateLimitKey } from '../../src/core/LambderPolicyBuilders.js';
 import { LambderResponse } from '../../src/core/LambderResponse.js';
 import { canonicalJson } from '../../src/shared/util/canonicalJson.js';
+import { joinKeyFields } from '../../src/shared/util/joinKeyFields.js';
+import { lambderTestApp } from '../../src/testing.js';
 import { createApiEvent as createEnvelopeEvent, createMockContext, MemoryDdb, testPublicFiles } from '../helpers.js';
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
@@ -27,6 +29,20 @@ const createApiEvent = (apiName: string, payload?: any, extra: Record<string, an
 const testSchema = {
     input: z.object({ value: z.string() }),
     output: z.object({ result: z.string() }),
+};
+
+/**
+ * A caller's field as an app with no session salt writes it into a store key,
+ * computed the way a reader of the table would: the plain SHA-256 of the kind
+ * and the value joined.
+ */
+const unkeyedFieldDigest = (kind: string, value: string): string =>
+    `${kind}:${nodeCrypto.createHash('sha256').update(joinKeyFields(kind, value), 'utf8').digest('hex')}`;
+
+/** The same field in an app with a session salt: an HMAC under the subkey HKDF derives from the salt for this purpose alone. */
+const keyedFieldDigest = (salt: string, kind: string, value: string): string => {
+    const subkey = Buffer.from(nodeCrypto.hkdfSync('sha256', salt, Buffer.alloc(0), 'lambder/key-field-digest', 32));
+    return `${kind}:${nodeCrypto.createHmac('sha256', subkey).update(joinKeyFields(kind, value), 'utf8').digest('hex')}`;
 };
 
 const makeLimiter = (client: MemoryDdb) =>
@@ -72,7 +88,7 @@ describe('API policies - registration assertions', () => {
         expect(() => initLambder().create({
             files: testPublicFiles(),
             apiPath: '/api',
-            guards: { sessionOnly: { handler: async () => {} } },
+            guards: { signedIn: { handler: async () => {} } },
             requireApiGuards: true,
             maxResponseBytes: 100,
         })).not.toThrow();
@@ -402,13 +418,17 @@ describe('API policies - rate limiting', () => {
         expect((await call()).statusCode).toBe(200);
         const third = await call();
         expect(third.statusCode).toBe(429);
-        // The default is the standard refusal shape, so refusalHandlers
-        // that read .content work for rate limits like for refuse().
-        expect(JSON.parse(third.body || '{}').refusal).toEqual({ type: 'warning', code: 'lambder/rate-limited', content: 'Too many requests. Please try again later.' });
         // Retry-After is the exceeded window's reset, which the fixed window already knows.
         const retryAfter = Number(third.multiValueHeaders?.['Retry-After']?.[0]);
         expect(retryAfter).toBeGreaterThanOrEqual(1);
         expect(retryAfter).toBeLessThanOrEqual(60);
+        // The default is the standard refusal shape, so refusalHandlers that
+        // read .content work for rate limits like for refuse(), and its data
+        // names the policy and the same wait the header gives.
+        expect(JSON.parse(third.body || '{}').refusal).toEqual({
+            type: 'warning', code: 'lambder/rate-limited', content: 'Too many requests. Please try again later.',
+            data: { policy: 'tight', retryAfterSeconds: retryAfter },
+        });
         expect(handlerRuns).toBe(2);
     });
 
@@ -435,16 +455,20 @@ describe('API policies - rate limiting', () => {
         expect((await call('b@x.com')).statusCode).toBe(200);   // different bucket
         const blocked = await call('a@x.com');
         expect(blocked.statusCode).toBe(429);
-        // A policy's own message inherits the framework code.
-        expect(JSON.parse(blocked.body || '{}').refusal).toEqual({ type: 'warning', code: LAMBDER_REFUSAL_CODES.rateLimited, content: 'Too many attempts for this address.' });
+        // A policy's own message inherits the framework code and data.
+        expect(JSON.parse(blocked.body || '{}').refusal).toEqual({
+            type: 'warning', code: LAMBDER_REFUSAL_CODES.rateLimited, content: 'Too many attempts for this address.',
+            data: { policy: 'perEmail', retryAfterSeconds: expect.any(Number) },
+        });
     });
 
-    it('bounds an over-long custom key, so a store with a key limit still meters it', async () => {
+    it('writes a custom key as its digest at any length, so no email reaches the table and a store with a key limit still meters it', async () => {
         // A store refuses a key it cannot take by throwing, and a throw is
         // what failOpen swallows: unbounded, a 3,000-character payload field
         // would turn the whole policy off in silence, every window of it, with
-        // the request going through unmetered. The bound folds the variable
-        // half into its own digest instead, so the counters stay distinct.
+        // the request going through unmetered. And a short one written as it
+        // is puts the caller's email in the table. The digest answers both,
+        // and keeps distinct callers on distinct counters.
         const trackerKeys: string[] = [];
         const counters = new LambderMemoryRateLimiter();
         const recording: LambderRateLimiter = {
@@ -477,13 +501,14 @@ describe('API policies - rate limiting', () => {
         expect((await call(longB)).statusCode).toBe(200);
         expect((await call('short@x.com')).statusCode).toBe(200);
 
-        // The api and policy names stay readable around the folded half, the
-        // two long keys stay distinct, and a key that fits is untouched.
-        expect(trackerKeys[0]).toMatch(/^api\|test\.code\|perEmail\|custom:h:[0-9a-f]{64}$/);
+        // The api and policy names stay readable around the digest, the two
+        // long keys stay distinct, and a short key is digested as well.
+        expect(trackerKeys[0]).toBe(joinKeyFields('api', 'test.code', 'perEmail', unkeyedFieldDigest('custom', longA)));
         expect(trackerKeys[0]).toBe(trackerKeys[1]);
         expect(trackerKeys[2]).not.toBe(trackerKeys[0]);
-        expect(trackerKeys[3]).toBe('api|test.code|perEmail|custom:short@x.com');
-        expect(Math.max(...trackerKeys.map((key) => key.length))).toBeLessThan(1024);
+        expect(trackerKeys[3]).toBe(joinKeyFields('api', 'test.code', 'perEmail', unkeyedFieldDigest('custom', 'short@x.com')));
+        expect(trackerKeys.filter((key) => key.includes('@'))).toEqual([]);
+        expect(new Set(trackerKeys.map((key) => key.length)).size).toBe(1);
     });
 
     it('bounds a custom key by its escaped length, so one made of separators still fits the table', async () => {
@@ -512,10 +537,49 @@ describe('API policies - rate limiting', () => {
             expect((await call()).statusCode).toBe(200);
             expect((await call()).statusCode).toBe(429);
             expect(errors).not.toHaveBeenCalled();
-            expect([...client.items.values()].map((item) => item.pk?.S)).toEqual([expect.stringMatching(/^RL#api\|test\.code\|perEmail\|custom:h:[0-9a-f]{64}$/)]);
+            expect([...client.items.values()].map((item) => item.pk?.S)).toEqual([expect.stringMatching(/^RL#api\|test\.code\|perEmail\|custom:[0-9a-f]{64}$/)]);
         } finally {
             errors.mockRestore();
         }
+    });
+
+    it('writes the address, the session key and a custom key as digests keyed by the session salt, so a table read names no caller', async () => {
+        const trackerKeys: string[] = [];
+        const counters = new LambderMemoryRateLimiter();
+        const recording: LambderRateLimiter = {
+            isRateLimited: async (trackerKey: string, policy: LambderRateLimitPolicy) => {
+                trackerKeys.push(trackerKey);
+                return await counters.isRateLimited(trackerKey, policy);
+            },
+        };
+        const app = initLambder<{ userId: string }>().create({
+            apiPath: '/api',
+            session: { store: new LambderMemorySessionStore(), sessionSalt: 'shop-salt' },
+            guards: { signedIn: { session: true, handler: async () => {} } },
+            rateLimits: {
+                limiter: recording,
+                policies: {
+                    perIp: { perMin: 10, per: 'ip' },
+                    perUser: { perMin: 10, per: 'session' },
+                    perEmail: { perMin: 10, per: lambderRateLimitKey({ apiInput: z.object({ email: z.string() }), handler: (_ctx, { email }) => email }) },
+                },
+            },
+        });
+        const lambder = app.registerApiGroups(app.defineApiGroup('account', {
+            invite: app.defineApi({ input: z.object({ email: z.string() }), output: z.object({ ok: z.boolean() }), guards: 'signedIn', rateLimit: ['perIp', 'perUser', 'perEmail'] },
+                async () => ({ ok: true })),
+        }));
+        const testApp = lambderTestApp(lambder, { rateLimits: { limiter: recording } });
+        const ada = await testApp.signIn('ada@example.com', { userId: 'ada' });
+
+        await ada.api('account.invite', { email: 'bea@example.com' });
+
+        expect(trackerKeys).toEqual([
+            joinKeyFields('api', 'account.invite', 'perIp', keyedFieldDigest('shop-salt', 'ip', ada.clientIp)),
+            joinKeyFields('api', 'account.invite', 'perUser', keyedFieldDigest('shop-salt', 'session', 'ada@example.com')),
+            joinKeyFields('api', 'account.invite', 'perEmail', keyedFieldDigest('shop-salt', 'custom', 'bea@example.com')),
+        ]);
+        expect(trackerKeys.filter((key) => key.includes('@') || key.includes(ada.clientIp))).toEqual([]);
     });
 
     it('a policy message keeps its own words under the framework\'s code, and may not name a code of its own', async () => {
@@ -529,7 +593,10 @@ describe('API policies - rate limiting', () => {
 
         const call = () => lambder.render(createApiEvent('test.worded', { value: 'x' }), createMockContext());
         await call();
-        expect(JSON.parse((await call()).body || '{}').refusal).toEqual({ type: 'warning', title: 'Easy', content: 'Slow down.', code: 'lambder/rate-limited' });
+        expect(JSON.parse((await call()).body || '{}').refusal).toEqual({
+            type: 'warning', title: 'Easy', content: 'Slow down.', code: 'lambder/rate-limited',
+            data: { policy: 'worded', retryAfterSeconds: expect.any(Number) },
+        });
 
         // A code there would read as one the app chose for clients to branch
         // on, when every rate limit reaches them as lambder/rate-limited.
@@ -559,7 +626,8 @@ describe('API policies - rate limiting', () => {
         expect((await call()).statusCode).toBe(200);
         const second = await call();
         expect(second.statusCode).toBe(429);
-        expect(JSON.parse(second.body || '{}').refusal).toEqual({ type: 'error', code: 'lambder/rate-limited', content: 'strict says no' });
+        // The data names the policy that refused, not the first one listed.
+        expect(JSON.parse(second.body || '{}').refusal).toEqual({ type: 'error', code: 'lambder/rate-limited', content: 'strict says no', data: { policy: 'strict', retryAfterSeconds: expect.any(Number) } });
     });
 
     it('fails open by default when the limiter is down, says so once, and never prints the tracker key', async () => {
@@ -747,7 +815,7 @@ describe('API policies - rate limiting', () => {
         // perMin raised to 5, but the policy's perHour: 2 still applies (merge, not replace).
         const third = await call('test.tuned');
         expect(third.statusCode).toBe(429);
-        expect(JSON.parse(third.body || '{}').refusal).toEqual({ type: 'warning', code: 'lambder/rate-limited', content: 'tuned says no' });
+        expect(JSON.parse(third.body || '{}').refusal).toEqual({ type: 'warning', code: 'lambder/rate-limited', content: 'tuned says no', data: { policy: 'lookup', retryAfterSeconds: expect.any(Number) } });
         // The plain API keeps the declared perMin: 1 on its own counter.
         expect((await call('test.plain')).statusCode).toBe(200);
         expect((await call('test.plain')).statusCode).toBe(429);
@@ -766,7 +834,7 @@ describe('API policies - rate limiting', () => {
         expect((await lambder.render(createApiEvent('test.second', { value: 'x' }), createMockContext())).statusCode).toBe(200);
         const blocked = await lambder.render(createApiEvent('test.first', { value: 'x' }), createMockContext());
         expect(blocked.statusCode).toBe(429);
-        expect(JSON.parse(blocked.body || '{}').refusal).toEqual({ type: 'error', code: 'lambder/rate-limited', content: 'first is closed' });
+        expect(JSON.parse(blocked.body || '{}').refusal).toEqual({ type: 'error', code: 'lambder/rate-limited', content: 'first is closed', data: { policy: 'shared', retryAfterSeconds: expect.any(Number) } });
     });
 
     it('stacked policies charge every counter checked before the refusing one (attempts count)', async () => {
@@ -793,15 +861,15 @@ describe('API policies - rate limiting', () => {
 describe('API policies - requireApiGuards', () => {
     /** An app's authorization vocabulary, plus the named opt-outs. */
     const guards = {
-        orgPermission: lambderGuard({
+        staffPermission: lambderGuard({
             session: true,
             handler: (_ctx, _payload, permission: string) => ({ permission }),
         }),
         // The named opt-out of a session API: the session itself is the whole authorization.
-        sessionOnly: lambderGuard({ session: true, handler: () => {} }),
-        deviceToken: lambderGuard({
+        signedIn: lambderGuard({ session: true, handler: () => {} }),
+        terminalToken: lambderGuard({
             apiInput: z.object({ value: z.string() }),
-            handler: (_ctx, { value }) => ({ deviceId: value }),
+            handler: (_ctx, { value }) => ({ terminalId: value }),
         }),
         // Anyone may call, and the param records why.
         open: lambderGuard({ handler: (_ctx, _payload, _reason: string) => {} }),
@@ -819,8 +887,8 @@ describe('API policies - requireApiGuards', () => {
     it('accepts a session API that declares a guard, or the named opt-out', () => {
         const app = strict();
         expect(() => app.registerApiGroups(app.defineApiGroup('secure', {
-            admin: app.defineApi({ ...testSchema, guards: { orgPermission: 'ORG.MANAGE' } }, async (ctx) => ({ result: 'ok' })),
-            me: app.defineApi({ ...testSchema, guards: 'sessionOnly' }, async (ctx) => ({ result: 'ok' })),
+            admin: app.defineApi({ ...testSchema, guards: { staffPermission: 'ORDERS.REFUND' } }, async (ctx) => ({ result: 'ok' })),
+            me: app.defineApi({ ...testSchema, guards: 'signedIn' }, async (ctx) => ({ result: 'ok' })),
         })))
             .not.toThrow();
     });
@@ -828,7 +896,7 @@ describe('API policies - requireApiGuards', () => {
     it('accepts a public API that declares a guard, or either named opt-out', () => {
         const app = strict();
         expect(() => app.registerApiGroups(app.defineApiGroup('public', {
-            device: app.defineApi({ ...testSchema, guards: 'deviceToken' }, async (ctx) => ({ result: 'ok' })),
+            terminal: app.defineApi({ ...testSchema, guards: 'terminalToken' }, async (ctx) => ({ result: 'ok' })),
             translations: app.defineApi({ ...testSchema, guards: { open: 'Static strings already in the bundle.' } }, async (ctx) => ({ result: 'ok' })),
             login: app.defineApi({ ...testSchema, guards: 'credentialFlow' }, async (ctx) => ({ result: 'ok' })),
         })))
@@ -854,13 +922,13 @@ describe('API policies - requireApiGuards', () => {
         expect(() => app.registerApiGroups(secure)).toThrow(/declares no guards/);
         // The declaration keeps its typing: the guard's output lands on ctx.guardData.
         app.registerApiGroups(app.defineApiGroup('typed', {
-            session: app.defineApi({ ...testSchema, guards: { orgPermission: 'ORG.READ' } }, async (ctx) => {
-                const permission: string = ctx.guardData.orgPermission.permission;
+            session: app.defineApi({ ...testSchema, guards: { staffPermission: 'ORDERS.VIEW' } }, async (ctx) => {
+                const permission: string = ctx.guardData.staffPermission.permission;
                 return { result: permission };
             }),
-            public: app.defineApi({ ...testSchema, guards: 'deviceToken' }, async (ctx) => {
-                const deviceId: string = ctx.guardData.deviceToken.deviceId;
-                return { result: deviceId };
+            public: app.defineApi({ ...testSchema, guards: 'terminalToken' }, async (ctx) => {
+                const terminalId: string = ctx.guardData.terminalToken.terminalId;
+                return { result: terminalId };
             }),
         }));
     });
@@ -871,8 +939,8 @@ describe('API policies - an empty guards option declares nothing', () => {
     // an optional one: the option is present, so the required-field check
     // passes, and it normalizes to zero entries, so no guard runs.
     const guards = {
-        orgPermission: lambderGuard({ session: true, handler: (_ctx, _p, permission: string) => ({ permission }) }),
-        sessionOnly: lambderGuard({ session: true, handler: () => {} }),
+        staffPermission: lambderGuard({ session: true, handler: (_ctx, _p, permission: string) => ({ permission }) }),
+        signedIn: lambderGuard({ session: true, handler: () => {} }),
         open: lambderGuard({ handler: (_ctx, _payload, _reason: string) => {} }),
     };
     const strict = () => initLambder().create({
@@ -922,7 +990,7 @@ describe('API policies - an empty guards option declares nothing', () => {
         // optional would be indistinguishable. The type is the whole check.
         const app = strict();
         // @ts-expect-error a named guard with an undefined param is not a declaration
-        const undefinedParam = app.defineApi({ ...testSchema, guards: { orgPermission: undefined } }, async (ctx) => ({ result: 'ok' }));
+        const undefinedParam = app.defineApi({ ...testSchema, guards: { staffPermission: undefined } }, async (ctx) => ({ result: 'ok' }));
         expect(() => app.registerApiGroups(app.defineApiGroup('secure', { t3: undefinedParam })))
             .not.toThrow();
     });
@@ -955,10 +1023,10 @@ describe('API policies - an empty guards option declares nothing', () => {
         const app = strict();
         expect(() => app.registerApiGroups(
             app.defineApiGroup('secure', {
-                one: app.defineApi({ ...testSchema, guards: 'sessionOnly' }, async (ctx) => ({ result: 'ok' })),
-                list: app.defineApi({ ...testSchema, guards: ['sessionOnly'] }, async (ctx) => ({ result: 'ok' })),
-                map: app.defineApi({ ...testSchema, guards: { orgPermission: 'ORG.READ' } }, async (ctx) => ({ result: 'ok' })),
-                both: app.defineApi({ ...testSchema, guards: { sessionOnly: true, orgPermission: 'ORG.READ' } }, async (ctx) => ({ result: 'ok' })),
+                one: app.defineApi({ ...testSchema, guards: 'signedIn' }, async (ctx) => ({ result: 'ok' })),
+                list: app.defineApi({ ...testSchema, guards: ['signedIn'] }, async (ctx) => ({ result: 'ok' })),
+                map: app.defineApi({ ...testSchema, guards: { staffPermission: 'ORDERS.VIEW' } }, async (ctx) => ({ result: 'ok' })),
+                both: app.defineApi({ ...testSchema, guards: { signedIn: true, staffPermission: 'ORDERS.VIEW' } }, async (ctx) => ({ result: 'ok' })),
             }),
             app.defineApiGroup('public', {
                 open: app.defineApi({ ...testSchema, guards: { open: 'Nothing here is anybody\'s.' } }, async (ctx) => ({ result: 'ok' })),
@@ -1125,21 +1193,21 @@ describe('API policies - guards', () => {
 
     it("a guard's return value lands typed on ctx.guardData under its name", async () => {
         const app = initLambder().create({ files: testPublicFiles(), apiPath: '/api', guards: {
-                deviceAuth: lambderGuard({
+                terminalAuth: lambderGuard({
                     apiInput: z.object({ token: z.string() }),
-                    handler: async (_ctx, { token }) => ({ deviceId: `dev-${token}` }),
+                    handler: async (_ctx, { token }) => ({ terminalId: `terminal-${token}` }),
                 }),
             } });
         const lambder = app.registerApiGroups(app.defineApiGroup('test', {
             withData: app.defineApi({
                 input: z.object({ value: z.string(), token: z.string() }),
                 output: z.object({ result: z.string() }),
-                guards: 'deviceAuth',
-            }, async (ctx) => ({ result: ctx.guardData.deviceAuth.deviceId })),
+                guards: 'terminalAuth',
+            }, async (ctx) => ({ result: ctx.guardData.terminalAuth.terminalId })),
         }));
 
         const result = await lambder.render(createApiEvent('test.withData', { value: 'x', token: 'abc' }), createMockContext());
-        expect(JSON.parse(result.body || '{}').payload.result).toBe('dev-abc');
+        expect(JSON.parse(result.body || '{}').payload.result).toBe('terminal-abc');
     });
 
     it('the object form passes params, runs in insertion order, and keeps void guards out of guardData', async () => {
@@ -1196,12 +1264,12 @@ describe('API policies - guards', () => {
 
     it('session guards are rejected at registration on an instance created without sessions', () => {
         const app = initLambder().create({ files: testPublicFiles(), apiPath: '/api', guards: {
-                orgPermission: lambderGuard({
+                staffPermission: lambderGuard({
                     session: true,
-                    handler: (ctx) => ({ orgId: ctx.session.sessionKey }),
+                    handler: (ctx) => ({ storeId: ctx.session.sessionKey }),
                 }),
             } });
-        expect(() => app.registerApiGroups(app.defineApiGroup('test', { pub: app.defineApi({ ...testSchema, guards: 'orgPermission' } as any, async (ctx) => null) })))
+        expect(() => app.registerApiGroups(app.defineApiGroup('test', { pub: app.defineApi({ ...testSchema, guards: 'staffPermission' } as any, async (ctx) => null) })))
             .toThrow(/a guard of API "test\.pub" needs a session, and the instance was created without the session option/);
     });
 });
@@ -1214,6 +1282,8 @@ describe('API policies - idempotency', () => {
     const KEY_3 = 'k-3-abcdefabcdefabcdef';
     const KEY_BUSY = 'k-busy-abcdefabcdefabcdef';
     const KEY_OLD = 'k-old-abcdefabcdefabcdef';
+    /** The partition key of a public API's record scoped by the posted key alone, in an app with no session salt. */
+    const keyOnlyPartition = (apiName: string, key: string): string => `IDEM#${joinKeyFields('k', apiName, unkeyedFieldDigest('key', key))}`;
 
     const build = (client: MemoryDdb, onRun?: () => void) => {
         const app = initLambder().create({ files: testPublicFiles(), apiPath: '/api', idempotency: { store: makeStore(client) } });
@@ -1524,10 +1594,10 @@ describe('API policies - idempotency', () => {
         const now = Math.floor(Date.now() / 1000);
         // Pre-seed an unexpired pending claim for this scope (public scope:
         // key-only), taken by this same request: its payload's fingerprint.
-        client.items.set(`IDEM#k|test.op|${KEY_BUSY}|idem`, {
-            pk: { S: `IDEM#k|test.op|${KEY_BUSY}` }, sk: { S: 'idem' },
+        client.items.set(`${keyOnlyPartition('test.op', KEY_BUSY)}|idem`, {
+            pk: { S: keyOnlyPartition('test.op', KEY_BUSY) }, sk: { S: 'idem' },
             state: { S: 'pending' }, expiresAt: { N: String(now + 100) },
-            fingerprint: { S: nodeCrypto.createHash('sha256').update(canonicalJson({ value: 'a' })).digest('hex') },
+            fingerprint: { S: nodeCrypto.createHash('sha256').update(canonicalJson({ payload: { value: 'a' }, guardInputs: {} })).digest('hex') },
         });
 
         const result = await lambder.render(createApiEvent('test.op', { value: 'a' }, { idempotencyKey: KEY_BUSY }), createMockContext());
@@ -1545,8 +1615,8 @@ describe('API policies - idempotency', () => {
         const client = new MemoryDdb();
         const lambder = build(client, () => { runs += 1; });
         const now = Math.floor(Date.now() / 1000);
-        const plantWithoutFingerprint = (key: string, attributes: Record<string, { S: string } | { N: string }>) => client.items.set(`IDEM#k|test.op|${key}|idem`, {
-            pk: { S: `IDEM#k|test.op|${key}` }, sk: { S: 'idem' }, expiresAt: { N: String(now + 100) }, ...attributes,
+        const plantWithoutFingerprint = (key: string, attributes: Record<string, { S: string } | { N: string }>) => client.items.set(`${keyOnlyPartition('test.op', key)}|idem`, {
+            pk: { S: keyOnlyPartition('test.op', key) }, sk: { S: 'idem' }, expiresAt: { N: String(now + 100) }, ...attributes,
         });
         plantWithoutFingerprint(KEY_1, { state: { S: 'done' }, statusCode: { N: '200' }, body: { S: '{"foreign":true}' } });
         plantWithoutFingerprint(KEY_BUSY, { state: { S: 'pending' }, ownerToken: { S: 'someone-else' } });
@@ -1583,8 +1653,8 @@ describe('API policies - idempotency', () => {
         const client = new MemoryDdb();
         const lambder = build(client, () => { runs += 1; });
         const now = Math.floor(Date.now() / 1000);
-        client.items.set(`IDEM#k|test.op|${KEY_OLD}|idem`, {
-            pk: { S: `IDEM#k|test.op|${KEY_OLD}` }, sk: { S: 'idem' },
+        client.items.set(`${keyOnlyPartition('test.op', KEY_OLD)}|idem`, {
+            pk: { S: keyOnlyPartition('test.op', KEY_OLD) }, sk: { S: 'idem' },
             state: { S: 'done' }, statusCode: { N: '200' }, body: { S: '{"stale":true}' },
             expiresAt: { N: String(now - 10) },
         });

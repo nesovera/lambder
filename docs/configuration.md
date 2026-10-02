@@ -23,7 +23,7 @@ policy types; the curried creator is the canonical entry.
 | --- | --- | --- |
 | `apiPath` | `"/api"` | Path API calls are posted to; must start with `/` |
 | `apiVersion` | none | Stamped on every API answer's envelope as `apiVersion`, so a client can tell which build answered. Dotted numbers (`"1.2.10"`), since `minApiVersion` compares against it. Staleness itself is judged per endpoint by signatures, see [APIs](./apis.md#signatures-when-a-client-must-update) |
-| `minApiVersion` | none | The oldest client build still served: a call naming a lower `version` answers `versionExpired` whatever its signature says. Dotted numbers compared segment by segment; a floor above `apiVersion` is taken as `apiVersion` |
+| `minApiVersion` | none | The oldest client build still served: a call naming a lower `version` answers `versionExpired` whatever its signature says. Dotted numbers compared segment by segment; a floor above `apiVersion` throws at creation, since it would refuse the build's own clients |
 | `apiSignatures` | none | The generated signature map (`lambder.apiSignatures()`), the same file the frontend ships with; enables the signature gate. See [APIs](./apis.md#signatures-when-a-client-must-update) |
 | `files` | none | Where the app's files come from, for `servePublicFiles`, `serveIndexHtml`, `res.file` and `res.templateFile`. See [Frontend hosting](./frontend-hosting.md) |
 | `compression` | `true` (off on a REST API unless given) | Automatic response compression. `true` is `{ minBytes: 860, encodings: ["br", "gzip"], quality: 5 }`; `false` disables it. See [Responses](./responses.md#compression) |
@@ -33,7 +33,7 @@ policy types; the curried creator is the canonical entry.
 | `cors` | off | `true` allows any origin, or a `LambderCorsConfig` (below) |
 | `trustedClientIpHeaders` | none | Headers that may name the caller's own address, in order of preference. Empty means `ctx.ip` is the address the gateway observed (below) |
 | `trustedHostHeaders` | none | Headers that may name the host the viewer asked for, in order of preference. Empty means `ctx.host` is the Host the gateway received (below) |
-| `originProof` | none | `{ header, secrets }`: the trusted headers above are read only from a request carrying the secret the proxy in front of the app sets (below) |
+| `originProof` | none | `{ header, secrets, proxyHeaders? }`: the trusted headers above are read only from a request carrying the secret the proxy in front of the app sets, taken off one that does not along with `proxyHeaders`, and `ctx.arrivedVia` says which it was (below) |
 | `callSummary` | one JSON line per API call on stdout | What each API call's summary goes to: a function, or `false` for none (below) |
 | `session` | none | Sessions over a store of your choosing; a guard that needs a session (`session: true`) and `addSessionRoute` are compile errors without it. See [Sessions](./sessions.md) |
 | `rateLimits` | none | A limiter (`LambderRateLimiter`: DynamoDB, memory, or your own) plus named policies APIs reference by name, in one map or a list of maps (below). See [API policies](./api-policies.md#rate-limits) |
@@ -87,7 +87,7 @@ const lambder = initLambder<SessionData>().create({
         limiter: new LambderDdbRateLimiter({ tableName: "app-policies", region: "us-east-1" }),
         policies: { authPerIp: { perMin: 5, perHour: 30, per: "ip" } },
     },
-    guards: { orgPermission, sessionOnly },
+    guards: { staffPermission, signedIn },
     idempotency: {
         store: new LambderDdbIdempotencyStore({ tableName: "app-policies", region: "us-east-1" }),
         defaultTtlSeconds: 24 * 3600,
@@ -154,7 +154,8 @@ forwards them. So on an invoke `ctx.ip` is the invoker's `clientIp`, which
 its event carries in `requestContext.http.sourceIp`, and nothing else. The
 server tells an invoke by the event's `requestContext.apiId`, which a gateway
 writes itself, and never by the `x-lambder-invoke` marker, an ordinary header
-any HTTP caller can send.
+any HTTP caller can send; `ctx.arrivedVia` is `"invoke"` on such a request,
+and is what code that has to tell an invoke checks.
 
 ## `trustedHostHeaders`
 
@@ -203,7 +204,11 @@ it:
 
 ```typescript
 trustedClientIpHeaders: ["cf-connecting-ip"],
-originProof: { header: "x-origin-proof", secrets: [process.env.ORIGIN_PROOF!] },
+originProof: {
+    header: "x-origin-proof",
+    secrets: [process.env.ORIGIN_PROOF!],
+    proxyHeaders: ["cf-ipcountry"],   // the other headers only the proxy writes that the app reads
+},
 ```
 
 - Set the header at the proxy, overwriting whatever the viewer sent: a
@@ -211,14 +216,36 @@ originProof: { header: "x-origin-proof", secrets: [process.env.ORIGIN_PROOF!] },
   header.
 - A request without it, or with another value, is answered as usual, with
   `ctx.ip` and `ctx.host` the ones the gateway observed: counted by the
-  address it really came from.
-- The header is taken off `ctx.headers` and `ctx.header()`, so no handler,
-  hook or header log meets the secret; the raw `ctx.event` keeps it.
+  address it really came from. The headers the proxy writes are, on such a
+  request, whatever its sender wrote, so they are taken off `ctx.headers`
+  and `ctx.header()` (and the API request's headers): the trusted client
+  address and host headers, and `proxyHeaders`, the others the app reads
+  (a country, a viewer's device class, a bot score). A handler reading one
+  gets what the proxy said, or nothing. The raw event is left as it arrived,
+  so `ctx.event.headers` (and the event an action filter receives) still
+  holds what the sender wrote: read these headers through `ctx.header()`,
+  never off the event.
+- `ctx.arrivedVia` says how the request came: `"proxy"` with a valid proof,
+  `"direct"` without one, and `"invoke"` for a [Lambda invoke](./invoke.md)
+  either way; an invoke keeps the proxy's headers only when its caller
+  forwarded the proof beside them. Without `originProof` it is `"unverified"`
+  on every request but an invoke, since nothing tells a proxied request from
+  a direct one. An app reachable only through its proxy refuses the rest in
+  a hook:
+
+  ```typescript
+  lambder.addHook("beforeRender", (ctx, res) =>
+      ctx.arrivedVia === "direct" ? res.text("Forbidden", { statusCode: 403 }) : ctx);
+  ```
+
+- The proof header itself is taken off `ctx.headers` and `ctx.header()` on
+  every request, so no handler, hook or header log meets the secret; the raw
+  `ctx.event` keeps it.
 - `secrets` takes the previous secret beside the current one while the
   proxy's rule changes over, so a rotation drops no request. Each is at
   least 32 characters: a proof a sender could guess proves nothing.
-- It needs trusted headers to guard, and its header may not be one of them;
-  both are refused at creation.
+- The proof header may not also be a trusted header or a proxy header, and
+  `proxyHeaders` are header names; both are refused at creation.
 
 ## `callSummary`
 
@@ -239,7 +266,7 @@ CloudWatch Logs Insights reads its fields without a parse step:
 | `durationMs`, `handlerMs` | From the invocation's start to the answer, and the handler's own time (null when it did not run: refused before it, or replayed) |
 | `replayed` | A stored idempotent answer was replayed |
 | `coldStart` | The process's first invocation, whose duration includes loading the app |
-| `requestId`, `parentRequestId` | The invocation's request id, the one Lambda's own lines for it carry, and that of the invocation that called it over a [direct invoke](./invoke.md), which the invoke carries |
+| `requestId`, `parentRequestId` | The invocation's request id, the one Lambda's own lines for it carry, and that of the invocation that called it over a [Lambda invoke](./invoke.md), which the invoke carries |
 
 Nothing from the call's input, its session, its cookies or its caller's
 address is in it, so the lines can be kept as long as the app keeps logs.
@@ -272,7 +299,7 @@ fields api, outcome, code, durationMs
 | Field | Default | Description |
 | --- | --- | --- |
 | `store` | required | `LambderDdbSessionStore`, `LambderMemorySessionStore`, or your own `LambderSessionStore` |
-| `sessionSalt` | required | The HMAC key that turns a sessionKey into the store's partition key. Treat as a secret |
+| `sessionSalt` | required | The HMAC key that turns a sessionKey into the store's partition key, and, through a subkey derived from it, the key of the at-rest digests of rate-limit and idempotency key fields ([What a table read shows](./api-policies.md#what-a-table-read-shows)). Changing it signs every session out and starts every rate-limit counter and idempotency record afresh. Treat as a secret |
 | `enableSlidingExpiration` | `true` | Extend the session on each access |
 | `slidingWriteIntervalSeconds` | `max(60, 5% of TTL)` | Minimum seconds between sliding-expiration writes |
 | `cookie` | see [Sessions](./sessions.md#cookie-scope) | Cookie scope: `domain`, `path`, `sameSite`, `secure` |

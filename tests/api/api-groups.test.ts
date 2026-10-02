@@ -20,6 +20,7 @@ import { LAMBDER_REFUSAL_CODES } from '../../src/shared/wire/LambderApiRefusal.j
 import type { LambderRegistrableApiGroup } from '../../src/api/LambderApiDeclarations.js';
 import type { LambderFallbackHandler } from '../../src/core/LambderCreateOptions.js';
 import { LAMBDER_CALLER_MEMBER_NAMES, LAMBDER_RESERVED_GROUP_NAMES, apiCallPath, apiNameOfCallPath } from '../../src/shared/wire/LambderApiNames.js';
+import { html } from '../../src/shared/LambderHtml.js';
 
 type Session = { userId: string };
 
@@ -138,7 +139,7 @@ describe('A lazy group', () => {
         const lambder = app.registerApiGroups(...declaration.apiGroups);
         expectTypeOf<keyof typeof lambder.ApiContract>().toEqualTypeOf<'reports.daily'>();
         const daily = await lambderTestApp(lambder).visitor().reports.daily({});
-        expectTypeOf(daily).toEqualTypeOf<{ count: number } | undefined>();
+        expectTypeOf(daily).toEqualTypeOf<{ count: number }>();
         expect(daily).toEqual({ count: 3 });
     });
 
@@ -237,7 +238,7 @@ describe('Where registered groups stand among routes', () => {
         const group = pingApis(app);
         const lambder = app
             .addHook('beforeRender', async (ctx, res) => {
-                if(ctx.get.blocked) res.die.status404('Not found');
+                if(ctx.get.blocked) res.die.status404(html`Not found`);
                 return ctx;
             })
             .registerApiGroups(app.lazyApiGroup('ping', async () => { loads += 1; return group; }));
@@ -263,6 +264,11 @@ describe('Where registered groups stand among routes', () => {
             }))
             .setRouteFallbackHandler(fallback);
         expect((await root.render(createMockEvent('/about/team'), createMockContext())).body).toBe('page /about/team');
+        // The site root too: under a root apiPath it is the site's home page.
+        expect((await root.render(createMockEvent('/'), createMockContext())).body).toBe('page /');
+        // And under a nested one, apiPath itself is still the API's.
+        const atApiPath = await nested.render(createMockEvent('/api'), createMockContext());
+        expect(JSON.parse(String(atApiPath.body))).toMatchObject({ refusal: { code: LAMBDER_REFUSAL_CODES.apiNotFound } });
         const call = await root.render(createMockEvent('/ping/pong', {
             httpMethod: 'POST', body: JSON.stringify({ payload: {} }), headers: { Host: 'localhost', 'Content-Type': 'application/json' },
         }), createMockContext());
@@ -406,9 +412,10 @@ describe('Names and paths', () => {
         expect([...members].sort()).toEqual([...LAMBDER_CALLER_MEMBER_NAMES].sort());
         for(const name of members) expect(LAMBDER_RESERVED_GROUP_NAMES).toContain(name);
         // In the types too, where a member added to a caller and left off the
-        // list is a compile error rather than a group it shadows.
+        // list is a compile error rather than a group it shadows. By name
+        // alone: a symbol-keyed member can never be read as a group.
         expectTypeOf<typeof LAMBDER_CALLER_MEMBER_NAMES[number]>()
-            .toEqualTypeOf<keyof LambderCaller<{}> | keyof LambderInvokeCaller<{}> | keyof LambderTestVisitor<{}>>();
+            .toEqualTypeOf<Extract<keyof LambderCaller<{}> | keyof LambderInvokeCaller<{}> | keyof LambderTestVisitor<{}>, string>>();
     });
 
     it('lets a group take a name the callers use for their own state, which is #private', async () => {

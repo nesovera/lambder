@@ -20,8 +20,9 @@ between runs once, in one place, on Node and in the browser.
                      │                  │
                      ▼                  ▼
             ══════════ LambderApiPipeline (isomorphic core) ══════════
-            version floor → signature gate → payload restore → ip-keyed rate limits → session
-            → replay → session-keyed rate limits (and custom keys charged beforeGuards)
+            envelope check → version floor → signature gate → payload restore
+            → ip-keyed rate limits → session → replay
+            → session-keyed rate limits (and custom keys charged beforeGuards)
             → guards → input validation → guards placed after it
             → custom-key rate limits → exec → answer
 ```
@@ -111,6 +112,7 @@ store, and a **Controller** the per-request API over a manager.
 ```typescript
 type LambderApiRequest = {
     apiName: string;                 // group.action, read off the path the call was posted to
+    invalidEnvelope?: string;        // set when the body is no JSON object; prepare() refuses the call
     version: string | null;          // the caller's apiVersion, informational
     signature: string | null;        // the caller's signature for the endpoint, for the gate
     token: string;                   // the CSRF token the caller posted
@@ -137,10 +139,14 @@ type LambderApiAnswer = {
 };
 ```
 
-`readApiEnvelope(post, info, apiName)` reads the posted envelope of a call to
-`apiName` into a request. The name comes from where the call was posted,
+`readApiEnvelope(posted, info, apiName)` reads the posted envelope of a call to
+`apiName` into a request, and `readApiEnvelopeText(text, info, apiName)` the
+same from the body's text. The name comes from where the call was posted,
 `{apiPath}/{group}/{action}` (`apiNameOfCallPath` reads it off a path), and
-never from a field of the body. `restoreCompressedPayload(request, maxBytes)`
+never from a field of the body. A body that is not a JSON object (a number, a
+string, a boolean, null, an array, or not JSON at all) is flagged
+`invalidEnvelope`, and `prepare()` answers it with `invalidPayloadAnswer`, so
+every adapter refuses it alike. `restoreCompressedPayload(request, maxBytes)`
 restores a `payloadGz` or `payloadBr` pair under its declared length. The
 answer is the shape the idempotency store persists and replays;
 `toHttpAnswer(answer)` gives the accessor view `resolveApiOutcome()` reads.
@@ -159,7 +165,7 @@ answer is the shape the idempotency store persists and replays;
 | `validationAnswer(zodError, logList?)` | The standard 422 body, bounded by bytes |
 | `apiNotFoundAnswer(apiVersion, logList?)` | The `lambder/api-not-found` refusal |
 | `sessionExpiredAnswer(apiVersion, logList?)`, `versionExpiredAnswer(apiVersion)` | The protocol flags |
-| `invalidPayloadAnswer(apiVersion, message)` | A compressed payload that could not be restored (400) |
+| `invalidPayloadAnswer(apiVersion, message)` | A body that is no envelope, or a compressed payload that could not be restored (400) |
 | `crashAnswer(apiVersion, revealed?)` | The last-resort 500, still an envelope; `revealed` (the crash in full, with the call's logList) only for a caller `crashes.reveal` trusts |
 
 The server wraps an API handler's parsed output with `successEnvelope`, and
@@ -190,6 +196,10 @@ const pipeline = new LambderApiPipeline<Ctx, SessionData>({
     rateLimits?: { limiter: LambderRateLimiter, policies, failOpen?, ipv6PrefixLength? },
     guards?: Record<string, LambderApiGuard<any, any, any, Ctx, Ctx & { session: LambderSessionRecord<SessionData> }>>,
     idempotency?: { store: LambderIdempotencyStore, defaultTtlSeconds?, defaultPendingTtlSeconds?, failOpen?, callerIdentity? },
+    // The session salt, which both adapters pass when sessions are on: a
+    // subkey derived from it keys the digest the caller's fields of every
+    // rate-limit and idempotency key are written as. Without it, a SHA-256.
+    atRestSecret?: string,
 });
 
 const { answer, replayed, guardsRun } = await pipeline.run(request, ctx, definition, exec);
@@ -212,11 +222,12 @@ idempotency?, input?, output?, refusals? }`. `mode` is `"session"` when one of
 the endpoint's guards needs a session and `"public"` otherwise, which the
 server reads off the guards at registration and the mock off the generated
 `apiOptions` table or the guards an entry restates. The schemas are optional
-because the mock has none. On the server, `output` is what every output a
-handler returns is parsed through before it is sent (the parse is the server
-adapter's, so the mock, which has no schemas, sends outputs as given once it
-has checked they are objects or arrays), and it is part of the endpoint's
-signature digest. `refusals` is every code the endpoint may refuse with, its
+because a mock may have none: its input schema is the generated `apiSchemas`
+table's, an entry's own, or neither. On the server, `output` is what every
+output a handler returns is parsed through before it is sent, and it is part
+of the endpoint's signature digest. The parse is each adapter's: the mock
+parses an output through the generated table's schema when it has one, and
+otherwise sends it as given once it has checked it is an object or an array. `refusals` is every code the endpoint may refuse with, its
 own and its guards', resolved against the vocabulary: the pipeline checks a
 thrown refusal against it with `checkedRefusal` before rendering it, parsing
 a declared code's data through its schema. The mock fills it from the
@@ -230,8 +241,10 @@ pipeline an answer or throws.
 
 The steps, in the order `run` executes them:
 
-1. **Version floor and signature gate**: a request naming a `version` below
-   `minApiVersion` answers `versionExpired` whatever else it carries; then a
+1. **Envelope check, version floor and signature gate**: a body that is no
+   envelope (`invalidEnvelope`) answers `lambder/invalid-request-payload`
+   (400); a request naming a `version` below `minApiVersion` answers
+   `versionExpired` whatever else it carries; then a
    request carrying a signature that is not the `apiSignatures` map's entry
    for its endpoint answers `versionExpired` too (see
    [APIs](./apis.md#signatures-when-a-client-must-update)). A request naming

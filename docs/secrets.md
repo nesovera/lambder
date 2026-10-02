@@ -1,13 +1,13 @@
 # Secrets and retries
 
-Four small things an app otherwise writes for itself, each of them once per
-kind of token, secret or retry loop it has: a signed token that is its own
-record, the digest a stored secret rests as, the life of a secret handed out
-once and taken back once, and a wait that grows after each failure. The
-signed claims, the digest helpers and the timer run wherever WebCrypto and
-`setTimeout` do (a Lambda, a browser, an edge Worker) and come from both
-`lambder` and `lambder/client`; the one-shot secrets live with the stores on
-the root entry.
+Small things an app otherwise writes for itself, each of them once per kind
+of token, secret or retry loop it has: a signed token that is its own record,
+the digest a stored secret rests as, the stored form of a password, the life
+of a secret handed out once and taken back once, and a wait that grows after
+each failure. The signed claims, the digest helpers and the timer run
+wherever WebCrypto and `setTimeout` do (a Lambda, a browser, an edge Worker)
+and come from both `lambder` and `lambder/client`; the password hasher, which
+needs node's argon2, and the one-shot secrets live on the root entry.
 
 ## Signed claims
 
@@ -92,6 +92,20 @@ constant time, itself.
 runtime's cryptographic random source, as base64url. Synchronous, since
 `getRandomValues` is.
 
+`randomCode(alphabet, length)` mints one a person types or reads out instead:
+`length` characters drawn uniformly from `alphabet`, from the same source. One
+byte draws one character, and a byte at or above the largest multiple of the
+alphabet's size is drawn again, because `byte % alphabet.length` alone draws
+the alphabet's first characters more often than the rest. So the alphabet is
+2 to 256 distinct characters (counted as code points, so one outside the
+basic plane is one character), past which one byte cannot reach every
+character, and `length` a positive integer; anything else throws.
+
+```typescript
+const pairingCode = randomCode("ABCDEFGHJKMNPQRSTVWXYZ23456789", 8);   // no 0/O or 1/I to misread
+const emailCode = randomCode("0123456789", 6);
+```
+
 ```typescript
 const deviceSecret = randomSecret();                              // handed to the device, once
 await db.insert({ deviceId, secretDigest: await keyedDigest(DEVICE_SECRET_KEY, deviceSecret) });
@@ -100,6 +114,76 @@ await db.insert({ deviceId, secretDigest: await keyedDigest(DEVICE_SECRET_KEY, d
 const row = await db.findDevice(deviceId);
 if(!row || !constantTimeEquals(row.secretDigest, await keyedDigest(DEVICE_SECRET_KEY, presented))) refuse("Unknown device.");
 ```
+
+## Passwords
+
+`LambderPasswordHasher` stores a password as argon2id, through node's own
+`crypto.argon2` (Node 24.7 and later), in the PHC string every argon2 library
+reads and writes:
+
+```text
+$argon2id$v=19$m=65536,t=3,p=4$<salt>$<tag>
+```
+
+The string carries its own random salt and its cost (memory in KiB, passes,
+lanes), so verifying needs nothing but the string and the attempt, and the
+cost can be raised without invalidating a password stored before it.
+
+```typescript
+import { LambderPasswordHasher } from "lambder";
+
+const passwords = new LambderPasswordHasher();                 // 64 MiB, 3 passes, 4 lanes
+
+// Setting a password: store the string.
+await db.updateCustomer(customerId, { passwordHash: await passwords.hash(newPassword) });
+
+// Signing in. Verified whether or not the email names a customer, so an
+// unknown email takes as long to refuse as a wrong password.
+const customer = await db.findCustomerByEmail(email);
+const matches = await passwords.verify(customer?.passwordHash, attempt);
+if(!customer || !matches) refuse("Wrong email or password.");
+if(passwords.needsRehash(customer.passwordHash)){
+    await db.updateCustomer(customer.id, { passwordHash: await passwords.hash(attempt) });
+}
+```
+
+- **`hash(password)`** writes argon2id under the instance's cost with a fresh
+  16-byte salt and a 32-byte tag.
+- **`verify(stored, password)`** reads the variant and cost from `stored`, so
+  it verifies what other argon2 libraries wrote too: argon2id, argon2i or
+  argon2d, with the parameters in any order. It answers false, never throws,
+  for anything that is not an argon2 PHC string within the ceilings below:
+  `null` for an account with no password, `undefined` for one that does not
+  exist, a hash of another scheme, a corrupt value. For those it still
+  computes one hash under the instance's cost, so how long a sign-in takes
+  does not say whether the account exists or has a password. The comparison
+  takes the same time wherever the tags differ.
+- **`needsRehash(stored)`** is true when `stored` was written under another
+  variant or cost than the instance writes. Ask it after a successful verify,
+  while the plaintext is at hand: that is how a raised cost reaches the
+  passwords stored before it.
+
+The options are `memoryKib` (default 65536), `passes` (default 3) and
+`parallelism` (default 4), each a positive integer, with at least 8 KiB per
+lane; anything else throws at construction. A cost has ceilings, the same for
+what an instance writes and what it verifies: at most 2 GiB of memory (RFC
+9106's largest recommended setting), at most 4 GiB of memory over all passes
+(libsodium's strongest preset, 1 GiB over 4), and at most 255 lanes. The cost
+a verify runs under is read from the stored string, before anyone is signed
+in, so a string naming hours of passes or more memory than the function has
+(an imported hash, a corrupt row) would stall every sign-in on its account; a
+string over the ceilings matches no password instead. A runtime without argon2 (Node
+before 24.7) throws at construction too, rather than on the first sign-in,
+where a hasher that cannot hash would read as a wrong password for every
+account. Each hash holds `memoryKib` of memory while it runs, so a function
+that verifies passwords needs that much headroom per concurrent sign-in.
+
+A password is hashed as its UTF-8 bytes, as given. The same password typed on
+two keyboards can arrive as two spellings of one character (`é` composed or
+decomposed), so an app that wants them to match normalizes it, for example
+with `password.normalize("NFC")`, before both `hash` and `verify`, the same
+way every time. Which passwords are acceptable (length, breached lists) is the
+app's rule, checked before `hash`.
 
 ## One-shot secrets
 
@@ -149,7 +233,8 @@ guessable, so it is bound to a scope the app names (an address for a purpose,
 a recipient, a device), redeemed with that scope, and defended by a ceiling
 on tries: `maxAttempts` wrong tries are refused as `wrong`, and the try after
 them as `exhausted`, right or wrong. Its `alphabet` is the app's (the ten
-digits by default), drawn from without bias. A **token** carries its own
+digits by default), drawn from without bias by `randomCode` (above), and
+held to its rules at construction. A **token** carries its own
 identity, is redeemed by value through `redeemToken`, and has no ceiling:
 random bytes (32 of base64url unless `bytes` says otherwise), long enough that
 guessing is not a thing; or, for a code somebody types without knowing what it
@@ -207,55 +292,7 @@ tries, and one that holds only codes need not find anything by digest.
 
 ## Retrying with a backoff
 
-Most things that retry also wait for other reasons (a refresh cadence, a
-pause before recreating something), and those waits must never stack with a
-retry. `LambderBackoffTimer` holds exactly one wait of either kind: `retry`
-and `wait` climb the ladder, `after` waits a fixed time without climbing it,
-and scheduling any of them replaces whatever was waiting. A caller says what
-to run and when it worked, and never keeps a handle and a counter of its own.
-
-```typescript
-import { LambderBackoffTimer } from "lambder/client";
-
-const reconnect = new LambderBackoffTimer({ baseMs: 1_000, maxMs: 60_000 });
-
-socket.onclose = () => reconnect.retry(open);      // waits longer after each failure
-socket.onopen = () => reconnect.reset();           // the next failure waits the shortest time again
-page.onhide = () => reconnect.cancel();            // drops the pending wait, keeps the count
-```
-
-The ladder: a retry waits the base plus a share of a ceiling that grows by
-`factor` with every failed attempt, the whole never past `maxMs`. With full
-jitter (the default) the share is random, so anything many clients fail at together (a
-deploy dropping every socket, a power cut bringing every screen in a building
-up at once) is retried across the whole window instead of in step, which is
-what keeps the herd off the server; even the first wait falls between the
-base and twice it. `jitter: "none"` waits the whole ceiling, a predictable
-ladder for a caller that is alone: twice the base, then climbing to `maxMs`.
-
-| Option | Default | Description |
-| --- | --- | --- |
-| `baseMs` | `1000` | The shortest retry wait; the first after a reset falls between it and twice it |
-| `maxMs` | `60000`, or `baseMs` when that is longer | The longest any retry wait is; at least `baseMs` |
-| `factor` | `2` | How much the ceiling grows with each failed attempt |
-| `jitter` | `"full"` | `"full"`: the base plus a random share of the ceiling. `"none"`: the base plus the whole ceiling |
-
-`wait(signal?)` is `retry` for code that awaits rather than calls back: it
-resolves after the next rung, rejects at once with the signal's reason when
-`signal` aborts, and rejects with an `Error` when `cancel()` or a later wait
-drops it before it ran, so an `await` on it always settles. `pending` is true
-while a wait of any kind is scheduled and false again by the time it runs, so
-what it runs may schedule the next one.
-
-```typescript
-const storageBackoff = new LambderBackoffTimer({ baseMs: 1_000, maxMs: 15_000 });
-for(let attempt = 1; ; attempt += 1){
-    if(await tryStorage()) break;
-    if(attempt === 4) throw new Error("storage stayed unreachable");
-    await storageBackoff.wait(signal);   // throws the abort reason if the caller gives up meanwhile
-}
-```
-
-That loop is what `LambderUploadRunner` runs between tries at storage; its
-`storageRetry` option's `baseDelayMs` and `maxDelayMs` are the timer's
-`baseMs` and `maxMs`.
+`LambderBackoffTimer`, one pending wait at a time where each retry after a
+failure waits longer than the one before it, is documented with the browser
+client, where it is exported: see [Retrying with a
+backoff](./client.md#retrying-with-a-backoff).

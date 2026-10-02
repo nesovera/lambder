@@ -1,13 +1,14 @@
 /**
- * LambderSignedClaims, and the two helpers beside it for secrets an app
- * stores: the envelope is pinned to a known token, so a change to how a
- * token is written would fail here rather than sign every link already in
- * an inbox out of existence.
+ * LambderSignedClaims, and the helpers beside it for secrets an app stores
+ * and codes it sends: the envelope is pinned to a known token, so a change to
+ * how a token is written would fail here rather than sign every link already
+ * in an inbox out of existence.
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { LambderSignedClaims, constantTimeEquals, keyedDigest, randomSecret } from '../../src/index.js';
+import { LambderSignedClaims, constantTimeEquals, keyedDigest, randomCode, randomSecret } from '../../src/index.js';
+import { randomCode as randomCodeOnTheClient } from '../../src/client.js';
 
 const SECRET = 'shop-secret';
 const OTHER_SECRET = 'another-secret-entirely';
@@ -135,6 +136,66 @@ describe('randomSecret', () => {
         expect(secrets.size).toBe(500);
         for(const secret of secrets) expect(secret).toMatch(/^[A-Za-z0-9_-]{43}$/);
         expect(randomSecret(16)).toMatch(/^[A-Za-z0-9_-]{22}$/);
+    });
+});
+
+describe('randomCode', () => {
+    afterEach(() => { vi.restoreAllMocks(); });
+
+    it('is the same function on lambder and lambder/client', () => {
+        expect(randomCodeOnTheClient).toBe(randomCode);
+    });
+
+    it('draws codes of the length asked for, from the alphabet alone, every character reachable', () => {
+        const code = randomCode('ABCDEFGHJK', 5000);
+        expect(code).toHaveLength(5000);
+        expect(code).toMatch(/^[A-HJK]+$/);
+        expect(new Set(code).size).toBe(10);
+        expect(randomCode('0123456789', 6)).toMatch(/^\d{6}$/);
+    });
+
+    it('draws without favouring the characters a modulo would', () => {
+        // 200 characters: a plain byte % 200 draws the first 56 twice as
+        // often as the other 144. Unbiased, the two groups come out alike.
+        const alphabet = Array.from({ length: 200 }, (_, index) => String.fromCodePoint(0x100 + index)).join('');
+        const counts = new Map<string, number>();
+        for(const character of randomCode(alphabet, 200 * 400)) counts.set(character, (counts.get(character) ?? 0) + 1);
+        const mean = (characters: string[]) => characters.reduce((sum, character) => sum + (counts.get(character) ?? 0), 0) / characters.length;
+        const characters = Array.from(alphabet);
+        expect(counts.size).toBe(200);
+        expect(mean(characters.slice(0, 56)) / mean(characters.slice(56))).toBeCloseTo(1, 1);
+    });
+
+    it('discards a byte past the largest multiple of the alphabet\'s size and draws again', () => {
+        // Three characters: 255 is past 255 = 3 * 85 and is discarded; 254 % 3 is 2.
+        const bytes = [255, 0, 1, 2, 254];
+        vi.spyOn(globalThis.crypto, 'getRandomValues').mockImplementation(<T extends ArrayBufferView | null>(array: T): T => {
+            const view = array as unknown as Uint8Array;
+            for(let index = 0; index < view.length; index++) view[index] = bytes.shift() ?? 255;
+            return array;
+        });
+        expect(randomCode('ABC', 4)).toBe('ABCC');
+    });
+
+    it('draws a code longer than one getRandomValues call can fill', () => {
+        expect(randomCode('0123456789', 40_000)).toHaveLength(40_000);
+    });
+
+    it('takes characters as code points, so an alphabet outside the basic plane draws whole characters', () => {
+        expect(Array.from(randomCode('\u{1F34E}\u{1F350}\u{1F352}', 12)).every((character) => '\u{1F34E}\u{1F350}\u{1F352}'.includes(character))).toBe(true);
+        expect(Array.from(randomCode('\u{1F34E}\u{1F350}', 12))).toHaveLength(12);
+    });
+
+    it('refuses an alphabet or a length it cannot draw from without bias', () => {
+        expect(() => randomCode('A', 6)).toThrow('Lambder: randomCode alphabet must be 2 to 256 distinct characters, got 1 characters, 1 of them distinct.');
+        expect(() => randomCode('ABCA', 6)).toThrow(/randomCode alphabet must be 2 to 256 distinct characters, got 4 characters, 3 of them distinct/);
+        const wide = Array.from({ length: 257 }, (_, index) => String.fromCodePoint(0x100 + index)).join('');
+        expect(() => randomCode(wide, 6)).toThrow(/randomCode alphabet must be 2 to 256 distinct characters, got 257 characters/);
+        expect(randomCode(wide.slice(0, 256), 6)).toHaveLength(6);
+        expect(() => randomCode(undefined as never, 6)).toThrow(/randomCode alphabet must be 2 to 256 distinct characters, got undefined/);
+        for(const length of [0, -1, 1.5, Number.NaN]){
+            expect(() => randomCode('0123456789', length)).toThrow(/randomCode length must be a positive integer/);
+        }
     });
 });
 

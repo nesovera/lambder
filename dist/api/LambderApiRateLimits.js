@@ -1,5 +1,4 @@
 import { joinKeyFields } from "../shared/util/joinKeyFields.js";
-import { boundKeyField } from "../shared/util/boundKeyField.js";
 import { RATE_LIMIT_WINDOWS, } from "../shared/contracts/LambderRateLimiter.js";
 import { LambderApiRefusal, LAMBDER_REFUSAL_CODES } from "../shared/wire/LambderApiRefusal.js";
 import { parsePreflightSlice } from "./LambderApiValidationRefusal.js";
@@ -7,29 +6,43 @@ import { assertNonNegativeInteger } from "../shared/util/LambderOptionChecks.js"
 import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
 import { DEFAULT_IPV6_RATE_LIMIT_PREFIX, rateLimitSubjectOf } from "../shared/util/LambderClientIp.js";
 const RATE_LIMIT_WINDOW_KEYS = RATE_LIMIT_WINDOWS.map((window) => window.key);
-/** Refusal a rate-limited request answers unless the policy or the API's override names its own. */
-export const DEFAULT_RATE_LIMIT_REFUSAL = { type: "warning", code: LAMBDER_REFUSAL_CODES.rateLimited, content: "Too many requests. Please try again later." };
+/** The words a rate-limited call answers with unless the policy or the API's override writes its own (the `refusal` option of each). */
+export const DEFAULT_RATE_LIMIT_REFUSAL = { type: "warning", content: "Too many requests. Please try again later." };
 /**
  * The refusal a rate-limited call answers with: a 429 envelope carrying the
- * framework code, whatever message a policy or an API wrote, and a
- * Retry-After header. The engine throws it; the mock runtime's failure
- * injection throws the same one, so an injected rate limit is
- * indistinguishable from a real one.
+ * framework code, the words a policy or an API wrote, the policy's name and
+ * the seconds to wait as its data, and a Retry-After header of those same
+ * seconds. The engine throws it; the mock runtime's failure injection throws
+ * the same one, so an injected rate limit is indistinguishable from a real
+ * one.
  *
- * The code goes on after the message, so a message that carries one anyway
- * (a plain-JS caller, a cast) cannot replace it: a rate limit is never a code
- * an endpoint declares, and the pipeline would refuse to send one it did not.
+ * Only the words are read off the message, so one that carries a code or
+ * data anyway (a plain-JS caller, a cast) cannot replace them: a rate limit
+ * is never a code an endpoint declares, and the pipeline sends one only with
+ * the data a client narrows it by.
  */
-export const rateLimitRefusal = (detail, retryAfterSeconds, message) => new LambderApiRefusal(detail, {
-    refusal: message ? { type: message.type, ...(message.title !== undefined ? { title: message.title } : {}), content: message.content, code: LAMBDER_REFUSAL_CODES.rateLimited } : DEFAULT_RATE_LIMIT_REFUSAL,
-    statusCode: 429,
-    headers: { "Retry-After": String(Math.max(1, Math.floor(retryAfterSeconds))) },
-});
+export const rateLimitRefusal = (detail, data, message = DEFAULT_RATE_LIMIT_REFUSAL) => {
+    // The header carries whole seconds of at least one, and the data says the
+    // same number: a client reading either waits as long.
+    if (!Number.isFinite(data.retryAfterSeconds))
+        throw new Error(`Lambder: a rate-limit refusal waits a finite number of seconds, got ${String(data.retryAfterSeconds)}.`);
+    const retryAfterSeconds = Math.max(1, Math.floor(data.retryAfterSeconds));
+    return new LambderApiRefusal(detail, {
+        refusal: {
+            type: message.type,
+            ...(message.title !== undefined ? { title: message.title } : {}),
+            content: message.content,
+            code: LAMBDER_REFUSAL_CODES.rateLimited,
+            data: { policy: data.policy, retryAfterSeconds },
+        },
+        statusCode: 429,
+        headers: { "Retry-After": String(retryAfterSeconds) },
+    });
+};
 /**
- * A rate-limit message carries no code of its own and no data: its code is
- * always the framework's, which rateLimitRefusal sets, and a code there would
- * read as one the app chose for clients to branch on when it never reaches
- * them.
+ * A rate-limit message carries no code of its own and no data: both are the
+ * framework's, which rateLimitRefusal sets, and a code there would read as
+ * one the app chose for clients to branch on when it never reaches them.
  */
 const assertRateLimitMessage = (where, message) => {
     if (message === undefined)
@@ -39,7 +52,7 @@ const assertRateLimitMessage = (where, message) => {
         throw new Error(`Lambder: ${where} sets a refusal code. A rate-limit refusal is always "${LAMBDER_REFUSAL_CODES.rateLimited}", so an endpoint never has to declare it; write the type, title and content only.`);
     }
     if (data !== undefined) {
-        throw new Error(`Lambder: ${where} sets refusal data. A rate-limit refusal carries none.`);
+        throw new Error(`Lambder: ${where} sets refusal data. A rate-limit refusal carries the framework's: the policy that refused and the seconds to wait.`);
     }
 };
 /**
@@ -118,8 +131,13 @@ const trackerKeyOf = (name, policy, apiName, key) => policy.budget === "perPolic
  * slice) and hands the context to a custom key's handler, reading nothing
  * of the context itself but its session, so it runs unchanged under the
  * server and the mock runtime.
+ *
+ * The caller's half of every tracker key (the address, the session key, a
+ * custom key) reaches the limiter as a digest (LambderKeyFieldDigest), so a
+ * table read names the API and the policy and never who was counted.
  */
 export class LambderApiRateLimitsEngine {
+    keyFieldDigest;
     limiter = null;
     failOpen = true;
     ipv6PrefixLength = DEFAULT_IPV6_RATE_LIMIT_PREFIX;
@@ -134,6 +152,9 @@ export class LambderApiRateLimitsEngine {
      * second would otherwise be as many identical log lines.
      */
     loggedFailures = new WeakSet();
+    constructor(keyFieldDigest) {
+        this.keyFieldDigest = keyFieldDigest;
+    }
     /** True once rateLimits were configured. */
     get isConfigured() { return this.limiter !== null; }
     configure(config) {
@@ -249,14 +270,14 @@ export class LambderApiRateLimitsEngine {
             const limits = windowsOf(policy, override);
             const exceeded = await this.countAttempt(name, trackerKeyOf(name, policy, apiName, key), limits, `API "${apiName}"`);
             if (exceeded) {
-                throw rateLimitRefusal(`Rate limited: "${apiName}" exceeded policy "${name}" (${exceeded.window}: ${exceeded.limit}).`, this.retryAfterOf(exceeded), override?.refusal ?? policy.refusal);
+                throw rateLimitRefusal(`Rate limited: "${apiName}" exceeded policy "${name}" (${exceeded.window}: ${exceeded.limit}).`, { policy: name, retryAfterSeconds: this.retryAfterOf(exceeded) }, override?.refusal ?? policy.refusal);
             }
         }
     }
     /**
      * One policy charged by code rather than by a declaration, for
      * `ctx.rateLimit` and `ctx.isRateLimited`. Counters, failOpen, key
-     * bounding and refusal are those of a declared limit; only who knows the
+     * digests and refusal are those of a declared limit; only who knows the
      * key differs. A policy without `per` takes the key the code passes, a
      * `per: "ip"` or `per: "session"` one reads it off the request, and one
      * keyed by an API payload is refused, since only its APIs know the key.
@@ -276,7 +297,7 @@ export class LambderApiRateLimitsEngine {
         const retryAfterSeconds = this.retryAfterOf(exceeded);
         return {
             checkResult: { ...exceeded, retryAfterSeconds },
-            refusal: rateLimitRefusal(`Rate limited: ${where} exceeded policy "${name}" (${exceeded.window}: ${exceeded.limit}).`, retryAfterSeconds, policy.refusal),
+            refusal: rateLimitRefusal(`Rate limited: ${where} exceeded policy "${name}" (${exceeded.window}: ${exceeded.limit}).`, { policy: name, retryAfterSeconds }, policy.refusal),
         };
     }
     /**
@@ -292,10 +313,10 @@ export class LambderApiRateLimitsEngine {
     /**
      * Counts one attempt, or lets it through when the limiter itself fails
      * and failOpen is on. The log line names the policy and its windows,
-     * never the tracker key: the key carries whatever a custom handler
-     * returned, which the docs' own example makes an email address. A
-     * failure the limiter throws again (see loggedFailures) is not logged
-     * again.
+     * never the tracker key: digested as its caller's half is, the key is
+     * still the same for every attempt of one caller, and a log is read by
+     * more people than the table. A failure the limiter throws again (see
+     * loggedFailures) is not logged again.
      */
     async countAttempt(name, trackerKey, limits, where) {
         try {
@@ -319,7 +340,7 @@ export class LambderApiRateLimitsEngine {
         if (per === undefined) {
             if (subject.key === undefined)
                 throw new Error(`Lambder: rate-limit policy "${name}" declares no per, so the code charging it passes the key: ctx.rateLimit("${name}", key).`);
-            return await boundKeyField("custom", subject.key);
+            return await this.keyFieldDigest.digestOf("custom", subject.key);
         }
         if (per !== "ip" && per !== "session") {
             throw new Error(`Lambder: rate-limit policy "${name}" derives its key from an API's payload, so only the APIs declaring it can charge it.`);
@@ -332,21 +353,20 @@ export class LambderApiRateLimitsEngine {
         if (per === "ip" || per === "session")
             return await this.requestKeyOf(name, per, request.ip, ctx.session);
         const payload = per.apiInput ? await parsePreflightSlice(per.apiInput, request.payload) : undefined;
-        return await boundKeyField("custom", await per.handler(ctx, payload));
+        return await this.keyFieldDigest.digestOf("custom", await per.handler(ctx, payload));
     }
     /**
      * The key a `per: "ip"` or `per: "session"` policy counts under: what the
-     * request carries, however the policy is charged. A session key is
-     * bounded like a custom one (see boundKeyField); an address needs no
-     * bound, since normalizeClientIp caps it at 45 characters whichever
-     * header or gateway field named it.
+     * request carries, however the policy is charged, digested as a custom
+     * key is. The address is the subject rateLimitSubjectOf counts (an IPv6
+     * caller's /64), so the digest of one subscriber's every address is one.
      */
     async requestKeyOf(name, per, ip, session) {
         if (per === "ip")
-            return `ip:${rateLimitSubjectOf(ip, this.ipv6PrefixLength)}`;
+            return await this.keyFieldDigest.digestOf("ip", rateLimitSubjectOf(ip, this.ipv6PrefixLength));
         const sessionKey = session?.sessionKey;
         if (!sessionKey)
             throw new Error(`Lambder: rate-limit policy "${name}" is keyed per "session", and the request charging it has no session.`);
-        return await boundKeyField("session", sessionKey);
+        return await this.keyFieldDigest.digestOf("session", sessionKey);
     }
 }

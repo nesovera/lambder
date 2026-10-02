@@ -57,7 +57,7 @@ const lambderApp = initLambder<SessionData>().create({
         // acting on their own account. A guard that needs a session is also
         // what makes an endpoint a session endpoint: its session is read and
         // validated before it runs, and ctx.session is typed present.
-        sessionOnly: lambderGuard({ session: true, handler: () => {} }),
+        signedIn: lambderGuard({ session: true, handler: () => {} }),
         // Anyone may call, and the reason is recorded at the call site, so
         // `grep "open:"` lists every public door in the app with its reason.
         open: lambderGuard({ handler: (_ctx, _params, _reason: string) => {} }),
@@ -99,9 +99,9 @@ export const userApis = defineApiGroup("user", {
     profile: defineApi({
         input: z.void(),
         output: z.object({ userId: z.string(), username: z.string(), role: z.string() }),
-        guards: "sessionOnly",
+        guards: "signedIn",
     }, async (ctx) => {
-        // Session is automatically fetched and validated, since sessionOnly needs one
+        // Session is automatically fetched and validated, since signedIn needs one
         const sessionData = ctx.session.data;
 
         return {
@@ -114,10 +114,11 @@ export const userApis = defineApiGroup("user", {
     changePassword: defineApi({
         input: z.object({ oldPassword: z.string(), newPassword: z.string() }),
         output: z.object({ csrfToken: z.string() }),
-        guards: "sessionOnly",
+        guards: "signedIn",
     }, async (ctx) => {
         const { oldPassword, newPassword } = ctx.apiPayload;
         const { sessionController } = ctx;
+        const { sessionKey } = ctx.session;
         const { userId, username, role } = ctx.session.data;
 
         // Validate old password
@@ -133,8 +134,12 @@ export const userApis = defineApiGroup("user", {
         // created AFTER it rather than before, or it would be deleted too and
         // this answer would hand back the CSRF token of a session that no longer
         // exists. The clearing Set-Cookie headers are emitted before the new
-        // pair, so the browser ends up holding the new session.
-        await sessionController.endSessionAll();
+        // pair, so the browser ends up holding the new session. False means a
+        // session rotating in a tight loop raced every pass of the delete; this
+        // request no longer holds a session, so the retry goes by key.
+        const ended = await sessionController.endSessionAll()
+            || await sessionController.deleteSessionAllByKey(sessionKey);
+        if (!ended) throw new Error("A session of this user may have outlived the password change.");
         const renewed = await sessionController.issueSession(userId, { userId, username, role });
 
         return { csrfToken: renewed.csrfToken }; // Send new CSRF token
@@ -143,7 +148,7 @@ export const userApis = defineApiGroup("user", {
     updatePreferences: defineApi({
         input: z.object({ theme: z.string(), language: z.string() }),
         output: z.object({ success: z.boolean(), message: z.string() }),
-        guards: "sessionOnly",
+        guards: "signedIn",
     }, async (ctx) => {
         const { theme, language } = ctx.apiPayload;
         const { sessionController } = ctx;
@@ -164,7 +169,7 @@ export const userApis = defineApiGroup("user", {
     logout: defineApi({
         input: z.void(),
         output: z.object({ success: z.boolean(), message: z.string() }),
-        guards: "sessionOnly",
+        guards: "signedIn",
     }, async (ctx) => {
         const { sessionController } = ctx;
 
@@ -180,7 +185,7 @@ export const userApis = defineApiGroup("user", {
     logoutAll: defineApi({
         input: z.void(),
         output: z.object({ success: z.boolean(), message: z.string() }),
-        guards: "sessionOnly",
+        guards: "signedIn",
     }, async (ctx) => {
         const { sessionController } = ctx;
 
@@ -253,7 +258,7 @@ const lambder = lambderApp.registerApiGroups(userApis)
         // the record, not against the cookie beside it.
         const posted = typeof ctx.post.csrf === "string" ? ctx.post.csrf : null;
         if (!await lambderApp.getSessionManager().isSessionCsrfTokenValid(ctx.session, posted)) {
-            return resolver.status(403, "This form is stale. Reload the page and try again.");
+            return resolver.text("This form is stale. Reload the page and try again.", { statusCode: 403 });
         }
 
         const displayName = typeof ctx.post.displayName === "string" ? ctx.post.displayName : ctx.session.data.username;

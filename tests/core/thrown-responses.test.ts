@@ -5,13 +5,14 @@
 import { describe, it, expect } from 'vitest';
 import Lambder from '../../src/core/Lambder.js';
 import { browse, testPublicFiles } from '../helpers.js';
+import { html } from '../../src/shared/LambderHtml.js';
 describe('Thrown responses and die', () => {
     it('a thrown response becomes the response (any call depth)', async () => {
         const guard = (res: any) => { throw res.redirect('/login', 302); };
         const lambder = new Lambder({ files: testPublicFiles() })
             .addRoute('/deep', (ctx, res) => {
                 guard(res);
-                return res.html('never reached');
+                return res.html(html`never reached`);
             });
 
         const result = await browse(lambder).request('GET', '/deep');
@@ -23,9 +24,9 @@ describe('Thrown responses and die', () => {
         let afterDieRan = false;
         const lambder = new Lambder({ files: testPublicFiles() })
             .addRoute('/die', (ctx, res) => {
-                res.die.status404('Gone');
+                res.die.status404(html`Gone`);
                 afterDieRan = true;
-                return res.html('never');
+                return res.html(html`never`);
             });
 
         const result = await browse(lambder).request('GET', '/die');
@@ -38,12 +39,12 @@ describe('Thrown responses and die', () => {
         let handlerRan = false;
         const lambder = new Lambder({ files: testPublicFiles() });
         lambder.addHook('beforeRender', async (ctx, res) => {
-            if(ctx.cookie.dev !== 'atlas'){ res.die.status404('Not found'); }
+            if(ctx.cookie.dev !== 'atlas'){ res.die.status404(html`Not found`); }
             return ctx;
         });
         lambder.addRoute('/gated', (ctx, res) => {
             handlerRan = true;
-            return res.html('secret');
+            return res.html(html`secret`);
         });
 
         const result = await browse(lambder).request('GET', '/gated');
@@ -57,7 +58,7 @@ describe('Thrown responses and die', () => {
         lambder.addHook('beforeRender', async (ctx, res) => res.redirect('/elsewhere', 301));
         lambder.addRoute('/x', (ctx, res) => {
             handlerRan = true;
-            return res.html('x');
+            return res.html(html`x`);
         });
 
         const result = await browse(lambder).request('GET', '/x');

@@ -65,8 +65,27 @@ export declare const xml: (strings: TemplateStringsArray, ...values: LambderHtml
 /** Mark a trusted string as safe (inserted without escaping). Never pass user input. */
 export declare const raw: (value: string) => LambderSafeHtml;
 /**
- * Server-preloaded state as <script type="application/json" id="..."> so an SPA
- * can hydrate without a first fetch. Escaped so the payload can't break out of
- * the script element. Read with JSON.parse(document.getElementById(id).textContent).
+ * Where jsonScript writes its data, and the id it carries. A data block
+ * (`application/json`, the default) is found by its id, so it needs one;
+ * JSON-LD (`application/ld+json`) is read by whatever crawls the page, so its
+ * id is optional.
  */
-export declare const jsonScript: (id: string, data: unknown) => LambderSafeHtml;
+export type LambderJsonScriptOptions = {
+    type?: "application/json";
+    id: string;
+} | {
+    type: "application/ld+json";
+    id?: string;
+};
+/**
+ * JSON in a <script> element, escaped so the payload cannot break out of it:
+ * every `<` is written `\u003c` (so no `</script>` or `<!--` can appear), and
+ * U+2028 and U+2029 as escapes too, which JSON.parse reads back unchanged.
+ *
+ * `jsonScript(id, data)` is server-preloaded state as
+ * <script type="application/json" id="...">, so an SPA can hydrate without a
+ * first fetch; read it with JSON.parse(document.getElementById(id).textContent).
+ * `jsonScript({ type: "application/ld+json" }, data)` is structured data for
+ * search engines, with the same escaping.
+ */
+export declare const jsonScript: (target: string | LambderJsonScriptOptions, data: unknown) => LambderSafeHtml;

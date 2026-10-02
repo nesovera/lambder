@@ -2,7 +2,7 @@
  * The one mapping from an HTTP answer to an API outcome.
  *
  * LambderCaller (a browser, over fetch) and LambderInvokeCaller (a server,
- * over a direct Lambda invoke) receive the same envelope and must read it
+ * over a Lambda invoke) receive the same envelope and must read it
  * the same way: which status is a crash, which is a rejected input, in what
  * order the envelope flags are honoured, what a non-envelope body means.
  * Both hand their answer to resolveApiOutcome and act on the result; their
@@ -23,8 +23,9 @@ import { isObjectPayload } from "./LambderObjectPayload.js";
 export type LambderValidationError = { name: string; message: string; issues: z.core.$ZodIssue[] };
 
 export type LambderApiFailureReason =
-    | 'network'          // the request never got an answer: offline, DNS, CORS, an external abort, a rejected invoke
+    | 'network'          // the request never got an answer: offline, DNS, CORS, a rejected invoke
     | 'timeout'          // aborted by the configured timeoutMs
+    | 'aborted'          // aborted by the call's own signal: the site gave the call up, which nothing reports as a failure
     | 'server'           // HTTP 5xx, or a response body that is not the API envelope
     | 'validation'       // HTTP 422: the server rejected the input schema
     | 'versionExpired'   // envelope flag: the client was built against another shape of the endpoint (its signature did not match)
@@ -75,13 +76,14 @@ type LambderApiFailureFields<TMessage extends LambderUncheckedRefusalMessage> = 
 
 /**
  * No result came back to read: the request never completed, it was given up
- * on, the server failed, or something inside the caller threw. Always carries
- * the Error, so a reader that narrowed this far never has to check for it.
- * A 5xx also carries `response` when the server answered with Lambder's own
- * envelope, which is how a crash detail and a logList arrive with it.
+ * on (by its timeout, or by the site through its signal), the server failed,
+ * or something inside the caller threw. Always carries the Error, so a reader
+ * that narrowed this far never has to check for it. A 5xx also carries
+ * `response` when the server answered with Lambder's own envelope, which is
+ * how a crash detail and a logList arrive with it.
  */
 export type LambderApiCallFailure<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = LambderApiFailureFields<TMessage> & {
-    reason: 'network' | 'timeout' | 'server' | 'unknown';
+    reason: 'network' | 'timeout' | 'aborted' | 'server' | 'unknown';
     error: Error;
     response?: LambderApiRefusalEnvelope;
 };
@@ -101,6 +103,17 @@ export type LambderApiEnvelopeFailure<TMessage extends LambderUncheckedRefusalMe
 );
 
 /**
+ * The failure side of an API call's outcome, every arm of it: what a failure
+ * handler is handed beside the error it reports (LambderCaller's
+ * errorHandler), and what a site that keeps a failure to act on later holds.
+ * Discriminated by `reason` like the outcome itself.
+ */
+export type LambderApiFailure<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> =
+    | LambderApiCallFailure<TMessage>
+    | LambderApiValidationFailure<TMessage>
+    | LambderApiEnvelopeFailure<TMessage>;
+
+/**
  * Discriminated result of an API call: `ok: true` carries the handler's
  * output, every failure carries a machine-readable reason, so "the server
  * answered" and "the request failed" are never conflated.
@@ -113,16 +126,15 @@ export type LambderApiEnvelopeFailure<TMessage extends LambderUncheckedRefusalMe
  */
 export type LambderApiOutcome<T, TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> =
     | LambderApiSuccessOutcome<T>
-    | LambderApiCallFailure<TMessage>
-    | LambderApiValidationFailure<TMessage>
-    | LambderApiEnvelopeFailure<TMessage>;
+    | LambderApiFailure<TMessage>;
 
 /**
  * What reading one HTTP answer can produce: LambderApiOutcome minus the
- * three reasons no answer carries (`network` and `timeout` are the caller's
- * own abort, `unknown` is something throwing around the call). A caller that
- * has handled `server` and `validation` holds a success or an envelope
- * refusal, both of which carry the envelope.
+ * four reasons no answer carries (`network` is no answer at all, `timeout`
+ * and `aborted` are the caller giving up on one, `unknown` is something
+ * throwing around the call). A caller that has handled `server` and
+ * `validation` holds a success or an envelope refusal, both of which carry
+ * the envelope.
  */
 export type LambderApiAnswerOutcome<T, TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> =
     | LambderApiSuccessOutcome<T>

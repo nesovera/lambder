@@ -71,17 +71,17 @@ export const refusalMessageOf = (message) => {
  * than retyping the strings.
  */
 export const LAMBDER_REFUSAL_CODES = {
-    /** A rate-limit policy refused (429). A policy's own message carries it. */
+    /** A rate-limit policy refused (429), in the policy's own words, with the policy's name and the seconds to wait as its data (LambderRateLimitRefusalData). */
     rateLimited: "lambder/rate-limited",
     /** The original of an idempotent request is still processing (409). */
     duplicateInFlight: "lambder/duplicate-in-flight",
-    /** The idempotencyKey was already used for a request with a different payload (409). */
+    /** The idempotencyKey was already used for a request with another payload, or another guard input that counts (409). */
     idempotencyKeyReused: "lambder/idempotency-key-reused",
     /** The idempotencyKey is malformed (400). */
     invalidIdempotencyKey: "lambder/invalid-idempotency-key",
     /** No API is registered under the requested name. */
     apiNotFound: "lambder/api-not-found",
-    /** The request's compressed payload is malformed or over the size limit (400). */
+    /** The call's body is not a JSON object, or its compressed payload is malformed or over the size limit (400). */
     invalidRequestPayload: "lambder/invalid-request-payload",
     /** Only the mock runtime emits it: the endpoint is registered as not mocked, with a reason. */
     notMocked: "lambder/not-mocked",

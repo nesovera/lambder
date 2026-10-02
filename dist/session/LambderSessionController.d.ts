@@ -194,7 +194,22 @@ export default class LambderSessionController<TSessionData = any> {
      * invoke caller) needs the new one to keep calling.
      */
     reissueSession(): Promise<LambderCreatedSession<TSessionData>>;
-    fetchSession(): Promise<LambderSessionRecord<TSessionData>>;
+    /**
+     * The session the request's cookies name, checked against the posted
+     * CSRF token and renewed (its dataRefresh once due, its sliding write),
+     * onto ctx.session. Throws LambderSessionNotFoundError when there is
+     * none.
+     *
+     * `refreshData: true` renews the data on this read whatever its
+     * deadline, for a read that wants it fresh (a page load): the dataRefresh
+     * callback runs once and its result shares the read's one write. A read
+     * followed by refreshSessionData() runs both twice whenever the data was
+     * due. Requires dataRefresh, and throws without it once there is a
+     * session to renew.
+     */
+    fetchSession(options?: {
+        refreshData?: boolean;
+    }): Promise<LambderSessionRecord<TSessionData>>;
     /**
      * Re-issues both cookies at this session's expiry: after a sliding write
      * moved it, and beside the host-only eviction, which would otherwise
@@ -222,7 +237,10 @@ export default class LambderSessionController<TSessionData = any> {
      * sent. A dead cookie costs a store read per request until it expires.
      */
     private endWithNoSession;
-    fetchSessionIfExists(): Promise<LambderSessionRecord<TSessionData> | null>;
+    /** fetchSession, answering null where it throws LambderSessionNotFoundError; it takes the same `refreshData`. */
+    fetchSessionIfExists(options?: {
+        refreshData?: boolean;
+    }): Promise<LambderSessionRecord<TSessionData> | null>;
     /**
      * Writes new data onto the current session. Throws
      * LambderSessionNotFoundError when the session was ended while this
@@ -244,8 +262,14 @@ export default class LambderSessionController<TSessionData = any> {
      * Deletes every session of the given sessionKey (e.g. a user id): "log
      * this subject out everywhere". Unlike endSessionAll it needs no fetched
      * session and touches no cookies, so it works on any subject.
+     *
+     * Answers whether it is sure none is left. False means a client
+     * rotating its session in a tight loop raced every pass of the delete,
+     * so a session of the subject may still stand (it is logged too); running
+     * it again is the remedy, and a caller ending sessions because a
+     * credential changed must not report success on false.
      */
-    deleteSessionAllByKey(sessionKey: string): Promise<void>;
+    deleteSessionAllByKey(sessionKey: string): Promise<boolean>;
     /**
      * Marks the data of every session of the given sessionKey stale, so each
      * renews via dataRefresh on its next read: the way to apply a change to
@@ -254,5 +278,14 @@ export default class LambderSessionController<TSessionData = any> {
      */
     expireSessionDataAllByKey(sessionKey: string): Promise<void>;
     endSession(): Promise<void>;
-    endSessionAll(): Promise<void>;
+    /**
+     * Ends every session of this session's subject, this one included, and
+     * clears this request's cookies: "log out everywhere".
+     *
+     * Answers false on deleteSessionAllByKey's terms: a session of the
+     * subject may still stand, and running the delete again is the remedy.
+     * This request's own session is over either way, so the second run is
+     * deleteSessionAllByKey with the sessionKey read before this call.
+     */
+    endSessionAll(): Promise<boolean>;
 }

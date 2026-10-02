@@ -8,7 +8,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import nodeCrypto from 'crypto';
 import { mockClient } from 'aws-sdk-client-mock';
-import { DynamoDBDocumentClient, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBClient, GetItemCommand, PutItemCommand } from '@aws-sdk/client-dynamodb';
 import type { APIGatewayProxyEventV2 } from 'aws-lambda';
 import { z } from 'zod';
 import Lambder, { initLambder } from '../../src/core/Lambder.js';
@@ -19,9 +19,11 @@ import LambderSessionManager, { LambderSessionReadError } from '../../src/sessio
 import LambderSessionController from '../../src/session/LambderSessionController.js';
 import type { LambderSessionStore } from '../../src/shared/contracts/LambderSessionStore.js';
 import { LambderDdbSessionStore } from '../../src/stores/LambderDdbSessionStore.js';
+import { marshallJsonValue } from '../../src/stores/LambderDdbSdk.js';
 import { LambderAnswerHeaders } from '../../src/shared/wire/LambderAnswerHeaders.js';
 import { lambderGuard } from '../../src/core/LambderPolicyBuilders.js';
 import { decodeBody, createMockEvent, createMockContext, testPublicFiles } from '../helpers.js';
+import { html } from '../../src/shared/LambderHtml.js';
 
 const hashTok = (value: string) => nodeCrypto.createHash('sha256').update(value).digest('hex');
 
@@ -135,7 +137,7 @@ describe('ctx.setCookie / ctx.clearCookie', () => {
             .addRoute('/set', (ctx, res) => {
                 ctx.setCookie('pref', 'dark', { domain: (hostname) => `.${hostname}`, maxAge: 3600 });
                 ctx.clearCookie('legacy', { httpOnly: true });
-                return res.html('ok');
+                return res.html(html`ok`);
             });
 
         const result = await lambder.render(
@@ -152,7 +154,7 @@ describe('ctx.setCookie / ctx.clearCookie', () => {
 
     it('work from an afterRender hook (the accumulators apply after the hooks)', async () => {
         const lambder = new Lambder({ files: testPublicFiles() })
-            .addRoute('/x', (ctx, res) => res.html('ok'))
+            .addRoute('/x', (ctx, res) => res.html(html`ok`))
             .addHook('afterRender', async (ctx, res, response) => {
                 ctx.setCookie('seen', '1', { secure: false });
                 return response;
@@ -165,7 +167,7 @@ describe('ctx.setCookie / ctx.clearCookie', () => {
 });
 
 describe('Session cookies at several scopes', () => {
-    const ddbMock = mockClient(DynamoDBDocumentClient);
+    const ddbMock = mockClient(DynamoDBClient);
     const nowSec = () => Math.floor(Date.now() / 1000);
 
     // Hex stand-ins for the two halves of a token: the controller checks every
@@ -179,6 +181,10 @@ describe('Session cookies at several scopes', () => {
     const STALE_TOKEN = `${PARTITION}:57a1e`;
     const FOREIGN_TOKEN = `${PARTITION}:${FOREIGN_SECRET}`;
     const OTHER_TOKEN = `${PARTITION}:${OTHER_SECRET}`;
+
+    /** The key of the record under one secret, and a record's fields as the item holding them, as the item-level client sends and reads them. */
+    const keyFor = (secret: string) => ({ Key: { pk: { S: PARTITION }, sk: { S: hashTok(secret) } } });
+    const asItem = (fields: Record<string, unknown>) => marshallJsonValue(fields).M!;
 
     const liveSession = () => ({
         pk: PARTITION,
@@ -241,9 +247,9 @@ describe('Session cookies at several scopes', () => {
     beforeEach(() => {
         ddbMock.reset();
         // Only the live secret's hash finds a record; every other token is a miss.
-        ddbMock.on(GetCommand).resolves({});
-        ddbMock.on(GetCommand, { Key: { pk: PARTITION, sk: hashTok(LIVE_SECRET) } }).resolves({ Item: liveSession() });
-        ddbMock.on(PutCommand).resolves({});
+        ddbMock.on(GetItemCommand).resolves({});
+        ddbMock.on(GetItemCommand, keyFor(LIVE_SECRET)).resolves({ Item: asItem(liveSession()) });
+        ddbMock.on(PutItemCommand).resolves({});
     });
 
     it('writes the session cookies under the configured domain, with the tokens unencoded', async () => {
@@ -265,7 +271,7 @@ describe('Session cookies at several scopes', () => {
 
         expect(session.sessionKey).toBe('user-123');
         expect(ctx.session).toBe(session);
-        expect(ddbMock.commandCalls(GetCommand).length).toBe(2);
+        expect(ddbMock.commandCalls(GetItemCommand).length).toBe(2);
         // The eviction of the host-only twin, and then the resolved session
         // re-issued at the configured scope, which is what keeps the eviction
         // from being a sign-out when the twin was the live copy.
@@ -297,7 +303,7 @@ describe('Session cookies at several scopes', () => {
         const session = await controller.fetchSession();
 
         expect(session.sessionKey).toBe('user-123');
-        expect(ddbMock.commandCalls(PutCommand).length).toBe(0);
+        expect(ddbMock.commandCalls(PutItemCommand).length).toBe(0);
         const cookies = setCookies(ctx);
         expect(cookies.filter((cookie) => cookie.includes('Max-Age=0')).length).toBe(2);
         expect(cookies.some((cookie) => new RegExp(`^sid=${LIVE_TOKEN}; Max-Age=\\d+; Domain=\\.example\\.com;`).test(cookie))).toBe(true);
@@ -322,7 +328,7 @@ describe('Session cookies at several scopes', () => {
         // cookie beside the session it planted. Whichever CSRF token the
         // browser happens to send would otherwise select that session and the
         // ambiguity would be invisible, so neither is used.
-        ddbMock.on(GetCommand, { Key: { pk: PARTITION, sk: hashTok(FOREIGN_SECRET) } }).resolves({ Item: { ...liveSession(), sk: hashTok(FOREIGN_SECRET), sessionKey: 'attacker', csrfTokenHash: hashTok('other-csrf') } });
+        ddbMock.on(GetItemCommand, keyFor(FOREIGN_SECRET)).resolves({ Item: asItem({ ...liveSession(), sk: hashTok(FOREIGN_SECRET), sessionKey: 'attacker', csrfTokenHash: hashTok('other-csrf') }) });
         const { controller } = makeController([FOREIGN_TOKEN, LIVE_TOKEN], '.example.com');
 
         await expect(controller.fetchSession()).rejects.toThrow(/ambiguous/);
@@ -336,7 +342,7 @@ describe('Session cookies at several scopes', () => {
         // first, which the planting site chooses. So the token posted is the
         // attacker's. Selecting on it would sign this visitor into the
         // attacker's account.
-        ddbMock.on(GetCommand, { Key: { pk: PARTITION, sk: hashTok(FOREIGN_SECRET) } }).resolves({ Item: { ...liveSession(), sk: hashTok(FOREIGN_SECRET), sessionKey: 'attacker', csrfTokenHash: hashTok('other-csrf') } });
+        ddbMock.on(GetItemCommand, keyFor(FOREIGN_SECRET)).resolves({ Item: asItem({ ...liveSession(), sk: hashTok(FOREIGN_SECRET), sessionKey: 'attacker', csrfTokenHash: hashTok('other-csrf') }) });
         const { controller } = makeController([FOREIGN_TOKEN, LIVE_TOKEN], '.example.com', 'app.example.com', 'other-csrf');
 
         await expect(controller.fetchSession()).rejects.toThrow(/ambiguous/);
@@ -363,7 +369,7 @@ describe('Session cookies at several scopes', () => {
         const { controller, ctx } = makeController([...planted, LIVE_TOKEN], '.example.com');
 
         await expect(controller.fetchSession()).rejects.toThrow(/ambiguous/);
-        expect(ddbMock.commandCalls(GetCommand).length).toBe(0);
+        expect(ddbMock.commandCalls(GetItemCommand).length).toBe(0);
         expect(setCookies(ctx).length).toBeGreaterThan(0);
         // And nothing announced the reads: the line that says the store is
         // about to be read once per copy belongs after the cap, where reading
@@ -390,7 +396,7 @@ describe('Session cookies at several scopes', () => {
 
         await controller.fetchSession();
 
-        expect(ddbMock.commandCalls(GetCommand).length).toBe(1);
+        expect(ddbMock.commandCalls(GetItemCommand).length).toBe(1);
         expect(setCookies(ctx)).toEqual([]);
         expect(warn).not.toHaveBeenCalled();
         warn.mockRestore();
@@ -403,8 +409,8 @@ describe('Session cookies at several scopes', () => {
         // check does not catch it. Taking either would sign the visitor into
         // an account that is not theirs.
         const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-        ddbMock.on(GetCommand, { Key: { pk: PARTITION, sk: hashTok(OTHER_SECRET) } })
-            .resolves({ Item: { ...liveSession(), sk: hashTok(OTHER_SECRET), sessionKey: 'attacker', csrfTokenHash: hashTok('attacker-csrf') } });
+        ddbMock.on(GetItemCommand, keyFor(OTHER_SECRET))
+            .resolves({ Item: asItem({ ...liveSession(), sk: hashTok(OTHER_SECRET), sessionKey: 'attacker', csrfTokenHash: hashTok('attacker-csrf') }) });
         const { controller, ctx } = makeController([OTHER_TOKEN, LIVE_TOKEN], '.example.com');
 
         await expect(controller.fetchSession()).rejects.toThrow(/ambiguous/);
@@ -541,7 +547,7 @@ describe('Session cookies at several scopes', () => {
         const { controller } = makeController([LIVE_TOKEN, LIVE_TOKEN], '.example.com');
 
         expect((await controller.fetchSession()).sessionKey).toBe('user-123');
-        expect(ddbMock.commandCalls(GetCommand).length).toBe(1);
+        expect(ddbMock.commandCalls(GetItemCommand).length).toBe(1);
         expect(warn).not.toHaveBeenCalled();
         warn.mockRestore();
     });
@@ -551,7 +557,7 @@ describe('Session cookies at several scopes', () => {
         // caller clear the client's cookies, so a DynamoDB blip answering it
         // would be a forced logout.
         vi.spyOn(console, 'warn').mockImplementation(() => {});
-        ddbMock.on(GetCommand, { Key: { pk: PARTITION, sk: hashTok('bad') } }).rejects(new Error('ddb down'));
+        ddbMock.on(GetItemCommand, keyFor('bad')).rejects(new Error('ddb down'));
         const { controller } = makeController([`${PARTITION}:bad`, LIVE_TOKEN], '.example.com');
 
         await expect(controller.fetchSession()).rejects.toBeInstanceOf(LambderSessionReadError);

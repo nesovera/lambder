@@ -152,7 +152,7 @@ describe('lambderHandlerTransport', () => {
 
         const outcome = await caller.apiOutcome('test.echo', { text: 'hi' }, { signal: controller.signal });
 
-        assertApiFailure(outcome, 'network');
+        assertApiFailure(outcome, 'aborted');
         expect(handlerRan).toBe(false);
     });
 });
@@ -529,6 +529,35 @@ describe('The mock app as a callee', () => {
         const unknown = await (caller as LambderInvokeCaller<any>).apiOutcome('test.nope', {});
         assertApiFailure(unknown);
         expect(unknown.refusal?.code).toBe('lambder/api-not-found');
+    });
+
+    it('reports a call its site aborted as aborted, over the caller\'s transport and the invoke-shaped one, whatever the mock was doing', async () => {
+        // The mock rejects a call whose signal aborts (during its latency, or
+        // while an injected timeout waits for it), and only the caller knows
+        // whether the site or its own timeout did that.
+        const mockApp = createMockApp();
+        mockApp.setLatency(1_000);
+        const errorHandler = vi.fn();
+        const browser = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false, errorHandler, transport: mockApp.transport() });
+        const onFailure = vi.fn();
+        const server = new LambderInvokeCaller<Contract>({ functionName: 'callee', apiVersion: '1', onFailure, transport: lambderMockInvokeTransport(mockApp) });
+        const abortSoon = () => {
+            const controller = new AbortController();
+            setTimeout(() => controller.abort(), 5);
+            return controller.signal;
+        };
+
+        assertApiFailure(await browser.apiOutcome('test.echo', { text: 'hi' }, { signal: abortSoon() }), 'aborted');
+        assertApiFailure(await server.apiOutcome('test.echo', { text: 'hi' }, { signal: abortSoon() }), 'aborted');
+
+        mockApp.setLatency(0);
+        mockApp.failNext('test.echo', 'timeout');
+        assertApiFailure(await browser.apiOutcome('test.echo', { text: 'hi' }, { signal: abortSoon() }), 'aborted');
+        mockApp.failNext('test.echo', 'timeout');
+        assertApiFailure(await browser.apiOutcome('test.echo', { text: 'hi' }, { timeoutMs: 5 }), 'timeout');
+
+        expect(errorHandler).toHaveBeenCalledOnce();
+        expect(onFailure).not.toHaveBeenCalled();
     });
 
     it('serves one MSW handler for the whole api path, the session riding in its jar and never in MSW\'s Cookie header', async () => {

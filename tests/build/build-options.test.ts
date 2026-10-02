@@ -23,7 +23,7 @@ import { LambderMemorySessionStore } from '../../src/stores/LambderMemorySession
 import { writeApiGuardParams, writeApiOptions } from '../../src/build.js';
 import { readOptionTables, type LambderApiOptionsFileOptions } from '../../src/build/writeApiOptions.js';
 import type { LambderApiOptionsSource } from '../../src/build/generatedTables.js';
-import { apiGuardParam, apiGuardParamExportName, type LambderApiOptionEntries, type LambderApisGuardedBy, type LambderApisWithGuard, type LambderApisWithMode, type LambderGuardParamOf } from '../../src/shared/wire/LambderApiOptionEntries.js';
+import { apiGuardParam, apiGuardParamExportName, apisWithGuard, type LambderApiOptionEntries, type LambderApisGuardedBy, type LambderApisWithGuard, type LambderApisWithMode, type LambderGuardParamOf } from '../../src/shared/wire/LambderApiOptionEntries.js';
 import { initLambderMock } from '../../src/mock/LambderMockApp.js';
 import { lambderMockPoliciesFrom } from '../../src/mock/lambderMockPoliciesFrom.js';
 
@@ -450,6 +450,20 @@ describe('Reading the generated tables', () => {
         expectTypeOf<LambderApisGuardedBy<typeof apiOptions, 'owner'>>().toEqualTypeOf<'account.me'>();
         expectTypeOf<LambderApisGuardedBy<typeof apiOptions, { store: 'ORDERS.MANAGE' }>>().toEqualTypeOf<'orders.list'>();
         expectTypeOf<LambderApisWithMode<typeof apiOptions, 'session'>>().toEqualTypeOf<'account.me' | 'orders.list' | 'staff.invite'>();
+    });
+
+    it('lists the APIs behind a guard as a value, typed as the union the type derives', () => {
+        const behindStore = apisWithGuard(apiOptions, 'store');
+        expectTypeOf(behindStore).toEqualTypeOf<LambderApisWithGuard<typeof apiOptions, 'store'>[]>();
+        expectTypeOf(behindStore).toEqualTypeOf<('orders.list' | 'staff.invite')[]>();
+        // The three forms of the guards option, in the table's order.
+        expect(behindStore).toEqual(['orders.list', 'staff.invite']);
+        expect(apisWithGuard(apiOptions, 'owner')).toEqual(['account.me']);
+        expect(apisWithGuard(apiOptions, 'device')).toEqual(['device.ping']);
+        expect(apisWithGuard(apiOptions, 'open')).toEqual(['order.lookup']);
+        expect(apisWithGuard(apiOptions, 'nobody')).toEqual([]);
+        // A guard named for something Object.prototype carries is declared by no API.
+        expect(apisWithGuard(apiOptions, 'toString')).toEqual([]);
     });
 
     it('reads a guard parameter with the literal the table pins', () => {

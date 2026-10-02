@@ -15,7 +15,8 @@ export type LambderCallOutcomeHint = {
 /**
  * An envelope's outcome, read in the order a caller honours it: a 5xx is a
  * crash whatever the envelope says, then the three flags, then a refusal,
- * and anything else is the handler's answer.
+ * and anything else is the handler's answer. A flag a declared code sets
+ * (sessionExpired, notAuthorized) keeps that code beside it.
  */
 export declare const outcomeOfEnvelope: (written: object, statusCode: number) => LambderCallOutcomeHint;
 /**

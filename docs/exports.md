@@ -13,8 +13,9 @@ not listed here is internal and may change without a major version.
 - `lambder/testing` puts a real app under test in this process. Server-only,
   and reached by nothing else in the package, so no deployment carries it.
 - `lambder/build` is what a generator script runs at build time: the
-  signature file, the declared options as data, the generated contract, and
-  the check of every refusal a handler can reach.
+  signature file, the declared options as data, the generated contract, the
+  schemas a mock validates against in development, and the check of every
+  refusal a handler can reach.
   Node-only, and reached by nothing else in the package.
 
 The **Client** column marks what `lambder/client` also exports; `client only`
@@ -32,9 +33,13 @@ marks the two names it exports that the root entry does not.
 | `isV2HttpEvent` | | Whether an event uses payload format v2 |
 
 Types: `LambderCreateOptions`, `LambderHandler`, `LambderRenderContext`, `LambderContextOptions`,
-`LambderSessionRenderContext`, `LambderHttpEvent`, `LambderHttpEventFormat`,
+`LambderSessionRenderContext`, `LambderRenderContextOf` and
+`LambderSessionRenderContextOf` (one instance's context, read off
+`typeof lambderApp`, for a helper typed apart from its handlers),
+`LambderHttpEvent`, `LambderHttpEventFormat`,
 `LambderActionTools`, `LambderCorsConfig`, `LambderOriginProof` (the
-`originProof` option), the `crashes` option's `LambderCrashOptions`,
+`originProof` option), `LambderRequestArrival` (what `ctx.arrivedVia` holds:
+`"proxy"`, `"direct"`, `"invoke"` or `"unverified"`), the `crashes` option's `LambderCrashOptions`,
 `LambderCrashReporter`, `LambderCrashSite`, and the `callSummary` option's
 `LambderCallSummary` (one call's line), `LambderCallSummaryOption`,
 `LambderCallOutcome` (how a call ended) and `LambderCallOutcomeHint` (an
@@ -62,13 +67,12 @@ Types: `LambderRouteMatcher`, `LambderRouteCondition`, `LambderRouteConditionFn`
 | Export | Client | Description |
 | --- | --- | --- |
 | `LambderResponse` | | The response object the pipeline finalizes |
-| `finalizeResponse` | | Apply compression, ETag and the size guard to a response |
 | `serializeCookie` | | Build a Set-Cookie header value |
 | `serializeClearCookie` | | Build a Set-Cookie header value that deletes a cookie |
 | `resolveCookieDomain` | | Resolve a string-or-function cookie domain against a hostname |
 
 Types: `LambderHttpResponse`, `LambderRawResponseInit`,
-`LambderResponseOptions`, `LambderFinalizeOptions`, `LambderHeadersInput`,
+`LambderResponseOptions`, `LambderTemplateFileOptions`, `LambderHeadersInput`,
 `LambderHttpStatusCode` and `LambderRefusalStatusCode` (client and mock too), `LambderCookieOptions`, `LambderClearCookieOptions`,
 `LambderCookieDomain`, `LambderResponseCompressionOption`,
 `LambderResponseCompressionSettings`.
@@ -113,13 +117,14 @@ See [APIs and refusals](./apis.md).
 | `isLambderApiRefusal` | yes | Brand-based detection, safe across duplicate copies of the package |
 | `LAMBDER_REFUSAL_CODES` | yes | The codes the framework stamps on its own refusals |
 | `isLambderRefusalCode` | yes | Whether a code is one of the framework's own |
-| `LambderApiRefusalValidationError` | | The crash a refusal causes when its endpoint may not send it: a code the endpoint does not declare, data on a code that declares none, data its code's schema rejects, or a declared code under a 422 or 5xx status (`apiName`, `code`, `zodError`; the refusal as thrown is the `cause`). Also from `lambder/mock` |
+| `LambderApiRefusalValidationError` | | The crash a refusal causes when its endpoint may not send it: a code the endpoint does not declare, data on a code that declares none, data its code's schema rejects, `lambder/rate-limited` without its policy and wait, or a declared code under a 422 or 5xx status (`apiName`, `code`, `zodError`; the refusal as thrown is the `cause`). Also from `lambder/mock` |
 | `isObjectPayload` | yes | Whether a value is what an API answers with, or a refusal carries as data: an array, or an object JSON writes as an object |
 | `refusalMessageOf` | yes | An envelope's refusal as the message object every reader gets: a plain string becomes `{ type: "error", content }` |
 | `describeCrash` | yes | Describe a thrown error for the envelope's `crash` field: name, message, stack, cause chain, where it happened |
 | `errorFromCrashDetail` | yes | Rebuild an Error (with its cause chain) from a crash detail |
 | `apiGuardParam` | yes | The parameter an API's guards option gives a guard, read off the generated `apiOptions` table with the literal the table pins: the value in the map form, `true` for a guard named without one, `undefined` when the API does not declare it |
 | `apiGuardParamExportName` | yes | The identifier `writeApiGuardParams` exports an API's parameter under (`orders.list` exports `ordersListGuardParam`), for code that reads a generated module by API name |
+| `apisWithGuard` | yes | The names of the APIs in a generated `apiOptions` table whose guards option names a guard, in any of its three forms: the list `LambderApisWithGuard` is the type of, read off the same entries in the table's order |
 
 Types: `LambderApiContractShape`; the envelope, `LambderApiEnvelopeBody` (a
 `LambderApiSuccessEnvelope` or a `LambderApiRefusalEnvelope`),
@@ -127,7 +132,9 @@ Types: `LambderApiContractShape`; the envelope, `LambderApiEnvelopeBody` (a
 `LambderApiRefusalConfig` (what `res.apiRefusal` takes);
 `LambderApiRefusalOptions`, `LambderRefusalMessage` (generic over an
 endpoint's declared codes, one arm per code), `LambderPlainRefusalMessage`
-(the framework's and the uncoded refusal), `LambderUncheckedRefusalMessage` (any
+(the framework's codes that carry no data and the uncoded refusal),
+`LambderRateLimitRefusalData` (what `lambder/rate-limited` carries: the
+policy that refused and the seconds to wait), `LambderUncheckedRefusalMessage` (any
 code, the form an app writes), `LambderRefusalCode`, `LambderRefuseOptions`,
 `LambderDeclaredRefuse` and `LambderDeclaredRefuseOptions` (`ctx.refuse`
 typed to declared codes), `LambderCrashDetail`, `LambderCrashCause`; and the
@@ -178,13 +185,14 @@ See [Sessions](./sessions.md).
 | `LambderSignedClaims` | yes | One kind of signed token: `sign(claims)` writes `<version>.<base64url claims>.<base64url HMAC-SHA256>` over the claims a zod schema accepted, `verify(token, { now? })` answers the claims or null for a forged, foreign, malformed, refused or expired token alike; an optional `exp` claim in epoch seconds is judged on every verify |
 | `keyedDigest` | yes | HMAC-SHA256 of a value under the app's secret as 43 characters of base64url: how a secret an app stores and looks up by value (a device secret, a code sent by email) rests, so a copied table cannot be attacked offline |
 | `randomSecret` | yes | A fresh secret from the cryptographic random source as base64url, 32 bytes unless told otherwise |
+| `randomCode` | yes | A code of `length` characters drawn uniformly from an alphabet of 2 to 256 distinct characters, from the same source and without the bias of a plain modulo: what a person types or reads out (a pairing code, the digits in an email) |
 | `constantTimeEquals` | yes | Length-aware comparison whose duration says nothing about where two digests differ |
-
+| `LambderPasswordHasher` | | Passwords at rest as argon2id PHC strings through node's `crypto.argon2` (Node 24.7+): `hash(password)`, `verify(stored, password)` for argon2id, argon2i or argon2d strings in any parameter order, `needsRehash(stored)` for a hash written under another variant or cost |
 | `LambderOneShotSecrets` | | Codes and tokens an app hands out once and takes back once (a code emailed to an address, an activation link, a pairing code), over a store that settles their races: `issue(kind, scope, { cooldownSeconds?, meta? })`, `redeem(kind, scope, candidate)` for a code, `redeemToken(kind, candidate)` for a token, `retire(scope)` |
 | `LambderDdbOneShotSecretStore` | | The secrets as digests in DynamoDB under `OTS#`, sharing the policy table: a code as one item, a token as two written in one transaction |
 | `LambderMemoryOneShotSecretStore` | | The same rules in a `Map`, for tests and development |
 
-Types: `LambderSignedClaimsOptions`; `LambderOneShotSecretsOptions`,
+Types: `LambderSignedClaimsOptions`; `LambderPasswordHasherOptions` (`memoryKib`, `passes`, `parallelism`); `LambderOneShotSecretsOptions`,
 `LambderOneShotSecretKind` (a `code` of an alphabet and length with a ceiling
 on tries, or a `token` of random bytes or of an alphabet, redeemed by value),
 `LambderOneShotIssueResult`,
@@ -203,7 +211,7 @@ See [Secrets and retries](./secrets.md).
 | `lambderGuardBuilder` | | The guard builder bound to other context types (what the mock runtime's `mock.guard` is) |
 | `lambderRateLimitKey` | | Build a custom rate-limit key from a validated payload slice; the handler sees the render context |
 | `lambderRateLimitKeyBuilder` | | The same builder bound to another context type; the mock runtime binds it as `rateLimitKey` |
-| `rateLimitRefusal`, `DEFAULT_RATE_LIMIT_REFUSAL` | | The 429 refusal a rate limit throws, and its default message |
+| `rateLimitRefusal`, `DEFAULT_RATE_LIMIT_REFUSAL` | | The 429 refusal a rate limit throws (`rateLimitRefusal(detail, { policy, retryAfterSeconds }, words?)`), and its default words |
 
 Types: guards, `LambderApiGuard`, `LambderGuardBuilder`, `LambderGuardMeta`, `LambderGuardMetaMap`, `LambderGuardRunAt`,
 `LambderGuardsOption`, `LambderGuardsOptionValue`, `LambderAllowedGuardNames`,
@@ -253,13 +261,13 @@ implementations ship, and an app may bring its own.
 | `RATE_LIMIT_WINDOWS` | | The fixed windows a policy may cap, with their lengths |
 | `LambderExpiringMap` | | The bounded map every memory store and the memory cache sit on: expiry on read plus an amortized sweep, a ceiling, and `{ evictable }` entries held back from eviction |
 | `LambderExpiringMapFullError` | | Thrown by `set()` when the ceiling is reached and every entry is protected from eviction |
-| `LambderBackoffTimer` | yes | One pending wait at a time, each retry after a failure waiting longer than the last: `retry(run)` and `wait(signal?)` climb a jittered ladder, `after(ms, run)` waits off it, `reset()` and `cancel()`. What the upload runner waits on between tries at storage. See [Secrets and retries](./secrets.md#retrying-with-a-backoff) |
+| `LambderBackoffTimer` | yes | One pending wait at a time, each retry after a failure waiting longer than the last: `retry(run)` and `wait(signal?)` climb a jittered ladder, `after(ms, run)` waits off it, `retries` counts them since `reset()`, and `cancel()`. What the upload runner waits on between tries at storage. See [Retrying with a backoff](./client.md#retrying-with-a-backoff) |
 
 Types: `LambderBackoffTimerOptions`; the interfaces `LambderRateLimiter`, `LambderIdempotencyStore`,
 `LambderCache` (and `LambderSessionStore` above); cache, `LambderCacheKey`,
-`LambderCacheSetOptions`, `LambderCacheListOptions`,
+`LambderCacheSetOptions`, `LambderCacheGetOrSetOptions`, `LambderCacheListOptions`,
 `LambderMemoryCacheOptions`, `LambderDdbCacheOptions`,
-`LambderDdbCacheGetOrSetOptions`, `LambderStorageBackedCacheOptions`,
+`LambderStorageBackedCacheOptions`,
 `LambderCacheStorage` (what an app implements for it),
 `LambderCacheStoredEntry`, `LambderCacheAddress`; rate limiter, `LambderDdbRateLimiterOptions`,
 `LambderRateLimitWindow`, `LambderRateLimitPolicy`,
@@ -295,8 +303,8 @@ See [Frontend hosting](./frontend-hosting.md).
 | `LambderUploadFileFactsSchema`, `LambderUploadTicketSchema` | | The zod schemas an app's ticket endpoint declares its input and output with |
 | `checkUploadRule` | yes | A rule's verdict on a file's type and size, or null when it may be uploaded |
 | `refuseUnacceptedUpload` | | Refuses a ticket for a file the rule does not accept, with the `lambder/upload-*` code; what a bucket of an app's own calls before it signs |
-| `LambderUploadRunner` | yes | The browser half: checks the file against the rule, hashes it, asks for a ticket, sends it with progress, retries and cancellation, and has the server confirm it |
-| `LambderUploadError` | yes | How an upload failed, as a reason a screen can word |
+| `LambderUploadRunner` | yes | The browser half: checks the file against the rule, hashes it, asks for a ticket, sends it with progress, retries at storage and at the app's own endpoints, stops on an abort, and has the server confirm it |
+| `LambderUploadError` | yes | How an upload failed, as a reason a screen can word, with the failed ticket or confirm call's outcome when that call ended it |
 
 Types: `LambderUploadBucket` (the interface both buckets implement),
 `LambderUploadVerdict`, `LambderUploadObjectOptions` (what a stored object
@@ -317,13 +325,13 @@ See [Direct uploads](./uploads.md).
 | `html` | yes | Tagged template with automatic HTML escaping; throws for an interpolation where escaping cannot protect it (unquoted, in a tag, in `on*`/`style`/`srcdoc`, in script content, at a comment's edge) and checks URL schemes. See [Templating](./templating.md) |
 | `xml` | yes | Alias of `html`, for XML documents |
 | `raw` | yes | Insert trusted markup verbatim |
-| `jsonScript` | yes | Embed JSON safely for client hydration |
+| `jsonScript` | yes | Embed JSON safely in a `<script>`: hydration state as `application/json` under an id, or structured data as `application/ld+json` |
 | `escapeHtml` | yes | Escape a string |
 | `renderHtmlValue` | yes | Render any interpolatable value the tags accept |
-| `LambderSafeHtml` | yes | The marker class for already-safe fragments |
-| `LambderTemplatingEngine` | | The comment-only HTML template engine |
+| `LambderSafeHtml` | yes | The marker class for already-safe fragments, and the only body `res.html`, `res.xml`, `res.status` and `res.status404` take |
+| `LambderTemplatingEngine` | | The comment-only HTML template engine. A data key the template has no slot or condition for throws; its names as a type parameter type the data |
 
-Types: `LambderHtmlValue`, `LambderTemplateData`,
+Types: `LambderHtmlValue`, `LambderJsonScriptOptions`, `LambderTemplateData`,
 `LambderTemplatingEngineOptions`.
 
 See [Templating](./templating.md).
@@ -384,7 +392,8 @@ Types: `LambderCallerOptions`, `LambderCallOptions`, `LambderLogListHandler`, `L
 `LambderStoredCookie`, `LambderHandlerTransportOptions`; and the arms of the
 outcome union a consumer narrows to, `LambderApiAnswerOutcome` (the answer
 outcome an HTTP answer resolves to), `LambderApiSuccessOutcome`,
-`LambderApiCallFailure`, `LambderApiValidationFailure`,
+`LambderApiFailure` (the whole failure side, which the caller's error
+handler is handed beside the error), `LambderApiCallFailure`, `LambderApiValidationFailure`,
 `LambderApiEnvelopeFailure`.
 
 See [Frontend client](./client.md) and [The API core](./api-core.md#transports).
@@ -394,7 +403,8 @@ See [Frontend client](./client.md) and [The API core](./api-core.md#transports).
 | Export | Client | Description |
 | --- | --- | --- |
 | `LambderApiPipeline` | | The one pipeline the server and the mock runtime run |
-| `readApiEnvelope` | | Read a posted envelope into a `LambderApiRequest` |
+| `readApiEnvelope` | | Read a posted envelope into a `LambderApiRequest`; a body that is not a JSON object is flagged on the request as no envelope, which the pipeline refuses |
+| `readApiEnvelopeText` | | The same over a body's text, for an adapter holding nothing parsed: an empty body is an empty envelope, and text that is not JSON is flagged too |
 | `apiSignatureOf` | | An endpoint's signature digested from its definition; what `lambder.apiSignatures()` builds the map both sides ship with from |
 | `restoreCompressedPayload` | | Restore a `payloadGz` or `payloadBr` pair onto the request |
 | `successEnvelope`, `refusalEnvelope`, `plainRefusalEnvelope`, `envelopeAnswer`, `refusalAnswer`, `validationAnswer`, `apiNotFoundAnswer`, `sessionExpiredAnswer`, `versionExpiredAnswer`, `invalidPayloadAnswer`, `crashAnswer` | | The one place the envelope is written and every outcome rendered: a handler's output as the only success, everything else as a refusal |
@@ -404,7 +414,6 @@ See [Frontend client](./client.md) and [The API core](./api-core.md#transports).
 | `API_ANSWER_CONTENT_TYPE` | | The content type every API answer carries (`application/json; charset=utf-8`) |
 | `LambderApiValidationRefusal`, `isLambderApiValidationRefusal` | | Input validation as a typed throw |
 | `LambderApiOutputValidationError` | | The crash a handler's returned output causes when its API's output schema does not accept it (`apiName`; `zodError` when the schema rejected the output, null when parsing threw; what was thrown as `cause`); an idempotency key records it as the key's answer |
-| `answerFromResponse`, `responseFromAnswer` | | The server adapter's conversions between a `LambderResponse` and an answer |
 | `synthesizeLambdaHttpEvent`, `decodeLambdaHttpResult`, `localLambdaContext` | | The Lambda event conversions the invoke caller and the handler transport share. The event is payload format 2.0 unless `eventFormat: "v1"` asks for a REST API's |
 
 Types: `LambderApiRequest`, `LambderApiRequestInfo`, `LambderCompressedPayloadFields`,
@@ -436,7 +445,7 @@ See [The API core](./api-core.md).
 
 | Export | Client | Description |
 | --- | --- | --- |
-| `LambderInvokeCaller` | | Calls a Lambder app running in another lambda directly, typed from the callee's contract |
+| `LambderInvokeCaller` | | Calls a Lambder app running in another lambda through a Lambda invoke, typed from the callee's contract |
 | `LambderInvokeError` | | What `api()` throws: the reason, the outcome, the callee's crash, and its error rebuilt as `cause` |
 | `isLambderInvokeError` | | Brand-based detection, safe across duplicate copies of the package |
 | `LAMBDER_INVOKE_HEADER` | | The marker header name (`x-lambder-invoke`) |
@@ -466,8 +475,12 @@ See [Calling a Lambder app from another lambda](./invoke.md).
 
 Types: `LambderI18nConfig`, `LambderI18nInstance`, `LambderI18nTranslator`,
 `LambderLanguageMeta`, `LambderI18nExtractParams`, `LambderI18nDictionaryLoader`,
-and the instance-derived
-`LambderI18nCodes`, `LambderI18nKeys`, `LambderI18nTranslatorFor`.
+`LambderI18nDictionaryEntry` (what a dictionary holds under one key: a text or
+a plural entry), `LambderI18nPluralEntry` (a text's forms by plural category),
+`LambderI18nPluralCategory`, `LambderI18nReadonlyInstance` (the reading
+members of any instance of one contract, whatever its language set), and the
+instance-derived `LambderI18nCodes`, `LambderI18nKeys`,
+`LambderI18nTranslatorFor`.
 
 See [Translations](./i18n.md).
 
@@ -505,6 +518,9 @@ the reason, and a session endpoint's guards without the `apiOptions` table),
 `LambderCustomKeyedPolicyNames`, `LambderMockGuardShapeOf` (what a mock guard
 standing in for a declared server guard has to look like, from the generated
 `guardDeclarations`), `LambderMockInputOf`, `LambderMockOutputOf`,
+`LambderApiSchemaEntries`, `LambderApiSchemaEntry` and `LambderJsonSchema`
+(the generated schemas module the `apiSchemas` option takes: every API's
+input and output as JSON Schema),
 `LambderMockConsoleLoggerOptions`, `LambderMswModule`, `LambderMockMswTarget`,
 `LambderMemoryUploadBucketOptions`, `LambderMemoryUploadObject`,
 and the event and answer shapes the invoke transport reads and returns,
@@ -527,27 +543,35 @@ See [The mock runtime](./mock.md).
 
 | Export | Description |
 | --- | --- |
-| `lambderTestApp` | Puts a built Lambder instance under test: memory stores under it in place, simulated browsers in front of it. Returns a `LambderTestApp` |
+| `lambderTestApp` | Puts a built Lambder instance under test: memory stores under it in place, memory twins under the caches, one-shot secret stores and upload buckets the app builds itself, mock apps behind its invoke callers, simulated browsers in front of it. Returns a `LambderTestApp` |
 | `assertApiSuccess`, `assertApiFailure`, `assertApiRefusal` | Narrow an `apiOutcome` through an `asserts` signature (`assertApiRefusal` to one of the endpoint's declared codes, with its data typed), and throw a plain Error naming what the outcome was. No test runner is imported |
-| `LambderMemorySessionStore`, `LambderMemoryRateLimiter`, `LambderMemoryIdempotencyStore`, `LambderMemoryOneShotSecretStore`, `LambderMemoryCache`, `LambderMemoryUploadBucket`, `LambderLocalFileSource`, `LambderCookieJar`, `LAMBDER_REFUSAL_CODES` | Re-exported for a test's convenience: the stores to inspect or hand in, the cache to swap an app's own for, an upload bucket to put under an app's uploads, a file source over fixtures, a visitor's jar, the codes to assert on |
-| `lambderSessionStoreConformance`, `lambderIdempotencyStoreConformance`, `lambderRateLimiterConformance`, `lambderOneShotSecretStoreConformance` | The rules each store interface promises, registered as cases with the runner's own `it` and `expect`, for an app to hold a store it writes to the rules Lambder's own stores meet |
+| `LambderMemorySessionStore`, `LambderMemoryRateLimiter`, `LambderMemoryIdempotencyStore`, `LambderMemoryOneShotSecretStore`, `LambderMemoryCache`, `LambderMemoryUploadBucket`, `LambderLocalFileSource`, `LambderCookieJar`, `LAMBDER_REFUSAL_CODES` | Re-exported for a test's convenience: the stores to inspect or hand in, the twins `memoryTwinOf` hands back, a file source over fixtures, a visitor's jar, the codes to assert on |
+| `bootLambdaPackage` | Boots an assembled deployment package the way Lambda boots it, in a fresh node process with its imports held to the package (what the runtime supplies, the AWS SDK by default, resolved from an install outside it), and hands its handler API calls or events in turn. Resolves to what each call answered, what the import cost, and the phase that failed; throws for a misconfiguration |
+| `lambderSessionStoreConformance`, `lambderIdempotencyStoreConformance`, `lambderRateLimiterConformance`, `lambderOneShotSecretStoreConformance`, `lambderCacheConformance`, `lambderCacheStorageConformance` | The rules each store interface promises, registered as cases with the runner's own `it` and `expect`, for an app to hold a store it writes to the rules Lambder's own stores meet; the last two for a `LambderCache` and for the `LambderCacheStorage` under `LambderStorageBackedCache` |
 
 Types: `LambderTestApp` and `LambderTestVisitor` (the two classes, reached
 through `lambderTestApp()` and `visitor()` rather than constructed),
 `LambderTestAppOptions`, `LambderTestVisitorOptions`, `LambderTestRequestInit`,
+`LambderTestVisitorEndpoint` and `LambderTestVisitorGroupCalls` (a visitor's
+endpoints by group: the output, thrown on a failure, and `.outcome`),
 `LambderTestedInstance` (an instance as `lambderTestApp` takes it),
 `LambderMemoryUploadBucketOptions`, `LambderMemoryUploadObject`,
 `LambderExpectedFailure`; the suites' options
 (`LambderSessionStoreConformanceOptions`,
 `LambderIdempotencyStoreConformanceOptions`,
 `LambderRateLimiterConformanceOptions`,
-`LambderOneShotSecretStoreConformanceOptions`) and what they take from the
+`LambderOneShotSecretStoreConformanceOptions`,
+`LambderCacheConformanceOptions`,
+`LambderCacheStorageConformanceOptions`) and what they take from the
 runner (`LambderConformanceRunner`, `LambderConformanceIt`,
 `LambderConformanceExpect`, `LambderConformanceAssertion`,
-`LambderConformanceSetup`); and what a visitor hands back:
+`LambderConformanceSetup`); what a visitor hands back:
 `LambderLambdaHttpResult` from `request()`, `LambderCreatedSession` from
 `signIn()`, `LambderApiOutcome` and `LambderApiFailureReason` from
-`apiOutcome()`.
+`apiOutcome()`; and the boot's own: `LambderPackageBootOptions`,
+`LambderPackageBootCall` (an API call or an event),
+`LambderPackageBootResult`, `LambderPackageBootCallResult` (one call's
+answer) and `LambderPackageBootMeasurements`.
 
 See [Testing](./testing.md).
 
@@ -559,8 +583,9 @@ See [Testing](./testing.md).
 | `writeApiContract` | Writes the server's contract type as plain types in a module that imports nothing, for a client to compile instead of the server, or checks the one on disk, naming the APIs that moved; a write is verified against the contract, entry by entry, before the file is touched |
 | `writeApiOptions` | Writes the declared options of every API, every rate-limit policy less its key handler and every guard's input mode and refusal codes as three `as const` tables of plain data (`apiOptions`, `rateLimitPolicies`, `guardDeclarations`), from the instance a module exports, or checks the one on disk, naming what moved per table. See [the options as a generated file](./apis.md#the-options-as-a-generated-file) |
 | `writeApiGuardParams` | Writes one guard's parameters as one export per API that declares it (`orders.list` exports `ordersListGuardParam`), each typed `LambderApiGuardParam`, and nothing else about any API: a browser gating on the guard imports the ones its screens use, and its bundle carries those alone. See [one guard's parameters, for a browser](./apis.md#one-guards-parameters-for-a-browser) |
-| `generateApiFiles` | Writes, or with `check` verifies, every file a script names for each of its apps (the contract, the signatures, the options, the guard parameters), in one call that names everything stale or broken. See [Generating every file at once](./apis.md#generating-every-file-at-once) |
-| `checkApiRefusals` | Reads a project through the compiler and holds every refusal a handler can reach (an endpoint's, a guard's, a mock entry's, through any helper it calls) to the codes it may send, naming each code it may not send, each declared code nothing reaches, each refusal with no code and each handler it cannot follow, and failing a project in which it finds none to check. See [Checking what a handler can reach](./apis.md#checking-what-a-handler-can-reach) |
+| `writeApiSchemas` | Writes every API's input schema (its input form) and output schema (its output form) as JSON Schema in one `as const` table of plain data (`apiSchemas`) that imports nothing, for the mock to validate its calls against in development, or checks the one on disk, naming the APIs that moved and listing every refinement, transform, pipe and computed default the file cannot carry; a schema JSON Schema cannot represent throws. See [the schemas, for the mock](./apis.md#the-schemas-for-the-mock) |
+| `generateApiFiles` | Writes, or with `check` verifies, every file a script names for each of its apps (the contract, the signatures, the options, the guard parameters, the schemas), in one call that names everything stale or broken, each contract printed in a Node process of its own with a heap sized for the compiler. See [Generating every file at once](./apis.md#generating-every-file-at-once) |
+| `checkApiRefusals` | Reads a project through the compiler and holds every refusal a handler can reach (an endpoint's, a guard's, a mock entry's, through any helper it calls) to the codes it may send, naming each code it may not send, each declared code nothing reaches, each refusal with no code, each handler it cannot follow and each handler handed no typed refuse, and failing a project in which it finds none to check. See [Checking what a handler can reach](./apis.md#checking-what-a-handler-can-reach) |
 
 Types: `LambderApiSignatureSource` (what it reads: anything with
 `apiSignatureEntries()`), `LambderApiSignatureFileOptions`,
@@ -569,9 +594,15 @@ Types: `LambderApiSignatureSource` (what it reads: anything with
 module that exports the instance),
 `LambderApiOptionsSource`, `LambderApiOptionsFileOptions`,
 `LambderApiOptionsFileResult`, `LambderApiGuardParamsFileOptions`,
-`LambderApiGuardParamsFileResult`, `LambderNameChanges`, and what
+`LambderApiGuardParamsFileResult`, `LambderNameChanges`,
+`LambderApiSchemasSource` (what `writeApiSchemas` reads: anything with
+`apiSchemaEntries()`), `LambderApiSchemasFileOptions`,
+`LambderApiSchemasFileResult`, `LambderApiSchemaLoss` (one place a schema
+does what the file cannot carry), and what
 `generateApiFiles` takes and answers: `LambderApiFilesConfig`,
-`LambderApiFilesApp` (one app's module and files), `LambderApiFilesResult`,
+`LambderApiFilesApp` (one app's module and files), `LambderApiFilesOptions`
+(`check`, and `contractHeapMegabytes`, the heap of a contract's process),
+`LambderApiFilesResult`,
 and what `checkApiRefusals` takes and answers:
 `LambderApiRefusalCheckOptions`, `LambderApiRefusalCheckResult`,
 `LambderRefusalCheckFinding`.

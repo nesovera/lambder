@@ -12,6 +12,7 @@ import Lambder from '../../src/core/Lambder.js';
 import type { LambderResponse } from '../../src/core/LambderResponse.js';
 import { LambderLocalFileSource } from '../../src/stores/LambderLocalFileSource.js';
 import type { LambderRenderContext } from '../../src/core/LambderContext.js';
+import { html } from '../../src/shared/LambderHtml.js';
 
 
 
@@ -31,7 +32,7 @@ describe('Hooks - beforeRender Hook', () => {
 
         lambder.addRoute('/test', (ctx, res) => {
             executionOrder.push('routeHandler');
-            return res.html('Test');
+            return res.html(html`Test`);
         });
 
         const visitor = browse(lambder);
@@ -86,7 +87,7 @@ describe('Hooks - beforeRender Hook', () => {
             return ctx;
         });
 
-        lambder.addRoute('/test', (ctx, res) => res.html('Test'));
+        lambder.addRoute('/test', (ctx, res) => res.html(html`Test`));
 
         const visitor = browse(lambder);
         await visitor.request('GET', '/test');
@@ -111,7 +112,7 @@ describe('Hooks - beforeRender Hook', () => {
 
         lambder.addRoute('/test', (ctx, res) => {
             routeHandlerCalled = true;
-            return res.html('Test');
+            return res.html(html`Test`);
         });
 
         const visitor = browse(lambder);
@@ -134,7 +135,7 @@ describe('Hooks - afterRender Hook', () => {
 
         lambder.addRoute('/test', (ctx, res) => {
             executionOrder.push('routeHandler');
-            return res.html('Test');
+            return res.html(html`Test`);
         });
 
         await lambder.addHook('afterRender', async (ctx, res, response) => {
@@ -182,7 +183,7 @@ describe('Hooks - afterRender Hook', () => {
             apiPath: '/api'
         });
 
-        lambder.addRoute('/test', (ctx, res) => res.html('Test'));
+        lambder.addRoute('/test', (ctx, res) => res.html(html`Test`));
 
         await lambder.addHook('afterRender', async (ctx, res, response) => {
             executionOrder.push(1);
@@ -215,7 +216,7 @@ describe('Hooks - afterRender Hook', () => {
         // A module-level answer, the way a maintenance page or a 404 is kept.
         let kept: LambderResponse | undefined;
         await lambder.addHook('afterRender', async (ctx, res) => {
-            kept ??= res.html('kept');
+            kept ??= res.html(html`kept`);
             return kept;
         });
         await lambder.addHook('afterRender', async (ctx, res, response) => {
@@ -257,7 +258,7 @@ describe('Hooks - afterRender Hook', () => {
                 return res.raw({ statusCode: 500, body: `Error: ${err.message}` });
             });
 
-        lambder.addRoute('/test', (ctx, res) => res.html('Test'));
+        lambder.addRoute('/test', (ctx, res) => res.html(html`Test`));
 
         await lambder.addHook('afterRender', async (ctx, res, response) => {
             return new Error('Post-processing failed');
@@ -303,14 +304,14 @@ describe('Hooks - fallback Hook', () => {
             apiPath: '/api'
         });
 
-        lambder.addRoute('/exists', (ctx, res) => res.html('Exists'));
+        lambder.addRoute('/exists', (ctx, res) => res.html(html`Exists`));
 
         await lambder.addHook('fallback', async (ctx, res) => {
             fallbackCalled = true;
         });
 
         lambder.setRouteFallbackHandler((ctx, res) => {
-            return res.status404('Not Found');
+            return res.status404(html`Not Found`);
         });
 
         const visitor = browse(lambder);
@@ -335,7 +336,7 @@ describe('Hooks - fallback Hook', () => {
             executionOrder.push(2);
         });
 
-        lambder.setRouteFallbackHandler((ctx, res) => res.status404('Not Found'));
+        lambder.setRouteFallbackHandler((ctx, res) => res.status404(html`Not Found`));
 
         const visitor = browse(lambder);
         await visitor.request('GET', '/nonexistent');
@@ -351,7 +352,7 @@ describe('Hooks - fallback Hook', () => {
             apiPath: '/api'
         });
 
-        lambder.addRoute('/test', (ctx, res) => res.html('Test'));
+        lambder.addRoute('/test', (ctx, res) => res.html(html`Test`));
 
         await lambder.addHook('fallback', async (ctx, res) => {
             fallbackCalled = true;
@@ -382,7 +383,7 @@ describe('Hooks - created Hook', () => {
         // Lazy: runs once at the first render, keeping addHook chainable.
         expect(createdCalled).toBe(false);
 
-        lambder.addRoute('/test', (ctx, res) => res.html('Test'));
+        lambder.addRoute('/test', (ctx, res) => res.html(html`Test`));
         const visitor = browse(lambder);
         await visitor.request('GET', '/test');
 
@@ -397,7 +398,7 @@ describe('Hooks - created Hook', () => {
         });
 
         lambder.addHook('created', async (instance) => {
-            instance.addRoute('/from-created', (ctx, res) => res.html('Configured'));
+            instance.addRoute('/from-created', (ctx, res) => res.html(html`Configured`));
         });
 
         const visitor = browse(lambder);
@@ -414,8 +415,8 @@ describe('Hooks - created Hook', () => {
     it('retries the created hooks after one of them fails', async () => {
         let attempts = 0;
         const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
-            .addRoute('/test', (ctx, res) => res.html('Ready'))
-            .setGlobalErrorHandler((err, ctx, res) => res.status(500, err.message));
+            .addRoute('/test', (ctx, res) => res.html(html`Ready`))
+            .setGlobalErrorHandler((err, ctx, res) => res.text(err.message, { statusCode: 500 }));
 
         lambder.addHook('created', async () => {
             attempts += 1;
@@ -461,7 +462,7 @@ describe('Hooks - Priority Ordering', () => {
             return ctx;
         }, 30);
 
-        lambder.addRoute('/test', (ctx, res) => res.html('Test'));
+        lambder.addRoute('/test', (ctx, res) => res.html(html`Test`));
 
         const visitor = browse(lambder);
         await visitor.request('GET', '/test');
@@ -478,7 +479,7 @@ describe('Hooks - Priority Ordering', () => {
             apiPath: '/api'
         });
 
-        lambder.addRoute('/test', (ctx, res) => res.html('Test'));
+        lambder.addRoute('/test', (ctx, res) => res.html(html`Test`));
 
         await lambder.addHook('afterRender', async (ctx, res, response) => {
             executionOrder.push(50);
@@ -524,12 +525,26 @@ describe('Hooks - Priority Ordering', () => {
             return ctx;
         }, 10);
 
-        lambder.addRoute('/test', (ctx, res) => res.html('Test'));
+        lambder.addRoute('/test', (ctx, res) => res.html(html`Test`));
 
         const visitor = browse(lambder);
         await visitor.request('GET', '/test');
 
         expect(executionOrder).toEqual(['negative', 'no-priority', 'positive']);
+    });
+
+    it('runs the created hooks in priority order too, those of one priority in the order they were added', async () => {
+        const executionOrder: string[] = [];
+        const lambder = new Lambder({ files: testPublicFiles(), apiPath: '/api' })
+            .addHook('created', () => { executionOrder.push('late'); }, 10)
+            .addHook('created', () => { executionOrder.push('default, first'); })
+            .addHook('created', () => { executionOrder.push('early'); }, -10)
+            .addHook('created', () => { executionOrder.push('default, second'); })
+            .addRoute('/test', (ctx, res) => res.html(html`Test`));
+
+        await browse(lambder).request('GET', '/test');
+
+        expect(executionOrder).toEqual(['early', 'default, first', 'default, second', 'late']);
     });
 });
 
@@ -554,7 +569,7 @@ describe('Hooks - Combined Workflow', () => {
 
         lambder.addRoute('/test', (ctx, res) => {
             executionOrder.push('handler');
-            return res.html('Test');
+            return res.html(html`Test`);
         });
 
         await lambder.addHook('afterRender', async (ctx, res, response) => {

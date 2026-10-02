@@ -5,6 +5,8 @@ export type LambderApiRefusalCheckOptions = {
     files?: string[];
     /** Whether a refusal with no code is a finding, as it is a crash in an app whose vocabulary requires codes (declareRefusals's requireCodes). Default: true. */
     requireCodes?: boolean;
+    /** Whether a handler handed no typed refuse is a finding, since nothing it reaches could be checked. Default: true; false lists such handlers without failing. */
+    requireTypedRefuse?: boolean;
 };
 /** What one handler's check found. */
 export type LambderRefusalCheckFinding = {
@@ -20,15 +22,18 @@ export type LambderRefusalCheckFinding = {
      * - `untraced`: a handler handed a typed refuse whose function cannot be
      *   found (a parameter, a dependency's value), so nothing it reaches was
      *   checked.
+     * - `unchecked`: a handler handed no typed refuse, built by an init that
+     *   declared no refusal vocabulary, so there is nothing to hold what it
+     *   reaches to. Not a finding with `requireTypedRefuse: false`.
      */
-    problem: "undeclared" | "unused" | "uncoded" | "unreadable" | "untraced";
+    problem: "undeclared" | "unused" | "uncoded" | "unreadable" | "untraced" | "unchecked";
     /** The code, for `undeclared` and `unused`. */
     code?: string;
     /** Where the refusal is raised, as `file:line`, for `undeclared`, `uncoded` and `unreadable`. */
     raisedAt?: string;
 };
 export type LambderApiRefusalCheckResult = {
-    /** False when the project could not be read, no handler in it could be checked, or any handler has a finding. */
+    /** False when the project could not be read, no handler in it could be checked, or any handler has a finding, an unchecked one included unless `requireTypedRefuse` is false. */
     ok: boolean;
     /** How many handlers were checked. */
     handlers: number;

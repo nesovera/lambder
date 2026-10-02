@@ -1,5 +1,6 @@
 /**
- * The keys of the two doors `lambder/testing` opens on a built instance.
+ * The keys of the two doors `lambder/testing` opens on a built instance, the
+ * first of which it also opens on the classes an app builds beside it.
  *
  * Symbols rather than named methods, and exported by no entry point: the
  * package's exports map is what a consumer can import, so only
@@ -14,7 +15,10 @@
  * other stores: the copy's closures would still reach the original and the
  * production table under it. The stores are therefore replaced in place, and
  * every class that holds one answers to this key with a method that takes the
- * replacement.
+ * replacement. A class an app builds itself, beside the instance (a cache, an
+ * upload bucket, an invoke caller), registers as it is constructed (see
+ * LambderSwappableInstances) and answers to this key with a method that puts
+ * a memory twin, or a mock app, under itself in place.
  */
 export const LAMBDER_BACKEND_SWAP = Symbol("lambder.backendSwap");
 /**

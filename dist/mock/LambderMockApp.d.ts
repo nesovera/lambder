@@ -6,7 +6,8 @@ import { type LambderDeclaredRefuse, type LambderRefusalMessage } from "../share
 import { type LambderDeclaredVocabulary, type LambderHandlerRefusalsOf, type LambderRefusalVocabulary, type LambderRefusalVocabularyOption, type LambderRefusalVocabularyOptionChecks, type LambderMergedRefusalVocabulary } from "../api/LambderApiRefusals.js";
 import { type LambderApiTransport, type LambderApiTransportRequest } from "../shared/transport/LambderApiTransport.js";
 import { LambderCookieJar } from "../shared/transport/LambderCookieJar.js";
-import { type LambderApiGuard, type LambderGuardBuilder } from "../api/LambderApiGuards.js";
+import { type LambderApiGuard } from "../api/LambderApiGuards.js";
+import { LAMBDER_MOCK_ADAPTER_DOOR, type LambderMockAdapterDoor } from "./LambderMockAdapterDoor.js";
 import { LambderMemoryRateLimiter } from "../stores/LambderMemoryRateLimiter.js";
 import { LambderMemoryIdempotencyStore } from "../stores/LambderMemoryIdempotencyStore.js";
 import { LambderMemorySessionStore } from "../stores/LambderMemorySessionStore.js";
@@ -50,6 +51,21 @@ export declare class LambderMockApp<C extends LambderApiContractShape, S = any, 
     /** The host this runtime's cookies belong to (see the cookieHost option). */
     readonly cookieHost: string;
     /**
+     * The page's cookie jar: where the browser this runtime serves keeps the
+     * cookies no page script can read, the HttpOnly session cookie among
+     * them. signIn and signOut plant into it and clear it when they are given
+     * no jar, and the MSW adapter carries its calls' cookies in it when it is
+     * given none, so the session signIn starts is the one the page's next
+     * call through the worker sends. The runtime's own: reset() empties it.
+     */
+    readonly pageCookieJar: LambderCookieJar;
+    /**
+     * What the MSW adapter asks of the runtime and tells it beyond handing it
+     * a call, behind a key no entry point exports (see
+     * LAMBDER_MOCK_ADAPTER_DOOR): the adapter's bookkeeping, not the app's.
+     */
+    readonly [LAMBDER_MOCK_ADAPTER_DOOR]: LambderMockAdapterDoor;
+    /**
      * The API core, every protocol step of it. Private: the mock's surface is
      * the app, and a consumer reaching past it would be configuring the
      * server's pipeline through a development tool. The adapters use the
@@ -69,6 +85,8 @@ export declare class LambderMockApp<C extends LambderApiContractShape, S = any, 
     private readonly registry;
     /** The server's declared options per API, when create() was given the generated table; the entries' declarations come from here. */
     private readonly apiOptions;
+    /** The server's schemas, when create() was given the generated table: every entry's input is validated, and every answer parsed, through them. */
+    private readonly apiSchemas;
     /** The mock's own guards as create() was given them: which of them need a session, for an entry's mode without the apiOptions table. */
     private readonly mockGuards;
     /** The server's guard declarations, when create() was given the generated table: the refusal codes a declared guard adds to an entry. */
@@ -120,6 +138,13 @@ export declare class LambderMockApp<C extends LambderApiContractShape, S = any, 
     private declaredRefusalsOf;
     /** The mode the apiOptions table gives a name, or null without a table or for a name it does not hold. */
     private declaredModeOf;
+    /**
+     * The schema an entry's input is validated with: the server's, from the
+     * apiSchemas table when create() was given it, then the entry's own where
+     * it restates one, run on what the server's leaves (the payload stripped
+     * and defaulted as on the server). Either alone where only one is given.
+     */
+    private entryInputOf;
     private buildEntry;
     /**
      * A mock for an endpoint: a handler, or the handler with the endpoint's
@@ -195,16 +220,6 @@ export declare class LambderMockApp<C extends LambderApiContractShape, S = any, 
     restoreOverrides(): void;
     /** The registered endpoint names. */
     get registeredNames(): string[];
-    /**
-     * Whether a call to this name would be answered from the registry, which
-     * is what an adapter asks before passing one on.
-     *
-     * True for every name once a rest entry is registered, since it answers
-     * whatever nothing else claimed. That makes a rest entry and the MSW
-     * adapter's `onUnmocked: "passthrough"` alternatives rather than layers:
-     * with one registered, nothing is handed on to the network.
-     */
-    hasRegisteredEntry(apiName: string): boolean;
     private entryFor;
     /**
      * The entry that answers a name nothing registered, when register() was
@@ -216,7 +231,7 @@ export declare class LambderMockApp<C extends LambderApiContractShape, S = any, 
      * restore, and for a session endpoint the session read).
      */
     private restNotMockedEntry;
-    /** The next call to the endpoint fails this way; several calls queue in order. An injected refusal names one of the endpoint's declared codes, its data as a handler raises it (see LambderMockRefusalsOf), and is checked and sent as a real one is. */
+    /** The next call to the endpoint fails this way; several calls queue in order. An injected refusal names one of the endpoint's declared codes, its data as a handler raises it (see LambderMockRefusalsOf), and is checked and sent as a real one is. An injected sessionExpired, or a refusal whose code is declared so, ends the session the call carries, as the server's does. */
     failNext<K extends keyof C & string>(apiName: K, failure: LambderMockFailure<LambderRefusalMessage<LambderMockRefusalsOf<C, K, TVocabulary>>> | LambderMockFailureReason): void;
     /** Every call to the endpoint fails this way until cleared with null. */
     setFailure<K extends keyof C & string>(apiName: K, failure: LambderMockFailure<LambderRefusalMessage<LambderMockRefusalsOf<C, K, TVocabulary>>> | LambderMockFailureReason | null): void;
@@ -226,13 +241,14 @@ export declare class LambderMockApp<C extends LambderApiContractShape, S = any, 
     /**
      * Rewinds the runtime: sessions, rate-limit counters, replay records,
      * overrides, injected failures, the offline switch, the configured
-     * latency, the call log and its numbering, the cookies its own transports
-     * hold, then onReset, so the app rewinds its own data too.
+     * latency, the call log and its numbering, the cookies its own jars hold,
+     * then onReset, so the app rewinds its own data too.
      *
      * The cookies matter as much as the sessions: a jar still holding the
      * token of an emptied store's session reads as signed in until an answer
-     * says sessionExpired. So every jar transport() built for itself is
-     * emptied, and the cookies a "document" transport mirrored are expired.
+     * says sessionExpired. So the page's jar and every jar transport() built
+     * for itself are emptied, and the cookies mirrored into document.cookie
+     * are expired at the scope each was set at.
      *
      * The registry survives, being configuration rather than accumulated
      * state. Subscriptions survive too, being how a test watches the runtime;
@@ -254,9 +270,10 @@ export declare class LambderMockApp<C extends LambderApiContractShape, S = any, 
     /**
      * Starts a session without a login endpoint: creates it through the
      * session controller, the way a login handler does, plants its cookies
-     * into the jar when one is given, so the jar's transport is signed in
-     * from its next call, and mirrors the readable ones into document.cookie
-     * the way an answer's cookies are. Returns the raw tokens too.
+     * into the jar given, or the page's (pageCookieJar) when none is, so that
+     * jar's transport or the MSW adapter is signed in from its next call, and
+     * mirrors the readable ones into document.cookie the way an answer's
+     * cookies are. Returns the raw tokens too.
      */
     signIn(sessionKey: string, data: S, options?: {
         jar?: LambderCookieJar;
@@ -265,8 +282,8 @@ export declare class LambderMockApp<C extends LambderApiContractShape, S = any, 
     }): Promise<LambderCreatedSession<S>>;
     /**
      * Ends every session of the subject ("log this subject out everywhere")
-     * and clears what signIn planted: the cookies in the jar given, and the
-     * copies in document.cookie.
+     * and clears what signIn planted: the cookies in the jar given, or the
+     * page's when none is, and the copies in document.cookie.
      *
      * Symmetric on purpose, the way reset() is. The records alone leave the
      * jar and the page carrying a token for a session that no longer exists,
@@ -291,14 +308,6 @@ export declare class LambderMockApp<C extends LambderApiContractShape, S = any, 
     private createContext;
     /** What a call looks like on the way in, for the runtime's own calls and for one an adapter passes on. */
     private requestEvent;
-    /**
-     * Records a call an adapter handed on instead of answering: the MSW
-     * adapter's passthrough. Without it a name the registry does not know
-     * leaves no trace at all, and a mistyped endpoint reaches the real
-     * network with nothing in the call log or on the subscription to say so,
-     * which is the one failure the log exists to make visible.
-     */
-    notePassthrough(request: LambderApiRequest): void;
     /** What every record of one call repeats (see LambderMockCallFacts). */
     private callFacts;
     /** One call from a parsed request to its answer, events included. The entry point every transport and adapter shares. */
@@ -320,21 +329,6 @@ export declare class LambderMockApp<C extends LambderApiContractShape, S = any, 
      * not create itself, and reset() empties it.
      */
     transport(options?: LambderMockTransportOptions): LambderMockTransport;
-    /**
-     * Mirrors an answer's non-HttpOnly cookies into document.cookie and
-     * remembers them, so reset() expires them again. The direct transport's
-     * "document" mode and the MSW adapter both come through here: one
-     * implementation of the mirror, one record of what was planted.
-     */
-    mirrorCookiesIntoDocument(setCookies: readonly string[]): void;
-    /**
-     * Takes a jar an adapter built for itself as the runtime's own, so reset()
-     * empties it with the rest. The MSW adapter's jar holds the session
-     * cookies of calls that never touch transport(); left full after a reset,
-     * the next request would carry a token for a session the emptied store no
-     * longer has.
-     */
-    adoptCookieJar(jar: LambderCookieJar): void;
     /** caller.setTransport(mockApp.transport(options)); returns the transport, its jar on it. */
     attach(caller: {
         setTransport(transport: LambderApiTransport): unknown;
@@ -361,8 +355,15 @@ export declare const initLambderMock: <C extends LambderApiContractShape, S = an
     declareRefusals<const TVocabulary extends LambderRefusalVocabularyOption, const TRequireCodes extends boolean = false>(refusals: TVocabulary & LambderRefusalVocabularyOptionChecks<TVocabulary>, options?: {
         requireCodes?: TRequireCodes;
     }): {
-        /** Builds a mock guard: the server guard's shape, the handler seeing the mock's contexts. */
-        guard: LambderGuardBuilder<LambderMockCallContext<S>, LambderMockSessionCallContext<S>>;
+        /**
+         * Builds a mock guard: the server guard's shape, the handler seeing the
+         * mock's contexts. Bound to the vocabulary the mock declared, as the
+         * server init's builder is to the server's: its ctx.refuse is typed to the
+         * guard's own `refusals`, data in the schema's input form, and a code the
+         * vocabulary does not hold is refused as the guard is built. A mock that
+         * declared none checks nothing here.
+         */
+        guard: import("../api/LambderApiGuards.js").LambderGuardBuilder<LambderMockCallContext<S>, LambderMockSessionCallContext<S>, LambderMergedRefusalVocabulary<TVocabulary>, TRequireCodes>;
         /**
          * Builds a mock rate-limit key, the counterpart of `guard`. Bound to the
          * mock's own call context, because the server's lambderRateLimitKey() is
@@ -390,8 +391,15 @@ export declare const initLambderMock: <C extends LambderApiContractShape, S = an
          */
         create<const G extends Record<string, LambderApiGuard<any, any, any, LambderMockCallContext<S>, LambderMockSessionCallContext<S>>> = {}, const P extends LambderMockRateLimitPolicies<S> = {}, I extends boolean | LambderMockIdempotencyOptions<S> = boolean | LambderMockIdempotencyOptions<S>, const D extends Record<string, LambderGuardDeclarationEntry> = {}, const A extends Record<string, LambderApiOptionEntry> | undefined = undefined>(options: LambderMockAppOptions<C, S, G, P, I, D, A>): LambderMockApp<C, S, G, [A] extends [undefined] ? false : true, LambderMergedRefusalVocabulary<TVocabulary>, TRequireCodes>;
     };
-    /** Builds a mock guard: the server guard's shape, the handler seeing the mock's contexts. */
-    guard: LambderGuardBuilder<LambderMockCallContext<S>, LambderMockSessionCallContext<S>>;
+    /**
+     * Builds a mock guard: the server guard's shape, the handler seeing the
+     * mock's contexts. Bound to the vocabulary the mock declared, as the
+     * server init's builder is to the server's: its ctx.refuse is typed to the
+     * guard's own `refusals`, data in the schema's input form, and a code the
+     * vocabulary does not hold is refused as the guard is built. A mock that
+     * declared none checks nothing here.
+     */
+    guard: import("../api/LambderApiGuards.js").LambderGuardBuilder<LambderMockCallContext<S>, LambderMockSessionCallContext<S>, never, false>;
     /**
      * Builds a mock rate-limit key, the counterpart of `guard`. Bound to the
      * mock's own call context, because the server's lambderRateLimitKey() is

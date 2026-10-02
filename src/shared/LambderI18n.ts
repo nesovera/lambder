@@ -24,24 +24,79 @@ export interface LambderLanguageMeta {
     [extra: string]: unknown;
 }
 
+/**
+ * The plural categories `Intl.PluralRules` sorts a count into. Which of them
+ * a language uses is its own: English uses one and other, Arabic all six,
+ * Japanese other alone.
+ */
+export type LambderI18nPluralCategory = "zero" | "one" | "two" | "few" | "many" | "other";
+
+/**
+ * A text that varies with a count: one form per plural category, keyed by
+ * category, so `{ one: "{count} item", other: "{count} items" }`.
+ * `t(key, { count })` picks the form for the count under the plural rules
+ * of the language the text is in, and `other` when the entry lacks the
+ * category picked. `other` is required, so there is always a form to fall
+ * back to. Which other categories a language uses is the runtime's plural
+ * data, which differs between runtimes, so whether an entry holds them all
+ * is what `checkPluralCoverage()` reports, in a test or a build, rather than
+ * anything that fails where the dictionary arrives.
+ */
+export interface LambderI18nPluralEntry {
+    zero?: string;
+    one?: string;
+    two?: string;
+    few?: string;
+    many?: string;
+    other: string;
+}
+
+/** What a dictionary holds under one key: a text, or a plural entry. */
+export type LambderI18nDictionaryEntry = string | LambderI18nPluralEntry;
+
 /** Extracts `{param}` placeholder names from a string literal type. */
 export type LambderI18nExtractParams<S extends string> =
     S extends `${string}{${infer P}}${infer Rest}` ? P | LambderI18nExtractParams<Rest> : never;
 
+/** The `{param}` names across every form of a plural entry. */
+type PluralEntryParams<TEntry> = LambderI18nExtractParams<Extract<TEntry[keyof TEntry], string>>;
+
 /**
  * Typed translator: `t(key)`, and when the key's contract value contains
- * `{tokens}`, a params object with exactly those tokens is required.
+ * `{tokens}`, a params object with exactly those tokens is required. A
+ * plural key always takes one: a numeric `count`, which picks the form,
+ * beside the tokens across its forms.
+ *
+ * The text test is wrapped (`[...] extends [string]`) so that it does not
+ * distribute: a translator stays comparable to `(key: string) => string`,
+ * which a cast for keys known only at runtime relies on.
  */
-export type LambderI18nTranslator<TContract extends Record<string, string>> = <
+export type LambderI18nTranslator<TContract extends Record<string, LambderI18nDictionaryEntry>> = <
     K extends keyof TContract & string
 >(
-    ...args: LambderI18nExtractParams<TContract[K]> extends never
-        ? [key: K]
-        : [key: K, params: Record<LambderI18nExtractParams<TContract[K]>, string | number>]
+    ...args: [TContract[K]] extends [string]
+        ? LambderI18nExtractParams<TContract[K] & string> extends never
+            ? [key: K]
+            : [key: K, params: Record<LambderI18nExtractParams<TContract[K] & string>, string | number>]
+        : [key: K, params: { count: number } & Record<Exclude<PluralEntryParams<TContract[K]>, "count">, string | number>]
 ) => string;
 
+/**
+ * What a language other than the default gives for a contract (the default
+ * language's block): a text for each text, and for each plural entry a
+ * plural entry of its own, whose forms are its language's. A plain text in
+ * place of a plural entry stands for the other form alone: complete for a
+ * language whose rules use nothing else (Japanese, say), and a gap that
+ * `checkPluralCoverage()` reports for any other. A plural entry where the
+ * contract has a text is a type error: `t` takes no count for that key, so
+ * no form could be picked.
+ */
+type TranslationBlock<TContract> = {
+    [K in keyof TContract]: TContract[K] extends string ? string : LambderI18nDictionaryEntry
+};
+
 /** A per-language dictionary set: `{ en: { key: "value" }, tr: {...} }`. */
-type DictSet = Record<string, Record<string, string> | undefined>;
+type DictSet = Record<string, Record<string, LambderI18nDictionaryEntry> | undefined>;
 
 /**
  * A language block fetched on demand instead of bundled: a function that
@@ -64,7 +119,7 @@ export interface LambderI18nConfig<
     TLanguages extends Record<string, LambderLanguageMeta>,
     TDefault extends keyof TLanguages & string,
     TEnforced extends readonly (keyof TLanguages & string)[],
-    TBase extends Record<TDefault, Record<string, string>>,
+    TBase extends Record<TDefault, Record<string, LambderI18nDictionaryEntry>>,
 > {
     /** Master registry of every supported language and its metadata. */
     languages: TLanguages;
@@ -78,18 +133,20 @@ export interface LambderI18nConfig<
     /**
      * App-wide base dictionary. Strict: every language in `languages` must
      * provide every key (the `defaultLanguage` block is the typed contract).
-     * Any language but the default may be a loader instead
+     * A key's entry is a text, or a plural entry where the text varies with
+     * a count. Any language but the default may be a loader instead
      * (`tr: () => import("./tr")`), fetched by `loadLanguage`. The default
      * block stays inline, because every lookup falls back to it.
      */
     base: TBase & {
         [L in keyof TLanguages]: L extends TDefault
-            ? Record<keyof TBase[TDefault], string>
-            : LanguageBlockFor<TBase, L, Record<keyof TBase[TDefault], string>>
+            ? Record<keyof TBase[TDefault], LambderI18nDictionaryEntry>
+            : LanguageBlockFor<TBase, L, TranslationBlock<TBase[TDefault]>>
     };
     /**
      * Optional language detector, tried before browser detection. Return a
-     * supported code to pick it, or null/undefined to continue the chain:
+     * supported code, in any case, to pick it (it is matched as language tags
+     * are, case-insensitively), or anything else to continue the chain:
      * setLanguage override → detectLanguage → browser languages → defaultLanguage.
      */
     detectLanguage?: (helpers: {
@@ -103,7 +160,7 @@ export interface LambderI18nInstance<
     TLanguages extends Record<string, LambderLanguageMeta>,
     TDefault extends keyof TLanguages & string,
     TEnforced extends readonly (keyof TLanguages & string)[],
-    TContract extends Record<string, string>,
+    TContract extends Record<string, LambderI18nDictionaryEntry>,
 > {
     /** Translate using the automatically resolved active language. */
     t: LambderI18nTranslator<TContract>;
@@ -115,11 +172,11 @@ export interface LambderI18nInstance<
      * Any language but the default may be a loader, as in `base`.
      * Returns a new instance whose key space = parent keys + new keys.
      */
-    extend<const TExt extends { [D in TDefault]: Record<string, string> }>(
+    extend<const TExt extends { [D in TDefault]: Record<string, LambderI18nDictionaryEntry> }>(
         dict: {
             [L in keyof TLanguages]: L extends TDefault
-                ? Record<keyof TExt[TDefault], string>
-                : LanguageBlockFor<TExt, L, Record<keyof TExt[TDefault], string>>
+                ? Record<keyof TExt[TDefault], LambderI18nDictionaryEntry>
+                : LanguageBlockFor<TExt, L, TranslationBlock<TExt[TDefault]>>
         }
             & { [D in TDefault]: Partial<Record<keyof TContract, never>> }
             & TExt
@@ -131,15 +188,15 @@ export interface LambderI18nInstance<
      * redeclaring a parent key is a compile-time and runtime error.
      * Any language but the default may be a loader, as in `base`.
      */
-    extendPartial<const TExt extends { [D in TDefault]: Record<string, string> }>(
+    extendPartial<const TExt extends { [D in TDefault]: Record<string, LambderI18nDictionaryEntry> }>(
         dict: {
             [E in TEnforced[number]]: E extends TDefault
-                ? Record<keyof TExt[TDefault], string>
-                : LanguageBlockFor<TExt, E, Record<keyof TExt[TDefault], string>>
+                ? Record<keyof TExt[TDefault], LambderI18nDictionaryEntry>
+                : LanguageBlockFor<TExt, E, TranslationBlock<TExt[TDefault]>>
         }
             & {
                 [L in Exclude<keyof TLanguages & string, TEnforced[number]>]?:
-                    LanguageBlockFor<TExt, L, Partial<Record<keyof TExt[TDefault], string>>>
+                    LanguageBlockFor<TExt, L, Partial<TranslationBlock<TExt[TDefault]>>>
             }
             & { [D in TDefault]: Partial<Record<keyof TContract, never>> }
             & TExt
@@ -157,8 +214,27 @@ export interface LambderI18nInstance<
      * `loadLanguage()`, which runs only what is still missing.
      */
     loadLanguage(code?: keyof TLanguages & string): Promise<void>;
-    /** Merge additional translations at runtime (e.g. fetched from an API). Notifies change listeners. */
-    registerDictionary(code: keyof TLanguages & string, dict: Record<string, string>): void;
+    /**
+     * Merge additional translations at runtime (e.g. fetched from an API),
+     * checked as inline blocks are. Notifies change listeners.
+     */
+    registerDictionary(code: keyof TLanguages & string, dict: Record<string, LambderI18nDictionaryEntry>): void;
+    /**
+     * Whether every plural entry this instance translates with (its own and
+     * its parents', in every language) holds a form for each category the
+     * language's plural rules use, by this runtime's Intl plural data. Loads
+     * every language first, as `loadLanguage` does for each, so entries behind
+     * loaders are checked too. Resolves when nothing is missing; rejects with
+     * every gap listed by key, language and missing categories, or with the
+     * failure of a loader that would not load.
+     *
+     * For a test or a build step, not for app start: runtimes ship different
+     * plural data, and `t` falls back to an entry's `other` form for a
+     * category it lacks, so a gap shows the other form rather than failing.
+     * An extension sees its parents but not its siblings, so check each leaf
+     * extension.
+     */
+    checkPluralCoverage(): Promise<void>;
 
     /**
      * Override the active language (shared with all extended instances), and
@@ -189,7 +265,11 @@ export interface LambderI18nInstance<
      */
     applyToDocument(): void;
 
-    /** Type guard: is this string a supported language code? */
+    /**
+     * Type guard: is this string a supported language code, spelled exactly
+     * as registered? The methods that take a code match it in any case, as
+     * language tags are compared, and answer it as registered.
+     */
     isLanguageCode(value: string): value is keyof TLanguages & string;
     readonly languages: TLanguages;
     readonly languageList: (keyof TLanguages & string)[];
@@ -198,6 +278,37 @@ export interface LambderI18nInstance<
     readonly defaultLanguage: TDefault;
     readonly enforced: TEnforced;
 }
+
+/**
+ * What reading translations takes, over any instance of one contract: `t`,
+ * `forLanguage`, the active language and its metadata, change notifications
+ * and the registry, without the members that change what an instance
+ * answers (`setLanguage`, `resetLanguage`, `loadLanguage`,
+ * `registerDictionary`, `applyToDocument`, and `checkPluralCoverage`, which
+ * loads every language) or build new ones (`extend`,
+ * `extendPartial`). Instances of one contract over different language sets
+ * are different types, and every one of them is assignable to this, so code
+ * that only reads translations takes this rather than one instance's type:
+ * `LambderI18nReadonlyInstance<typeof en>` for the contract of an `en` block.
+ * Language codes read as plain strings here, the language set being what it
+ * leaves open.
+ */
+export type LambderI18nReadonlyInstance<TContract extends Record<string, LambderI18nDictionaryEntry>> = Pick<
+    LambderI18nInstance<Record<string, LambderLanguageMeta>, string, readonly string[], TContract>,
+    | "t"
+    | "forLanguage"
+    | "currentLanguage"
+    | "currentLanguageMeta"
+    | "currentDir"
+    | "currentIntlLocale"
+    | "onLanguageChange"
+    | "isLanguageCode"
+    | "languages"
+    | "languageList"
+    | "languageMetaList"
+    | "defaultLanguage"
+    | "enforced"
+>;
 
 // ---------------------------------------------------------------------------
 // Instance-derived utility types
@@ -219,19 +330,19 @@ export type LambderI18nTranslatorFor<T extends { t: unknown }> = T["t"];
 // ---------------------------------------------------------------------------
 
 /**
- * Browser detection: ordered prefs, full code then primary subtag. Only in a
- * page, where there is a document: Node 21 and later, Deno and Bun define
- * `navigator.languages` too, from the process locale, and a server's locale
- * is not its reader's.
+ * Browser detection: ordered prefs, full code then primary subtag, each
+ * matched in any case and answered as registered. Only in a page, where there
+ * is a document: Node 21 and later, Deno and Bun define `navigator.languages`
+ * too, from the process locale, and a server's locale is not its reader's.
  */
-const detectBrowserLanguage = (isCode: (value: string) => boolean): string | null => {
+const detectBrowserLanguage = (codeOf: (value: string) => string | null): string | null => {
     if (typeof document === "undefined" || typeof navigator === "undefined") return null;
     const prefs = navigator.languages?.length ? navigator.languages : [navigator.language];
     for (const pref of prefs ?? []) {
-        const lower = (pref ?? "").toLowerCase();
-        if (isCode(lower)) return lower;
-        const primary = lower.split("-")[0] ?? "";
-        if (isCode(primary)) return primary;
+        const full = codeOf(pref ?? "");
+        if (full) return full;
+        const primary = codeOf((pref ?? "").split("-")[0] ?? "");
+        if (primary) return primary;
     }
     return null;
 };
@@ -244,7 +355,7 @@ class LanguageState {
     private listeners = new Set<(code: string) => void>();
 
     constructor(
-        private readonly isCode: (value: string) => boolean,
+        private readonly codeOf: (value: string) => string | null,
         private readonly defaultLanguage: string,
         private readonly customDetect: (() => string | null | undefined) | null,
     ) {}
@@ -267,12 +378,13 @@ class LanguageState {
                 console.error("LambderI18n: detectLanguage threw; continuing detection chain.", err);
             }
         }
-        if (custom && this.isCode(custom)) return custom;
-        return detectBrowserLanguage(this.isCode) ?? this.defaultLanguage;
+        const detected = typeof custom === "string" ? this.codeOf(custom) : null;
+        if (detected) return detected;
+        return detectBrowserLanguage(this.codeOf) ?? this.defaultLanguage;
     }
 
+    /** Overrides the active language with a code as registered (registeredCodeOf). */
     set(code: string): void {
-        if (!this.isCode(code)) throw new Error(`LambderI18n: unsupported language code "${code}".`);
         if (this.override === code) return;
         this.override = code;
         this.notify(code);
@@ -307,8 +419,8 @@ class LanguageState {
 
 /**
  * Fills `{name}` tokens in one pass over the template, so a value is inserted
- * as it is: a display name "Eve {org}" stays that, rather than having its own
- * `{org}` filled by the next parameter. A token with no parameter stays.
+ * as it is: a display name "Eve {store}" stays that, rather than having its own
+ * `{store}` filled by the next parameter. A token with no parameter stays.
  * Own properties only, through Object.prototype.hasOwnProperty rather than
  * Object.hasOwn: this runs in the browser bundle, and a browser without
  * ES2022 (Safari before 15.4) would throw on the first parameterised text.
@@ -327,36 +439,115 @@ const placeholdersOf = (text: string): Set<string> =>
 const describePlaceholders = (placeholders: Set<string>): string =>
     placeholders.size ? [...placeholders].sort().map((name) => `{${name}}`).join(", ") : "none";
 
-/** How many mismatched translations an error lists before it only counts the rest. */
-const PLACEHOLDER_MISMATCH_LIMIT = 20;
+/** How many refused entries an error lists, per kind of refusal, before it only counts the rest. */
+const REFUSED_ENTRY_LIST_LIMIT = 20;
+
+/** The plural categories in CLDR's order, the order messages list them in. */
+const PLURAL_CATEGORIES: readonly LambderI18nPluralCategory[] = ["zero", "one", "two", "few", "many", "other"];
 
 /**
- * Refuses translations that do not carry the placeholders of the text they
- * translate. The default language's text is the contract the translator's
- * type takes its parameters from, so a translation that drops one loses the
- * value a caller passed, and one that adds one shows its `{token}` as it
- * is. `lookupDefault` answers the default language's text for a key, and a
- * key it has none for is left to the other checks.
+ * What is wrong with a dictionary value that is not a text, as the end of a
+ * sentence about its key, or null for a well-formed plural entry: an object
+ * of texts under plural categories. Which categories it must hold is its
+ * language's, so that is checked apart.
  */
-const assertPlaceholdersKept = (
-    lookupDefault: (key: string) => string | undefined,
+const pluralEntryProblem = (value: unknown): string | null => {
+    if (!isObjectValue(value) || Array.isArray(value)) return "is neither a text nor a plural entry";
+    for (const [category, form] of Object.entries(value)) {
+        if (!(PLURAL_CATEGORIES as readonly string[]).includes(category)) {
+            return `has "${category}", which is no plural category (${PLURAL_CATEGORIES.join(", ")})`;
+        }
+        if (typeof form !== "string") return `has a ${category} form that is not a text`;
+    }
+    if (value.other === undefined) return "has no other form, which every plural entry needs";
+    return null;
+};
+
+/** A list of refused entries under its heading, as one section of an error. */
+const refusalSection = (heading: string, lines: string[]): string => {
+    const listed = lines.slice(0, REFUSED_ENTRY_LIST_LIMIT).map((line) => `  ${line}`);
+    const more = lines.length > REFUSED_ENTRY_LIST_LIMIT ? [`  ... and ${lines.length - REFUSED_ENTRY_LIST_LIMIT} more`] : [];
+    return [heading, ...listed, ...more].join("\n");
+};
+
+/**
+ * Refuses the entries of one language's block that do not keep the default
+ * language's contract, every such key listed in one error. Everything
+ * refused here is refused alike by every runtime; which plural categories a
+ * language uses is not (runtimes ship different plural data), so that is
+ * left to checkPluralCoverage.
+ *
+ * Placeholders: the default language's text is the contract the
+ * translator's type takes its parameters from, so a translation that drops
+ * one loses the value a caller passed, and one that adds one shows its
+ * `{token}` as it is. A plural entry's contract is the tokens across all
+ * the default entry's forms, and every form in every language, the default
+ * one's included, carries each of them, except `{count}`, which a form may
+ * leave out to spell the number in words ("one item"). The default
+ * language's plain texts are the contract itself and are not compared.
+ *
+ * Kinds: a plural entry where the default language has a text is refused,
+ * since `t` takes no count for that key. A plain text where the default
+ * language has a plural entry is taken as the other form alone.
+ *
+ * Intl locale: a language with a plural entry has its plural rules built
+ * here, so an Intl locale that is no well-formed language tag, which every
+ * runtime refuses, fails where the dictionary arrives rather than in `t`.
+ *
+ * `lookupDefault` answers the default language's entry for a key, the one
+ * already held when the block is the default language's own registration.
+ * A key it has none for is held to itself.
+ */
+const assertEntriesKept = (
+    core: InternalCore,
+    lookupDefault: (key: string) => LambderI18nDictionaryEntry | undefined,
     lang: string,
-    dict: Record<string, string>,
+    dict: Record<string, unknown>,
     label: string,
 ): void => {
+    const refused: string[] = [];
     const mismatches: string[] = [];
-    for (const [key, text] of Object.entries(dict)) {
-        const original = lookupDefault(key);
-        if (original === undefined || typeof text !== "string") continue;
-        const expected = placeholdersOf(original);
-        const found = placeholdersOf(text);
-        if (expected.size === found.size && [...expected].every((name) => found.has(name))) continue;
-        mismatches.push(`"${key}" has ${describePlaceholders(found)} where the default language has ${describePlaceholders(expected)}`);
+    for (const [key, entry] of Object.entries(dict)) {
+        if (typeof entry !== "string") {
+            const problem = pluralEntryProblem(entry);
+            if (problem) {
+                refused.push(`"${key}" ${problem}`);
+                continue;
+            }
+        }
+        const checked = entry as LambderI18nDictionaryEntry;
+        const reference = lookupDefault(key) ?? checked;
+        if (typeof reference === "string") {
+            if (typeof checked !== "string") {
+                refused.push(`"${key}" is a plural entry where the default language has a text, for which t takes no count: make the default language's entry plural`);
+            } else if (lang !== core.defaultLanguage) {
+                const expected = placeholdersOf(reference);
+                const found = placeholdersOf(checked);
+                if (expected.size !== found.size || ![...expected].every((name) => found.has(name))) {
+                    mismatches.push(`"${key}" has ${describePlaceholders(found)} where the default language has ${describePlaceholders(expected)}`);
+                }
+            }
+            continue;
+        }
+        const forms: LambderI18nPluralEntry = typeof checked === "string" ? { other: checked } : checked;
+        core.pluralRulesOf(lang);
+        const tokens = new Set(Object.values(reference).flatMap((form: string) => [...placeholdersOf(form)]));
+        tokens.delete("count");
+        for (const [category, form] of Object.entries(forms) as [LambderI18nPluralCategory, string][]) {
+            const found = placeholdersOf(form);
+            if ([...tokens].every((name) => found.has(name)) && [...found].every((name) => name === "count" || tokens.has(name))) continue;
+            mismatches.push(`"${key}" (${category}) has ${describePlaceholders(found)} where every form needs ${describePlaceholders(tokens)} and may add {count}`);
+        }
     }
-    if (mismatches.length === 0) return;
-    const listed = mismatches.slice(0, PLACEHOLDER_MISMATCH_LIMIT).map((line) => `  ${line}`);
-    const more = mismatches.length > PLACEHOLDER_MISMATCH_LIMIT ? [`  ... and ${mismatches.length - PLACEHOLDER_MISMATCH_LIMIT} more`] : [];
-    throw new Error([`LambderI18n: in ${label}, these "${lang}" translations carry other placeholders than the default language's text:`, ...listed, ...more].join("\n"));
+    const sections: string[] = [];
+    if (refused.length > 0) {
+        sections.push(refusalSection(`LambderI18n: in ${label}, these "${lang}" entries are refused:`, refused));
+    }
+    if (mismatches.length > 0) {
+        const texts = lang === core.defaultLanguage ? "plural forms" : "translations";
+        sections.push(refusalSection(`LambderI18n: in ${label}, these "${lang}" ${texts} carry other placeholders than the default language's text:`, mismatches));
+    }
+    if (sections.length > 0) throw new Error(sections.join("\n"));
 };
 
 interface InternalCore {
@@ -368,15 +559,24 @@ interface InternalCore {
     defaultLanguage: string;
     enforced: readonly string[];
     state: LanguageState;
+    /** Whether a string is a code exactly as registered: what the config's own keys are checked by. */
     isCode: (value: string) => boolean;
+    /** A code given in any case, as registered, or null when no registered code matches it. */
+    codeOf: (value: string) => string | null;
     /** Layers of this root and its extensions that still hold loaders. */
     lazyLayers: Set<DictLayer>;
+    /** A language's plural rules, built on first use; throws for an Intl locale Intl refuses. */
+    pluralRulesOf: (lang: string) => Intl.PluralRules;
+    /** The plural categories a language's rules use, in CLDR's order, by this runtime's plural data. */
+    pluralCategoriesOf: (lang: string) => LambderI18nPluralCategory[];
+    /** The plural category a count falls in under a language's rules: "other" for anything that is no number. */
+    pluralCategoryOf: (lang: string, count: unknown) => LambderI18nPluralCategory;
 }
 
 type DictLoader = () => Promise<unknown>;
 
 /** Language blocks as configured: a dictionary, or a loader resolving to one. */
-type DictSourceSet = Record<string, Record<string, string> | DictLoader | undefined>;
+type DictSourceSet = Record<string, Record<string, LambderI18nDictionaryEntry> | DictLoader | undefined>;
 
 /** Layered dictionary node: own translations + parent chain, walked child-first. */
 interface DictLayer {
@@ -388,7 +588,7 @@ interface DictLayer {
     parent: DictLayer | null;
 }
 
-const layerLookup = (layer: DictLayer | null, lang: string, key: string): string | undefined => {
+const layerLookup = (layer: DictLayer | null, lang: string, key: string): LambderI18nDictionaryEntry | undefined => {
     for (let node = layer; node; node = node.parent) {
         const value = node.dicts[lang]?.[key];
         if (value !== undefined) return value;
@@ -396,7 +596,7 @@ const layerLookup = (layer: DictLayer | null, lang: string, key: string): string
     return undefined;
 };
 
-const assertNoRedeclaredKeys = (parent: DictLayer, defaultLanguage: string, block: Record<string, string>, label: string): void => {
+const assertNoRedeclaredKeys = (parent: DictLayer, defaultLanguage: string, block: Record<string, unknown>, label: string): void => {
     for (const key of Object.keys(block)) {
         if (layerLookup(parent, defaultLanguage, key) !== undefined) {
             throw new Error(`LambderI18n: ${label} redeclares existing key "${key}".`);
@@ -413,8 +613,10 @@ const assertInlineDefaultBlock = (dict: DictSourceSet, defaultLanguage: string, 
 
 /**
  * A layer over its parent, from a dictionary set as configured. The inline
- * blocks' placeholders are checked here, against the default language's
- * texts the layer reaches; a loader's are checked when it has run.
+ * blocks are checked here (assertEntriesKept), against the default
+ * language's entries the layer reaches, the default block first so that a
+ * fault in the contract is reported as its own; a loader's block is checked
+ * when it has run.
  */
 const createLayer = (core: InternalCore, sources: DictSourceSet, parent: DictLayer | null, label: string): DictLayer => {
     const layer: DictLayer = { dicts: {}, loaders: new Map(), inFlight: new Map(), parent };
@@ -422,8 +624,10 @@ const createLayer = (core: InternalCore, sources: DictSourceSet, parent: DictLay
         if (typeof source === "function") layer.loaders.set(lang, source);
         else if (source) layer.dicts[lang] = source;
     }
-    for (const [lang, dict] of Object.entries(layer.dicts)) {
-        if (lang !== core.defaultLanguage && dict) assertPlaceholdersKept((key) => layerLookup(layer, core.defaultLanguage, key), lang, dict, label);
+    const languages = [core.defaultLanguage, ...Object.keys(layer.dicts).filter((lang) => lang !== core.defaultLanguage)];
+    for (const lang of languages) {
+        const dict = layer.dicts[lang];
+        if (dict) assertEntriesKept(core, (key) => layerLookup(layer, core.defaultLanguage, key), lang, dict, label);
     }
     if (layer.loaders.size > 0) core.lazyLayers.add(layer);
     return layer;
@@ -434,15 +638,24 @@ const isObjectValue = (value: unknown): value is Record<string, unknown> =>
 
 /**
  * A loader resolves to the dictionary itself or to a module whose default
- * export is the dictionary. The two cannot be confused: a dictionary's values
- * are strings, so a `default` holding an object can only be a module's.
+ * export is the dictionary. A `default` holding an object is a module's
+ * export, unless the contract makes `default` a plural key and the object is
+ * a plural entry: then it is the dictionary's own entry for that key, since
+ * a module's dictionary would carry keys that are no plural category.
  */
-const dictionaryFromLoaded = (loaded: unknown, lang: string): Record<string, string> => {
-    const dict = isObjectValue(loaded) && isObjectValue(loaded.default) ? loaded.default : loaded;
+const dictionaryFromLoaded = (
+    loaded: unknown,
+    lang: string,
+    lookupDefault: (key: string) => LambderI18nDictionaryEntry | undefined,
+): Record<string, unknown> => {
+    const ownPluralDefault = isObjectValue(loaded)
+        && isObjectValue(lookupDefault("default"))
+        && pluralEntryProblem(loaded.default) === null;
+    const dict = isObjectValue(loaded) && isObjectValue(loaded.default) && !ownPluralDefault ? loaded.default : loaded;
     if (!isObjectValue(dict)) {
         throw new Error(`LambderI18n: the "${lang}" loader resolved to neither a dictionary nor a module whose default export is one.`);
     }
-    return dict as Record<string, string>;
+    return dict;
 };
 
 /** Run a layer's loader for a language and merge what it brings, registered as the layer's load under way. */
@@ -455,11 +668,12 @@ const startLayerLoad = (core: InternalCore, layer: DictLayer, lang: string, load
             // that rejected stays, to be retried.
             layer.loaders.delete(lang);
             if (layer.loaders.size === 0) core.lazyLayers.delete(layer);
-            const dict = dictionaryFromLoaded(loaded, lang);
+            const lookupDefault = (key: string) => layerLookup(layer, core.defaultLanguage, key);
+            const dict = dictionaryFromLoaded(loaded, lang, lookupDefault);
             if (layer.parent) assertNoRedeclaredKeys(layer.parent, core.defaultLanguage, dict, `the "${lang}" loader`);
-            assertPlaceholdersKept((key) => layerLookup(layer, core.defaultLanguage, key), lang, dict, `the "${lang}" loader`);
+            assertEntriesKept(core, lookupDefault, lang, dict, `the "${lang}" loader`);
             // Translations registered while the loader ran override what it brought.
-            layer.dicts[lang] = { ...dict, ...layer.dicts[lang] };
+            layer.dicts[lang] = { ...dict as Record<string, LambderI18nDictionaryEntry>, ...layer.dicts[lang] };
         })
         .finally(() => { layer.inFlight.delete(lang); });
     layer.inFlight.set(lang, load);
@@ -501,7 +715,8 @@ interface InternalInstance {
     extend(dict: DictSourceSet): InternalInstance;
     extendPartial(dict: DictSourceSet): InternalInstance;
     loadLanguage(code?: string): Promise<void>;
-    registerDictionary(code: string, dict: Record<string, string>): void;
+    registerDictionary(code: string, dict: Record<string, LambderI18nDictionaryEntry>): void;
+    checkPluralCoverage(): Promise<void>;
     setLanguage(code: string): void;
     resetLanguage(): void;
     readonly currentLanguage: string;
@@ -518,18 +733,43 @@ interface InternalInstance {
     readonly enforced: readonly string[];
 }
 
+/**
+ * A code a caller passed, as registered: language tags are case-insensitive
+ * (BCP 47), so `pt-br` names a registered `pt-BR`, and everything past this
+ * point (the override, the dictionaries, the loaders) is keyed by the one
+ * spelling the config used.
+ */
+const registeredCodeOf = (core: InternalCore, code: string): string => {
+    const registered = core.codeOf(code);
+    if (registered === null) throw new Error(`LambderI18n: unsupported language code "${code}".`);
+    return registered;
+};
+
 const buildInstance = (core: InternalCore, layer: DictLayer): InternalInstance => {
     const translateIn = (lang: string, key: string, params?: Record<string, string | number>): string => {
-        const text = layerLookup(layer, lang, key)
-            ?? layerLookup(layer, core.defaultLanguage, key)
-            ?? key;
+        let textLanguage = lang;
+        let entry = layerLookup(layer, lang, key);
+        if (entry === undefined) {
+            textLanguage = core.defaultLanguage;
+            entry = layerLookup(layer, textLanguage, key);
+        }
+        if (entry === undefined) return key;
+        // A form is picked under the rules of the language the text is in,
+        // which is the default language's when the key fell back to it. A
+        // category the entry lacks falls back to other, silently: this
+        // runtime's plural data may list a category the dictionary was not
+        // written for, which is no fault a visitor's page can act on, and a
+        // warning would reach every visitor's console from the render path.
+        // checkPluralCoverage is where such gaps are reported.
+        const text = typeof entry === "string" ? entry : entry[core.pluralCategoryOf(textLanguage, params?.count)] ?? entry.other;
         return interpolate(text, params);
     };
 
     const t: InternalTranslator = (key, params) =>
         translateIn(core.state.resolve(), key, params);
 
-    // forLanguage sits on the hot path of reactive T() bridges: cache per code.
+    // forLanguage sits on the hot path of reactive T() bridges: cache per
+    // code as registered, so every spelling of one hands back one translator.
     const translatorCache = new Map<string, InternalTranslator>();
 
     const validateExtension = (dict: DictSourceSet, requiredLanguages: readonly string[], label: string): void => {
@@ -542,7 +782,7 @@ const buildInstance = (core: InternalCore, layer: DictLayer): InternalInstance =
         assertInlineDefaultBlock(dict, core.defaultLanguage, label);
         // A loader's keys are checked the same way once it has run.
         for (const block of Object.values(dict)) {
-            if (isObjectValue(block)) assertNoRedeclaredKeys(layer, core.defaultLanguage, block as Record<string, string>, label);
+            if (isObjectValue(block)) assertNoRedeclaredKeys(layer, core.defaultLanguage, block, label);
         }
     };
 
@@ -557,11 +797,11 @@ const buildInstance = (core: InternalCore, layer: DictLayer): InternalInstance =
     const instance: InternalInstance = {
         t,
         forLanguage(code) {
-            const cached = translatorCache.get(code);
+            const registered = registeredCodeOf(core, code);
+            const cached = translatorCache.get(registered);
             if (cached) return cached;
-            if (!core.isCode(code)) throw new Error(`LambderI18n: unsupported language code "${code}".`);
-            const translator: InternalTranslator = (key, params) => translateIn(code, key, params);
-            translatorCache.set(code, translator);
+            const translator: InternalTranslator = (key, params) => translateIn(registered, key, params);
+            translatorCache.set(registered, translator);
             return translator;
         },
         extend(dict) {
@@ -573,21 +813,53 @@ const buildInstance = (core: InternalCore, layer: DictLayer): InternalInstance =
             return buildInstance(core, createLayer(core, dict, layer, "extendPartial() dictionary"));
         },
         loadLanguage(code) {
-            const lang = code ?? core.state.resolve();
-            if (!core.isCode(lang)) return Promise.reject(new Error(`LambderI18n: unsupported language code "${lang}".`));
+            let lang: string;
+            try {
+                lang = registeredCodeOf(core, code ?? core.state.resolve());
+            } catch (err) {
+                return Promise.reject(err);
+            }
             return loadLanguageAcrossRoot(core, lang);
         },
         registerDictionary(code, dict) {
-            if (!core.isCode(code)) throw new Error(`LambderI18n: unsupported language code "${code}".`);
-            if (code !== core.defaultLanguage) {
-                assertPlaceholdersKept((key) => layerLookup(layer, core.defaultLanguage, key), code, dict, `registerDictionary("${code}")`);
-            }
-            layer.dicts[code] = { ...layer.dicts[code], ...dict };
+            const lang = registeredCodeOf(core, code);
+            assertEntriesKept(core, (key) => layerLookup(layer, core.defaultLanguage, key), lang, dict, `registerDictionary("${lang}")`);
+            layer.dicts[lang] = { ...layer.dicts[lang], ...dict };
             core.state.emitChange();
         },
+        async checkPluralCoverage() {
+            await Promise.all(core.languageList.map((lang) => loadLanguageAcrossRoot(core, lang)));
+            const gaps: string[] = [];
+            for (const lang of core.languageList) {
+                // Every key this instance answers in the language, each by
+                // the entry t would use: the nearest layer's.
+                const keys = new Set<string>();
+                for (let node: DictLayer | null = layer; node; node = node.parent) {
+                    for (const key of Object.keys(node.dicts[lang] ?? {})) keys.add(key);
+                }
+                for (const key of keys) {
+                    const entry = layerLookup(layer, lang, key)!;
+                    const reference = layerLookup(layer, core.defaultLanguage, key) ?? entry;
+                    if (typeof reference === "string") continue;
+                    const forms: LambderI18nPluralEntry = typeof entry === "string" ? { other: entry } : entry;
+                    const used = core.pluralCategoriesOf(lang);
+                    const missing = used.filter((category) => forms[category] === undefined);
+                    if (missing.length === 0) continue;
+                    const text = typeof entry === "string" ? "is a text, which stands for the other form alone, and " : "";
+                    gaps.push(`  "${key}" in "${lang}" ${text}lacks ${missing.join(", ")}: "${lang}" uses ${used.join(", ")}`);
+                }
+            }
+            if (gaps.length > 0) {
+                throw new Error([
+                    "LambderI18n: these plural entries lack forms for categories their language's plural rules use, by this runtime's Intl plural data; t shows their other form for those counts:",
+                    ...gaps,
+                ].join("\n"));
+            }
+        },
         setLanguage(code) {
-            core.state.set(code);
-            loadSwitchedLanguage(code);
+            const lang = registeredCodeOf(core, code);
+            core.state.set(lang);
+            loadSwitchedLanguage(lang);
         },
         resetLanguage() {
             core.state.reset();
@@ -624,13 +896,26 @@ export const createLambderI18n = <
     const TLanguages extends Record<string, LambderLanguageMeta>,
     const TDefault extends keyof TLanguages & string,
     const TEnforced extends readonly (keyof TLanguages & string)[],
-    const TBase extends Record<TDefault, Record<string, string>>,
+    const TBase extends Record<TDefault, Record<string, LambderI18nDictionaryEntry>>,
 >(
     config: LambderI18nConfig<TLanguages, TDefault, TEnforced, TBase>
 ): LambderI18nInstance<TLanguages, TDefault, TEnforced, TBase[TDefault]> => {
     const languageList = Object.keys(config.languages);
     const isCode = (value: string): boolean =>
         Object.prototype.hasOwnProperty.call(config.languages, value);
+    // Language tags are case-insensitive (BCP 47): a browser's `pt-br` and a
+    // path's `PT-BR` both name a registered `pt-BR`. So two registered codes
+    // that differ only in case would be one language twice.
+    const codeByLowerCase = new Map<string, string>();
+    for (const code of languageList) {
+        const clash = codeByLowerCase.get(code.toLowerCase());
+        if (clash !== undefined) {
+            throw new Error(`LambderI18n: languages registers "${clash}" and "${code}", one language tag in two spellings: tags are compared case-insensitively.`);
+        }
+        codeByLowerCase.set(code.toLowerCase(), code);
+    }
+    const codeOf = (value: string): string | null =>
+        typeof value === "string" ? codeByLowerCase.get(value.toLowerCase()) ?? null : null;
 
     if (!isCode(config.defaultLanguage)) {
         throw new Error(`LambderI18n: defaultLanguage "${config.defaultLanguage}" is not in languages.`);
@@ -663,6 +948,25 @@ export const createLambderI18n = <
 
     const metaByCode = new Map(languageList.map((code) => [code, { code, ...config.languages[code]! }]));
 
+    // Built for a language the first time one of its plural entries arrives,
+    // and kept: t picks a form on every call, and building the rules costs
+    // far more than the pick. Never for a language without plural entries,
+    // so its code need not be a tag Intl accepts.
+    const pluralRules = new Map<string, Intl.PluralRules>();
+    const pluralRulesOf = (lang: string): Intl.PluralRules => {
+        let rules = pluralRules.get(lang);
+        if (!rules) {
+            const locale = metaByCode.get(lang)?.intlLocale ?? lang;
+            try {
+                rules = new Intl.PluralRules(locale);
+            } catch (err) {
+                throw new Error(`LambderI18n: "${lang}" has plural entries, and Intl.PluralRules refuses its Intl locale "${locale}" (${(err as Error).message}): give the language an intlLocale it accepts.`);
+            }
+            pluralRules.set(lang, rules);
+        }
+        return rules;
+    };
+
     const core: InternalCore = {
         languages: config.languages,
         languageList,
@@ -670,9 +974,16 @@ export const createLambderI18n = <
         metaList: [...metaByCode.values()],
         defaultLanguage: config.defaultLanguage,
         enforced: config.enforced,
-        state: new LanguageState(isCode, config.defaultLanguage, customDetect),
+        state: new LanguageState(codeOf, config.defaultLanguage, customDetect),
         isCode,
+        codeOf,
         lazyLayers: new Set(),
+        pluralRulesOf,
+        pluralCategoriesOf: (lang) => {
+            const used = pluralRulesOf(lang).resolvedOptions().pluralCategories;
+            return PLURAL_CATEGORIES.filter((category) => used.includes(category));
+        },
+        pluralCategoryOf: (lang, count) => pluralRulesOf(lang).select(Number(count)),
     };
 
     return buildInstance(core, createLayer(core, config.base as DictSourceSet, null, "base dictionary")) as unknown as

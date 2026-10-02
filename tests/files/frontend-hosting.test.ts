@@ -16,8 +16,8 @@ describe('servePublicFiles + templateFile fallback (frontend hosting recipe)', (
     const buildHost = () => new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
         .servePublicFiles()
         .setRouteFallbackHandler(async (ctx, res) => {
-            if(ctx.method !== 'GET' && ctx.method !== 'HEAD') return res.status404('Not found');
-            if((ctx.path.split('/').pop() ?? '').includes('.')) return res.status404('Not found');
+            if(ctx.method !== 'GET' && ctx.method !== 'HEAD') return res.status404(html`Not found`);
+            if((ctx.path.split('/').pop() ?? '').includes('.')) return res.status404(html`Not found`);
             return res.templateFile('index.html', {
                 title: `Page ${ctx.path}`,
                 head: html`<link rel="canonical" href="https://example.com${ctx.path}" />`,
@@ -160,7 +160,7 @@ describe('servePublicFiles + templateFile fallback (frontend hosting recipe)', (
     it('never shadows routes registered after servePublicFiles', async () => {
         const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
             .servePublicFiles()
-            .addRoute('/registered-later', (ctx, res) => res.html('Later Route'));
+            .addRoute('/registered-later', (ctx, res) => res.html(html`Later Route`));
 
         const result = await lambder.render(createMockEvent('/registered-later'), createMockContext());
         expect(decodeBody(result)).toBe('Later Route');
@@ -168,7 +168,7 @@ describe('servePublicFiles + templateFile fallback (frontend hosting recipe)', (
 
     it('templateFile throws on missing files (server config error, not a 404)', async () => {
         const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
-            .setGlobalErrorHandler((err, ctx, res) => res.status(500, err.message))
+            .setGlobalErrorHandler((err, ctx, res) => res.text(err.message, { statusCode: 500 }))
             .setRouteFallbackHandler((ctx, res) => res.templateFile('nope.html'));
 
         const result = await lambder.render(createMockEvent('/page'), createMockContext());
@@ -225,7 +225,7 @@ describe('serveIndexHtml', () => {
     it('gates on method: non-GET/HEAD falls through to the route fallback', async () => {
         const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
             .serveIndexHtml()
-            .setRouteFallbackHandler((ctx, res) => res.status(405, 'nope'));
+            .setRouteFallbackHandler((ctx, res) => res.text('nope', { statusCode: 405 }));
 
         const result = await lambder.render(createMockEvent('/page', { httpMethod: 'POST' }), createMockContext());
         expect(result.statusCode).toBe(405);
@@ -237,7 +237,7 @@ describe('serveIndexHtml', () => {
         // compileRouteMatcher about what a method means.
         const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
             .serveIndexHtml(undefined, { methods: ['GET'] })
-            .setRouteFallbackHandler((ctx, res) => res.status(405, 'nope'));
+            .setRouteFallbackHandler((ctx, res) => res.text('nope', { statusCode: 405 }));
 
         expect((await lambder.render(createMockEvent('/page', { httpMethod: 'HEAD' }), createMockContext())).statusCode).toBe(200);
         expect((await lambder.render(createMockEvent('/page', { httpMethod: 'POST' }), createMockContext())).statusCode).toBe(405);
@@ -265,7 +265,7 @@ describe('serveIndexHtml', () => {
     it('dotted app routes reach the shell', async () => {
         const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
             .servePublicFiles()
-            .serveIndexHtml((ctx, res) => res.html(`page ${ctx.path}`));
+            .serveIndexHtml((ctx, res) => res.html(html`page ${ctx.path}`));
 
         const paths = [
             '/birth-report/eyJhbGci.eyJ2IjoxfQ.sIgNaTuRe', // JWT
@@ -283,7 +283,7 @@ describe('serveIndexHtml', () => {
     it('real files still win over the shell', async () => {
         const lambder = new Lambder({ files: new LambderLocalFileSource({ root: spaRoot }) })
             .servePublicFiles()
-            .serveIndexHtml((ctx, res) => res.html(`page ${ctx.path}`));
+            .serveIndexHtml((ctx, res) => res.html(html`page ${ctx.path}`));
 
         const result = await lambder.render(createMockEvent('/style.css'), createMockContext());
         expect(result.multiValueHeaders?.['Content-Type']?.[0]).toBe('text/css; charset=utf-8');

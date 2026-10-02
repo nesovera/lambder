@@ -130,6 +130,8 @@ type LambderRefusalViolation = {
     thrown: unknown;
 } | {
     notObject: string;
+} | {
+    notRateLimitData: true;
 };
 /**
  * A refusal an endpoint is not allowed to send, so it was not sent and the
@@ -137,8 +139,10 @@ type LambderRefusalViolation = {
  * the endpoint does not declare (neither
  * in its own `refusals` option nor through a guard), data on a refusal whose
  * code declares none, no data on one whose code carries data, data its code's
- * schema rejects or that is not an object or an array, or a declared code
- * raised with a status or flag of its own, which its declaration owns.
+ * schema rejects or that is not an object or an array, a framework code
+ * without the data it carries (`lambder/rate-limited`'s policy and wait), or
+ * a declared code raised with a status or flag of its own, which its
+ * declaration owns.
  *
  * What makes a client's refusal type exact: a reader narrows `code` to the
  * endpoint's declared codes and the framework's own, and relies on this to
@@ -162,8 +166,10 @@ export declare class LambderApiRefusalValidationError extends Error {
  * here first.
  *
  * - An uncoded refusal, or one carrying a framework code, goes out as it is,
- *   provided it carries no data. Where the app requires codes, an uncoded
- *   refusal is refused too; a framework code still passes.
+ *   provided it carries the data its code does: the policy and the seconds
+ *   to wait for `lambder/rate-limited`, none for every other. Where the app
+ *   requires codes, an uncoded refusal is refused too; a framework code
+ *   still passes.
  * - A declared code leaves with its declaration's status and flags, and
  *   with data exactly when the code carries data, parsed through
  *   the code's schema as an output is: undeclared fields stripped, defaults

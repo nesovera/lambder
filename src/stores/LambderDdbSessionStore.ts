@@ -1,6 +1,10 @@
-import type { DynamoDBDocumentClient, QueryCommandInput } from "@aws-sdk/lib-dynamodb";
-import { createDynamoDocumentClientLoader, isConditionalCheckFailure, type LambderDynamoDocumentClientReady } from "./LambderDdbSdk.js";
-import { compressText, restoreText } from "../shared/wire/LambderCompressionCodec.js";
+import type { AttributeValue, DynamoDBClient, QueryCommandInput } from "@aws-sdk/client-dynamodb";
+import {
+    attributeValueBytes, createDynamoClientLoader, isConditionalCheckFailure, marshallJsonValue, MAX_ITEM_BYTES,
+    storedNumber, unmarshallJsonValue,
+    type LambderDynamoClientReady,
+} from "./LambderDdbSdk.js";
+import { restoreStoredText, storedTextOf, type LambderStoredTextCeiling } from "./LambderStoredText.js";
 import {
     resolveCompressionOption,
     type LambderCompressionOption, type LambderCompressionSettings,
@@ -19,11 +23,36 @@ const UPDATABLE_FIELDS = ["dataExpiresAt", "lastAccessedAt", "expiresAt"] as con
  * Session compression defaults: every record compressed (see
  * LambderCompressionOption for the option's shape and toggle semantics).
  * A compressed record carries the data's JSON as Brotli bytes (`dataBr`)
- * beside its byte length (`dataBytes`), the scheme LambderDdbCache and
- * LambderDdbIdempotencyStore use; below minBytes, or with compression off, the
- * record keeps a plain `data` attribute.
+ * beside its byte length (`dataBytes`), the scheme every DynamoDB store here
+ * keeps text in (see LambderStoredText); below minBytes, or with compression
+ * off, the record keeps a plain `data` attribute.
  */
 const SESSION_COMPRESSION_DEFAULTS: LambderCompressionSettings = { minBytes: 0, quality: 5 };
+
+/**
+ * The longest session.data a record holds, in UTF-8 bytes of its JSON: the
+ * most the store writes, and so the ceiling it restores a compressed record
+ * under. Far past what a session should carry, since it is read on every
+ * request, and the same 32 MiB the cache and the idempotency store keep.
+ */
+const DATA_CEILING: LambderStoredTextCeiling = { user: "LambderDdbSessionStore", maxTextBytes: 32 * 1024 * 1024 };
+
+/**
+ * What session.data may take of a record as stored, sized as DynamoDB sizes
+ * an item: its item limit less 8 KB for the record's other attributes (three
+ * hashes, the session key and a handful of numbers, a few hundred bytes with
+ * any session key of sensible length).
+ */
+const MAX_STORED_DATA_BYTES = MAX_ITEM_BYTES - 8 * 1024;
+
+/** A session record as the table holds it: attribute values under the record's field names and the table's two key names. */
+type LambderSessionItem = Record<string, AttributeValue>;
+
+/** A number attribute's value, or undefined when the attribute is missing or holds no finite number. */
+const numberAttributeOf = (attribute: AttributeValue | undefined): number | undefined => {
+    const value = attribute?.N === undefined ? NaN : Number(attribute.N);
+    return Number.isFinite(value) ? value : undefined;
+};
 
 export type LambderDdbSessionStoreOptions = {
     tableName: string;
@@ -40,8 +69,8 @@ export type LambderDdbSessionStoreOptions = {
      * it can be switched on or off on a live table.
      */
     compression?: LambderCompressionOption;
-    /** A ready document client, e.g. one shared with the rest of the app. */
-    client?: DynamoDBDocumentClient;
+    /** A ready client, e.g. one shared with the rest of the app; the stores' shared one for the region otherwise. */
+    client?: DynamoDBClient;
 };
 
 /**
@@ -67,7 +96,7 @@ export class LambderDdbSessionStore<SessionData = unknown> implements LambderSes
     private readonly sortKey: string;
     private readonly compression: LambderCompressionSettings | null;
     /** The SDK and the client, loaded and created the first time the table is touched (see LambderDdbSdk). */
-    private readonly ready: () => Promise<LambderDynamoDocumentClientReady>;
+    private readonly ready: () => Promise<LambderDynamoClientReady>;
 
     constructor(options: LambderDdbSessionStoreOptions){
         if(!options.tableName.trim()) throw new Error("tableName is required");
@@ -75,44 +104,69 @@ export class LambderDdbSessionStore<SessionData = unknown> implements LambderSes
         this.partitionKey = options.partitionKey ?? "pk";
         this.sortKey = options.sortKey ?? "sk";
         this.compression = resolveCompressionOption(options.compression, SESSION_COMPRESSION_DEFAULTS);
-        this.ready = createDynamoDocumentClientLoader({
-            user: "LambderDdbSessionStore",
-            ...(options.region !== undefined ? { region: options.region } : {}),
-            ...(options.client ? { client: options.client } : {}),
-        });
+        this.ready = createDynamoClientLoader({ user: "LambderDdbSessionStore", region: options.region, client: options.client });
     }
 
-    private keyOf(sessionKeyHash: string, secretHash: string): Record<string, string> {
-        return { [this.partitionKey]: sessionKeyHash, [this.sortKey]: secretHash };
+    private keyOf(sessionKeyHash: string, secretHash: string): LambderSessionItem {
+        return { [this.partitionKey]: { S: sessionKeyHash }, [this.sortKey]: { S: secretHash } };
     }
 
     /**
      * session.data as the attributes that hold it: `dataBr` and `dataBytes`
-     * when compressed, a plain `data` otherwise. Either way it goes through
-     * its JSON first, so a plain record holds exactly what a compressed one
-     * restores to: an `undefined` inside the data is dropped rather than
-     * handed to the document client, which refuses one and would fail the
-     * write (a login answering 500) only when compression is off.
+     * when compressed, a plain `data` attribute otherwise. Either way it goes
+     * through its JSON first, so a plain record holds exactly what a
+     * compressed one restores to: an `undefined` inside the data is dropped,
+     * as JSON drops it, rather than handed to marshallJsonValue, which
+     * refuses one and would fail the write (a login answering 500) only when
+     * compression is off.
+     *
+     * Data too large for a record is refused here, before anything is
+     * written, with the size and the limit it passed: DynamoDB would refuse
+     * the item with a ValidationException that names neither, and data past
+     * the restore ceiling would be written only to read back as no session.
+     * Create and update measure the same attributes, so data one accepts the
+     * other does too.
      */
-    private async dataAttributes(data: SessionData): Promise<{ dataBr: Uint8Array; dataBytes: number } | { data: unknown }> {
+    private async dataAttributes(data: SessionData): Promise<LambderSessionItem> {
         const json = JSON.stringify(data);
-        const raw = Buffer.from(json, "utf8");
-        if(this.compression && raw.byteLength >= this.compression.minBytes){
-            return { dataBr: await compressText(raw, "br", this.compression.quality), dataBytes: raw.byteLength };
+        const utf8 = Buffer.from(json, "utf8");
+        if(utf8.byteLength > DATA_CEILING.maxTextBytes){
+            throw new Error(`LambderDdbSessionStore: session.data is ${utf8.byteLength} bytes of JSON, over the ${DATA_CEILING.maxTextBytes}-byte limit of a session record. Keep less in the session.`);
         }
-        return { data: JSON.parse(json) };
+        const text = await storedTextOf(utf8, this.compression);
+        const attributes: LambderSessionItem = text.encoding === "br"
+            ? { dataBr: { B: text.stored }, dataBytes: { N: String(text.textBytes) } }
+            : { data: marshallJsonValue(JSON.parse(json)) };
+        const storedBytes = Object.entries(attributes)
+            .reduce((total, [name, value]) => total + Buffer.byteLength(name, "utf8") + attributeValueBytes(value), 0);
+        if(storedBytes > MAX_STORED_DATA_BYTES){
+            const remedy = text.encoding === "br" ? "Keep less in the session." : "Keep less in the session, or let the store's compression option compress it.";
+            throw new Error(`LambderDdbSessionStore: session.data is ${storedBytes} bytes as stored, over the ${MAX_STORED_DATA_BYTES} bytes a session record leaves it inside DynamoDB's ${MAX_ITEM_BYTES}-byte item limit. ${remedy}`);
+        }
+        return attributes;
     }
 
-    /** The item for a record: the two hashes under the table's key names, the data plain or compressed. */
-    private async toItem(record: LambderSessionRecord<SessionData>): Promise<Record<string, unknown>> {
-        const { sessionKeyHash, secretHash, data, ...rest } = record;
-        return { ...this.keyOf(sessionKeyHash, secretHash), ...rest, ...await this.dataAttributes(data) };
+    /**
+     * The item for a record: the two hashes under the table's key names, the
+     * record's other fields under their own names (strings and numbers, an
+     * absent dataExpiresAt left out), the data plain or compressed. The
+     * attribute names and types are the ones items have always carried, so
+     * records written before and after read alike.
+     */
+    private async toItem(record: LambderSessionRecord<SessionData>): Promise<LambderSessionItem> {
+        const { sessionKeyHash, secretHash, data, ...fields } = record;
+        const item: LambderSessionItem = { ...this.keyOf(sessionKeyHash, secretHash), ...await this.dataAttributes(data) };
+        for(const [name, value] of Object.entries(fields)){
+            if(value !== undefined) item[name] = marshallJsonValue(value);
+        }
+        return item;
     }
 
     /**
      * The record for an item. A compressed record decodes back into `data`;
-     * one whose data cannot be decoded is malformed and reads as no session,
-     * like a record missing its csrfTokenHash.
+     * one whose data cannot be decoded, or declares more of it than the store
+     * ever writes, is malformed and reads as no session, like a record
+     * missing its csrfTokenHash.
      *
      * This is where read failures and malformed records separate. A read
      * failure is infrastructure and must surface as a 500: signing somebody
@@ -121,45 +175,59 @@ export class LambderDdbSessionStore<SessionData = unknown> implements LambderSes
      * so a 500 there would be a session the visitor can neither use nor clear
      * until the TTL retires it. Ending it lets them log in again.
      */
-    private async fromItem(item: Record<string, any>): Promise<LambderSessionRecord<SessionData> | null> {
-        const { [this.partitionKey]: sessionKeyHash, [this.sortKey]: secretHash, dataBr, dataBytes, data, ...rest } = item;
-        let restored = data;
-        if(dataBr){
-            try {
-                restored = JSON.parse(await restoreText(dataBr, "br", { declaredBytes: dataBytes }));
-            }catch(err){
-                console.warn(`LambderDdbSessionStore: a session record in "${this.tableName}" could not be decoded, so it reads as no session.`, err);
-                return null;
-            }
-        }
-        // The load-bearing fields are checked before the cast, because
-        // everything past this line trusts them: the manager compares the two
-        // hashes in constant time (a non-string would throw there rather than
-        // answer false) and reads expiresAt as a number to decide whether the
-        // session is over. An item missing them is not this store's record
-        // (written by an earlier major, by hand, or by another app sharing the
-        // table), and it reads as no session for the same reason an
-        // undecodable one does: it will not become valid later. Not logged: a
-        // visitor whose cookie names such an item sends it on every request
-        // until the cookie expires, and the item itself goes with its TTL.
-        // dataVersion is load-bearing the same way: every conditioned write
-        // names the one read, and a record without it would fail that write
-        // rather than answer "stale".
-        if(typeof sessionKeyHash !== "string" || typeof secretHash !== "string"
-            || typeof rest.csrfTokenHash !== "string" || typeof rest.sessionKey !== "string"
-            || typeof rest.createdAt !== "number" || typeof rest.expiresAt !== "number"
-            || typeof rest.ttlInSeconds !== "number" || typeof rest.dataVersion !== "number"){
+    private async fromItem(item: LambderSessionItem): Promise<LambderSessionRecord<SessionData> | null> {
+        let data: unknown;
+        try {
+            const compressed = item.dataBr?.B;
+            if(compressed) data = JSON.parse(await restoreStoredText(compressed, storedNumber(item.dataBytes?.N, 0), DATA_CEILING));
+            else if(item.data) data = unmarshallJsonValue(item.data);
+        }catch(err){
+            console.warn(`LambderDdbSessionStore: a session record in "${this.tableName}" could not be decoded, so it reads as no session.`, err);
             return null;
         }
-        // The one cast: session.data is whatever the app put there, and JSON
-        // (or the plain attribute) hands it back as any. Nothing in the store
-        // can check it, because the shape is the app's, not this layer's.
-        return { sessionKeyHash, secretHash, data: restored as SessionData, ...rest } as LambderSessionRecord<SessionData>;
+        const sessionKeyHash = item[this.partitionKey]?.S;
+        const secretHash = item[this.sortKey]?.S;
+        const csrfTokenHash = item.csrfTokenHash?.S;
+        const sessionKey = item.sessionKey?.S;
+        const createdAt = numberAttributeOf(item.createdAt);
+        const expiresAt = numberAttributeOf(item.expiresAt);
+        const lastAccessedAt = numberAttributeOf(item.lastAccessedAt);
+        const ttlInSeconds = numberAttributeOf(item.ttlInSeconds);
+        const dataVersion = numberAttributeOf(item.dataVersion);
+        const dataExpiresAt = numberAttributeOf(item.dataExpiresAt);
+        // The load-bearing fields are checked before the record is built,
+        // because everything past this line trusts them: the manager compares
+        // the two hashes in constant time (a non-string would throw there
+        // rather than answer false) and reads expiresAt as a number to decide
+        // whether the session is over. An item missing them is not this
+        // store's record (written by an earlier major, by hand, or by another
+        // app sharing the table), and it reads as no session for the same
+        // reason an undecodable one does: it will not become valid later. Not
+        // logged: a visitor whose cookie names such an item sends it on every
+        // request until the cookie expires, and the item itself goes with its
+        // TTL. dataVersion is load-bearing the same way: every conditioned
+        // write names the one read, and a record without it would fail that
+        // write rather than answer "stale".
+        if(sessionKeyHash === undefined || secretHash === undefined || csrfTokenHash === undefined || sessionKey === undefined
+            || createdAt === undefined || expiresAt === undefined || ttlInSeconds === undefined || dataVersion === undefined){
+            return null;
+        }
+        // The cast: session.data is whatever the app put there, and JSON (or
+        // the plain attribute) hands it back untyped. Nothing in the store can
+        // check it, because the shape is the app's, not this layer's. The
+        // other unchecked field is lastAccessedAt: written with every record,
+        // and read as absent from an item without it rather than refusing it.
+        return {
+            sessionKeyHash, secretHash, csrfTokenHash, sessionKey, data: data as SessionData,
+            createdAt, expiresAt, ttlInSeconds, dataVersion,
+            ...(lastAccessedAt !== undefined ? { lastAccessedAt } : {}),
+            ...(dataExpiresAt !== undefined ? { dataExpiresAt } : {}),
+        } as LambderSessionRecord<SessionData>;
     }
 
     async get(sessionKeyHash: string, secretHash: string): Promise<LambderSessionRecord<SessionData> | null> {
         const { client, sdk } = await this.ready();
-        const response = await client.send(new sdk.GetCommand({ TableName: this.tableName, Key: this.keyOf(sessionKeyHash, secretHash), ConsistentRead: true }));
+        const response = await client.send(new sdk.GetItemCommand({ TableName: this.tableName, Key: this.keyOf(sessionKeyHash, secretHash), ConsistentRead: true }));
         if(!response.Item) return null;
         return await this.fromItem(response.Item);
     }
@@ -167,7 +235,7 @@ export class LambderDdbSessionStore<SessionData = unknown> implements LambderSes
     async create(record: LambderSessionRecord<SessionData>): Promise<void> {
         const item = await this.toItem(record);
         const { client, sdk } = await this.ready();
-        await client.send(new sdk.PutCommand({
+        await client.send(new sdk.PutItemCommand({
             TableName: this.tableName,
             Item: item,
             ConditionExpression: "attribute_not_exists(#sk)",
@@ -182,7 +250,7 @@ export class LambderDdbSessionStore<SessionData = unknown> implements LambderSes
         condition?: { dataVersion: number },
     ): Promise<LambderSessionUpdateResult> {
         const names: Record<string, string> = { "#sk": this.sortKey };
-        const values: Record<string, unknown> = {};
+        const values: LambderSessionItem = {};
         const set: string[] = [];
         const remove: string[] = [];
         const add: string[] = [];
@@ -191,8 +259,9 @@ export class LambderDdbSessionStore<SessionData = unknown> implements LambderSes
             const attributes = await this.dataAttributes(changes.data as SessionData);
             for(const attribute of ["data", "dataBr", "dataBytes"]){
                 names[`#${attribute}`] = attribute;
-                if(attribute in attributes){
-                    values[`:${attribute}`] = (attributes as Record<string, unknown>)[attribute];
+                const value = attributes[attribute];
+                if(value){
+                    values[`:${attribute}`] = value;
                     set.push(`#${attribute} = :${attribute}`);
                 }else{
                     remove.push(`#${attribute}`);
@@ -202,25 +271,25 @@ export class LambderDdbSessionStore<SessionData = unknown> implements LambderSes
         for(const field of UPDATABLE_FIELDS){
             if(changes[field] === undefined) continue;
             names[`#${field}`] = field;
-            values[`:${field}`] = changes[field];
+            values[`:${field}`] = marshallJsonValue(changes[field]);
             set.push(`#${field} = :${field}`);
         }
         // A write of the data or its deadline moves the version in the same
         // write, whatever value it writes (see LambderSessionStore.update).
         if("data" in changes || changes.dataExpiresAt !== undefined){
             names["#dataVersion"] = "dataVersion";
-            values[":dataVersionStep"] = 1;
+            values[":dataVersionStep"] = { N: "1" };
             add.push("#dataVersion :dataVersionStep");
         }
         let conditionExpression = "attribute_exists(#sk)";
         if(condition){
             names["#dataVersion"] = "dataVersion";
-            values[":readDataVersion"] = condition.dataVersion;
+            values[":readDataVersion"] = marshallJsonValue(condition.dataVersion);
             conditionExpression += " AND #dataVersion = :readDataVersion";
         }
         try {
             const { client, sdk } = await this.ready();
-            await client.send(new sdk.UpdateCommand({
+            await client.send(new sdk.UpdateItemCommand({
                 TableName: this.tableName,
                 Key: this.keyOf(sessionKeyHash, secretHash),
                 UpdateExpression: [
@@ -239,13 +308,13 @@ export class LambderDdbSessionStore<SessionData = unknown> implements LambderSes
             return "updated";
         }catch(err){
             if(!isConditionalCheckFailure(err)) throw err;
-            return (err as { Item?: Record<string, unknown> }).Item ? "stale" : "missing";
+            return (err as { Item?: LambderSessionItem }).Item ? "stale" : "missing";
         }
     }
 
     async delete(sessionKeyHash: string, secretHash: string): Promise<LambderSessionRecord<SessionData> | null> {
         const { client, sdk } = await this.ready();
-        const response = await client.send(new sdk.DeleteCommand({ TableName: this.tableName, Key: this.keyOf(sessionKeyHash, secretHash), ReturnValues: "ALL_OLD" }));
+        const response = await client.send(new sdk.DeleteItemCommand({ TableName: this.tableName, Key: this.keyOf(sessionKeyHash, secretHash), ReturnValues: "ALL_OLD" }));
         return response.Attributes ? await this.fromItem(response.Attributes) : null;
     }
 
@@ -255,7 +324,7 @@ export class LambderDdbSessionStore<SessionData = unknown> implements LambderSes
             KeyConditionExpression: "#pk = :pv",
             ProjectionExpression: "#sk",
             ExpressionAttributeNames: { "#pk": this.partitionKey, "#sk": this.sortKey },
-            ExpressionAttributeValues: { ":pv": sessionKeyHash },
+            ExpressionAttributeValues: { ":pv": { S: sessionKeyHash } },
             // Consistent: "log out everywhere" has to find a session created
             // a moment before it, and an eventually consistent read may not.
             ConsistentRead: true,
@@ -264,7 +333,10 @@ export class LambderDdbSessionStore<SessionData = unknown> implements LambderSes
         for(;;){
             const { client, sdk } = await this.ready();
             const { Items, LastEvaluatedKey } = await client.send(new sdk.QueryCommand(params));
-            for(const item of Items ?? []) hashes.push(item[this.sortKey]);
+            for(const item of Items ?? []){
+                const secretHash = item[this.sortKey]?.S;
+                if(secretHash !== undefined) hashes.push(secretHash);
+            }
             if(LastEvaluatedKey === undefined) return hashes;
             params.ExclusiveStartKey = LastEvaluatedKey;
         }

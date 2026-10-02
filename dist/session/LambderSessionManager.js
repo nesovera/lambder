@@ -185,6 +185,14 @@ export default class LambderSessionManager {
         // Refused for the same reason: data the schema refuses would end the
         // session on its first read, a sign-out right after the sign-in.
         const served = this.servedDataOf(data, (issues) => new Error(`Lambder: createSession was given data that does not match session.dataSchema (${issues}).`));
+        return await this.mintSession(sessionKey, data, served, ttlInSeconds, options?.dataExpiresAt);
+    }
+    /**
+     * Writes a new record holding `data` under fresh tokens, and hands it
+     * back with `served` as its data: the schema's reading of what the record
+     * holds, which createSession has checked and a rotation carries over.
+     */
+    async mintSession(sessionKey, data, served, ttlInSeconds, dataExpiresAt) {
         const sessionKeyHash = await this.sessionKeyHashOf(sessionKey);
         // The sort-key SECRET goes to the client; only its hash becomes the
         // store's range key, so the store never contains a usable token.
@@ -200,7 +208,7 @@ export default class LambderSessionManager {
             csrfTokenHash: await this.hashToken(csrfToken),
             sessionKey, data,
             createdAt, lastAccessedAt, expiresAt, ttlInSeconds,
-            ...(this.dataRefresh ? { dataExpiresAt: options?.dataExpiresAt ?? (createdAt + this.dataRefresh.ttlSeconds) } : {}),
+            ...(this.dataRefresh ? { dataExpiresAt: dataExpiresAt ?? (createdAt + this.dataRefresh.ttlSeconds) } : {}),
             dataVersion: 0,
         };
         await this.store.create(session);
@@ -320,8 +328,16 @@ export default class LambderSessionManager {
      * when the session is over: a refresh said so (a deleted or disabled
      * login), or the record was deleted while this request read it (a
      * logout, a password change), which a renewal must not undo.
+     *
+     * `refreshData: true` renews the data on this read whatever its
+     * deadline, for a read that wants it fresh (a page load): the callback
+     * runs once and its result shares the read's one write, where a read
+     * followed by refreshSessionData would run both twice whenever the data
+     * was due. Requires dataRefresh, and throws without it.
      */
-    async renewSession(session) {
+    async renewSession(session, options = {}) {
+        if (options.refreshData && !this.dataRefresh)
+            throw new Error("dataRefresh is not configured. Pass session.dataRefresh at creation to enable.");
         const now = Math.floor(Date.now() / 1000);
         const refreshed = {};
         const slid = {};
@@ -337,10 +353,10 @@ export default class LambderSessionManager {
         // once a refresh ran, the refresh's.
         let served = read?.success ? read.data : session.data;
         // Renew session.data once its shelf life has passed (opt-in
-        // dataRefresh), or at once when it does not match the schema. A
-        // record created while dataRefresh was off has no dataExpiresAt, so
-        // it renews on its first read.
-        if (this.dataRefresh && (read?.success === false || (session.dataExpiresAt ?? 0) <= now)) {
+        // dataRefresh), at once when it does not match the schema, or when
+        // the read asks for it. A record created while dataRefresh was off
+        // has no dataExpiresAt, so it renews on its first read.
+        if (this.dataRefresh && (options.refreshData === true || read?.success === false || (session.dataExpiresAt ?? 0) <= now)) {
             let newData;
             try {
                 newData = await this.dataRefresh.refresh(session);
@@ -573,7 +589,6 @@ export default class LambderSessionManager {
         const now = Math.floor(Date.now() / 1000);
         // An update, so a session deleted in between stays deleted.
         await this.forEachSessionOf(sessionKeyHash, (secretHash) => this.store.update(sessionKeyHash, secretHash, { dataExpiresAt: now }));
-        return true;
     }
     ;
     /**
@@ -597,29 +612,53 @@ export default class LambderSessionManager {
      * marked by expireSessionDataAllByKey while the new record was being
      * written may have passed it by, and due, its next read renews the data
      * from the source of truth either way.
+     *
+     * The record is read first, because what the request holds is the
+     * schema's reading of the data, which a schema that strips keys or
+     * transforms is not the data the record holds. The new record holds the
+     * stored data, every comparison is between stored data, and the request
+     * is handed the schema's reading of what the new record holds, as a read
+     * would hand it.
      */
     async regenerateSession(session) {
         if (!session)
             throw new Error("Invalid session");
         const now = Math.floor(Date.now() / 1000);
-        const created = await this.createSession(session.sessionKey, session.data, session.ttlInSeconds, this.dataRefresh ? { dataExpiresAt: now } : undefined);
+        const stored = await this.store.get(session.sessionKeyHash, session.secretHash);
+        if (!stored || stored.expiresAt <= now)
+            return null;
+        const created = await this.mintSession(session.sessionKey, stored.data, this.carriedDataOf(stored.data, session), session.ttlInSeconds, this.dataRefresh ? now : undefined);
         const replacement = created.session;
         const removed = await this.store.delete(session.sessionKeyHash, session.secretHash);
         if (!removed || removed.expiresAt <= now) {
             await this.store.delete(replacement.sessionKeyHash, replacement.secretHash);
             return null;
         }
-        if (canonicalJson(removed.data) === canonicalJson(session.data))
+        if (canonicalJson(removed.data) === canonicalJson(stored.data))
             return created;
-        // Another request wrote the data after this one read it. The write
-        // moves the replacement's dataVersion one past the one it was created
-        // with, and the record handed back says so: a data write later in
-        // this request names the version the store holds rather than answer
-        // stale. A mark landing in between still makes it stale, the safe
-        // side (see updateSessionData).
+        // Another request wrote the data between this read and the delete.
+        // The write moves the replacement's dataVersion one past the one it
+        // was created with, and the record handed back says so: a data write
+        // later in this request names the version the store holds rather
+        // than answer stale. A mark landing in between still makes it stale,
+        // the safe side (see updateSessionData).
         if (await this.store.update(replacement.sessionKeyHash, replacement.secretHash, { data: removed.data }) === "missing")
             return null;
-        return { ...created, session: { ...replacement, data: removed.data, dataVersion: replacement.dataVersion + 1 } };
+        return { ...created, session: { ...replacement, data: this.carriedDataOf(removed.data, session), dataVersion: replacement.dataVersion + 1 } };
+    }
+    /**
+     * Data a rotation carries over, as the request is handed it: the
+     * schema's reading of it. It is the record's own data rather than the
+     * app's, so it is not refused as a write would be. Where the schema
+     * refuses it, the request keeps the data it already held, and the new
+     * record's next read meets it as every read meets such data: refreshed
+     * with dataRefresh (the new record starts due), ended without.
+     */
+    carriedDataOf(data, session) {
+        if (!this.dataSchema)
+            return data;
+        const read = this.dataSchema.safeParse(data);
+        return read.success ? read.data : session.data;
     }
 }
 ;

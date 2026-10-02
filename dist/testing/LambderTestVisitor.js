@@ -1,16 +1,18 @@
 import LambderCaller from "../client/LambderCaller.js";
-import { withApiGroupCalls } from "../shared/wire/LambderApiGroupCalls.js";
+import { withApiGroupCalls, } from "../shared/wire/LambderApiGroupCalls.js";
 import { lambderHandlerTransport } from "../invoke/lambderHandlerTransport.js";
 import { decodeLambdaHttpResult, localLambdaContext, synthesizeLambdaHttpEvent, } from "../invoke/LambderLambdaEvent.js";
 import { LambderCookieJar } from "../shared/transport/LambderCookieJar.js";
 import { lambderCookieJarTransport } from "../shared/transport/lambderCookieJarTransport.js";
+import { assertApiSuccess } from "../shared/wire/LambderOutcomeAssertions.js";
 import { DEFAULT_MAX_RESTORED_PAYLOAD_BYTES } from "../shared/wire/LambderRequestPayload.js";
 /**
  * One simulated browser in front of a real Lambder app: a cookie jar, an
- * address and a host of its own, and two ways in. `api` / `apiOutcome` are a
- * typed LambderCaller's, over the real handler in this process, so a call
- * runs the whole pipeline (rate limits, session, replay, guards, validation)
- * the way a browser's would. `request` is everything else a browser sends:
+ * address and a host of its own, and two ways in. `api` / `apiOutcome` go
+ * through a typed LambderCaller, over the real handler in this process, so a
+ * call runs the whole pipeline (rate limits, session, replay, guards,
+ * validation) the way a browser's would; `api` throws where the caller's
+ * would hand back undefined. `request` is everything else a browser sends:
  * pages, redirects, session routes, file requests. Both carry the same jar,
  * so a session started through one is the session the other presents.
  *
@@ -26,7 +28,13 @@ class LambderTestVisitorCore {
      * An answer's logList is not printed; it is on the outcome.
      */
     caller;
-    /** The payload on success, `undefined` on a failure: LambderCaller.api, through this visitor. */
+    /**
+     * The endpoint's output; throws on every failure, with an Error that
+     * names the endpoint and says what came back the way assertApiSuccess
+     * does: the reason, the status, the refusal's code and message, and for
+     * a crash the error the app threw, which is also the end of the Error's
+     * cause chain. `apiOutcome` is for a test that expects a failure.
+     */
     api;
     /**
      * The full outcome, never throwing: LambderCaller.apiOutcome, through
@@ -77,12 +85,28 @@ class LambderTestVisitorCore {
                 outcome.error.cause = crash;
             return outcome;
         };
-        this.api = ((apiName, ...callArgs) => caller.api(apiName, ...callArgs));
+        // The plain call reads as the output, so a failure has nowhere to go
+        // but a throw. assertApiSuccess says what came back, as a test's own
+        // assertion would; the endpoint's name says which step of a setup it
+        // was.
+        const api = async (apiName, ...callArgs) => {
+            const outcome = await apiOutcome(apiName, ...callArgs);
+            try {
+                assertApiSuccess(outcome);
+            }
+            catch (err) {
+                const described = err;
+                throw new Error(`${apiName}: ${described.message}`, { cause: described.cause });
+            }
+            return outcome.payload;
+        };
+        this.api = api;
         this.apiOutcome = apiOutcome;
-        // Each group of the contract, as on a caller, through this visitor's
-        // own two calls: visitor.orders.place.outcome(input) carries the crash
-        // cause as visitor.apiOutcome does.
-        return withApiGroupCalls(this, (apiName, args) => caller.api(apiName, ...args), (apiName, args) => apiOutcome(apiName, ...args));
+        // Each group of the contract through this visitor's own two calls:
+        // visitor.orders.place(input) throws as visitor.api does, and
+        // visitor.orders.place.outcome(input) carries the crash cause as
+        // visitor.apiOutcome does.
+        return withApiGroupCalls(this, (apiName, args) => api(apiName, ...args), (apiName, args) => apiOutcome(apiName, ...args));
     }
     /**
      * This visitor's cookies, to inspect or clear; every call and request

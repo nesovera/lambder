@@ -137,7 +137,7 @@ export type LambderApisWithGuard<TOptions, N extends string> =
 
 /**
  * The names of the APIs whose guards option is exactly TGuards: the APIs
- * behind `"platformAdmin"` alone, say, and not those that declare it beside
+ * behind `"adminOnly"` alone, say, and not those that declare it beside
  * another guard. For a list a test loops over, checked against the table in
  * both directions.
  */
@@ -179,6 +179,24 @@ export const apiGuardParam = <TOptions extends Record<string, LambderApiOptionEn
     else if(guards !== undefined && Object.prototype.hasOwnProperty.call(guards, guard)) param = (guards as Readonly<Record<string, unknown>>)[guard];
     return param as LambderGuardParamOf<TOptions[K], N>;
 };
+
+/**
+ * The names of the APIs in a generated `apiOptions` table whose guards
+ * option names guard N, in any of its three forms: the list
+ * LambderApisWithGuard is the type of, read off the same entries, in the
+ * table's order. What a test loops over to call every API behind a guard,
+ * with no list kept by hand and no cast.
+ */
+export const apisWithGuard = <TOptions extends Record<string, LambderApiOptionEntry>, N extends string>(
+    options: TOptions,
+    guard: N,
+): LambderApisWithGuard<TOptions, N>[] =>
+    Object.keys(options).filter((name) => {
+        const guards = options[name]!.guards;
+        if(typeof guards === "string") return guards === guard;
+        if(Array.isArray(guards)) return guards.includes(guard);
+        return guards !== undefined && Object.prototype.hasOwnProperty.call(guards, guard);
+    }) as LambderApisWithGuard<TOptions, N>[];
 
 /**
  * The identifier writeApiGuardParams exports an API's parameter under: its

@@ -128,7 +128,14 @@ export type LambderSessionOptions<TSessionData = any> = {
      * the store, so ctx.session.data would be typed by the table.
      */
     store: LambderSessionStore<any>;
-    /** The HMAC key that turns a sessionKey into the store's partition key, so a table read does not reveal whose sessions it holds. Treat as a secret. */
+    /**
+     * The HMAC key that turns a sessionKey into the store's partition key, so
+     * a table read does not reveal whose sessions it holds. A subkey derived
+     * from it (HKDF) also keys the at-rest digests of the caller's fields in
+     * every rate-limit key and idempotency scope. Changing it signs every
+     * session out and starts every rate-limit counter and idempotency record
+     * afresh. Treat as a secret.
+     */
     sessionSalt: string;
     enableSlidingExpiration?: boolean;
     /** Min seconds between sliding-expiration writes. Default: max(60, 5% of TTL). */
@@ -203,8 +210,8 @@ export type LambderCreateOptions<TSessionData = any> = {
      * a change the signatures cannot see (a security fix, a field whose
      * meaning changed under the same shape). Dotted numbers ("1.2.10"),
      * compared segment by segment; a call naming no version is not judged. A
-     * floor above `apiVersion` is taken as `apiVersion`, with a warning, so a
-     * mistaken floor cannot refuse this build's own clients. Default: none.
+     * floor above `apiVersion` throws at creation, since it would refuse this
+     * build's own clients. Default: none.
      */
     minApiVersion?: string;
     /**
@@ -248,7 +255,7 @@ export type LambderCreateOptions<TSessionData = any> = {
      * `per: "ip"` rate limits key off ctx.ip, and an address the caller picks
      * per request is not a limit. API Gateway APPENDS to x-forwarded-for, so
      * behind API Gateway alone the leftmost entry is the client's own claim
-     * and the header should be left out. A direct invoke reads none of these:
+     * and the header should be left out. A Lambda invoke reads none of these:
      * its ctx.ip is the invoker's `clientIp`.
      */
     trustedClientIpHeaders?: readonly string[];
@@ -260,24 +267,28 @@ export type LambderCreateOptions<TSessionData = any> = {
      *
      * The same rule as trustedClientIpHeaders: ctx.host decides cookie
      * domains and host-matched routes, and a host a client picks is a tenant
-     * a client picks. A direct invoke reads none of these: its ctx.host is the
+     * a client picks. A Lambda invoke reads none of these: its ctx.host is the
      * invoker's `host`.
      */
     trustedHostHeaders?: readonly string[];
     /**
      * Proof that a request came through the proxy the trusted headers are
-     * trusted for: `{ header, secrets }`, a header the proxy sets on every
-     * request it forwards (a Cloudflare transform rule, a CloudFront origin
-     * custom header) and the secret it carries, with the previous one beside
-     * it during a rotation. The trusted client address and host headers are
-     * read only from a request that carries it. One sent to the origin
-     * directly (an API Gateway's own execute-api URL, a Function URL) has
-     * its address and host from the gateway, whatever headers it wrote, so
-     * a `per: "ip"` limit counts it by the address it really came from. The
-     * header is taken off `ctx.headers` and `ctx.header()`, so no handler or
-     * hook meets the secret. Default: none, so the trusted headers are read
-     * on every request, which is right only for an origin nothing but the
-     * proxy can reach.
+     * trusted for: `{ header, secrets, proxyHeaders? }`, a header the proxy
+     * sets on every request it forwards (a Cloudflare transform rule, a
+     * CloudFront origin custom header) and the secret it carries, with the
+     * previous one beside it during a rotation. The trusted client address
+     * and host headers are read only from a request that carries it. One
+     * sent to the origin directly (an API Gateway's own execute-api URL, a
+     * Function URL) has its address and host from the gateway, whatever
+     * headers it wrote, so a `per: "ip"` limit counts it by the address it
+     * really came from, and the trusted headers and `proxyHeaders` (the
+     * other headers only the proxy writes) are taken off `ctx.headers` and
+     * `ctx.header()` on it. `ctx.arrivedVia` says which it was: "proxy" or
+     * "direct", or "invoke" for a Lambda invoke. The proof header itself is
+     * always taken off, so no handler or hook meets the secret. Default:
+     * none, so the trusted headers are read on every request, which is right
+     * only for an origin nothing but the proxy can reach, and
+     * `ctx.arrivedVia` is "unverified" on all but an invoke.
      */
     originProof?: LambderOriginProof;
     /**

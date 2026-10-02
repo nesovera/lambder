@@ -221,50 +221,82 @@ import { LambderUploadError, LambderUploadRunner } from "lambder/client";
 
 const runner = new LambderUploadRunner({
     uploadRule: INVOICE_UPLOAD_RULE,
-    requestTicket: async (fileFacts, { signal }) => {
-        const answer = await caller.invoices.requestUpload({ storeId, fileFacts }, { signal });
-        if(!answer) throw new Error("The ticket was refused.");
-        return { ticket: answer.ticket, reference: answer.invoiceId };
-    },
-    confirmUpload: async (invoiceId, { signal }) => {
-        const answer = await caller.invoices.confirmUpload({ invoiceId }, { signal });
-        if(!answer) throw new Error("The upload was not confirmed.");
-        return answer;
-    },
+    requestTicket: (fileFacts, { signal }) => caller.invoices.requestUpload.outcome({ storeId, fileFacts }, { signal }),
+    confirmUpload: ({ invoiceId }, { signal }) => caller.invoices.confirmUpload.outcome({ invoiceId }, { signal }),
 });
 
 try{
     const invoice = await runner.upload(file, { onProgress: showProgress, signal: controller.signal });
 }catch(err){
-    if(err instanceof LambderUploadError) showFailure(err.reason);
+    if(err instanceof LambderUploadError) showFailure(err.reason, err.callFailure?.refusal);
 }
 ```
 
-`reference` is whatever the confirm endpoint needs to find the upload again
-(the id of the record the ticket endpoint made), and means nothing to the
-runner. Both calls get the upload's `signal` to pass on, so a cancel stops the
-app's request as well as the runner; a call that fails after the cancel is
-read as the cancel. `upload()` answers the confirm endpoint's receipt, or
-throws a `LambderUploadError` whose `reason` a screen words for the person:
+The two calls answer with the outcome a caller's `.outcome()` resolves to
+(`LambderApiOutcome`), which is what lets the runner tell a call that got no
+usable answer from one the endpoint refused. The ticket endpoint's output
+carries `ticket` and whatever the confirm endpoint needs to find the upload
+again (here `invoiceId`, the id of the record it made); the runner reads the
+ticket and hands the whole output to `confirmUpload` unread, so its type is
+the endpoint's own. Both calls get the upload's `signal` to pass on, so an
+abort stops the app's request as well as the runner; a call that fails after
+the abort is read as the abort. `upload()` answers the confirm endpoint's
+receipt, or throws a `LambderUploadError` whose `reason` a screen words for
+the person:
 
 | Reason | What happened |
 | --- | --- |
 | `fileEmpty`, `fileTypeRejected`, `fileTooLarge` | The rule's verdict, before anything was sent |
 | `fileUnreadable` | The browser could not read the file (moved, deleted, a cloud placeholder never downloaded) |
-| `ticketRefused` | `requestTicket` threw |
+| `ticketRefused` | The ticket endpoint refused (a refusal, a rejected input, an expired session or any other answer that is not a 5xx), or `requestTicket` threw |
 | `storageRejected` | Storage said no for a reason a retry cannot cure (or kept calling new tickets expired); the message carries its code |
-| `networkFailed` | Storage could not be reached, or kept stalling, through every attempt |
-| `confirmRefused` | The bytes are stored and `confirmUpload` threw |
-| `cancelled` | `signal` was aborted |
+| `networkFailed` | Storage, or the ticket or confirm call, could not be reached or kept stalling or failing, through every attempt |
+| `confirmRefused` | The bytes are stored and the confirm endpoint refused them, or `confirmUpload` threw |
+| `aborted` | `signal` was aborted |
+
+When a ticket or confirm call is what ended the upload, the error carries its
+failure outcome as `callFailure`, so a screen words a refusal by its code
+(`callFailure.refusal.code`, `lambder/upload-too-large` from
+`issueUploadTicket` among them) as it would on the call itself; its message
+names the call's reason and what it said, and its `cause` is the call's
+error when it had one. A function that throws instead of answering is the
+app's own code failing, which no retry cures: it ends the upload as
+`ticketRefused` or `confirmRefused` with what it threw as the `cause`.
 
 Along the way the runner reports its phase (`hashing`, `requesting`,
 `uploading` with the bytes sent, `confirming`). A dropped connection, a 5xx,
 a refusal a retry can cure (S3's `RequestTimeout`, `SlowDown`) or a post that
 moves nothing for a minute (`stallTimeoutMs`) is tried again after a random
 wait whose ceiling grows with each attempt (a `LambderBackoffTimer`, see
-[Secrets and retries](./secrets.md#retrying-with-a-backoff)), with the same
-ticket, so a flaky connection does not leave the app a record per attempt;
-`storageRetry` sets the attempts and the bounds of the wait. A ticket storage calls expired, or
+[Retrying with a backoff](./client.md#retrying-with-a-backoff)), with the same
+ticket, so a flaky connection does not leave the app a record per attempt.
+The app's own calls are tried again the same way, on the same timer, when
+they fail as `network`, `timeout` or `server`: the ticket call with the same
+file facts, and the confirm call with the same ticket output, so a dropped
+connection after the bytes are stored is confirmed on the next try rather
+than ending the upload, and no second ticket leaves an orphan object behind.
+A retried call may follow one that ran on the server and lost only its
+answer, so both endpoints must be safe to run twice. The confirm above is:
+it verifies the object and marks the same record again. A ticket endpoint
+run twice leaves one unconfirmed record behind, as a person's own retry
+would. A confirm with an effect of its own (a count, a message, a move to
+another key) is declared idempotent on the server and called with one key
+per upload, built from the ticket's output, so every retry carries it:
+
+```typescript
+confirmUpload: ({ invoiceId }, { signal }) =>
+    caller.invoices.confirmUpload.outcome({ invoiceId }, { signal, idempotencyKey: `confirm-${invoiceId}` }),
+```
+
+A key made inside `confirmUpload` with `createIdempotencyKey()` would be a
+new one on every retry, and protect nothing.
+Each step (the ticket, storage, the confirm) gets every attempt: the timer is
+reset when a step succeeds. `storageRetry` sets the attempts and the bounds
+of the wait for all three, and a
+`baseDelayMs` of 0, which would retry with no pause, is refused where the
+runner is built. A caller's handlers hear each attempt of its call as they
+hear any call, so a call site that words the upload's failure itself passes
+its own quiet `errorHandler` in the call's options. A ticket storage calls expired, or
 whose signing credentials it calls expired (S3's `ExpiredToken`), is replaced
 with a new one at once, spending no attempt, up to twice. The runner
 sends over XMLHttpRequest, the one way a browser reports how much of a body

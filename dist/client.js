@@ -28,7 +28,7 @@ export { LambderApiRefusal, isLambderApiRefusal, isLambderRefusalCode, refuse, r
 export { isObjectPayload } from "./shared/wire/LambderObjectPayload.js";
 // The server's declared options as plain data (the generated options module's
 // entry types) and the readers a client derives its own facts from.
-export { apiGuardParam, apiGuardParamExportName } from "./shared/wire/LambderApiOptionEntries.js";
+export { apiGuardParam, apiGuardParamExportName, apisWithGuard } from "./shared/wire/LambderApiOptionEntries.js";
 // A crash described for a caller allowed to see it (the envelope's `crash` field; pure, no Node built-ins).
 export { describeCrash, errorFromCrashDetail } from "./shared/wire/LambderCrashDetail.js";
 // Request payload compression (browser-safe: gzip via CompressionStream, no Node built-ins).
@@ -45,7 +45,7 @@ export { LambderBackoffTimer } from "./shared/util/LambderBackoffTimer.js";
 // Signed claims tokens, for the isomorphic code that verifies them where a
 // server's secret is at hand (an edge Worker, a shared backend package);
 // never in a page, which holds no secret to verify with.
-export { LambderSignedClaims, keyedDigest, randomSecret } from "./shared/util/LambderSignedClaims.js";
+export { LambderSignedClaims, keyedDigest, randomSecret, randomCode } from "./shared/util/LambderSignedClaims.js";
 export { constantTimeEquals } from "./shared/util/LambderTextDigest.js";
 // Direct uploads: the runner that takes a file from the browser straight to
 // storage, and the vocabulary it shares with the server's bucket.

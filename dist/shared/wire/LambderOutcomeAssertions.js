@@ -83,7 +83,7 @@ export function assertApiSuccess(outcome) {
  * `error` after the rest) reads directly on the next line.
  *
  * ```typescript
- * assertApiFailure(await member.apiOutcome("org.delete", { id }), "notAuthorized");
+ * assertApiFailure(await clerk.apiOutcome("store.delete", { id }), "notAuthorized");
  * assertApiFailure(await guest.apiOutcome("signup", form), "refusal", { code: LAMBDER_REFUSAL_CODES.rateLimited, status: 429 });
  * ```
  */

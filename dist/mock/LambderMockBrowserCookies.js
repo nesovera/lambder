@@ -1,4 +1,5 @@
 import { parseSetCookie } from "../shared/transport/LambderCookieJar.js";
+import { serializeClearCookie } from "../shared/wire/LambderCookie.js";
 /**
  * Where the runtime's cookies live outside its own answers: the jars it built
  * for itself, and the copies it planted in the page's cookie storage. A
@@ -42,13 +43,12 @@ export class LambderMockBrowserCookies {
     mirrorSetCookies(setCookies) {
         if (typeof document === "undefined")
             return;
-        const secureContext = typeof globalThis.isSecureContext === "boolean" ? globalThis.isSecureContext : true;
         for (const header of setCookies) {
             const cookie = parseSetCookie(header, Date.now());
             if (!cookie || cookie.httpOnly)
                 continue;
-            document.cookie = secureContext ? header : header.replace(/;\s*Secure\b/i, "");
-            this.mirroredCookies.set(`${cookie.name}|${cookie.path}`, { name: cookie.name, path: cookie.path });
+            writeDocumentCookie(header);
+            this.mirroredCookies.set(`${cookie.name}|${cookie.domain ?? ""}|${cookie.path}`, { name: cookie.name, domain: cookie.domain, path: cookie.path });
         }
     }
     /**
@@ -64,9 +64,22 @@ export class LambderMockBrowserCookies {
         for (const jar of this.ownedJars)
             jar.clear();
         if (typeof document !== "undefined") {
-            for (const cookie of this.mirroredCookies.values())
-                document.cookie = `${cookie.name}=; Path=${cookie.path}; Max-Age=0`;
+            // At the Domain and Path each was set with: a deletion reaches
+            // only the cookie of the same name at the same scope, so one
+            // planted under the app's cookie domain would outlive a deletion
+            // naming the path alone.
+            for (const { name, domain, path } of this.mirroredCookies.values())
+                writeDocumentCookie(serializeClearCookie(name, { domain, path }));
         }
         this.mirroredCookies.clear();
     }
 }
+/**
+ * One write into document.cookie, `Secure` dropped where the page is not a
+ * secure context: the browser refuses such a write there, and plain http on
+ * a LAN address has to keep working.
+ */
+const writeDocumentCookie = (header) => {
+    const secureContext = typeof globalThis.isSecureContext === "boolean" ? globalThis.isSecureContext : true;
+    document.cookie = secureContext ? header : header.replace(/;\s*Secure\b/i, "");
+};

@@ -1,31 +1,33 @@
 import type { LambderApiMode } from "../shared/wire/LambderApiContract.js";
 import type { LambderRateLimitMessage, LambderRateLimitOptionValue, LambderRateLimitOverride } from "../shared/wire/LambderApiOptionValues.js";
+import type { LambderKeyFieldDigest } from "../shared/util/LambderKeyFieldDigest.js";
 import type { z } from "zod";
 import type { LambderApiRequest } from "./LambderApiRequest.js";
 import type { LambderApiCallContext } from "./LambderApiCallContext.js";
 import { type LambderRateLimiter, type LambderRateLimitExceeded, type LambderRateLimitPolicy } from "../shared/contracts/LambderRateLimiter.js";
 import type { LambderSessionRecord } from "../shared/contracts/LambderSessionStore.js";
-import { LambderApiRefusal } from "../shared/wire/LambderApiRefusal.js";
+import { LambderApiRefusal, type LambderRateLimitRefusalData } from "../shared/wire/LambderApiRefusal.js";
 import type { LambderNonEmptyOptionMap } from "../shared/util/LambderTypeUtilities.js";
 import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
-/** Refusal a rate-limited request answers unless the policy or the API's override names its own. */
+/** The words a rate-limited call answers with unless the policy or the API's override writes its own (the `refusal` option of each). */
 export declare const DEFAULT_RATE_LIMIT_REFUSAL: {
     type: "warning";
-    code: "lambder/rate-limited";
     content: string;
 };
 /**
  * The refusal a rate-limited call answers with: a 429 envelope carrying the
- * framework code, whatever message a policy or an API wrote, and a
- * Retry-After header. The engine throws it; the mock runtime's failure
- * injection throws the same one, so an injected rate limit is
- * indistinguishable from a real one.
+ * framework code, the words a policy or an API wrote, the policy's name and
+ * the seconds to wait as its data, and a Retry-After header of those same
+ * seconds. The engine throws it; the mock runtime's failure injection throws
+ * the same one, so an injected rate limit is indistinguishable from a real
+ * one.
  *
- * The code goes on after the message, so a message that carries one anyway
- * (a plain-JS caller, a cast) cannot replace it: a rate limit is never a code
- * an endpoint declares, and the pipeline would refuse to send one it did not.
+ * Only the words are read off the message, so one that carries a code or
+ * data anyway (a plain-JS caller, a cast) cannot replace them: a rate limit
+ * is never a code an endpoint declares, and the pipeline sends one only with
+ * the data a client narrows it by.
  */
-export declare const rateLimitRefusal: (detail: string, retryAfterSeconds: number, message?: LambderRateLimitMessage) => LambderApiRefusal;
+export declare const rateLimitRefusal: (detail: string, data: LambderRateLimitRefusalData, message?: LambderRateLimitMessage) => LambderApiRefusal;
 /**
  * A custom rate-limit key. `apiInput` names the fields of the API's OWN
  * payload the key derives from: that slice is validated against the raw
@@ -110,7 +112,7 @@ export type LambderApiRateLimitPolicyConfig<TCtx = any> = LambderRateLimitPolicy
      * takes it: `per: "ip"` and `per: "session"` have one place each.
      */
     chargeAt?: LambderRateLimitChargeAt;
-    /** The refusal's message for refused requests: its type, title and content, under the code "lambder/rate-limited". Default: a warning saying too many requests. */
+    /** The refusal's words for refused requests: its type, title and content, under the code "lambder/rate-limited" and beside the data that names this policy to the client. Default: a warning saying too many requests. */
     refusal?: LambderRateLimitMessage;
 };
 export type LambderApiRateLimitsConfig<TPolicies extends Record<string, LambderApiRateLimitPolicyConfig<any>>> = {
@@ -276,8 +278,13 @@ type LambderRateLimitPhase = "beforeSession" | LambderRateLimitChargeAt;
  * slice) and hands the context to a custom key's handler, reading nothing
  * of the context itself but its session, so it runs unchanged under the
  * server and the mock runtime.
+ *
+ * The caller's half of every tracker key (the address, the session key, a
+ * custom key) reaches the limiter as a digest (LambderKeyFieldDigest), so a
+ * table read names the API and the policy and never who was counted.
  */
 export declare class LambderApiRateLimitsEngine {
+    private readonly keyFieldDigest;
     private limiter;
     private failOpen;
     private ipv6PrefixLength;
@@ -289,6 +296,7 @@ export declare class LambderApiRateLimitsEngine {
      * second would otherwise be as many identical log lines.
      */
     private readonly loggedFailures;
+    constructor(keyFieldDigest: LambderKeyFieldDigest);
     /** True once rateLimits were configured. */
     get isConfigured(): boolean;
     configure(config: LambderApiRateLimitsConfig<Record<string, LambderApiRateLimitPolicyConfig>>): void;
@@ -318,7 +326,7 @@ export declare class LambderApiRateLimitsEngine {
     /**
      * One policy charged by code rather than by a declaration, for
      * `ctx.rateLimit` and `ctx.isRateLimited`. Counters, failOpen, key
-     * bounding and refusal are those of a declared limit; only who knows the
+     * digests and refusal are those of a declared limit; only who knows the
      * key differs. A policy without `per` takes the key the code passes, a
      * `per: "ip"` or `per: "session"` one reads it off the request, and one
      * keyed by an API payload is refused, since only its APIs know the key.
@@ -334,20 +342,19 @@ export declare class LambderApiRateLimitsEngine {
     /**
      * Counts one attempt, or lets it through when the limiter itself fails
      * and failOpen is on. The log line names the policy and its windows,
-     * never the tracker key: the key carries whatever a custom handler
-     * returned, which the docs' own example makes an email address. A
-     * failure the limiter throws again (see loggedFailures) is not logged
-     * again.
+     * never the tracker key: digested as its caller's half is, the key is
+     * still the same for every attempt of one caller, and a log is read by
+     * more people than the table. A failure the limiter throws again (see
+     * loggedFailures) is not logged again.
      */
     private countAttempt;
     private chargeKeyOf;
     private resolveKey;
     /**
      * The key a `per: "ip"` or `per: "session"` policy counts under: what the
-     * request carries, however the policy is charged. A session key is
-     * bounded like a custom one (see boundKeyField); an address needs no
-     * bound, since normalizeClientIp caps it at 45 characters whichever
-     * header or gateway field named it.
+     * request carries, however the policy is charged, digested as a custom
+     * key is. The address is the subject rateLimitSubjectOf counts (an IPv6
+     * caller's /64), so the digest of one subscriber's every address is one.
      */
     private requestKeyOf;
 }

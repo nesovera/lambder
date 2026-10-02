@@ -7,6 +7,7 @@ import {
 } from "../shared/contracts/LambderUploadBucket.js";
 import { LambderBackoffTimer, type LambderBackoffTimerOptions } from "../shared/util/LambderBackoffTimer.js";
 import { sha256Base64Of } from "../shared/util/LambderTextDigest.js";
+import type { LambderApiFailure, LambderApiFailureReason, LambderApiOutcome } from "../shared/wire/LambderApiOutcome.js";
 
 /*
  * The browser half of a direct upload (the conversation, and the reasons for
@@ -16,12 +17,12 @@ import { sha256Base64Of } from "../shared/util/LambderTextDigest.js";
  * on uploading is `await runner.upload(file)`. Everything in between is the
  * runner's: checking the file against the rule, hashing it, asking for a
  * ticket, sending the bytes to storage with progress (a form post or a PUT,
- * as the ticket says), waiting out a dropped
- * or stalled connection and trying again, asking for a new ticket when
- * storage says the old one ran out, stopping the moment the caller cancels,
- * and having the server confirm what arrived. It ends one of two ways: the
- * app's receipt, or a LambderUploadError whose reason a screen can word for
- * the person.
+ * as the ticket says), waiting out a dropped or stalled connection, at
+ * storage or at the app's own endpoints, and trying again, asking for a new
+ * ticket when storage says the old one ran out, stopping the moment the
+ * caller aborts, and having the server confirm what arrived. It ends one of
+ * two ways: the app's receipt, or a LambderUploadError whose reason a screen
+ * can word for the person.
  */
 
 /** Where an upload is, in order. `sentBytes` only moves during `uploading`. */
@@ -37,48 +38,72 @@ export type LambderUploadFailureReason =
     | LambderUploadRuleVerdict
     /** The browser could not read the file (moved, deleted, or a cloud placeholder that never downloaded). */
     | "fileUnreadable"
-    /** The app's ticket endpoint would not issue a ticket. */
+    /** The app's ticket endpoint would not issue a ticket: it refused, or its call failed in a way a retry cannot cure. */
     | "ticketRefused"
     /** Storage answered and said no, for a reason a retry cannot cure. */
     | "storageRejected"
-    /** Storage could not be reached, or kept stalling, through every attempt. */
+    /** Storage, or the app's ticket or confirm endpoint, could not be reached, or kept stalling or failing, through every attempt. */
     | "networkFailed"
-    /** The bytes are stored, and the app's confirm endpoint would not confirm them. */
+    /** The bytes are stored, and the app's confirm endpoint would not confirm them: it refused, or its call failed in a way a retry cannot cure. */
     | "confirmRefused"
-    | "cancelled";
+    /** The upload's signal aborted it. */
+    | "aborted";
 
-/** How an upload failed: `reason` for a screen to word, the underlying error as `cause`. */
+/**
+ * How an upload failed: `reason` for a screen to word, the underlying error
+ * as `cause`, and the failed outcome of the app's own call as `callFailure`
+ * when that call is what ended the upload, so a screen words a refusal by its
+ * code (`callFailure.refusal.code`) as it would on the call itself.
+ */
 export class LambderUploadError extends Error {
     readonly reason: LambderUploadFailureReason;
+    /** The ticket or confirm call's failure outcome, when the upload ended on one. */
+    readonly callFailure?: LambderApiFailure;
 
-    constructor(reason: LambderUploadFailureReason, options: { cause?: unknown; detail?: string } = {}){
+    constructor(reason: LambderUploadFailureReason, options: { cause?: unknown; detail?: string; callFailure?: LambderApiFailure } = {}){
         super(options.detail ? `${reason}: ${options.detail}` : reason, { cause: options.cause });
         this.name = "LambderUploadError";
         this.reason = reason;
+        if(options.callFailure) this.callFailure = options.callFailure;
     }
 }
 
-export type LambderUploadRunnerOptions<Reference, Receipt> = {
+/**
+ * What a runner is built from. The app's ticket and confirm calls answer with
+ * the outcome a caller's `.outcome()` resolves to, so the runner can tell a
+ * call that got no usable answer, which it tries again, from a refusal, which
+ * it does not.
+ */
+export type LambderUploadRunnerOptions<TicketOutput extends { ticket: LambderUploadTicket }, Receipt> = {
     uploadRule: LambderUploadRule;
     /**
-     * The app's ticket endpoint. `reference` is whatever its confirm endpoint
-     * needs to find this upload again (the id of the record it made), and
-     * means nothing to the runner. `signal` is the upload's own, for the call
-     * to pass on so a cancel stops it too.
+     * The app's ticket endpoint, as its outcome
+     * (`caller.invoices.requestUpload.outcome(input, { signal })`). Its output
+     * carries the `ticket` and whatever the confirm endpoint needs to find this
+     * upload again (the id of the record it made), which the runner hands to
+     * confirmUpload unread. `signal` is the upload's own, for the call to pass
+     * on so an abort stops it too.
      */
-    requestTicket: (fileFacts: LambderUploadFileFacts, call: { signal: AbortSignal | undefined }) => Promise<{ ticket: LambderUploadTicket; reference: Reference }>;
-    /** The app's confirm endpoint: the server checks the stored object and answers its record of it. */
-    confirmUpload: (reference: Reference, call: { signal: AbortSignal | undefined }) => Promise<Receipt>;
+    requestTicket: (fileFacts: LambderUploadFileFacts, call: { signal: AbortSignal | undefined }) => Promise<LambderApiOutcome<TicketOutput>>;
+    /**
+     * The app's confirm endpoint, as its outcome: handed the ticket
+     * endpoint's output, the server checks the stored object and answers its
+     * record of it, the receipt upload() resolves to.
+     */
+    confirmUpload: (ticketOutput: TicketOutput, call: { signal: AbortSignal | undefined }) => Promise<LambderApiOutcome<Receipt>>;
     /** The app's way of forgetting a confirmed upload the person removed again. Without one, discard() does nothing. */
     discardUpload?: (receipt: Receipt) => Promise<void>;
     /**
-     * How storage is tried again when it cannot be reached, stalls, or answers
-     * a failure a retry can cure (a 5xx, RequestTimeout, SlowDown). Each wait
-     * is `baseDelayMs` plus a random share of a ceiling that starts at
-     * `baseDelayMs` and doubles with every failed attempt, the whole never
-     * past `maxDelayMs` (the ladder of LambderBackoffTimer), so many browsers
-     * dropped together do not come back in step, not even the first time.
-     * Default: 4 attempts, waits from one second to 15.
+     * How a step is tried again when it got no usable answer: storage that
+     * cannot be reached, stalls, or answers a failure a retry can cure (a 5xx,
+     * RequestTimeout, SlowDown), and a ticket or confirm call that failed as
+     * `network`, `timeout` or `server`. Each wait is `baseDelayMs` plus a
+     * random share of a ceiling that starts at `baseDelayMs` and doubles with
+     * every failed attempt, the whole never past `maxDelayMs` (the ladder of
+     * LambderBackoffTimer), so many browsers dropped together do not come
+     * back in step, not even the first time. The attempts are per step: the
+     * ladder starts again after each step that succeeds. Default: 4
+     * attempts, waits from one second to 15.
      */
     storageRetry?: { attempts?: number; baseDelayMs?: number; maxDelayMs?: number };
     /**
@@ -92,7 +117,7 @@ export type LambderUploadRunnerOptions<Reference, Receipt> = {
 
 type StorageOutcome =
     | { kind: "stored" }
-    | { kind: "cancelled" }
+    | { kind: "aborted" }
     /** No answer, a 5xx, a stall, or a refusal a retry can cure: all worth another try. */
     | { kind: "unreachable" }
     | { kind: "rejected"; ticketExpired: boolean; detail: string };
@@ -108,20 +133,41 @@ const TICKET_RENEWAL_LIMIT = 2;
 /** S3's refusals that are the connection's or the service's fault rather than the file's, which its own SDK retries too. */
 const TRANSIENT_STORAGE_CODES = new Set(["RequestTimeout", "SlowDown", "InternalError", "ServiceUnavailable"]);
 
-export class LambderUploadRunner<Reference, Receipt> {
-    private readonly options: LambderUploadRunnerOptions<Reference, Receipt>;
-    private readonly attempts: number;
+/**
+ * The ticket and confirm call failures that got no usable answer, so the same
+ * call may well pass on another try: no answer at all, the call's own
+ * timeout, a 5xx. Every other failure is the endpoint's answer (a refusal, a
+ * rejected input, an expired session), and the same call would get it again.
+ */
+const RETRIED_CALL_REASONS: ReadonlySet<LambderApiFailureReason> = new Set<LambderApiFailureReason>(["network", "timeout", "server"]);
+
+/** One line on what a failed call said, for the message of the upload error it ends in. */
+const describeCallFailure = (failure: LambderApiFailure): string => {
+    const said = failure.refusal !== undefined ? failure.refusal.content
+        : "error" in failure ? failure.error.message
+        : "";
+    return said ? `${failure.reason}: ${said}` : failure.reason;
+};
+
+export class LambderUploadRunner<TicketOutput extends { ticket: LambderUploadTicket }, Receipt> {
+    private readonly options: LambderUploadRunnerOptions<TicketOutput, Receipt>;
+    /** How many times a step is tried again after its first try: the storageRetry option's attempts, less that first one. */
+    private readonly retries: number;
     /** The ladder one upload's waits climb; each upload() builds a timer of its own from it, so two uploads never share a count. */
     private readonly backoff: LambderBackoffTimerOptions;
     private readonly stallTimeoutMs: number;
 
-    constructor(options: LambderUploadRunnerOptions<Reference, Receipt>){
+    constructor(options: LambderUploadRunnerOptions<TicketOutput, Receipt>){
         this.options = options;
-        this.attempts = Math.max(1, options.storageRetry?.attempts ?? 4);
+        this.retries = Math.max(1, options.storageRetry?.attempts ?? 4) - 1;
         const baseDelayMs = options.storageRetry?.baseDelayMs ?? 1_000;
         const maxDelayMs = options.storageRetry?.maxDelayMs ?? 15_000;
         // A longest wait below the shortest is every wait at the shortest.
         this.backoff = { baseMs: baseDelayMs, maxMs: Math.max(baseDelayMs, maxDelayMs) };
+        // Each upload climbs a timer of its own; one built here checks the
+        // ladder where the runner is configured, so a storageRetry the timer
+        // refuses (a baseDelayMs of 0) fails now rather than on the first upload.
+        new LambderBackoffTimer(this.backoff);
         this.stallTimeoutMs = options.stallTimeoutMs ?? 60_000;
     }
 
@@ -150,11 +196,11 @@ export class LambderUploadRunner<Reference, Receipt> {
         if(rejection) throw new LambderUploadError(rejection);
 
         const report = (phase: LambderUploadPhase, sentBytes = 0) => onProgress?.({ phase, sentBytes, totalBytes: file.size });
-        const stopIfCancelled = () => {
-            if(signal?.aborted) throw new LambderUploadError("cancelled");
+        const stopIfAborted = () => {
+            if(signal?.aborted) throw new LambderUploadError("aborted");
         };
 
-        stopIfCancelled();
+        stopIfAborted();
         report("hashing");
         const fileFacts: LambderUploadFileFacts = {
             fileName: file.name,
@@ -167,27 +213,61 @@ export class LambderUploadRunner<Reference, Receipt> {
                 throw new LambderUploadError("fileUnreadable", { cause });
             }))),
         };
-        stopIfCancelled();
+        stopIfAborted();
 
-        const requestTicket = async () => {
-            report("requesting");
-            try{
-                return await this.options.requestTicket(fileFacts, { signal });
-            }catch(cause){
-                throw new LambderUploadError(signal?.aborted ? "cancelled" : "ticketRefused", { cause });
+        // One timer for the whole upload, the app's calls and storage alike.
+        // A step that succeeds resets it, so each step has every attempt and
+        // its first wait is the shortest again. Every retry so far waited on
+        // the timer once, so its count is the retries the step has spent.
+        const backoff = new LambderBackoffTimer(this.backoff);
+        const waitToRetry = async (lastFailure: { cause?: unknown; detail?: string; callFailure?: LambderApiFailure }) => {
+            if(backoff.retries >= this.retries) throw new LambderUploadError("networkFailed", lastFailure);
+            // The wait rejects only for the signal: nothing else cancels it.
+            await backoff.wait(signal).catch((cause: unknown) => {
+                throw new LambderUploadError("aborted", { cause });
+            });
+        };
+
+        /**
+         * One of the app's calls through to its output. A failure with no
+         * usable answer is tried again on the timer, the same request each
+         * time (so a confirm asks about the ticket it was issued); any other
+         * failure ends the upload as `refused`, and one after the upload's
+         * signal aborted as the abort. A throw is the app's own code failing
+         * rather than the call, which no retry cures.
+         */
+        const callApp = async <TOutput>(call: () => Promise<LambderApiOutcome<TOutput>>, refused: "ticketRefused" | "confirmRefused"): Promise<TOutput> => {
+            for(;;){
+                stopIfAborted();
+                let outcome: LambderApiOutcome<TOutput>;
+                try{
+                    outcome = await call();
+                }catch(cause){
+                    throw new LambderUploadError(signal?.aborted ? "aborted" : refused, { cause });
+                }
+                if(outcome.ok){
+                    backoff.reset();
+                    return outcome.payload;
+                }
+                const ended = { callFailure: outcome, detail: describeCallFailure(outcome), ...("error" in outcome ? { cause: outcome.error } : {}) };
+                if(outcome.reason === "aborted" || signal?.aborted) throw new LambderUploadError("aborted", ended);
+                if(!RETRIED_CALL_REASONS.has(outcome.reason)) throw new LambderUploadError(refused, ended);
+                await waitToRetry(ended);
             }
+        };
+        const requestTicket = () => {
+            report("requesting");
+            return callApp(() => this.options.requestTicket(fileFacts, { signal }), "ticketRefused");
         };
 
         let issued = await requestTicket();
-        const backoff = new LambderBackoffTimer(this.backoff);
-        let failedAttempts = 0;
         let ticketRenewals = 0;
         for(;;){
-            stopIfCancelled();
+            stopIfAborted();
             report("uploading");
             const outcome = await this.send(issued.ticket, file, signal, (sentBytes) => report("uploading", sentBytes));
             if(outcome.kind === "stored") break;
-            if(outcome.kind === "cancelled") throw new LambderUploadError("cancelled");
+            if(outcome.kind === "aborted") throw new LambderUploadError("aborted");
             if(outcome.kind === "rejected"){
                 // An expired ticket needs no wait and costs no attempt, only a
                 // new ticket; any other refusal is the file's, and final.
@@ -197,19 +277,12 @@ export class LambderUploadRunner<Reference, Receipt> {
             }
             // The ticket is kept through a network retry, so a flaky
             // connection does not leave the app a record per attempt.
-            if(++failedAttempts >= this.attempts) throw new LambderUploadError("networkFailed");
-            // The wait rejects only for the signal: nothing else cancels it.
-            await backoff.wait(signal).catch((cause: unknown) => {
-                throw new LambderUploadError("cancelled", { cause });
-            });
+            await waitToRetry({});
         }
+        backoff.reset();
 
         report("confirming", file.size);
-        try{
-            return await this.options.confirmUpload(issued.reference, { signal });
-        }catch(cause){
-            throw new LambderUploadError(signal?.aborted ? "cancelled" : "confirmRefused", { cause });
-        }
+        return await callApp(() => this.options.confirmUpload(issued, { signal }), "confirmRefused");
     }
 
     /** Forgets a confirmed upload through the app's endpoint, when it declared one. */
@@ -219,7 +292,7 @@ export class LambderUploadRunner<Reference, Receipt> {
 
     /** One upload of the file to storage, in the ticket's form. Never throws: every ending is an outcome. */
     private send(ticket: LambderUploadTicket, file: File, signal: AbortSignal | undefined, onSent: (sentBytes: number) => void): Promise<StorageOutcome> {
-        if(signal?.aborted) return Promise.resolve({ kind: "cancelled" });
+        if(signal?.aborted) return Promise.resolve({ kind: "aborted" });
         let request: StorageRequest;
         if(ticket.method === "PUT"){
             request = { method: "PUT", url: ticket.uploadUrl, body: file, headers: ticket.headers };
@@ -270,7 +343,7 @@ const sendWithXhr = ({ method, url, body, headers }: StorageRequest, fileBytes: 
             settle(rejectedOutcome(request.status, request.responseText));
         };
         request.onerror = () => settle({ kind: "unreachable" });
-        request.onabort = () => settle(stalled ? { kind: "unreachable" } : { kind: "cancelled" });
+        request.onabort = () => settle(stalled ? { kind: "unreachable" } : { kind: "aborted" });
 
         signal?.addEventListener("abort", cancel, { once: true });
         watchForStall();
@@ -289,7 +362,7 @@ const sendWithFetch = async ({ method, url, body, headers }: StorageRequest, fil
     try{
         response = await fetch(url, { method, body, headers, signal });
     }catch{
-        return signal?.aborted ? { kind: "cancelled" } : { kind: "unreachable" };
+        return signal?.aborted ? { kind: "aborted" } : { kind: "unreachable" };
     }
     if(response.ok){
         onSent(fileBytes);

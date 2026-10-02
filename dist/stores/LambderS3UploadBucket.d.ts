@@ -1,5 +1,7 @@
 import type { S3Client, S3ClientConfig } from "@aws-sdk/client-s3";
 import { type LambderUploadBucket, type LambderUploadContentDisposition, type LambderUploadFileFacts, type LambderUploadMethod, type LambderUploadObjectOptions, type LambderUploadRule, type LambderUploadTicket, type LambderUploadVerdict } from "../shared/contracts/LambderUploadBucket.js";
+import type { LambderMemoryUploadBucketOptions } from "./LambderMemoryUploadBucket.js";
+import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
 export type LambderS3UploadBucketOptions = {
     bucket: string;
     /** A ready client, e.g. one shared with the rest of the app. */
@@ -50,6 +52,16 @@ export declare class LambderS3UploadBucket implements LambderUploadBucket {
     private presignedPostSdk;
     private requestPresignerSdk;
     constructor({ bucket, client, clientConfig, ticketLifetimeSeconds, downloadLifetimeSeconds, uploadMethod }: LambderS3UploadBucketOptions);
+    /**
+     * Puts a memory twin under this bucket in place, for `lambder/testing`:
+     * every LambderUploadBucket member answers from the twin from then on.
+     * The twin signs with this bucket's own lifetimes and upload method, so a
+     * client takes the path against it that it takes against this bucket.
+     * Keyed by a symbol no entry point exports; see registerSwappableInstance.
+     */
+    [LAMBDER_BACKEND_SWAP](twins: {
+        uploadBucket(options: LambderMemoryUploadBucketOptions): LambderUploadBucket;
+    }): void;
     issueUploadTicket({ objectKey, fileFacts, uploadRule, lifetimeSeconds, object }: {
         objectKey: string;
         fileFacts: LambderUploadFileFacts;

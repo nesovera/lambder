@@ -4,7 +4,10 @@
  * - apiOutcome() resolves to a discriminated { ok } union and never throws.
  * - api() keeps its payload-shortcut shape (undefined on failure).
  * - Per-call handlers override the constructor handlers.
- * - timeoutMs aborts the fetch and reports reason 'timeout'.
+ * - timeoutMs aborts the fetch and reports reason 'timeout'; the call's own
+ *   signal reports 'aborted', which no handler but fetchEnded hears.
+ * - errorHandler is handed the failure beside the error, and fetchEnded the
+ *   outcome.
  * - What the contract decides at the call site: the output, the payload and
  *   the header types, none of which an annotation may replace.
  * - A stale bundle asks for one reload at a time per page, however many
@@ -20,7 +23,9 @@ import { initLambder } from '../../src/core/Lambder.js';
 import { lambderHandlerTransport } from '../../src/invoke/lambderHandlerTransport.js';
 import { apiNameKeyOf } from '../../src/shared/wire/LambderApiSignatureMap.js';
 import { createIdempotencyKey, createIdempotencyKeyScope } from '../../src/shared/wire/LambderIdempotencyKeyScope.js';
-import { resolveApiOutcome, type LambderApiHttpAnswer, type LambderApiOutcome } from '../../src/shared/wire/LambderApiOutcome.js';
+import { resolveApiOutcome, type LambderApiFailure, type LambderApiHttpAnswer, type LambderApiOutcome } from '../../src/shared/wire/LambderApiOutcome.js';
+import { assertApiFailure } from '../../src/shared/wire/LambderOutcomeAssertions.js';
+import type { LambderContractAnyRefusalMessage } from '../../src/shared/wire/LambderApiContract.js';
 import { buildTransportEnvelope, type LambderApiTransport, type LambderApiTransportRequest } from '../../src/shared/transport/LambderApiTransport.js';
 import { apiCallPath } from '../../src/shared/wire/LambderApiNames.js';
 
@@ -256,6 +261,16 @@ describe('LambderCaller - an endpoint called through its group', () => {
         expect(byGroup![1].body).toBe(byName![1].body);
     });
 
+    it('posts to the server\'s default apiPath when none is given, as the invoke caller does', async () => {
+        const fetchMock = stubFetch(async () => mockResponse({ apiVersion: '1', payload: { orderId: 'o-1' } }));
+        const caller = new LambderCaller<Contract>({ isCorsEnabled: false });
+
+        expect(await caller.orders.place({ sku: 'a' })).toEqual({ orderId: 'o-1' });
+
+        const [[url]] = fetchMock.mock.calls as unknown as [string, RequestInit][];
+        expect(url).toBe('/api/orders/place');
+    });
+
     it('types the group call as the contract types the endpoint', async () => {
         stubFetch(async () => mockResponse({ apiVersion: '1', payload: { orderId: 'o-1' } }));
         const caller = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false });
@@ -344,14 +359,95 @@ describe('LambderCaller - idempotency key transport', () => {
 });
 
 describe('LambderCaller - timeout and abort', () => {
-    it('timeoutMs aborts the request with reason timeout', async () => {
+    it('timeoutMs aborts the request with reason timeout, a failure errorHandler is told', async () => {
         stubFetch((url: any, init: any) => new Promise((_, reject) => {
             init.signal?.addEventListener('abort', () => reject(new DOMException('The operation was aborted.', 'AbortError')));
         }));
-        const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, timeoutMs: 20 });
+        const errorHandler = vi.fn();
+        const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, timeoutMs: 20, errorHandler });
 
         const outcome = await caller.apiOutcome('test.slow', {});
         expect(outcome).toMatchObject({ ok: false, reason: 'timeout' });
+        expect(errorHandler).toHaveBeenCalledOnce();
+        expect(errorHandler.mock.calls[0]![1]).toBe(outcome);
+    });
+
+    it('a call its own signal aborts fails as aborted: fetchEnded hears it, errorHandler never does', async () => {
+        // A site cancels a read the person has moved past (a newer search, a
+        // closed view). That is the page's own choice, so nothing may tell
+        // the person the server could not be reached.
+        let fetching = () => {};
+        stubFetch((url: any, init: any) => new Promise((_, reject) => {
+            init.signal?.addEventListener('abort', () => reject(new DOMException('The operation was aborted.', 'AbortError')));
+            fetching();
+        }));
+        const errorHandler = vi.fn();
+        const ended: unknown[] = [];
+        const caller = new LambderCaller({
+            apiPath: '/api', isCorsEnabled: false, errorHandler,
+            fetchEndedHandler: ({ fetchResult }) => { ended.push(fetchResult); },
+        });
+
+        for(const timeoutMs of [undefined, 5_000]){
+            const controller = new AbortController();
+            // Given up on while the request is out, as a superseded read is.
+            fetching = () => controller.abort();
+            const outcome = await caller.apiOutcome('search.stores', { query: 'ba' }, { signal: controller.signal, ...(timeoutMs ? { timeoutMs } : {}) });
+            assertApiFailure(outcome, 'aborted');
+            expectTypeOf(outcome.error).toEqualTypeOf<Error>();
+            expect(ended.at(-1)).toBe(outcome);
+            expect(await caller.api('search.stores', { query: 'ba' }, { signal: AbortSignal.abort() })).toBeUndefined();
+        }
+        expect(errorHandler).not.toHaveBeenCalled();
+        expect(caller.isLoading).toBe(false);
+    });
+
+    it('stays aborted when its timeout fires after the signal, through a transport that answers late', async () => {
+        // The first abort names the call. The site's signal fires at 5ms, the
+        // 20ms timeout after it, and the answer arrives at 40ms, read only
+        // then; a timer that fired second must not report the site's choice
+        // as a timeout.
+        const errors: Error[] = [];
+        const caller = new LambderCaller({
+            apiPath: '/api', isCorsEnabled: false, timeoutMs: 20,
+            errorHandler: (err) => { errors.push(err); },
+            transport: async () => {
+                await new Promise((resolve) => setTimeout(resolve, 40));
+                return { status: 200, statusText: '', header: () => null, json: async () => ({ apiVersion: '1', payload: { late: true } }), text: async () => '{}' };
+            },
+        });
+        const controller = new AbortController();
+        setTimeout(() => controller.abort(), 5);
+
+        assertApiFailure(await caller.apiOutcome('search.stores', {}, { signal: controller.signal }), 'aborted');
+        expect(errors).toEqual([]);
+    });
+
+    it('leaves the key of a call aborted before sending unused, and marks one aborted after sending as possibly used', async () => {
+        const fetchMock = stubFetch(async () => mockResponse({ apiVersion: '1', payload: null, refusal: { type: 'error', content: 'Only 5 in stock.' } }));
+        const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false });
+
+        // Never sent: the refusal after it settles the operation as usual.
+        const unsent = createIdempotencyKeyScope();
+        const unsentKey = unsent.current;
+        assertApiFailure(await caller.apiOutcome('order.place', {}, { idempotencyKey: unsent, signal: AbortSignal.abort() }), 'aborted');
+        expect(fetchMock).not.toHaveBeenCalled();
+        assertApiFailure(await caller.apiOutcome('order.place', {}, { idempotencyKey: unsent }), 'refusal');
+        expect(unsent.current).not.toBe(unsentKey);
+
+        // Sent, then given up on: the server may have run it under that key,
+        // so a refusal after it keeps the key for the replay.
+        const controller = new AbortController();
+        stubFetch((url: any, init: any) => new Promise((_, reject) => {
+            init.signal?.addEventListener('abort', () => reject(new DOMException('The operation was aborted.', 'AbortError')));
+            controller.abort();
+        }));
+        const sent = createIdempotencyKeyScope();
+        const sentKey = sent.current;
+        assertApiFailure(await caller.apiOutcome('order.place', {}, { idempotencyKey: sent, signal: controller.signal }), 'aborted');
+        stubFetch(async () => mockResponse({ apiVersion: '1', payload: null, refusal: { type: 'error', content: 'Only 5 in stock.' } }));
+        assertApiFailure(await caller.apiOutcome('order.place', {}, { idempotencyKey: sent }), 'refusal');
+        expect(sent.current).toBe(sentKey);
     });
 
     it('a per-call timeoutMs overrides the constructor default', async () => {
@@ -401,12 +497,12 @@ describe('LambderCaller - timeout and abort', () => {
 
         const outcome = await caller.apiOutcome('test.anything', {}, { signal: controller.signal });
 
-        expect(outcome).toMatchObject({ ok: false, reason: 'network' });
+        expect(outcome).toMatchObject({ ok: false, reason: 'aborted' });
         expect(fetchMock).not.toHaveBeenCalled();
-        expect(errors.length).toBe(1);
+        expect(errors.length).toBe(0);
     });
 
-    it('an already-aborted external signal fails as network, not timeout', async () => {
+    it('an already-aborted external signal fails as aborted, not timeout', async () => {
         stubFetch((url: any, init: any) => new Promise((_, reject) => {
             if(init.signal?.aborted) reject(new DOMException('The operation was aborted.', 'AbortError'));
             init.signal?.addEventListener('abort', () => reject(new DOMException('The operation was aborted.', 'AbortError')));
@@ -416,7 +512,7 @@ describe('LambderCaller - timeout and abort', () => {
         const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, timeoutMs: 5000 });
 
         const outcome = await caller.apiOutcome('test.anything', {}, { signal: controller.signal });
-        expect(outcome).toMatchObject({ ok: false, reason: 'network' });
+        expect(outcome).toMatchObject({ ok: false, reason: 'aborted' });
     });
 });
 
@@ -555,6 +651,48 @@ describe('LambderCaller - what the contract decides at the call site', () => {
     });
 });
 
+describe('LambderCaller - errorHandler is handed the failure', () => {
+    it('beside the error, for every failure it hears: a 5xx, a rejected input with no handler of its own, an envelope refusal with none', async () => {
+        const told: [Error, LambderApiFailure][] = [];
+        const caller = new LambderCaller({ apiPath: '/api', isCorsEnabled: false, errorHandler: (error, failure) => { told.push([error, failure]); } });
+
+        stubFetch(async () => mockResponse({ apiVersion: '1', payload: null, refusal: { type: 'error', content: 'Down for maintenance.' } }, { status: 503 }));
+        const crashed = await caller.apiOutcome('test.crash', {});
+        expect(told.at(-1)![1]).toBe(crashed);
+        expect(told.at(-1)![1]).toMatchObject({ reason: 'server', status: 503, refusal: { content: 'Down for maintenance.' }, response: { apiVersion: '1' } });
+        assertApiFailure(crashed, 'server');
+        expect(told.at(-1)![0]).toBe(crashed.error);
+
+        stubFetch(async () => mockResponse({ zodError: { name: 'ZodError', message: 'bad', issues: [] } }, { status: 422 }));
+        const invalid = await caller.apiOutcome('test.crash', {});
+        expect(told.at(-1)![0].message).toBe('API Input Validation Error');
+        expect(told.at(-1)![1]).toBe(invalid);
+
+        stubFetch(async () => mockResponse({ apiVersion: '1', payload: null, notAuthorized: true, refusal: { type: 'error', code: 'app/not-owner', content: 'Not yours.' } }));
+        const denied = await caller.apiOutcome('test.crash', {});
+        expect(told.at(-1)![1]).toBe(denied);
+        expect(told.at(-1)![1]).toMatchObject({ reason: 'notAuthorized', refusal: { code: 'app/not-owner' }, response: { notAuthorized: true } });
+
+        stubFetch(async () => { throw new TypeError('Failed to fetch'); });
+        const offline = await caller.apiOutcome('test.crash', {});
+        expect(told.at(-1)).toEqual([expect.objectContaining({ message: 'Failed to fetch' }), offline]);
+        expect(told).toHaveLength(4);
+    });
+
+    it('is typed with the contract\'s refusal codes, and a handler that takes only the error still compiles', () => {
+        type Contract = {
+            'order.place': { input: { sku: string }; output: { orderId: string }; refusals: { 'out-of-stock': { data: { available: number } } } };
+        };
+        new LambderCaller<Contract>({
+            errorHandler: (_error, failure) => {
+                expectTypeOf(failure).toEqualTypeOf<LambderApiFailure<LambderContractAnyRefusalMessage<Contract>>>();
+                if(failure.reason === 'refusal' && failure.refusal.code === 'out-of-stock') expectTypeOf(failure.refusal.data.available).toEqualTypeOf<number>();
+            },
+        });
+        new LambderCaller<Contract>({ errorHandler: (error) => { void error.message; } });
+    });
+});
+
 describe('LambderCaller - per-call handler overrides', () => {
     it('a per-call errorHandler wins over the constructor handler', async () => {
         stubFetch(async () => mockResponse(null, { status: 500, statusText: 'Internal Server Error', rawText: 'dead' }));
@@ -591,31 +729,47 @@ describe('LambderCaller - per-call handler overrides', () => {
 });
 
 describe('LambderCaller - lifecycle handlers and resilience', () => {
-    it('fetchStarted/fetchEnded fire, and fetchEnded receives the Error on 500', async () => {
+    it('fetchStarted/fetchEnded fire, and fetchEnded receives the call\'s outcome on a 500', async () => {
         stubFetch(async () => mockResponse(null, { status: 500, statusText: 'Internal Server Error', rawText: 'dead' }));
         const started: string[] = [];
-        let endedWith: any = 'unset';
+        let endedWith: unknown = 'unset';
         const caller = new LambderCaller({
             apiPath: '/api', isCorsEnabled: false,
             fetchStartedHandler: ({ fetchParams }) => { started.push(fetchParams.apiName); },
-            fetchEndedHandler: ({ fetchResult }) => { endedWith = fetchResult; },
+            fetchEndedHandler: ({ fetchResult }) => {
+                expectTypeOf(fetchResult).toEqualTypeOf<LambderApiOutcome<unknown>>();
+                endedWith = fetchResult;
+            },
         });
 
-        await caller.apiOutcome('test.crash', {});
+        const outcome = await caller.apiOutcome('test.crash', {});
         expect(started).toEqual(['test.crash']);
-        expect(endedWith).toBeInstanceOf(Error);
+        expect(endedWith).toBe(outcome);
+        expect(endedWith).toMatchObject({ ok: false, reason: 'server', status: 500, error: expect.any(Error) });
     });
 
-    it('fetchEnded receives the parsed envelope on success', async () => {
-        stubFetch(async () => mockResponse({ apiVersion: '1', payload: { ok: true } }));
-        let endedWith: any = 'unset';
+    it('fetchEnded receives the outcome on a success, a rejected input and a refusal alike', async () => {
+        let endedWith: unknown = 'unset';
         const caller = new LambderCaller({
             apiPath: '/api', isCorsEnabled: false,
+            apiInputValidationErrorHandler: () => {},
             fetchEndedHandler: ({ fetchResult }) => { endedWith = fetchResult; },
         });
 
-        await caller.apiOutcome('test.fine', {});
-        expect(endedWith).toMatchObject({ payload: { ok: true } });
+        stubFetch(async () => mockResponse({ apiVersion: '1', payload: { ok: true } }));
+        const fine = await caller.apiOutcome('test.fine', {});
+        expect(endedWith).toBe(fine);
+        expect(endedWith).toMatchObject({ ok: true, payload: { ok: true } });
+
+        stubFetch(async () => mockResponse({ zodError: { name: 'ZodError', message: 'bad', issues: [] } }, { status: 422 }));
+        const invalid = await caller.apiOutcome('test.fine', {});
+        expect(endedWith).toBe(invalid);
+        expect(endedWith).toMatchObject({ ok: false, reason: 'validation' });
+
+        stubFetch(async () => mockResponse({ apiVersion: '1', payload: null, refusal: 'Denied.' }));
+        const refused = await caller.apiOutcome('test.fine', {});
+        expect(endedWith).toBe(refused);
+        expect(endedWith).toMatchObject({ ok: false, reason: 'refusal', refusal: { content: 'Denied.' } });
     });
 
     it('an app handler that throws yields reason unknown instead of propagating', async () => {
@@ -634,38 +788,38 @@ describe('LambderCaller - lifecycle handlers and resilience', () => {
 describe('LambderCaller - guardInputsProvider', () => {
     it('sends the provider\'s guardInputs on every call, per-call inputs merged on top', async () => {
         const fetchMock = stubFetch(async () => mockResponse({ apiVersion: '1', payload: { ok: true } }));
-        const provider = vi.fn((apiName: string) => ({ orgPermission: { orgSlug: `org-for-${apiName}` } }));
-        const caller = new LambderCaller<any, 'orgPermission'>({ apiPath: '/api', isCorsEnabled: false, guardInputsProvider: provider });
+        const provider = vi.fn((apiName: string) => ({ staffPermission: { storeSlug: `store-for-${apiName}` } }));
+        const caller = new LambderCaller<any, 'staffPermission'>({ apiPath: '/api', isCorsEnabled: false, guardInputsProvider: provider });
 
         await caller.api('test.doThing', { a: 1 });
         await caller.api('test.doThing', { a: 1 }, { guardInputs: { captcha: { token: 't-1' } } });
-        await caller.api('test.doThing', { a: 1 }, { guardInputs: { orgPermission: { orgSlug: 'explicit' } } });
+        await caller.api('test.doThing', { a: 1 }, { guardInputs: { staffPermission: { storeSlug: 'explicit' } } });
 
         const bodies = fetchMock.mock.calls.map((call) => JSON.parse(call[1]?.body as string));
         expect(provider).toHaveBeenCalledWith('test.doThing');
-        expect(bodies[0].guardInputs).toEqual({ orgPermission: { orgSlug: 'org-for-test.doThing' } });
-        expect(bodies[1].guardInputs).toEqual({ orgPermission: { orgSlug: 'org-for-test.doThing' }, captcha: { token: 't-1' } });
-        expect(bodies[2].guardInputs).toEqual({ orgPermission: { orgSlug: 'explicit' } });
+        expect(bodies[0].guardInputs).toEqual({ staffPermission: { storeSlug: 'store-for-test.doThing' } });
+        expect(bodies[1].guardInputs).toEqual({ staffPermission: { storeSlug: 'store-for-test.doThing' }, captcha: { token: 't-1' } });
+        expect(bodies[2].guardInputs).toEqual({ staffPermission: { storeSlug: 'explicit' } });
     });
 
     it('accepts an async provider', async () => {
         const fetchMock = stubFetch(async () => mockResponse({ apiVersion: '1', payload: { ok: true } }));
-        const caller = new LambderCaller<any, 'orgPermission'>({
+        const caller = new LambderCaller<any, 'staffPermission'>({
             apiPath: '/api', isCorsEnabled: false,
-            guardInputsProvider: async () => ({ orgPermission: { orgSlug: 'async-org' } }),
+            guardInputsProvider: async () => ({ staffPermission: { storeSlug: 'async-store' } }),
         });
 
         await caller.api('test.doThing', { a: 1 });
 
-        expect(JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string).guardInputs).toEqual({ orgPermission: { orgSlug: 'async-org' } });
+        expect(JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string).guardInputs).toEqual({ staffPermission: { storeSlug: 'async-store' } });
     });
 
     it('a throwing provider fails the call before anything is sent', async () => {
         const fetchMock = stubFetch(async () => mockResponse({ apiVersion: '1', payload: { ok: true } }));
         const errorHandler = vi.fn();
-        const caller = new LambderCaller<any, 'orgPermission'>({
+        const caller = new LambderCaller<any, 'staffPermission'>({
             apiPath: '/api', isCorsEnabled: false, errorHandler,
-            guardInputsProvider: () => { throw new Error('no organization selected'); },
+            guardInputsProvider: () => { throw new Error('no store selected'); },
         });
 
         const outcome = await caller.apiOutcome('test.doThing', { a: 1 });
@@ -678,39 +832,39 @@ describe('LambderCaller - guardInputsProvider', () => {
     it('typed contract: provided guards drop the options requirement, uncovered guards keep it', async () => {
         stubFetch(async () => mockResponse({ apiVersion: '1', payload: { ok: true } }));
         type Contract = {
-            'org.list': { input: { page: number }, output: string[], guardInputs: { orgPermission: { orgSlug: string } } },
-            'org.contact': { input: { text: string }, output: null, guardInputs: { orgPermission: { orgSlug: string }, turnstile: { turnstileToken: string } } },
+            'orders.list': { input: { page: number }, output: string[], guardInputs: { staffPermission: { storeSlug: string } } },
+            'store.contact': { input: { text: string }, output: null, guardInputs: { staffPermission: { storeSlug: string }, turnstile: { turnstileToken: string } } },
             'public.ping': { input: undefined, output: string },
         };
-        const caller = new LambderCaller<Contract, 'orgPermission'>({
+        const caller = new LambderCaller<Contract, 'staffPermission'>({
             apiPath: '/api', isCorsEnabled: false,
-            guardInputsProvider: () => ({ orgPermission: { orgSlug: 'acme' } }),
+            guardInputsProvider: () => ({ staffPermission: { storeSlug: 'acme' } }),
         });
 
         // Fully provided: options optional, and the provided guard may still be overridden.
-        await caller.api('org.list', { page: 1 });
-        await caller.api('org.list', { page: 1 }, { guardInputs: { orgPermission: { orgSlug: 'other' } } });
+        await caller.api('orders.list', { page: 1 });
+        await caller.api('orders.list', { page: 1 }, { guardInputs: { staffPermission: { storeSlug: 'other' } } });
         // Partly provided: the uncovered guard is still mandatory, the covered one optional.
-        await caller.api('org.contact', { text: 'hi' }, { guardInputs: { turnstile: { turnstileToken: 't' } } });
+        await caller.api('store.contact', { text: 'hi' }, { guardInputs: { turnstile: { turnstileToken: 't' } } });
         // @ts-expect-error the turnstile token cannot be omitted
-        await caller.api('org.contact', { text: 'hi' });
+        await caller.api('store.contact', { text: 'hi' });
         // @ts-expect-error the turnstile token cannot be omitted even with the provided guard given explicitly
-        await caller.api('org.contact', { text: 'hi' }, { guardInputs: { orgPermission: { orgSlug: 'x' } } });
+        await caller.api('store.contact', { text: 'hi' }, { guardInputs: { staffPermission: { storeSlug: 'x' } } });
         await caller.api('public.ping');
 
         // Naming guards makes the provider mandatory, and its return type is checked.
         // @ts-expect-error guardInputsProvider is required once guards are named
-        new LambderCaller<Contract, 'orgPermission'>({ apiPath: '/api', isCorsEnabled: false });
-        new LambderCaller<Contract, 'orgPermission'>({
+        new LambderCaller<Contract, 'staffPermission'>({ apiPath: '/api', isCorsEnabled: false });
+        new LambderCaller<Contract, 'staffPermission'>({
             apiPath: '/api', isCorsEnabled: false,
             // @ts-expect-error the provider must return the guard's declared input shape
-            guardInputsProvider: () => ({ orgPermission: { orgId: 42 } }),
+            guardInputsProvider: () => ({ staffPermission: { storeId: 42 } }),
         });
         // Without named guards, the plain contract rule applies: options mandatory for guardInput APIs.
         const plain = new LambderCaller<Contract>({ apiPath: '/api', isCorsEnabled: false });
-        // @ts-expect-error orgPermission must be sent per call
-        await plain.api('org.list', { page: 1 });
-        await plain.api('org.list', { page: 1 }, { guardInputs: { orgPermission: { orgSlug: 'acme' } } });
+        // @ts-expect-error staffPermission must be sent per call
+        await plain.api('orders.list', { page: 1 });
+        await plain.api('orders.list', { page: 1 }, { guardInputs: { staffPermission: { storeSlug: 'acme' } } });
     });
 });
 
@@ -1061,6 +1215,8 @@ describe('LambderCaller - a stale bundle that the reload brings back', () => {
         expect(versionExpiredHandler).toHaveBeenCalledOnce();
         expect(errorHandler).toHaveBeenCalledOnce();
         expect(errorHandler.mock.calls[0]![0]).toMatchObject({ message: expect.stringMatching(/^Version expired again for API "account.me"/) });
+        // Handed the refusal that confirmed the loop, beside the error saying so.
+        expect(errorHandler.mock.calls[0]![1]).toMatchObject({ ok: false, reason: 'versionExpired', response: { versionExpired: true } });
     });
 });
 
