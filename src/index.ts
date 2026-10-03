@@ -484,7 +484,7 @@ export { resolveApiOutcome } from "./shared/wire/LambderApiOutcome.js";
 export { createContext, isV2HttpEvent } from "./core/LambderContext.js";
 export type { LambderContextOptions, LambderOriginProof, LambderRequestArrival } from "./core/LambderContext.js";
 
-// One summary line per API call (the callSummary option)
+// One summary line per API call and per request a route answered (the callSummary option)
 export type { LambderCallSummary, LambderCallSummaryOption } from "./core/LambderCallSummary.js";
 export type { LambderCallOutcome, LambderCallOutcomeHint } from "./shared/wire/LambderCallOutcome.js";
 

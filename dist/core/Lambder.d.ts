@@ -150,7 +150,7 @@ export default class Lambder<TApp extends LambderAppTypes = LambderPlainAppTypes
     private readonly trustedClientIpHeaders;
     private readonly trustedHostHeaders;
     private readonly originProof;
-    /** Where each API call's summary goes (the callSummary option); null writes none. Replaceable through the backend swap alone. */
+    /** Where each call's summary goes, an API call's or a route's (the callSummary option); null writes none. Replaceable through the backend swap alone. */
     private callSummaryWriter;
     constructor(given?: LambderCreateOptions<TApp["session"]>);
     setRouteFallbackHandler(routeFallbackHandler: LambderFallbackHandler): this;
@@ -464,8 +464,8 @@ export default class Lambder<TApp extends LambderAppTypes = LambderPlainAppTypes
     private resolveRequest;
     /**
      * One HTTP invocation, from the event to the finalized response, under
-     * an invocation record of its own (see LambderInvocationScope): what an
-     * API call's summary line is written from once the response is final.
+     * an invocation record of its own (see LambderInvocationScope): what its
+     * call summary line is written from once the response is final.
      */
     render(event: LambderHttpEvent, lambdaContext: Context): Promise<LambderHttpResponse>;
     private renderRequest;
@@ -496,9 +496,9 @@ export default class Lambder<TApp extends LambderAppTypes = LambderPlainAppTypes
      */
     private answerCrash;
     /**
-     * The summary line of an API call, once its response is final: nothing
-     * for an invocation that served no API call. A writer that throws costs
-     * the call its line and nothing else.
+     * The summary line of an API call or of a request a route answered, once
+     * its response is final: nothing for an invocation that served neither. A
+     * writer that throws costs the call its line and nothing else.
      */
     private writeCallSummary;
     /**

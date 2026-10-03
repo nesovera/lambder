@@ -15,6 +15,8 @@ export type LambderRouteMatcher = {
     /** One or more HTTP methods; HEAD requests also match GET routes. */
     method?: string | string[];
     condition?: LambderRouteConditionFn;
+    /** What the route's call summary line names it by; by default its method and path pattern, which a route with neither has none of. */
+    name?: string;
 };
 export type LambderRouteCondition = LambderRoutePath | RegExp | LambderRouteConditionFn | LambderRouteMatcher;
 /** Returns matched path params, or false when the route doesn't match. */
@@ -28,6 +30,13 @@ export type CompiledMatcher = (ctx: LambderRenderContext) => false | Record<stri
  * this rule, so neighbouring slots cannot disagree about what a method means.
  */
 export declare const allowsRequestMethod: (methods: ReadonlySet<string>, requestMethod: string) => boolean;
+/**
+ * What a route's call summary line names it by: the name its matcher gives,
+ * or its method and path pattern, both fixed at registration, so the line
+ * carries nothing of the request's own path. Null for a route with neither,
+ * a bare predicate, which the line still counts.
+ */
+export declare const routeNameOf: (condition: LambderRouteCondition) => string | null;
 /** Compile a route condition once at registration time. */
 export declare const compileRouteMatcher: (condition: LambderRouteCondition) => CompiledMatcher;
 export {};

@@ -104,7 +104,7 @@ at all.
 | `crashes` | Every error the app threw while answering a request since the last reset; see [When the app crashes](#when-the-app-crashes) |
 | `assertNoCrashesAfterEach(afterEach)` | Installs, through your runner's `afterEach`, a check that fails each test the app crashed in, listing every crash with its stack |
 | `memoryTwinOf(store)` | The memory twin under one of the app's own stores (a `LambderMemoryCache`, `LambderMemoryOneShotSecretStore` or `LambderMemoryUploadBucket`), to seed, inspect or drive; see [What the app constructs itself](#what-the-app-constructs-itself) |
-| `callSummaries` | The summary of every API call answered since the last reset, in order: what the app's [`callSummary`](./configuration.md#callsummary) would have written, collected here instead of on stdout |
+| `callSummaries` | The summary of every API call, and every request a route answered, since the last reset, in order: what the app's [`callSummary`](./configuration.md#callsummary) would have written, collected here instead of on stdout |
 | `sessionStore`, `rateLimiter`, `idempotencyStore` | The stores now under the instance, for assertions; `null` for a subsystem the app never configured |
 | `sessionManager` | The app's session manager, to inspect or manipulate sessions directly |
 | `handler`, `host` | The instance's handler, and the default host |

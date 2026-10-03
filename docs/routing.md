@@ -49,7 +49,7 @@ registered before them sees their calls first
 | Path string | `"/user/:userId"` | `path-to-regexp` syntax, matched case-sensitively as API Gateway routes and CloudFront behaviors are (`/User/7` does not reach it); params land on `ctx.pathParams`, typed from the literal |
 | RegExp | `/\/reports\/\d+/` | Matched against `ctx.path`, its `%2F` and `%25` included; captures land on `ctx.pathParams` with those turned back |
 | Predicate | `(ctx) => boolean` | Any context value: host, header, cookie, method |
-| Matcher object | `{ path, host, method, condition }` | All present fields must match |
+| Matcher object | `{ path, host, method, condition, name }` | All present fields must match |
 
 The matcher object's fields:
 
@@ -59,6 +59,14 @@ The matcher object's fields:
 | `host` | string or RegExp | Matched against `ctx.host` |
 | `method` | string or string[] | HEAD requests also match GET routes |
 | `condition` | `(ctx) => boolean` | An extra predicate, ANDed with the rest |
+| `name` | string | What the route's call summary line names it by; by default the method and the path pattern |
+
+Every request a route answers writes a [call summary line](./configuration.md#callsummary),
+like an API call's, with `route` naming the route as it was registered: the
+matcher's `name`, or its method and path pattern (`GET /user/:userId`), and
+never the path the request asked for. A bare predicate route has no name
+unless its matcher object gives one; its line is still written, counted and
+timed.
 
 ### Session-protected routes
 
@@ -307,6 +315,10 @@ Semantics:
   otherwise, so `if (tools.ctx)` narrows both.
 - **HTTP invocations**: actions join the same first-match chain as routes and
   APIs (registration order) and must return a response built with `tools.res`.
+  A request an action answers writes a
+  [call summary line](./configuration.md#callsummary) like a route's, with
+  `route` null, since an action has no name; a filter that takes every
+  request writes one for every request it takes.
 - **Non-HTTP invocations**: actions are the only handlers; return values pass
   through to Lambda untouched (`{ batchItemFailures }` for SQS, say) and errors
   **rethrow**, never routed to `setGlobalErrorHandler`, preserving

@@ -292,14 +292,15 @@ export type LambderCreateOptions<TSessionData = any> = {
      */
     originProof?: LambderOriginProof;
     /**
-     * One summary per API call, written when the call is answered: the
-     * endpoint, how it ended (success, a refusal and its code, a flag, a
-     * validation refusal, a crash), the status, the duration and the
-     * handler's own time, whether an idempotent answer was replayed, whether
-     * the invocation was the process's first, and its request id with the
-     * id of the invocation that called it over invoke. Nothing from the
-     * input, the session, the cookies or the caller's address. See
-     * LambderCallSummary.
+     * One summary per API call, and per request a route answered, written
+     * when it is answered: the endpoint or the route as registered, how it
+     * ended (success, a refusal and its code, a flag, a validation refusal, a
+     * crash; a route's read from its status), the status, the duration and
+     * the handler's own time, whether an idempotent answer was replayed,
+     * whether the invocation was the process's first, and its request id
+     * with the id of the invocation that called it over invoke. Nothing from
+     * the input, the path, the session, the cookies or the caller's address.
+     * See LambderCallSummary.
      *
      * Default: each summary as one JSON line on stdout, which a Lambda
      * function's log group keeps and CloudWatch Logs Insights reads field by

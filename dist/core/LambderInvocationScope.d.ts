@@ -7,13 +7,19 @@ export type LambderInvocationRecord = LambderInvocation & {
     readonly startedAt: number;
     /** Whether this is the first invocation this process has run. */
     readonly coldStart: boolean;
-    /** How long the API handler itself ran, in milliseconds; null until it has. */
+    /** How long the API handler, or the route's handler, itself ran, in milliseconds; null until it has. */
     handlerMs: number | null;
     /** Whether an idempotent answer was replayed, so no handler ran. */
     replayed: boolean;
-    /** The API call the invocation serves: the endpoint its path named, and the invocation that invoked it, when one did. Null for anything else. */
+    /**
+     * What the invocation serves, named: an API call by the endpoint its path
+     * named, or a request a route answered by the route as registered (null
+     * for a route with no name), with the invocation that invoked it, when
+     * one did. Null for anything else: a file, the index page, an event.
+     */
     call: {
-        api: string;
+        api: string | null;
+        route: string | null;
         parentRequestId: string | null;
     } | null;
     /** What the answer is, once the call has one. */

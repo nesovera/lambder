@@ -80,10 +80,10 @@ const company = await caller.companies.get({ slug: "acme" });
   cookies, and a guard against Lambda's response size cap.
 - **Hooks and actions.** Lifecycle hooks, plus `addAction()` for the non-HTTP
   invocations (EventBridge, SQS, custom events) the same function receives.
-- **A summary line per call.** Every API call is logged once, as JSON, with
-  its endpoint, outcome, refusal code, status and timings, and the request
-  ids that join it to the calls it made; nothing from its input or its
-  caller.
+- **A summary line per call.** Every API call, and every request a route
+  answers, is logged once, as JSON, with its endpoint or route, outcome,
+  refusal code, status and timings, and the request ids that join it to the
+  calls it made; nothing from its input, its path or its caller.
 - **Lambda to lambda calls.** `LambderInvokeCaller` invokes a Lambder app in
   another function directly, with no API Gateway in between, typed from the
   callee's own contract and carrying its refusals, crash detail and logs back.

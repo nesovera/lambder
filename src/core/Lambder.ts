@@ -14,7 +14,8 @@ import {
     type LambderFinalizeOptions,
     type LambderHttpResponse,
 } from "./LambderResponse.js";
-import { compileRouteMatcher, type CompiledMatcher, type LambderRouteCondition, type LambderRouteConditionFn, type LambderRouteMatcher, type LambderPathParamsOf, type LambderRoutePath } from "./LambderRouting.js";
+import { compileRouteMatcher, routeNameOf, type CompiledMatcher, type LambderRouteCondition, type LambderRouteConditionFn, type LambderRouteMatcher, type LambderPathParamsOf, type LambderRoutePath } from "./LambderRouting.js";
+import type { LambderCallOutcomeHint } from "../shared/wire/LambderCallOutcome.js";
 import { allowedCorsOriginOf, applyCorsHeaders, type LambderCorsConfig } from "./LambderCors.js";
 import LambderSessionManager, { type LambderSessionDataOptions } from "../session/LambderSessionManager.js";
 import { resolveCompressionOption } from "../shared/wire/LambderCompressionOption.js";
@@ -201,7 +202,7 @@ type LambderPreparedApi = {
 const NO_DECLARED_REFUSALS: LambderEndpointRefusals = { codes: new Map(), codeRequired: false };
 
 /** Longest endpoint name a call summary carries: a page built before paths posts the name in its body, and a line is no place for a long one. */
-const MAX_SUMMARY_API_NAME_CHARS = 200;
+const MAX_SUMMARY_NAME_CHARS = 200;
 
 /** A request id as the parent header may carry one: what Lambda's own ids look like, and no longer than any of them. */
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9-]{1,128}$/;
@@ -219,11 +220,21 @@ const parentRequestIdOf = (event: LambderHttpEvent): string | null => {
 
 /** The API call a request is, as its invocation records it; null for a request that is no API call. */
 const apiCallOf = (ctx: LambderRenderContext, event: LambderHttpEvent): LambderInvocationRecord["call"] =>
-    ctx.api ? { api: ctx.api.apiName, parentRequestId: parentRequestIdOf(event) } : null;
+    ctx.api ? { api: ctx.api.apiName, route: null, parentRequestId: parentRequestIdOf(event) } : null;
+
+/** The call a request a route answered is: the route by its registered name, never by the path asked for. */
+const routeCallOf = (ctx: LambderRenderContext, route: string | null): LambderInvocationRecord["call"] =>
+    ({ api: null, route, parentRequestId: parentRequestIdOf(ctx.event) });
+
+/** A route's outcome, which no envelope names: read from the status it answered with, as an API call's 5xx reads. */
+const outcomeOfStatus = (status: number): LambderCallOutcomeHint =>
+    ({ outcome: status >= 500 ? "crash" : status >= 400 ? "other" : "success", code: null });
 
 // The two shapes the class keeps for its own handler lists: a compiled route
-// matcher beside the action it dispatches to, and the non-HTTP twin.
-type ActionObject = { match: CompiledMatcher, actionFn: LambderRouteHandler };
+// matcher beside the action it dispatches to, with what its summary line
+// names the route by (null for the API's own action, whose calls are named
+// by their endpoint, and for a route with no name), and the non-HTTP twin.
+type ActionObject = { match: CompiledMatcher, name: string | null, actionFn: LambderRouteHandler };
 type EventActionObject = { match: (event: unknown) => boolean, actionFn: (event: unknown, lambdaContext: Context) => MaybePromise<unknown> };
 
 /**
@@ -342,7 +353,7 @@ export default class Lambder<
     private readonly trustedClientIpHeaders: readonly string[];
     private readonly trustedHostHeaders: readonly string[];
     private readonly originProof: LambderOriginProof | null;
-    /** Where each API call's summary goes (the callSummary option); null writes none. Replaceable through the backend swap alone. */
+    /** Where each call's summary goes, an API call's or a route's (the callSummary option); null writes none. Replaceable through the backend swap alone. */
     private callSummaryWriter: ((summary: LambderCallSummary) => void) | null;
 
     constructor(given: LambderCreateOptions<TApp["session"]> = {}){
@@ -510,6 +521,7 @@ export default class Lambder<
     addRoute(condition: LambderRouteCondition, actionFn: (ctx: any, resolver: LambderResolver) => MaybePromise<LambderResponse>): this {
         this.actionList.push({
             match: compileRouteMatcher(condition),
+            name: routeNameOf(condition),
             actionFn: (ctx, resolver) => actionFn(ctx, resolver),
         });
         return this;
@@ -523,6 +535,7 @@ export default class Lambder<
     addSessionRoute(condition: LambderRouteCondition, actionFn: (ctx: any, resolver: LambderResolver) => MaybePromise<LambderResponse>): this {
         this.actionList.push({
             match: compileRouteMatcher(condition),
+            name: routeNameOf(condition),
             actionFn: async (ctx, resolver) => {
                 await this.requireSession(ctx, resolver);
                 // requireSession answered already if there was no session, so
@@ -689,6 +702,7 @@ export default class Lambder<
                 const group = ctx.api ? splitApiName(ctx.api.apiName)?.group : undefined;
                 return group !== undefined && names.has(group) ? {} : false;
             },
+            name: null,
             actionFn: (ctx, resolver) => instance.dispatchApiCall(ctx, resolver),
         });
         return instance as never;
@@ -866,6 +880,7 @@ export default class Lambder<
         // HTTP side: joins the route/API chain in registration order.
         this.actionList.push({
             match: (ctx) => filter(ctx.event, ctx) ? {} : false,
+            name: null,
             actionFn: async (ctx, resolver) => {
                 const result = await actionFn(ctx.event, { ctx, res: resolver, lambdaContext: ctx.lambdaContext });
                 if(!(result instanceof LambderResponse)){
@@ -1238,17 +1253,30 @@ export default class Lambder<
         // Set before the hooks run, so a beforeRender hook on a matched route
         // sees the route's own path params.
         ctx.pathParams = matched.params;
+        // A route's call is named as soon as it has matched, before the hooks
+        // run, so the line a hook's answer ends in is the route's too. An API
+        // call keeps the name its path gave it, whatever action answers it.
+        const invocation = currentInvocation();
+        if(invocation && !invocation.call) invocation.call = routeCallOf(ctx, matched.action.name);
 
         const beforeRenderResult = await this.runBeforeRenderHooks(ctx, resolver, onContextReplaced);
         if(beforeRenderResult instanceof LambderResponse) return beforeRenderResult;
 
-        return await matched.action.actionFn(beforeRenderResult, resolver);
+        // An API call's handler time is the pipeline's to measure, inside its
+        // own work; a route's is the whole action.
+        if(ctx.api) return await matched.action.actionFn(beforeRenderResult, resolver);
+        const handlerStarted = performance.now();
+        try {
+            return await matched.action.actionFn(beforeRenderResult, resolver);
+        } finally {
+            if(invocation) invocation.handlerMs = performance.now() - handlerStarted;
+        }
     }
 
     /**
      * One HTTP invocation, from the event to the finalized response, under
-     * an invocation record of its own (see LambderInvocationScope): what an
-     * API call's summary line is written from once the response is final.
+     * an invocation record of its own (see LambderInvocationScope): what its
+     * call summary line is written from once the response is final.
      */
     async render(
         event: LambderHttpEvent,
@@ -1327,7 +1355,8 @@ export default class Lambder<
 
             this.applyCors(allowedOrigin, response, this.isCorsPreflight(ctx));
 
-            invocation.outcome = response.callOutcome ?? { outcome: "other", code: null };
+            // An API answer names its outcome; a route's answer names none, and reads from its status.
+            invocation.outcome = response.callOutcome ?? (ctx.api ? { outcome: "other", code: null } : outcomeOfStatus(response.statusCode));
             return await finalizeResponse(ctx, response, this.finalizeOptions, ctx.eventFormat);
         }catch(err){
             // A crash before the context existed (a created hook that failed)
@@ -1437,9 +1466,9 @@ export default class Lambder<
     }
 
     /**
-     * The summary line of an API call, once its response is final: nothing
-     * for an invocation that served no API call. A writer that throws costs
-     * the call its line and nothing else.
+     * The summary line of an API call or of a request a route answered, once
+     * its response is final: nothing for an invocation that served neither. A
+     * writer that throws costs the call its line and nothing else.
      */
     private writeCallSummary(invocation: LambderInvocationRecord, status: number): void {
         const { call } = invocation;
@@ -1447,8 +1476,10 @@ export default class Lambder<
         const summary: LambderCallSummary = {
             kind: "lambder.call",
             // The path form is two identifiers; a page built before paths
-            // posts the name in its body, which is whatever it sent.
-            api: call.api.slice(0, MAX_SUMMARY_API_NAME_CHARS),
+            // posts the name in its body, which is whatever it sent. A route's
+            // name is the app's own, cut the same way.
+            api: call.api === null ? null : call.api.slice(0, MAX_SUMMARY_NAME_CHARS),
+            route: call.route === null ? null : call.route.slice(0, MAX_SUMMARY_NAME_CHARS),
             outcome: invocation.outcome?.outcome ?? "other",
             code: invocation.outcome?.code ?? null,
             status,
@@ -1462,7 +1493,7 @@ export default class Lambder<
         try {
             this.callSummaryWriter(summary);
         } catch(err) {
-            console.error(`Lambder: the callSummary writer threw, so the summary of "${summary.api}" was not written. ${coerceToError(err).message}`);
+            console.error(`Lambder: the callSummary writer threw, so the summary of "${summary.api ?? summary.route ?? "a route"}" was not written. ${coerceToError(err).message}`);
         }
     }
 

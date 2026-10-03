@@ -153,9 +153,10 @@ export declare class LambderTestApp<TContract extends LambderApiContractShape = 
      */
     get crashes(): readonly Error[];
     /**
-     * The summary of every API call the app answered since the last reset,
-     * in order (see LambderCallSummary): what its callSummary option would
-     * have been handed, collected here instead of written to stdout.
+     * The summary of every API call, and every request a route answered,
+     * since the last reset, in order (see LambderCallSummary): what the app's
+     * callSummary option would have been handed, collected here instead of
+     * written to stdout.
      */
     get callSummaries(): readonly LambderCallSummary[];
     /**

@@ -4,8 +4,8 @@ import { invocationScope, type LambderInvocation } from "../shared/util/LambderI
 
 /*
  * The server's side of the invocation scope (shared/util/LambderInvocationScope):
- * the record an invocation keeps about itself while it runs, which an API
- * call's summary line is written from once the response is final.
+ * the record an invocation keeps about itself while it runs, which its call
+ * summary line is written from once the response is final.
  */
 
 /** What one invocation records about itself while it runs, for its call summary and for the calls it makes. */
@@ -14,12 +14,17 @@ export type LambderInvocationRecord = LambderInvocation & {
     readonly startedAt: number;
     /** Whether this is the first invocation this process has run. */
     readonly coldStart: boolean;
-    /** How long the API handler itself ran, in milliseconds; null until it has. */
+    /** How long the API handler, or the route's handler, itself ran, in milliseconds; null until it has. */
     handlerMs: number | null;
     /** Whether an idempotent answer was replayed, so no handler ran. */
     replayed: boolean;
-    /** The API call the invocation serves: the endpoint its path named, and the invocation that invoked it, when one did. Null for anything else. */
-    call: { api: string; parentRequestId: string | null } | null;
+    /**
+     * What the invocation serves, named: an API call by the endpoint its path
+     * named, or a request a route answered by the route as registered (null
+     * for a route with no name), with the invocation that invoked it, when
+     * one did. Null for anything else: a file, the index page, an event.
+     */
+    call: { api: string | null; route: string | null; parentRequestId: string | null } | null;
     /** What the answer is, once the call has one. */
     outcome: LambderCallOutcomeHint | null;
 };
