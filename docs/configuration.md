@@ -34,7 +34,7 @@ policy types; the curried creator is the canonical entry.
 | `trustedClientIpHeaders` | none | Headers that may name the caller's own address, in order of preference. Empty means `ctx.ip` is the address the gateway observed (below) |
 | `trustedHostHeaders` | none | Headers that may name the host the viewer asked for, in order of preference. Empty means `ctx.host` is the Host the gateway received (below) |
 | `originProof` | none | `{ header, secrets, proxyHeaders? }`: the trusted headers above are read only from a request carrying the secret the proxy in front of the app sets, taken off one that does not along with `proxyHeaders`, and `ctx.arrivedVia` says which it was (below) |
-| `callSummary` | one JSON line per API call on stdout | What each API call's summary goes to: a function, or `false` for none (below) |
+| `callSummary` | one JSON line per call on stdout | What the summary of each API call, and of each request a route answered, goes to: a function, or `false` for none (below) |
 | `session` | none | Sessions over a store of your choosing; a guard that needs a session (`session: true`) and `addSessionRoute` are compile errors without it. See [Sessions](./sessions.md) |
 | `rateLimits` | none | A limiter (`LambderRateLimiter`: DynamoDB, memory, or your own) plus named policies APIs reference by name, in one map or a list of maps (below). See [API policies](./api-policies.md#rate-limits) |
 | `guards` | none | Named guards APIs reference by name; build each with `initLambder<SessionData>().guard()` (typed to the app's session) or `lambderGuard()`. One map or a list of maps (below). See [API policies](./api-policies.md#guards) |
@@ -249,31 +249,35 @@ originProof: {
 
 ## `callSummary`
 
-Every API call is summarized in one line when it is answered, written to
-stdout as JSON by default. A Lambda function's log group keeps it, and
-CloudWatch Logs Insights reads its fields without a parse step:
+Every API call, and every request a route answered, is summarized in one
+line when it is answered, written to stdout as JSON by default. A Lambda
+function's log group keeps it, and CloudWatch Logs Insights reads its fields
+without a parse step:
 
 ```json
-{"kind":"lambder.call","api":"order.place","outcome":"refusal","code":"order-closed","status":409,"durationMs":41.2,"handlerMs":12.8,"replayed":false,"coldStart":false,"requestId":"8c1f...","parentRequestId":null}
+{"kind":"lambder.call","api":"order.place","route":null,"outcome":"refusal","code":"order-closed","status":409,"durationMs":41.2,"handlerMs":12.8,"replayed":false,"coldStart":false,"requestId":"8c1f...","parentRequestId":null}
+{"kind":"lambder.call","api":null,"route":"POST /webhooks/:provider","outcome":"success","code":null,"status":200,"durationMs":88.0,"handlerMs":61.3,"replayed":false,"coldStart":false,"requestId":"8c20...","parentRequestId":null}
 ```
 
 | Field | What it holds |
 | --- | --- |
-| `api` | The endpoint the call's path named, registered or not |
-| `outcome` | `success`, `refusal`, `notAuthorized`, `sessionExpired`, `versionExpired`, `validation` (a 422), `crash`, or `other` for an answer a hook wrote that is not an API answer |
+| `api` | The endpoint an API call's path named, registered or not; null for a route |
+| `route` | The route that answered, as it was registered: its matcher's `name`, or its method and path pattern (`GET /orders/:orderId`), so nothing of the request's own path is in it; null for an API call, for a bare predicate route given no name, and for an `addAction` that answered an HTTP request |
+| `outcome` | `success`, `refusal`, `notAuthorized`, `sessionExpired`, `versionExpired`, `validation` (a 422), `crash`, or `other` for an answer a hook wrote that is not an API answer. A route's is read from its status: `success` below 400, `crash` from 500, `other` between |
 | `code` | The refusal's code, a framework code (`lambder/rate-limited`) or the app's; null when there is none |
 | `status` | The HTTP status the call was answered with |
-| `durationMs`, `handlerMs` | From the invocation's start to the answer, and the handler's own time (null when it did not run: refused before it, or replayed) |
+| `durationMs`, `handlerMs` | From the invocation's start to the answer, and the handler's own time, the API handler's or the route's (null when it did not run: refused before it, replayed, or answered by a hook) |
 | `replayed` | A stored idempotent answer was replayed |
 | `coldStart` | The process's first invocation, whose duration includes loading the app |
 | `requestId`, `parentRequestId` | The invocation's request id, the one Lambda's own lines for it carry, and that of the invocation that called it over a [Lambda invoke](./invoke.md), which the invoke carries |
 
-Nothing from the call's input, its session, its cookies or its caller's
-address is in it, so the lines can be kept as long as the app keeps logs.
-Pages, files and non-HTTP events write none. A call the app could not start
-for (a `created` hook that failed) is summarized as a crash like any other,
-so a count of crashes by endpoint shows the outage rather than calls
-stopping.
+Nothing from the call's input, its path, its session, its cookies or its
+caller's address is in it, so the lines can be kept as long as the app keeps
+logs. Files, the index page, the route fallback and non-HTTP events write
+none: a line is an endpoint or a route the app registered. A call the app
+could not start for (a `created` hook that failed) is summarized as a crash
+like any other, so a count of crashes by endpoint shows the outage rather
+than calls stopping.
 
 ```typescript
 callSummary: (summary) => metrics.record(summary),   // somewhere else
@@ -288,9 +292,9 @@ A query over the lines gives per-endpoint views without a metric per
 endpoint, whose count, and cost, grows with the API:
 
 ```text
-fields api, outcome, code, durationMs
+fields api, route, outcome, code, durationMs
 | filter kind = "lambder.call"
-| stats count(*) as calls, pct(durationMs, 99) as p99 by api, outcome
+| stats count(*) as calls, pct(durationMs, 99) as p99 by api, route, outcome
 | sort calls desc
 ```
 

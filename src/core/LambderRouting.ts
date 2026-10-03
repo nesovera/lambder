@@ -34,6 +34,8 @@ export type LambderRouteMatcher = {
     /** One or more HTTP methods; HEAD requests also match GET routes. */
     method?: string | string[];
     condition?: LambderRouteConditionFn;
+    /** What the route's call summary line names it by; by default its method and path pattern, which a route with neither has none of. */
+    name?: string;
 };
 
 export type LambderRouteCondition = LambderRoutePath | RegExp | LambderRouteConditionFn | LambderRouteMatcher;
@@ -93,6 +95,23 @@ export const allowsRequestMethod = (methods: ReadonlySet<string>, requestMethod:
     const method = requestMethod.toUpperCase();
     if(methods.has(method)) return true;
     return method === "HEAD" && methods.has("GET");
+};
+
+/**
+ * What a route's call summary line names it by: the name its matcher gives,
+ * or its method and path pattern, both fixed at registration, so the line
+ * carries nothing of the request's own path. Null for a route with neither,
+ * a bare predicate, which the line still counts.
+ */
+export const routeNameOf = (condition: LambderRouteCondition): string | null => {
+    if(typeof condition === "string") return condition;
+    if(condition instanceof RegExp) return condition.toString();
+    if(typeof condition === "function") return null;
+    if(condition.name !== undefined) return condition.name;
+    const methods = condition.method === undefined ? [] : (Array.isArray(condition.method) ? condition.method : [condition.method]).map((m) => m.toUpperCase());
+    const path = condition.path === undefined ? null : typeof condition.path === "string" ? condition.path : condition.path.toString();
+    const name = [methods.join(","), path].filter((part) => part).join(" ");
+    return name || null;
 };
 
 /** Compile a route condition once at registration time. */

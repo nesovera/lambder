@@ -183,9 +183,10 @@ export class LambderTestApp {
         return this.crashList;
     }
     /**
-     * The summary of every API call the app answered since the last reset,
-     * in order (see LambderCallSummary): what its callSummary option would
-     * have been handed, collected here instead of written to stdout.
+     * The summary of every API call, and every request a route answered,
+     * since the last reset, in order (see LambderCallSummary): what the app's
+     * callSummary option would have been handed, collected here instead of
+     * written to stdout.
      */
     get callSummaries() {
         return this.callSummaryList;

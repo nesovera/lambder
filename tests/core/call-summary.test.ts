@@ -1,8 +1,8 @@
 /**
- * Call summaries: one line per API call, written when the call is answered,
- * saying what was called, how it ended and how long it took, with the ids
- * that join it to the rest of the logs; and nothing from the call's input,
- * session or caller.
+ * Call summaries: one line per API call and per request a route answered,
+ * written when it is answered, saying what was called, how it ended and how
+ * long it took, with the ids that join it to the rest of the logs; and
+ * nothing from the call's input, its path, session or caller.
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
@@ -44,7 +44,12 @@ const createShop = (options: { callSummary?: false | ((summary: LambderCallSumma
         mine: app.defineApi({ input: z.object({}), output: z.object({ userId: z.string() }), guards: 'signedIn' }, async (ctx) => ({ userId: ctx.session.data.userId })),
         limited: app.defineApi({ input: z.object({}), output: z.object({ ok: z.boolean() }), rateLimit: 'oncePerMinute' }, async () => ({ ok: true })),
         history: app.defineApi({ input: z.object({}), output: z.object({ ok: z.boolean() }), guards: 'signedIn', refusals: 'account-closed' }, async (ctx) => ctx.refuse('This account is closed.', { code: 'account-closed' })),
-    })).addRoute({ path: '/page', method: 'GET' }, (_ctx, res) => res.html(html`<p>hello</p>`));
+    })).addRoute({ path: '/page', method: 'GET' }, (_ctx, res) => res.html(html`<p>hello</p>`))
+        .addRoute({ path: '/orders/:orderId/receipt', method: 'GET', name: 'receipt' }, (_ctx, res) => res.text('Your receipt.'))
+        .addRoute(/^\/reports\/\d+$/, (_ctx, res) => res.text('A report.'))
+        .addRoute((ctx) => ctx.path === '/by-predicate', (_ctx, res) => res.text('Matched.'))
+        .addRoute({ path: '/shelf', method: 'GET' }, (_ctx, res) => res.text('No such shelf.', { statusCode: 404 }))
+        .addRoute({ path: '/broken', method: 'GET' }, () => { throw new Error('the shelf fell over'); });
 };
 
 afterEach(() => { vi.restoreAllMocks(); });
@@ -57,6 +62,7 @@ describe('Call summaries: what a call records', () => {
         expect(app.callSummaries).toEqual([{
             kind: 'lambder.call',
             api: 'order.place',
+            route: null,
             outcome: 'success',
             code: null,
             status: 200,
@@ -119,9 +125,57 @@ describe('Call summaries: what a call records', () => {
         ]);
     });
 
-    it('writes no summary for a request that is not an API call', async () => {
+    it('records a request a route answered: the route as registered, never the path asked for, with its status and the handler\'s time', async () => {
         const app = lambderTestApp(createShop());
-        await app.visitor().request('GET', '/page');
+        await app.visitor().request('GET', '/orders/o-apple/receipt?note=leave%20at%20the%20door');
+
+        expect(app.callSummaries).toEqual([{
+            kind: 'lambder.call',
+            api: null,
+            route: 'receipt',
+            outcome: 'success',
+            code: null,
+            status: 200,
+            durationMs: expect.any(Number),
+            handlerMs: expect.any(Number),
+            replayed: false,
+            coldStart: expect.any(Boolean),
+            requestId: expect.any(String),
+            parentRequestId: null,
+        }]);
+        expect(JSON.stringify(app.callSummaries)).not.toContain('o-apple');
+    });
+
+    it('names a route by its matcher\'s name, else by its method and path pattern or the pattern alone, and a bare predicate not at all', async () => {
+        const app = lambderTestApp(createShop());
+        const visitor = app.visitor();
+        await visitor.request('GET', '/page');
+        await visitor.request('GET', '/reports/7');
+        await visitor.request('GET', '/by-predicate');
+
+        expect(app.callSummaries.map(({ api, route }) => ({ api, route }))).toEqual([
+            { api: null, route: 'GET /page' },
+            { api: null, route: '/^\\/reports\\/\\d+$/' },
+            { api: null, route: null },
+        ]);
+    });
+
+    it('reads a route\'s outcome from its status: other for the 4xx it answered, crash when it threw', async () => {
+        const app = lambderTestApp(createShop());
+        const visitor = app.visitor();
+        await visitor.request('GET', '/shelf');
+        await visitor.request('GET', '/broken');
+
+        expect(app.callSummaries.map(({ route, outcome, status, handlerMs }) => ({ route, outcome, status, handled: handlerMs !== null }))).toEqual([
+            { route: 'GET /shelf', outcome: 'other', status: 404, handled: true },
+            { route: 'GET /broken', outcome: 'crash', status: 500, handled: true },
+        ]);
+        expect(app.crashes).toHaveLength(1);
+    });
+
+    it('writes no summary for a request nothing registered answered', async () => {
+        const app = lambderTestApp(createShop());
+        await app.visitor().request('GET', '/nowhere');
         expect(app.callSummaries).toEqual([]);
     });
 

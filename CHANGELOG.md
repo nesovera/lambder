@@ -9,6 +9,32 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [15.1.1] - 2026-10-03
+
+A minor: every request a route answers writes a call summary line, named by
+the route as registered, and a matcher object can name its route.
+
+### Added
+
+- **A call summary line for every route.** A request a route answered
+  (`addRoute`, `addSessionRoute`, or an `addAction` on its HTTP side) writes
+  the same `lambder.call` line an API call does, so a webhook or a page route
+  is counted, timed and queried beside the endpoints. The line's `route`
+  names the route as it was registered, its matcher's `name` or its method
+  and path pattern, and carries nothing of the request's own path; its
+  `outcome` is read from its status (`success` below 400, `crash` from 500,
+  `other` between) and `handlerMs` is the route handler's own time. A line
+  a hook's answer ends in is the matched route's too. Files, the index page,
+  the route fallback and non-HTTP events still write none.
+- **`name` on a matcher object**, what the line names the route by, which a
+  bare predicate route needs to be named at all.
+
+### Changed
+
+- **`LambderCallSummary.api` is null for a route, and the line gains
+  `route`**, null for an API call. A `callSummary` function that read `api`
+  as a string narrows it first.
+
 ## [15.0.2] - 2026-10-02
 
 A patch: two fixes for apps with a large contract.
