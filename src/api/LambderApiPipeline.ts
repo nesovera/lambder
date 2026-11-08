@@ -29,6 +29,7 @@ import {
     type LambderRateLimitChargeSubject,
 } from "./LambderApiRateLimits.js";
 import { LambderApiIdempotencyEngine, type LambderApiIdempotencyConfig } from "./LambderApiIdempotency.js";
+import type { LambderAddedApiModules, LambderApiModuleDeclarations, LambderApiModuleUse, LambderPendingDeclarations } from "./LambderApiModules.js";
 import type { LambderApiIdempotencyOption } from "../shared/wire/LambderApiOptionValues.js";
 import type { LambderSessionRecord, LambderSessionStore } from "../shared/contracts/LambderSessionStore.js";
 import type { LambderRateLimiter } from "../shared/contracts/LambderRateLimiter.js";
@@ -43,7 +44,7 @@ import LambderSessionController, {
     type LambderSessionRequestInfo,
 } from "../session/LambderSessionController.js";
 import { DEFAULT_SESSION_CSRF_COOKIE_KEY, DEFAULT_SESSION_TOKEN_COOKIE_KEY } from "../shared/wire/LambderSessionCookieNames.js";
-import type { MaybePromise } from "../shared/util/LambderTypeUtilities.js";
+import type { LambderMaybePromise } from "../shared/util/LambderTypeUtilities.js";
 
 /**
  * The app's own answer for a rejected input (setApiInputValidationErrorHandler
@@ -52,7 +53,7 @@ import type { MaybePromise } from "../shared/util/LambderTypeUtilities.js";
  * API's schema and every preflight slice (guard inputs, rate-limit keys)
  * answer through here, so one failure has one shape.
  */
-export type LambderApiInputRefusal<TCtx> = (zodError: z.ZodError, ctx: TCtx, request: LambderApiRequest) => MaybePromise<LambderApiAnswer | null>;
+export type LambderApiInputRefusal<TCtx> = (zodError: z.ZodError, ctx: TCtx, request: LambderApiRequest) => LambderMaybePromise<LambderApiAnswer | null>;
 
 /** The session subsystem as the pipeline runs it: the manager plus the cookie names and scope the controller writes. */
 export type LambderApiSessionsConfig<TSessionData> = {
@@ -184,6 +185,8 @@ export class LambderApiPipeline<TCtx extends LambderApiCallContext<TSessionData>
     private readonly onInvalidInput: LambderApiInputRefusal<TCtx> | null;
     private readonly sessions: Required<LambderApiSessionsConfig<TSessionData>> | null;
     private readonly apiSignatures: LambderApiSignatureMap | null;
+    /** The modules whose guards and rate-limit policies this pipeline took (addModules), each once. */
+    private readonly modules = new Set<LambderApiModuleDeclarations>();
 
     constructor(options: LambderApiPipelineOptions<TCtx, TSessionData> = {}){
         this.apiVersion = options.apiVersion ?? null;
@@ -287,19 +290,87 @@ export class LambderApiPipeline<TCtx extends LambderApiCallContext<TSessionData>
         return await this.rateLimits.chargePolicy(name, subject);
     }
 
-    /** Registration-time checks of one definition's declarative options; the same messages on the server and in the mock. */
-    assertRegistration(definition: LambderApiDefinition): void {
+    /** Whether this pipeline took the module's guards and rate-limit policies already. */
+    hasModule(module: LambderApiModuleDeclarations): boolean {
+        return this.modules.has(module);
+    }
+
+    /**
+     * The modules among `uses` this pipeline has not taken yet, checked and
+     * merged, and nothing taken: a name one of them declares that this
+     * pipeline declares already (at creation, or by a module taken before)
+     * or that another of them declares is refused, as create() refuses a name
+     * two maps declare, and so are rate-limit policies on a pipeline with no
+     * limiter for them. A module met twice is one module. addModules() takes
+     * what this returns once every endpoint of the registration passed.
+     */
+    modulesToAdd(uses: readonly LambderApiModuleUse[]): LambderAddedApiModules {
+        const modules: LambderApiModuleDeclarations[] = [];
+        const guards = Object.create(null) as Record<string, LambderApiGuard<any, any, any>>;
+        const rateLimitPolicies = Object.create(null) as Record<string, LambderApiRateLimitPolicyConfig<any>>;
+        const guardModules = new Map<string, string>();
+        const policyModules = new Map<string, string>();
+        const claim = (what: "guard" | "rate-limit policy", name: string, usedBy: string, declaredHere: boolean, claimed: Map<string, string>) => {
+            if(declaredHere){
+                throw new Error(
+                    `Lambder: the ${what} "${name}" of the module ${usedBy} is declared already, at creation or by a module registered before. ` +
+                    `A module declares names of its own: rename one of the two.`
+                );
+            }
+            const other = claimed.get(name);
+            if(other !== undefined){
+                throw new Error(`Lambder: the ${what} "${name}" is declared by two modules, the one ${other} and the one ${usedBy}. Declare each name once.`);
+            }
+            claimed.set(name, usedBy);
+        };
+        for(const { module, usedBy } of uses){
+            if(this.modules.has(module) || modules.includes(module)) continue;
+            for(const [name, guard] of Object.entries(module.guards)){
+                claim("guard", name, usedBy, this.guards.has(name), guardModules);
+                guards[name] = guard;
+            }
+            const policies = Object.entries(module.rateLimitPolicies);
+            if(policies.length > 0 && !this.rateLimits.isConfigured){
+                throw new Error(
+                    `Lambder: the module ${usedBy} declares rate-limit policies, and no rateLimits option was given at creation, ` +
+                    `which gives the limiter they count on. Pass rateLimits at creation; on a server its own policies may be left out (rateLimits: { limiter }).`
+                );
+            }
+            for(const [name, policy] of policies){
+                claim("rate-limit policy", name, usedBy, this.rateLimits.has(name), policyModules);
+                rateLimitPolicies[name] = policy;
+            }
+            modules.push(module);
+        }
+        return { modules, guards, rateLimitPolicies };
+    }
+
+    /** Takes the guards and rate-limit policies of the modules modulesToAdd() checked: from here on its endpoints run them, and code may charge the policies. */
+    addModules(added: LambderAddedApiModules): void {
+        this.guards.add(added.guards);
+        if(Object.keys(added.rateLimitPolicies).length > 0) this.rateLimits.add(added.rateLimitPolicies);
+        for(const module of added.modules) this.modules.add(module);
+    }
+
+    /**
+     * Registration-time checks of one definition's declarative options; the
+     * same messages on the server and in the mock. `adding` holds the guards
+     * and policies a registration is about to add beside this pipeline's own:
+     * those of the modules it brings (modulesToAdd), or of the module an
+     * entry is built with.
+     */
+    assertRegistration(definition: LambderApiDefinition, adding?: LambderPendingDeclarations): void {
         const { name, mode } = definition;
         // Each subsystem reports its own absence: one combined message would
         // name all three when only one of them is missing.
         if(definition.rateLimit !== undefined && !this.rateLimits.isConfigured){
             throw new Error(`Lambder: API "${name}" declares rateLimit but no rateLimits option was configured at creation.`);
         }
-        if(definition.guards !== undefined && !this.guards.isConfigured){
+        if(definition.guards !== undefined && !this.guards.isConfigured && Object.keys(adding?.guards ?? {}).length === 0){
             throw new Error(`Lambder: API "${name}" declares guards but no guards option was configured at creation.`);
         }
-        this.rateLimits.assertRegistration(name, mode, definition.rateLimit);
-        this.guards.assertRegistration(name, mode, definition.guards);
+        this.rateLimits.assertRegistration(name, mode, definition.rateLimit, adding?.rateLimitPolicies);
+        this.guards.assertRegistration(name, mode, definition.guards, adding?.guards);
         // `idempotency: false` is an explicit opt-out, not a use: it asks for
         // nothing and so needs no store behind it.
         if(usesIdempotency(definition)){

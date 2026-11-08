@@ -13,7 +13,7 @@ import { LambderFiles } from "./LambderFiles.js";
 import { isLambderApiRefusal } from "../shared/wire/LambderApiRefusal.js";
 import { LambderApiPipeline } from "../api/LambderApiPipeline.js";
 import { LAMBDER_BACKEND_SWAP, LAMBDER_CRASH_WATCH } from "../shared/util/LambderTestingDoors.js";
-import { declaredRefusalVocabulary, readRefusalVocabulary, resolveAllowedRefusals, toRefusalCodes, } from "../api/LambderApiRefusals.js";
+import { assertRefusalCodesDeclared, declaredRefusalVocabulary, readRefusalVocabulary, resolveAllowedRefusals, toRefusalCodes, } from "../api/LambderApiRefusals.js";
 import { refuse } from "../shared/wire/LambderApiRefusal.js";
 import { apiSignatureOf } from "../api/LambderApiSignature.js";
 import { apiNameKeyOf } from "../shared/wire/LambderApiSignatureMap.js";
@@ -22,7 +22,10 @@ import { apiNotFoundAnswer, envelopeAnswer, sessionExpiredAnswer, successEnvelop
 import { describePayloadKind, isObjectPayload } from "../shared/wire/LambderObjectPayload.js";
 import { LambderApiOutputValidationError } from "../api/LambderApiOutputValidationError.js";
 import { toGuardEntries } from "../api/LambderApiGuards.js";
-import { buildApiGroup, buildLazyApiGroup, isRegistrableApiGroup, } from "../api/LambderApiDeclarations.js";
+import { apiModuleDeclarationsOf } from "../api/LambderApiModules.js";
+import { apiModuleUsesOf, isRegistrableApiGroup, } from "../api/LambderApiDeclarations.js";
+import { apiBuildersFor, } from "./LambderApiBuilders.js";
+import { LambderApiModule, } from "./LambderApiModule.js";
 import { splitApiName } from "../shared/wire/LambderApiNames.js";
 import { bindContextTools, createContext, isV2HttpEvent, } from "./LambderContext.js";
 import { COMPRESSED_PAYLOAD_GZ_FIELD, COMPRESSED_PAYLOAD_BR_FIELD, COMPRESSED_PAYLOAD_BYTES_FIELD } from "../shared/wire/LambderRequestPayload.js";
@@ -36,6 +39,8 @@ import { policyBuildersFor } from "./LambderPolicyBuilders.js";
 import { assertCreateOptions, mergeNamedMaps, } from "./LambderCreateOptions.js";
 /** The refusals of a name no API is registered under: no code, and none required. */
 const NO_DECLARED_REFUSALS = { codes: new Map(), codeRequired: false };
+/** The instance's own declaration builders: no module, and nothing of any instance, so every instance hands out the same three functions, each typed on its own app types. */
+const INSTANCE_BUILDERS = apiBuildersFor(null);
 /** Longest endpoint name a call summary carries: a page built before paths posts the name in its body, and a line is no place for a long one. */
 const MAX_SUMMARY_NAME_CHARS = 200;
 /** A request id as the parent header may carry one: what Lambda's own ids look like, and no longer than any of them. */
@@ -128,9 +133,14 @@ export default class Lambder {
     apiGroupNames = new Set();
     /** The lazy groups not loaded yet, each with its load in progress, if one is. */
     lazyApiGroups = new Map();
-    /** The guards given at creation, merged into one map, kept for apiSignatures(): a guard's schema is part of the signature of every endpoint declaring it. */
+    /**
+     * The guards given at creation merged into one map, and every registered
+     * module's beside them, kept for registration (a guard's session and
+     * refusal codes), apiSignatures() (a guard's schema is part of the
+     * signature of every endpoint declaring it) and apiOptionEntries().
+     */
     guards;
-    /** The rate-limit policies given at creation, kept for apiOptionEntries(), which records each one less its key handler. */
+    /** The rate-limit policies given at creation, and every registered module's beside them, kept for apiOptionEntries(), which records each one less its key handler. */
     rateLimitPolicies;
     /** The refusal vocabulary given at creation: what each API's and each guard's refusal codes resolve against. Null without the option. */
     refusalVocabulary;
@@ -170,7 +180,10 @@ export default class Lambder {
         const options = {
             ...given,
             guards: given.guards && mergeNamedMaps(given.guards, "guard"),
-            rateLimits: given.rateLimits && { ...given.rateLimits, policies: mergeNamedMaps(given.rateLimits.policies, "rate-limit policy") },
+            rateLimits: given.rateLimits && {
+                ...given.rateLimits,
+                policies: given.rateLimits.policies === undefined ? undefined : mergeNamedMaps(given.rateLimits.policies, "rate-limit policy"),
+            },
         };
         assertCreateOptions(options);
         this.files = options.files ? new LambderFiles(options.files) : null;
@@ -189,8 +202,8 @@ export default class Lambder {
             this.corsConfig = options.cors === true ? {} : options.cors;
         }
         const session = options.session;
-        this.guards = options.guards;
-        this.rateLimitPolicies = options.rateLimits?.policies;
+        this.guards = { ...options.guards };
+        this.rateLimitPolicies = { ...options.rateLimits?.policies };
         this.refusalVocabulary = readRefusalVocabulary(options.refusals);
         this.pipeline = new LambderApiPipeline({
             apiVersion: this.apiVersion,
@@ -341,46 +354,56 @@ export default class Lambder {
     // Declared as values, gathered into named groups, registered in one call.
     // =====================================================================
     /**
-     * Declares one endpoint, typed on this instance's types: its input and
-     * output schemas, its guards, rate limits, idempotency and refusals, and
-     * its handler. Nothing is registered until the declaration is put in a
-     * group (defineApiGroup) and the group is registered (registerApiGroups).
+     * Declares one endpoint, typed on this instance's types (see
+     * LambderDefineApi). Nothing is registered until the declaration is put
+     * in a group (defineApiGroup) and the group is registered
+     * (registerApiGroups).
      *
-     * The guards say who may call it, and so its mode: an endpoint whose
-     * guards include one that needs a session (`session: true`) is a session
-     * endpoint, its session read before the guards run and a call without
-     * one answered sessionExpired, and its handler's ctx.session is typed
-     * present. Any other endpoint is public.
-     *
-     * An arrow property rather than a method, so an app can hand it out
-     * detached: `export const { defineApi, defineApiGroup } = lambderApp;`.
+     * An arrow property rather than a method, as are the two below, so an
+     * app can hand them out detached; handed out under the instance's name
+     * (`export const defineApi: AppLambder["defineApi"] = lambderApp.defineApi`),
+     * a declaration file names each by the instance's type rather than
+     * writing the app's types out again in each.
      */
-    defineApi = (options, 
-    /** Answers the call by returning its output (parsed through `output` before it is sent), or refuses it with ctx.refuse() or refuse(). */
-    handler) => ({ kind: "lambderApi", options: options, handler: handler });
+    defineApi = INSTANCE_BUILDERS.defineApi;
+    /** Gathers endpoints into a named group (see LambderDefineApiGroup). */
+    defineApiGroup = INSTANCE_BUILDERS.defineApiGroup;
+    /** A group loaded on the first call to one of its endpoints (see LambderDefineLazyApiGroup). */
+    lazyApiGroup = INSTANCE_BUILDERS.lazyApiGroup;
     /**
-     * Gathers endpoints into a named group: each is registered as
-     * `name.action` and called at `{apiPath}/{name}/{action}`, and every
-     * Lambder caller reaches it as `caller.name.action(input)`. A group's
-     * name and its actions are identifiers, and a group may not take a name
-     * a caller already answers for (see LAMBDER_RESERVED_GROUP_NAMES).
+     * Defines a module: guards and rate-limit policies a part of the app
+     * declares for its own endpoints, beside the ones this instance was
+     * created with. Returns the module's builders, whose endpoints may name
+     * the instance's guards and policies and the module's own, and nothing
+     * else; their groups are registered with registerApiGroups() as any
+     * are, and their registration adds the module's guards and policies to
+     * the instance that registers them.
      *
-     * A group declared across files takes each file's part:
-     * `defineApiGroup("orders", orderReadApis, orderWriteApis)`. An action
-     * two parts declare is refused, at compile time and at startup, rather
-     * than one silently replacing the other as an object spread would.
+     * ```typescript
+     * export const giftCardModule = storeApp.defineApiModule({
+     *     guards: { cardHolder },
+     *     rateLimitPolicies: { redeemPerCard: { perHour: 5, per: "session" } },
+     * });
+     * ```
+     *
+     * A name the instance declares is refused here, at compile time and at
+     * the call; a name two modules declare is refused when the second is
+     * registered, as create() refuses a name two maps declare. A module's
+     * rate-limit policies count on the instance's limiter, so they need the
+     * rateLimits option at creation, whose own policies may then be left out.
      */
-    defineApiGroup = (name, ...parts) => buildApiGroup(name, parts);
-    /**
-     * A group loaded on the first call to one of its endpoints:
-     * `lazyApiGroup("orders", () => import("./orders.js").then((m) => m.orderApis))`.
-     * A cold start then parses none of it, nor anything only it imports,
-     * until a request calls it; the contract is the loaded group's, read off
-     * its type. The group loaded must carry the same name, which the type
-     * checks and loading checks again. `loadApiGroups()` loads every group,
-     * for a build step or a boot check that has to see them all.
-     */
-    lazyApiGroup = (name, load) => buildLazyApiGroup(name, load);
+    defineApiModule(options) {
+        const given = options;
+        const declarations = apiModuleDeclarationsOf(given, "Lambder");
+        for (const [name, guard] of Object.entries(declarations.guards)) {
+            assertRefusalCodesDeclared(`guard "${name}"`, (guard?.refusals ?? []), this.refusalVocabulary);
+        }
+        // Checked against this instance now, so a name it declares fails
+        // where the module is defined; registration checks again against
+        // whichever instance takes the module, and against the other modules.
+        this.pipeline.modulesToAdd([{ module: declarations, usedBy: "being defined" }]);
+        return new LambderApiModule(declarations);
+    }
     /**
      * Registers groups of endpoints, as one contract: `typeof
      * lambder.ApiContract` then maps every `group.action` to its entry, one
@@ -411,7 +434,6 @@ export default class Lambder {
         // caller that catches the error and fixes the declaration is told the
         // real problem on its next try.
         const names = new Set();
-        const prepared = [];
         for (const group of groups) {
             if (!isRegistrableApiGroup(group)) {
                 throw new Error("Lambder: registerApiGroups takes groups built by defineApiGroup() or lazyApiGroup().");
@@ -420,10 +442,21 @@ export default class Lambder {
                 throw new Error(`Lambder: group "${group.name}" is registered twice. A group is one namespace, so its endpoints belong in one defineApiGroup().`);
             }
             names.add(group.name);
-            if (group.kind === "lambderApiGroup")
-                prepared.push(...instance.prepareApiGroup(group));
         }
-        for (const group of groups) {
+        // The modules the groups bring, a lazy group's at once: checked
+        // against the instance and each other here, taken only after every
+        // endpoint passed against them.
+        const registrable = groups;
+        const added = instance.pipeline.modulesToAdd(registrable.flatMap(apiModuleUsesOf));
+        const prepared = [];
+        for (const group of registrable) {
+            if (group.kind === "lambderApiGroup")
+                prepared.push(...instance.prepareApiGroup(group, added));
+        }
+        instance.pipeline.addModules(added);
+        instance.guards = { ...instance.guards, ...added.guards };
+        instance.rateLimitPolicies = { ...instance.rateLimitPolicies, ...added.rateLimitPolicies };
+        for (const group of registrable) {
             instance.apiGroupNames.add(group.name);
             if (group.kind === "lambderLazyApiGroup")
                 instance.lazyApiGroups.set(group.name, { group, loading: null });
@@ -478,9 +511,14 @@ export default class Lambder {
             await this.loadLazyApiGroup(group);
         return this.apiDefinitions.get(apiName);
     }
-    /** The endpoints of one group, each checked as `group.action`; nothing is registered until they are committed. */
-    prepareApiGroup(group) {
-        return Object.entries(group.apis).map(([action, declaration]) => this.prepareApi(`${group.name}.${action}`, declaration.options, declaration.handler));
+    /**
+     * The endpoints of one group, each checked as `group.action` against the
+     * instance's guards and policies and those `adding` holds, of the modules
+     * the same registration adds; nothing is registered until they are
+     * committed.
+     */
+    prepareApiGroup(group, adding) {
+        return Object.entries(group.apis).map(([action, declaration]) => this.prepareApi(`${group.name}.${action}`, declaration.options, declaration.handler, adding));
     }
     /**
      * A lazy group, loaded once: its import, checked to be the group it was
@@ -501,6 +539,16 @@ export default class Lambder {
                 if (loaded.name !== name) {
                     throw new Error(`Lambder: lazy group "${name}" loaded the group "${loaded.name}". The loader must resolve to the group of the name it was registered under.`);
                 }
+                // A module's guards and policies are added when its group is
+                // registered, at startup, so a collision fails the boot and a
+                // route charging one of its policies finds it from the first
+                // request; one first met here would do neither.
+                for (const { module } of apiModuleUsesOf(loaded)) {
+                    if (!this.pipeline.hasModule(module)) {
+                        throw new Error(`Lambder: lazy group "${name}" loaded endpoints a module's builders declared, and was registered with a lazyApiGroup that does not carry that module. ` +
+                            `Register it with the module's own lazyApiGroup, so its guards and rate-limit policies are added at startup.`);
+                    }
+                }
                 for (const api of this.prepareApiGroup(loaded))
                     this.commitApi(api);
                 this.lazyApiGroups.delete(name);
@@ -517,9 +565,12 @@ export default class Lambder {
      * digests, beside its handler. Nothing is recorded here (commitApi does
      * that), so a refusal anywhere in a registration leaves nothing behind.
      */
-    prepareApi(name, schema, handler) {
+    prepareApi(name, schema, handler, adding) {
         const guardEntries = toGuardEntries(schema.guards);
-        const guardNeedsSession = (guard) => !!this.guards && Object.prototype.hasOwnProperty.call(this.guards, guard) && this.guards[guard]?.session === true;
+        const guardOf = (guard) => Object.prototype.hasOwnProperty.call(this.guards, guard) ? this.guards[guard]
+            : adding && Object.prototype.hasOwnProperty.call(adding.guards, guard) ? adding.guards[guard]
+                : undefined;
+        const guardNeedsSession = (guard) => guardOf(guard)?.session === true;
         const mode = guardEntries.some(({ name: guard }) => guardNeedsSession(guard)) ? "session" : "public";
         if (mode === "session" && !this.pipeline.hasSessions) {
             throw new Error(`Lambder: a guard of API "${name}" needs a session, and the instance was created without the session option.`);
@@ -534,13 +585,10 @@ export default class Lambder {
         if (schema.refusals !== undefined && ownRefusals.length === 0) {
             throw new Error(`Lambder: API "${name}" declares an empty refusals option, which declares no code. Name the codes it refuses with, or omit the option entirely.`);
         }
-        const allowedCodes = resolveAllowedRefusals(name, this.refusalVocabulary, ownRefusals, guardEntries.map(({ name: guard }) => ({
-            guard,
-            codes: (this.guards && Object.prototype.hasOwnProperty.call(this.guards, guard) ? this.guards[guard]?.refusals : undefined) ?? [],
-        })));
+        const allowedCodes = resolveAllowedRefusals(name, this.refusalVocabulary, ownRefusals, guardEntries.map(({ name: guard }) => ({ guard, codes: guardOf(guard)?.refusals ?? [] })));
         const refusals = { codes: allowedCodes, codeRequired: this.requireRefusalCodes };
         const definition = { name, mode, guards: schema.guards, rateLimit: schema.rateLimit, idempotency: schema.idempotency, input: schema.input, output: schema.output, refusals };
-        this.pipeline.assertRegistration(definition);
+        this.pipeline.assertRegistration(definition, adding);
         return { definition, refusalsOption: schema.refusals, output: schema.output, compress: schema.compress ?? "auto", handler };
     }
     /** Records a checked endpoint: its definition, its refusals option as written, and what answers it. */
@@ -703,7 +751,7 @@ export default class Lambder {
             apis[name] = entry;
         }
         const rateLimitPolicies = {};
-        for (const name of Object.keys(this.rateLimitPolicies ?? {}).sort()) {
+        for (const name of Object.keys(this.rateLimitPolicies).sort()) {
             const { per, budget, chargeAt, refusal, ...windows } = this.rateLimitPolicies[name];
             const entry = {};
             for (const [window, limit] of Object.entries(windows)) {
@@ -723,7 +771,7 @@ export default class Lambder {
             rateLimitPolicies[name] = entry;
         }
         const guards = {};
-        for (const name of Object.keys(this.guards ?? {}).sort()) {
+        for (const name of Object.keys(this.guards).sort()) {
             const guard = this.guards[name];
             guards[name] = {
                 input: guard.apiInput ? "apiInput" : guard.guardInput ? "guardInput" : "none",

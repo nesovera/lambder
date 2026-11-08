@@ -89,13 +89,21 @@ const fixtureSource = (keyed: boolean): string => {
  * guard that needs a session or one that does not, a rate limit, a handler
  * reading its payload and its session. The client reads the contract, as a
  * typed caller does. `registeredTwice` names a group the call gives a second
- * time.
+ * time. `viaModule` declares the guards and policies in a module of the app
+ * (defineApiModule) instead of at create(), and the endpoints with the
+ * module's builders.
  */
-const registrationSource = (endpoints: number, { groupSize = 25, registeredTwice }: { groupSize?: number; registeredTwice?: number } = {}): string => {
+const registrationSource = (endpoints: number, { groupSize = 25, registeredTwice, viaModule = false }: { groupSize?: number; registeredTwice?: number; viaModule?: boolean } = {}): string => {
     const groups = Math.ceil(endpoints / groupSize);
+    const builders = viaModule ? 'giftCards' : 'app';
     const endpoint = (index: number) => index % 2 === 0
-        ? `        e${index}: app.defineApi({ input: z.object({ id: z.string(), n${index}: z.number() }), output: z.object({ ok: z.boolean(), v${index}: z.string() }), guards: "signedIn", rateLimit: "perSession" }, async (ctx) => ({ ok: ctx.apiPayload.n${index} > 0, v${index}: ctx.session.data.userId })),`
-        : `        e${index}: app.defineApi({ input: z.object({ id: z.string(), n${index}: z.number() }), output: z.object({ ok: z.boolean(), v${index}: z.string() }), guards: "anyone", rateLimit: "perIp" }, async (ctx) => ({ ok: ctx.apiPayload.n${index} > 0, v${index}: ctx.apiPayload.id })),`;
+        ? `        e${index}: ${builders}.defineApi({ input: z.object({ id: z.string(), n${index}: z.number() }), output: z.object({ ok: z.boolean(), v${index}: z.string() }), guards: "signedIn", rateLimit: "perSession" }, async (ctx) => ({ ok: ctx.apiPayload.n${index} > 0, v${index}: ctx.session.data.userId })),`
+        : `        e${index}: ${builders}.defineApi({ input: z.object({ id: z.string(), n${index}: z.number() }), output: z.object({ ok: z.boolean(), v${index}: z.string() }), guards: "anyone", rateLimit: "perIp" }, async (ctx) => ({ ok: ctx.apiPayload.n${index} > 0, v${index}: ctx.apiPayload.id })),`;
+    const guards = [
+        `signedIn: lambderGuard({ session: true, handler: async () => {} }),`,
+        `anyone: lambderGuard({ handler: async () => {} }),`,
+    ];
+    const policies = `{ perIp: { perMin: 5, per: "ip" }, perSession: { perMin: 5, per: "session" } }`;
     const lines = [
         `import { z } from "zod";`,
         `import { initLambder, lambderGuard, LambderMemoryRateLimiter, LambderMemorySessionStore } from "../../../src/index.js";`,
@@ -103,17 +111,16 @@ const registrationSource = (endpoints: number, { groupSize = 25, registeredTwice
         `const app = initLambder<{ userId: string }>().create({`,
         `    apiPath: "/api",`,
         `    session: { store: new LambderMemorySessionStore(), sessionSalt: "salt" },`,
-        `    guards: {`,
-        `        signedIn: lambderGuard({ session: true, handler: async () => {} }),`,
-        `        anyone: lambderGuard({ handler: async () => {} }),`,
-        `    },`,
-        `    rateLimits: { limiter: new LambderMemoryRateLimiter(), policies: { perIp: { perMin: 5, per: "ip" }, perSession: { perMin: 5, per: "session" } } },`,
+        ...(viaModule
+            ? [`    rateLimits: { limiter: new LambderMemoryRateLimiter() },`]
+            : [`    guards: {`, ...guards.map((guard) => `        ${guard}`), `    },`, `    rateLimits: { limiter: new LambderMemoryRateLimiter(), policies: ${policies} },`]),
         `});`,
+        ...(viaModule ? [`const giftCards = app.defineApiModule({ guards: { ${guards.join(' ')} }, rateLimitPolicies: ${policies} });`] : []),
         ``,
     ];
     for(let group = 0; group < groups; group += 1){
         const indices = Array.from({ length: groupSize }, (_, offset) => group * groupSize + offset).filter((index) => index < endpoints);
-        lines.push(`const group${group} = app.defineApiGroup("g${group}", {`, ...indices.map(endpoint), `});`);
+        lines.push(`const group${group} = ${builders}.defineApiGroup("g${group}", {`, ...indices.map(endpoint), `});`);
     }
     lines.push(
         `export const lambder = app.registerApiGroups(${[...Array.from({ length: groups }, (_, group) => `group${group}`), ...(registeredTwice === undefined ? [] : [`group${registeredTwice}`])].join(', ')});`,
@@ -193,6 +200,20 @@ describe('What registering endpoints costs grows with the endpoints, no faster',
         expect(small.diagnostics).toEqual([]);
         expect(large.diagnostics).toEqual([]);
         expect(large.instantiations).toBeLessThan(small.instantiations * 4);
+    }, COMPILER_TIMEOUT_MS);
+});
+
+describe('What a module\'s endpoints cost: what the instance\'s own do', () => {
+    it('checks two hundred endpoints declared with a module\'s builders for about what the same endpoints on the instance cost', () => {
+        // The module's builders are typed on the instance's types with the
+        // module's guards and policies intersected in; that must not make an
+        // endpoint dearer than one the instance declares, since a modular app
+        // declares most of its endpoints through its modules.
+        const instance = checkFixture(registrationSource(200));
+        const module = checkFixture(registrationSource(200, { viaModule: true }));
+        expect(instance.diagnostics).toEqual([]);
+        expect(module.diagnostics).toEqual([]);
+        expect(module.instantiations).toBeLessThan(instance.instantiations * 1.25);
     }, COMPILER_TIMEOUT_MS);
 });
 

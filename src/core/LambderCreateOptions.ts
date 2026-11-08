@@ -20,7 +20,7 @@ import { assertRefusalCodesDeclared, readRefusalVocabulary, type LambderRefusalV
 import type { LambderNoExtraKeys } from "../shared/util/LambderTypeUtilities.js";
 import type { LambderGuardNamesIn, LambderJsonOf } from "../shared/wire/LambderApiContract.js";
 import type { LambderRateLimitMessage } from "../shared/wire/LambderApiOptionValues.js";
-import type { MaybePromise } from "../shared/util/LambderTypeUtilities.js";
+import type { LambderMaybePromise } from "../shared/util/LambderTypeUtilities.js";
 import { assertPositiveInteger } from "../shared/util/LambderOptionChecks.js";
 
 /*
@@ -32,11 +32,11 @@ import { assertPositiveInteger } from "../shared/util/LambderOptionChecks.js";
  * that refuse a value, so an option is looked up in one place.
  */
 
-export type LambderRouteHandler = (ctx: LambderRenderContext, resolver: LambderResolver) => MaybePromise<LambderResponse>;
+export type LambderRouteHandler = (ctx: LambderRenderContext, resolver: LambderResolver) => LambderMaybePromise<LambderResponse>;
 export type LambderSessionRouteHandler<SessionData = any> = (
     ctx: LambderSessionRenderContext<any, SessionData>,
     resolver: LambderResolver,
-) => MaybePromise<LambderResponse>;
+) => LambderMaybePromise<LambderResponse>;
 
 // ---------------------------------------------------------------------------
 // Hooks
@@ -46,15 +46,15 @@ export type LambderSessionRouteHandler<SessionData = any> = (
 // ---------------------------------------------------------------------------
 export type LambderHookEvent = "created" | "beforeRender" | "afterRender" | "fallback";
 /** Return the (possibly replaced) ctx to continue, a LambderResponse to short-circuit, or an Error to fail. */
-export type LambderBeforeRenderHook = (ctx: LambderRenderContext, resolver: LambderResolver) => MaybePromise<LambderRenderContext | LambderResponse | Error>;
-export type LambderAfterRenderHook = (ctx: LambderRenderContext, resolver: LambderResolver, response: LambderResponse) => MaybePromise<LambderResponse | Error>;
+export type LambderBeforeRenderHook = (ctx: LambderRenderContext, resolver: LambderResolver) => LambderMaybePromise<LambderRenderContext | LambderResponse | Error>;
+export type LambderAfterRenderHook = (ctx: LambderRenderContext, resolver: LambderResolver, response: LambderResponse) => LambderMaybePromise<LambderResponse | Error>;
 export type LambderFallbackHook = (ctx: LambderRenderContext, resolver: LambderResolver) => void | Promise<void>;
 
 export type LambderGlobalErrorHandler = (
     err: Error,
     ctx: LambderRenderContext | null,
     response: LambderResponseBuilder,
-) => MaybePromise<LambderResponse>;
+) => LambderMaybePromise<LambderResponse>;
 
 // ---------------------------------------------------------------------------
 // Crashes: what the instance tells the app about a thrown error, wherever it
@@ -90,7 +90,7 @@ export type LambderCrashSite =
  * password in the body, the session record): forward the fields a crash
  * needs rather than the whole context to an error tracker.
  */
-export type LambderCrashReporter = (error: Error, site: LambderCrashSite) => MaybePromise<void>;
+export type LambderCrashReporter = (error: Error, site: LambderCrashSite) => LambderMaybePromise<void>;
 
 /** The `crashes` option of create(). */
 export type LambderCrashOptions = {
@@ -111,10 +111,10 @@ export type LambderCrashOptions = {
      * writes its own answer, and describeCrash is there for it. A reveal
      * that throws counts as no. Default: nobody.
      */
-    reveal?: (ctx: LambderRenderContext) => MaybePromise<boolean>;
+    reveal?: (ctx: LambderRenderContext) => LambderMaybePromise<boolean>;
 };
-export type LambderFallbackHandler = (ctx: LambderRenderContext, resolver: LambderResolver) => MaybePromise<LambderResponse>;
-export type LambderInputValidationHandler = (ctx: LambderRenderContext, resolver: LambderResolver, zodError: z.ZodError) => MaybePromise<LambderResponse>;
+export type LambderFallbackHandler = (ctx: LambderRenderContext, resolver: LambderResolver) => LambderMaybePromise<LambderResponse>;
+export type LambderInputValidationHandler = (ctx: LambderRenderContext, resolver: LambderResolver, zodError: z.ZodError) => LambderMaybePromise<LambderResponse>;
 
 
 // ---------------------------------------------------------------------------
@@ -131,7 +131,7 @@ export type LambderActionTools =
     | { ctx: null; res: null; lambdaContext: Context };
 
 export type LambderActionFilter = (event: unknown, ctx: LambderRenderContext | null) => boolean;
-export type LambderActionHandler<TEvent = unknown> = (event: TEvent, tools: LambderActionTools) => MaybePromise<unknown>;
+export type LambderActionHandler<TEvent = unknown> = (event: TEvent, tools: LambderActionTools) => LambderMaybePromise<unknown>;
 
 /** Overloaded handler type returned by getHandler(): HTTP events get a typed response, others dispatch to actions. */
 export type LambderHandler = {
@@ -216,8 +216,12 @@ export type LambderRateLimitPoliciesMap = Record<string, LambderApiRateLimitPoli
 
 /** The `rateLimits` option of create(): the engine's config, with `policies` as one map or a list of maps. */
 export type LambderCreateRateLimitsOption = Omit<LambderApiRateLimitsConfig<LambderRateLimitPoliciesMap>, "policies"> & {
-    /** Named policies referenced (typed) from defineApi: one map, or a list of maps merged in order. */
-    policies: LambderNamedMapsOption<LambderRateLimitPoliciesMap>;
+    /**
+     * Named policies referenced (typed) from defineApi: one map, or a list of
+     * maps merged in order. Left out where every policy is declared by the
+     * app's modules (defineApiModule), which count on this limiter.
+     */
+    policies?: LambderNamedMapsOption<LambderRateLimitPoliciesMap>;
 };
 
 /** The options as the instance holds them: the guards and the rate-limit policies merged into one map each. */
@@ -557,7 +561,7 @@ type LambderGuardRefusalsKnown<TGuard, TRefusals> =
  */
 
 /** Every policy in a map, or in each map of a list, held to the policy shape, its message included; a list also declares no name twice. */
-type LambderRateLimitPolicyChecks<TPolicies> = TPolicies extends readonly unknown[]
+export type LambderRateLimitPolicyChecks<TPolicies> = TPolicies extends readonly unknown[]
     ? { [TIndex in keyof TPolicies]: LambderRateLimitPolicyChecks<TPolicies[TIndex]> } & LambderNoRepeatedNames<TPolicies>
     : {
         [TPolicy in keyof TPolicies]:
@@ -570,7 +574,7 @@ type LambderRateLimitPolicyChecks<TPolicies> = TPolicies extends readonly unknow
     };
 
 /** Every guard in a map, or in each map of a list, held to the guard shape and its refusals to the vocabulary; a list also declares no name twice. */
-type LambderGuardChecks<TSessionData, TGuards, TRefusals> = TGuards extends readonly unknown[]
+export type LambderGuardChecks<TSessionData, TGuards, TRefusals> = TGuards extends readonly unknown[]
     ? { [TIndex in keyof TGuards]: LambderGuardChecks<TSessionData, TGuards[TIndex], TRefusals> } & LambderNoRepeatedNames<TGuards>
     : {
         [TGuard in keyof TGuards]:
@@ -598,7 +602,7 @@ export type LambderNestedOptionChecks<TSessionData, TOptions extends LambderCrea
     crashes?: LambderNoExtraKeys<NonNullable<TOptions["crashes"]>, LambderOptionShape<TSessionData, "crashes">>;
     originProof?: LambderNoExtraKeys<NonNullable<TOptions["originProof"]>, LambderOptionShape<TSessionData, "originProof">>;
     rateLimits?: LambderNoExtraKeys<NonNullable<TOptions["rateLimits"]>, LambderOptionShape<TSessionData, "rateLimits">> & {
-        policies?: LambderRateLimitPolicyChecks<NonNullable<TOptions["rateLimits"]>["policies"]>;
+        policies?: LambderRateLimitPolicyChecks<NonNullable<NonNullable<TOptions["rateLimits"]>["policies"]>>;
     };
     guards?: LambderGuardChecks<TSessionData, NonNullable<TOptions["guards"]>, TRefusals>;
     // The object form of `files` (`{ source, memoryCache }`); a bare source

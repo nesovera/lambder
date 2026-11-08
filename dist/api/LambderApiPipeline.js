@@ -60,6 +60,8 @@ export class LambderApiPipeline {
     onInvalidInput;
     sessions;
     apiSignatures;
+    /** The modules whose guards and rate-limit policies this pipeline took (addModules), each once. */
+    modules = new Set();
     constructor(options = {}) {
         this.apiVersion = options.apiVersion ?? null;
         // Dotted, always, whether or not a floor is set today: the floor reads
@@ -160,19 +162,83 @@ export class LambderApiPipeline {
     async chargeRateLimit(name, subject) {
         return await this.rateLimits.chargePolicy(name, subject);
     }
-    /** Registration-time checks of one definition's declarative options; the same messages on the server and in the mock. */
-    assertRegistration(definition) {
+    /** Whether this pipeline took the module's guards and rate-limit policies already. */
+    hasModule(module) {
+        return this.modules.has(module);
+    }
+    /**
+     * The modules among `uses` this pipeline has not taken yet, checked and
+     * merged, and nothing taken: a name one of them declares that this
+     * pipeline declares already (at creation, or by a module taken before)
+     * or that another of them declares is refused, as create() refuses a name
+     * two maps declare, and so are rate-limit policies on a pipeline with no
+     * limiter for them. A module met twice is one module. addModules() takes
+     * what this returns once every endpoint of the registration passed.
+     */
+    modulesToAdd(uses) {
+        const modules = [];
+        const guards = Object.create(null);
+        const rateLimitPolicies = Object.create(null);
+        const guardModules = new Map();
+        const policyModules = new Map();
+        const claim = (what, name, usedBy, declaredHere, claimed) => {
+            if (declaredHere) {
+                throw new Error(`Lambder: the ${what} "${name}" of the module ${usedBy} is declared already, at creation or by a module registered before. ` +
+                    `A module declares names of its own: rename one of the two.`);
+            }
+            const other = claimed.get(name);
+            if (other !== undefined) {
+                throw new Error(`Lambder: the ${what} "${name}" is declared by two modules, the one ${other} and the one ${usedBy}. Declare each name once.`);
+            }
+            claimed.set(name, usedBy);
+        };
+        for (const { module, usedBy } of uses) {
+            if (this.modules.has(module) || modules.includes(module))
+                continue;
+            for (const [name, guard] of Object.entries(module.guards)) {
+                claim("guard", name, usedBy, this.guards.has(name), guardModules);
+                guards[name] = guard;
+            }
+            const policies = Object.entries(module.rateLimitPolicies);
+            if (policies.length > 0 && !this.rateLimits.isConfigured) {
+                throw new Error(`Lambder: the module ${usedBy} declares rate-limit policies, and no rateLimits option was given at creation, ` +
+                    `which gives the limiter they count on. Pass rateLimits at creation; on a server its own policies may be left out (rateLimits: { limiter }).`);
+            }
+            for (const [name, policy] of policies) {
+                claim("rate-limit policy", name, usedBy, this.rateLimits.has(name), policyModules);
+                rateLimitPolicies[name] = policy;
+            }
+            modules.push(module);
+        }
+        return { modules, guards, rateLimitPolicies };
+    }
+    /** Takes the guards and rate-limit policies of the modules modulesToAdd() checked: from here on its endpoints run them, and code may charge the policies. */
+    addModules(added) {
+        this.guards.add(added.guards);
+        if (Object.keys(added.rateLimitPolicies).length > 0)
+            this.rateLimits.add(added.rateLimitPolicies);
+        for (const module of added.modules)
+            this.modules.add(module);
+    }
+    /**
+     * Registration-time checks of one definition's declarative options; the
+     * same messages on the server and in the mock. `adding` holds the guards
+     * and policies a registration is about to add beside this pipeline's own:
+     * those of the modules it brings (modulesToAdd), or of the module an
+     * entry is built with.
+     */
+    assertRegistration(definition, adding) {
         const { name, mode } = definition;
         // Each subsystem reports its own absence: one combined message would
         // name all three when only one of them is missing.
         if (definition.rateLimit !== undefined && !this.rateLimits.isConfigured) {
             throw new Error(`Lambder: API "${name}" declares rateLimit but no rateLimits option was configured at creation.`);
         }
-        if (definition.guards !== undefined && !this.guards.isConfigured) {
+        if (definition.guards !== undefined && !this.guards.isConfigured && Object.keys(adding?.guards ?? {}).length === 0) {
             throw new Error(`Lambder: API "${name}" declares guards but no guards option was configured at creation.`);
         }
-        this.rateLimits.assertRegistration(name, mode, definition.rateLimit);
-        this.guards.assertRegistration(name, mode, definition.guards);
+        this.rateLimits.assertRegistration(name, mode, definition.rateLimit, adding?.rateLimitPolicies);
+        this.guards.assertRegistration(name, mode, definition.guards, adding?.guards);
         // `idempotency: false` is an explicit opt-out, not a use: it asks for
         // nothing and so needs no store behind it.
         if (usesIdempotency(definition)) {

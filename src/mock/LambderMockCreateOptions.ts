@@ -2,7 +2,7 @@ import type { z } from "zod";
 import type { LambderApiSignatureMap } from "../shared/wire/LambderApiSignatureMap.js";
 import type { LambderApiRefusalConfig } from "../shared/wire/LambderApiContract.js";
 import type { LambderHttpStatusCode } from "../shared/wire/LambderHttpStatus.js";
-import type { MaybePromise } from "../shared/util/LambderTypeUtilities.js";
+import type { LambderMaybePromise } from "../shared/util/LambderTypeUtilities.js";
 
 /*
  * What a mock runtime is configured with, and the shapes of what a mock
@@ -14,7 +14,6 @@ import type { MaybePromise } from "../shared/util/LambderTypeUtilities.js";
  */
 
 import type {
-    LambderContractGuardNames,
     LambderContractIdempotencyOf,
     LambderContractKeysWithMode,
     LambderContractMode,
@@ -36,11 +35,10 @@ import type { LambderSessionCookieOptions } from "../session/LambderSessionContr
 import type { LambderSessionCrypto } from "../session/LambderSessionCrypto.js";
 import type {
     LambderMockCallContext,
-    LambderMockGuards,
+    LambderMockGuardMapChecks,
     LambderMockLatency,
     LambderMockRateLimitPolicies,
     LambderMockSessionCallContext,
-    LambderMockSessionGuardsCheck,
     LambderMockSurplusKeys,
 } from "./LambderMockTypes.js";
 
@@ -173,26 +171,29 @@ type LambderMockGuardRefusalsMismatch<TDeclaration> = {
 };
 
 /** Each mock guard the declarations know held to its declared shape and refusal codes; a guard the table does not have is free. */
-type LambderMockGuardsAgree<G, D> = {
+export type LambderMockGuardsAgree<G, D> = {
     [N in keyof G & keyof D]: (G[N] extends LambderMockGuardShapeOf<D[N]> ? unknown : LambderMockGuardShapeOf<D[N]>) & LambderMockGuardRefusalsAgree<G[N], D[N]>;
 };
 
 /**
- * The guards option: required whenever the contract declares any guard name,
- * omittable only for a contract that declares none.
+ * The guards option: the app's own mock guards, each held to what the
+ * contract asks of a guard of its name (LambderMockGuardMapChecks), to the
+ * generated declarations when they are given, and to the mock contexts.
  *
- * The same reasoning the entry's own guards field carries: a guard the mock
- * does not declare cannot run, so a call the server answers notAuthorized
- * would answer 200 here. Optional, it would be the droppable half of exactly
- * the check it exists for.
+ * It need not name every guard the contract declares, since a part of the
+ * app may declare its own with its entries (defineApiModule); what it may
+ * not do is leave one out that an entry needs. Every entry is held to having
+ * a mock guard for each guard its endpoint declares, in the map it is built
+ * with (LambderMockEntryGuardsCheck), because a guard the mock does not
+ * declare cannot run, and a call the server answers notAuthorized would
+ * answer 200 here.
  */
-type LambderMockGuardsOption<C, S, G, D> =
+type LambderMockGuardsOption<C, S, G, D> = {
     // NoInfer: D is the declarations table given as `guardDeclarations`, and
     // nothing else; inferred from here as well, a missing table would be
     // taken as its constraint and hold every guard to `session: boolean`.
-    [LambderContractGuardNames<C>] extends [never]
-        ? { guards?: G & LambderMockGuards<C, S> & LambderMockGuardShapes<S, G> & LambderMockGuardsAgree<G, NoInfer<D>> & LambderMockSessionGuardsCheck<C, G> }
-        : { guards: G & LambderMockGuards<C, S> & LambderMockGuardShapes<S, G> & LambderMockGuardsAgree<G, NoInfer<D>> & LambderMockSessionGuardsCheck<C, G> };
+    guards?: G & LambderMockGuardMapChecks<C, S, G> & LambderMockGuardShapes<S, G> & LambderMockGuardsAgree<G, NoInfer<D>>;
+};
 
 /**
  * The sessions, idempotency and rateLimits options: each required whenever
@@ -235,7 +236,7 @@ type LambderMockRateLimitsOption<C, S, P extends LambderMockRateLimitPolicies<S>
         };
 
 /** Each guard checked for surplus keys, so `sesion: true` on an inline guard is an error at the key rather than a guard that silently runs as public. */
-type LambderMockGuardShapes<S, G> = {
+export type LambderMockGuardShapes<S, G> = {
     [N in keyof G]: LambderMockSurplusKeys<G[N], LambderApiGuard<any, any, any, LambderMockCallContext<S>, LambderMockSessionCallContext<S>>>;
 };
 
@@ -349,7 +350,7 @@ export type LambderMockAppOptions<
      * data. Return null for the standard 422 `validation` refusal, which is
      * also what an app that sets neither gets.
      */
-    onInvalidInput?: (zodError: z.ZodError, ctx: LambderMockCallContext<S>) => MaybePromise<LambderMockInvalidInputAnswer | null>;
+    onInvalidInput?: (zodError: z.ZodError, ctx: LambderMockCallContext<S>) => LambderMaybePromise<LambderMockInvalidInputAnswer | null>;
 };
 
 /**

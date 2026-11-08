@@ -3,7 +3,20 @@ import Lambder from './core/Lambder.js';
 export default Lambder;
 export { initLambder } from './core/Lambder.js';
 // The created hook's parameter is the instance, so it is declared beside the class.
-export type { LambderCreatedHook } from './core/Lambder.js';
+export type { LambderCreatedHook, LambderInitCreateOptions } from './core/Lambder.js';
+// The declaration builders an instance and a module hand out, each a named
+// type, so an app's declaration files name a builder rather than spelling it,
+// and the context the handler a builder takes is handed.
+export type {
+    LambderDefineApi,
+    LambderDefineApiGroup,
+    LambderDefineLazyApiGroup,
+    LambderApiHandlerContext,
+} from './core/LambderApiBuilders.js';
+// Modules: guards and rate-limit policies a part of an app declares for its own endpoints.
+export { LambderApiModule } from './core/LambderApiModule.js';
+export type { LambderApiModuleOptions, LambderApiModuleOptionChecks, LambderModuleAppTypes } from './core/LambderApiModule.js';
+export type { LambderApiModuleDeclarations } from './api/LambderApiModules.js';
 // Endpoints as values: what defineApi, defineApiGroup, lazyApiGroup and registerApiGroups build and read.
 export type {
     LambderAppTypes,
@@ -16,6 +29,15 @@ export type {
     LambderApiModeOf,
     LambderEntryOf,
     LambderContractOfGroups,
+    LambderRegisteredGroupsCheck,
+    // The checks the builders' signatures intersect onto what they take: an
+    // app's declaration file names them wherever it writes a builder out.
+    LambderActionNamesCheck,
+    LambderGroupNameCheck,
+    LambderGroupPartsCheck,
+    LambderMergedParts,
+    LambderPublicSessionPolicyCheck,
+    LambderSessionModeCheck,
 } from './api/LambderApiDeclarations.js';
 // How an endpoint is named, and where a call to it goes.
 export {
@@ -185,6 +207,17 @@ export type {
     LambderSessionOptions,
     LambderActionTools,
     LambderHandler,
+    // What create() and the builders hold what they take to, which an app's
+    // declaration file names wherever it writes the init's create() or a
+    // builder out.
+    LambderGivenOption,
+    LambderNamedMapsOption,
+    LambderMergedNamedMaps,
+    LambderNestedOptionChecks,
+    LambderObjectOutputCheck,
+    LambderPayloadSliceCheck,
+    LambderRequirableGuardsField,
+    LambderSessionEnabledInstance,
 } from "./core/LambderCreateOptions.js";
 export type { LambderIndexHtmlOptions } from "./core/LambderIndexHtml.js";
 // The handlers and hooks an app writes, so one can be declared apart from its registration
@@ -361,6 +394,7 @@ export type {
     LambderRefusalDeclaration,
     LambderRefusalVocabulary,
     LambderRefusalVocabularyOption,
+    LambderRefusalVocabularyOptionChecks,
     LambderMergedRefusalVocabulary,
     LambderApiAllowedRefusal,
     LambderApiAllowedRefusals,
@@ -389,7 +423,11 @@ export type {
     LambderAllowedPolicyNames,
     LambderPolicyNamesInputLacks,
     LambderRateLimitOption,
+    LambderPolicyPerOf,
 } from "./api/LambderApiRateLimits.js";
+// The type utilities the builders' and create()'s signatures are written
+// with, which an app's declaration file names wherever it writes them out.
+export type { LambderMaybePromise, LambderNoExtraKeys } from "./shared/util/LambderTypeUtilities.js";
 
 // Declarative per-API policies: idempotency
 export type { LambderApiIdempotencyConfig } from "./api/LambderApiIdempotency.js";

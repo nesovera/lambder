@@ -32,7 +32,9 @@ marks the two names it exports that the root entry does not.
 | `createContext` | | Build a render context from a raw Lambda event, given `{ apiPath?, trustedClientIpHeaders?, trustedHostHeaders?, originProof? }` (`LambderContextOptions`, optional; `apiPath` defaults to `"/api"` as at `create()`) |
 | `isV2HttpEvent` | | Whether an event uses payload format v2 |
 
-Types: `LambderCreateOptions`, `LambderHandler`, `LambderRenderContext`, `LambderContextOptions`,
+Types: `LambderCreateOptions`, `LambderInitCreateOptions` (what the init's
+`create()` takes: the options less the vocabulary `declareRefusals()`
+supplies), `LambderHandler`, `LambderRenderContext`, `LambderContextOptions`,
 `LambderSessionRenderContext`, `LambderRenderContextOf` and
 `LambderSessionRenderContextOf` (one instance's context, read off
 `typeof lambderApp`, for a helper typed apart from its handlers),
@@ -77,6 +79,16 @@ Types: `LambderHttpResponse`, `LambderRawResponseInit`,
 `LambderCookieDomain`, `LambderResponseCompressionOption`,
 `LambderResponseCompressionSettings`.
 
+Types an app's declaration file names wherever it writes the init or the
+instance out (an exported init, a factory returning an instance):
+`LambderNamedMapsOption` (one map or a list of maps), `LambderMergedNamedMaps`
+(the one map a list declares), `LambderGivenOption` (what an options literal
+gave for one key) and `LambderNestedOptionChecks` (the checks one level
+down); and the types written into create()'s and the methods' parameters,
+`LambderNoExtraKeys` (the surplus-key rule) and
+`LambderSessionEnabledInstance` (what a session route needs of its
+instance), and into a handler's return, `LambderMaybePromise`.
+
 See [Responses](./responses.md).
 
 ## Endpoints: declarations, groups and names
@@ -97,6 +109,14 @@ below are the names, paths and types they use.
 | `LAMBDER_CALLER_MEMBER_NAMES` | | Every public member of LambderCaller, LambderInvokeCaller and the test visitor, which no group may shadow (their state is `#private`, which no group can reach) |
 | `LAMBDER_RESERVED_GROUP_NAMES`, `LAMBDER_RESERVED_ACTION_NAMES` | yes | The names no group and no action may take |
 
+An instance's `defineApiModule({ guards, rateLimitPolicies })` defines a
+module: guards and rate-limit policies a part of the app declares for its own
+endpoints, and the builders that declare them.
+
+| Export | Client | Description |
+| --- | --- | --- |
+| `LambderApiModule` | | What `defineApiModule()` returns: `defineApi`, `defineApiGroup` and `lazyApiGroup` typed on the instance's types with the module's guards and policies beside its own, and `AppTypes` for `LambderRenderContextOf`. Registering the groups they build adds the module's guards and policies to the instance |
+
 Types: `LambderAppTypes` (what `create()` configured, the instance's one
 type parameter), `LambderPlainAppTypes`, `LambderApiDeclaration`,
 `LambderApiDeclarations`, `LambderApiGroup`, `LambderLazyApiGroup`,
@@ -105,6 +125,36 @@ its guards), `LambderEntryOf`, `LambderContractOfGroups`,
 `LambderReservedGroupName`, `LambderReservedActionName`, and the readers of a
 contract's groups `LambderContractGroupsOf`, `LambderContractNamesInGroup`,
 `LambderContractActionOf`.
+
+The builders as named types, so an app's declaration file names a builder,
+handed out destructured or under the instance's or a module's name, rather
+than writing its signature out: `LambderDefineApi`, `LambderDefineApiGroup`
+and `LambderDefineLazyApiGroup`, with `LambderApiHandlerContext` (what an
+endpoint's handler is handed); the checks their signatures intersect onto
+what they take, `LambderObjectOutputCheck`,
+`LambderPayloadSliceCheck`, `LambderRequirableGuardsField`,
+`LambderPublicSessionPolicyCheck`, `LambderSessionModeCheck`,
+`LambderGroupNameCheck`, `LambderGroupPartsCheck`, `LambderActionNamesCheck`,
+`LambderMergedParts` (a group's endpoints from its parts) and
+`LambderRegisteredGroupsCheck` (what `registerApiGroups()` asks of its
+receiver). For modules, `LambderApiModuleOptions` (what `defineApiModule()`
+takes), `LambderApiModuleOptionChecks`, `LambderModuleAppTypes` (the types a
+module's builders are typed on, what an app writes to annotate a module) and
+`LambderApiModuleDeclarations` (what a module's endpoints and lazy groups
+carry for registration to add, and the module's constructor takes).
+
+A test (`tests/package/declaration-emit.test.ts`) emits the declarations of a
+sample app against the built package, as an installed dependency, and fails
+on any diagnostic. Its server: an exported init with and without a
+vocabulary, create() in a factory, the builders destructured and under the
+instance's name, groups and lazy groups, a module with its builders and its
+written type, a list of parts, the entry with hooks and routes, a test app
+and an invoke caller. Its mock: the vocabulary declared, the generated tables
+given to create() (entries as handlers), `notMocked`, a mock module and
+`register()`. The other types above are written directly into a builder's,
+a method's or a constructor's parameters or return, or were seen missing on
+an app's own declarations, and are exported for the shapes the sample does
+not reach.
 
 See [APIs and refusals](./apis.md).
 
@@ -222,7 +272,8 @@ fields an input does not carry), `LambderParamlessGuardNames`, `LambderGuardData
 declared refusals, `LambderRefusalDeclaration` (one code of the vocabulary) and
 `LambderRefusalVocabulary` (all of them in one map),
 `LambderRefusalVocabularyOption` (one map or a list of maps, as
-declareRefusals() takes them), `LambderMergedRefusalVocabulary` (the one map a
+declareRefusals() takes them) and `LambderRefusalVocabularyOptionChecks` (what
+declareRefusals() holds them to), `LambderMergedRefusalVocabulary` (the one map a
 list declares),
 `LambderRefusalsOption` and `LambderRefusalsOptionValue` (an API's `refusals`
 option, typed and at runtime), `LambderRefusalNamesIn` (the codes a refusals
@@ -231,7 +282,8 @@ option names), `LambderHandlerRefusalsOf` (the codes as
 contract records them);
 rate limits, `LambderApiRateLimitsConfig`, `LambderApiRateLimitPolicyConfig`,
 `LambderRateLimitKeyFn`, `LambderRateLimitKeyBuilder`, `LambderRateLimitPer`,
-`LambderRateLimitBudget`, `LambderRateLimitChargeAt`,
+`LambderRateLimitBudget`, `LambderRateLimitChargeAt`, `LambderPolicyPerOf`
+(a policy's `per` as its type declares it),
 `LambderRateLimitOption`, `LambderRateLimitOptionValue`,
 `LambderRateLimitOverride`, `LambderRateLimitMessage` (a rate-limit refusal's
 words, under the framework's code), `LambderAllowedPolicyNames`,
@@ -490,6 +542,7 @@ See [Translations](./i18n.md).
 | --- | --- |
 | `initLambderMock` | Fix the contract and session types, then `guard`, `rateLimitKey`, `refuse` and `create(options)`; `declareRefusals(vocabulary, options?)` first binds the server's refusal vocabulary, the same map or list of maps the server's init declares, so every handler's `ctx.refuse` takes a code's data in its input form and the mock parses it as the server does |
 | `LambderMockApp` | The runtime: registry, transports, sessions, failure injection, subscription, call log |
+| `LambderMockApiModule` | What a mock app's `defineApiModule({ guards })` returns: `api`, `notMocked`, `apiSlice` and `override` with the module's mock guards beside the app's; registering its entries adds the guards to the app |
 | `lambderMockPoliciesFrom` | The server's rate-limit policies as the mock restates them, from the generated `rateLimitPolicies` table plus the key handlers the table cannot hold, required for exactly the custom-keyed policies |
 | `lambderMockConsoleLogger` | A ready-made subscriber |
 | `lambderMockMswHandler` | One MSW handler for the whole API path, over the runtime |
@@ -503,9 +556,15 @@ Types: `LambderMockAppOptions`, `LambderMockSessionsOptions`,
 `LambderMockIdempotencyOptions`, `LambderMockInvalidInputAnswer`, `LambderMockOverride`, `LambderMockTransport`,
 `LambderMockTransportOptions`, `LambderMockCallContext`,
 `LambderMockSessionCallContext`, `LambderMockContext`, `LambderMockRefusalsOf` (the codes a mock handler may
-raise for an endpoint, data in the vocabulary's input form or the contract's wire form), `LambderMockGuards`,
-`LambderMockSessionGuardsCheck` (every session endpoint names a mock guard
-declared `session: true`), `LambderMockHandler`, `LambderMockEntry`, `LambderMockEntryOptions`,
+raise for an endpoint, data in the vocabulary's input form or the contract's wire form), `LambderMockGuards`
+(what the contract asks of a mock guard of each name it declares),
+`LambderMockEntryGuardsCheck` (an entry's endpoint has a mock guard for each
+guard it declares, and a session endpoint one declared `session: true`, in the
+map the entry is built with), `LambderMockNotMockedGuardsCheck` (the session
+half, for `notMocked`), `LambderMockApiModuleOptions` and
+`LambderMockApiModuleChecks` (what a mock app's `defineApiModule()` takes, and
+holds it to), `LambderMockApiModuleDoor` (what a mock module's constructor
+takes from its app), `LambderMockHandler`, `LambderMockEntry`, `LambderMockEntryOptions`,
 `LambderMockEntryInput`, `LambderMockNotMockedInput` (what `notMocked` takes:
 the reason, and a session endpoint's guards without the `apiOptions` table),
 `LambderMockSlice`, `LambderMockRestEntry`,
@@ -531,6 +590,7 @@ options, `LambderMockInvokeTransportOptions`; and
 
 The entry also re-exports the types a mock setup names around those values:
 `LambderApiTransport`, `LambderApiTransportRequest`, `LambderSessionCrypto`,
+`LambderRefusalVocabularyOption`, `LambderRefusalVocabularyOptionChecks`,
 `LambderRefusalMessage`, `LambderDeclaredRefuse`, `LambderDeclaredRefuseOptions`, `LambderApiRequest`, `LambderApiAnswer`,
 `LambderSessionRecord`, and the return types of the two session members it
 hands out, `LambderCreatedSession` and `LambderSessionManager`; and

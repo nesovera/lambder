@@ -31,16 +31,14 @@ import type { LambderFileSource } from "../shared/contracts/LambderFileSource.js
 import { LAMBDER_BACKEND_SWAP, LAMBDER_CRASH_WATCH } from "../shared/util/LambderTestingDoors.js";
 import type { LambderApiDefinition } from "../api/LambderApiDefinition.js";
 import {
+    assertRefusalCodesDeclared,
     declaredRefusalVocabulary,
     readRefusalVocabulary,
     resolveAllowedRefusals,
     toRefusalCodes,
     type LambderEndpointRefusals,
-    type LambderWireRefusalsOf,
     type LambderHandlerRefusalsOf,
     type LambderRefusalDeclaration,
-    type LambderRefusalNamesIn,
-    type LambderRefusalsOption,
     type LambderRefusalVocabulary,
     type LambderRefusalVocabularyOption,
     type LambderRefusalVocabularyOptionChecks,
@@ -53,10 +51,7 @@ import { apiNameKeyOf, type LambderApiSignatureMap } from "../shared/wire/Lambde
 import type { LambderApiOptionEntries, LambderApiOptionEntry, LambderGuardDeclarationEntry, LambderRateLimitPolicyEntry } from "../shared/wire/LambderApiOptionEntries.js";
 import { assertPlainData } from "../shared/util/assertPlainData.js";
 import type { LambderApiMode } from "../shared/wire/LambderApiContract.js";
-import type {
-    LambderApiIdempotencyOption,
-    LambderRefusalsOptionValue,
-} from "../shared/wire/LambderApiOptionValues.js";
+import type { LambderRefusalsOptionValue } from "../shared/wire/LambderApiOptionValues.js";
 import type { LambderApiAnswer } from "../api/LambderApiAnswer.js";
 import {
     apiNotFoundAnswer,
@@ -67,43 +62,35 @@ import {
 } from "../api/LambderApiEnvelope.js";
 import { describePayloadKind, isObjectPayload } from "../shared/wire/LambderObjectPayload.js";
 import { LambderApiOutputValidationError } from "../api/LambderApiOutputValidationError.js";
-import type {
-    LambderApiGuard,
-    LambderGuardMetaMap,
-    LambderGuardsOption,
-    LambderGuardDataOf,
-    LambderGuardInputsOf,
-    LambderGuardRefusalNamesOf,
-} from "../api/LambderApiGuards.js";
+import type { LambderApiGuard, LambderGuardMetaMap } from "../api/LambderApiGuards.js";
 import { toGuardEntries } from "../api/LambderApiGuards.js";
-import type {
-    LambderApiRateLimitPolicyConfig,
-    LambderRateLimitOption,
-} from "../api/LambderApiRateLimits.js";
+import type { LambderApiRateLimitPolicyConfig } from "../api/LambderApiRateLimits.js";
 import type { LambderApiIdempotencyConfig } from "../api/LambderApiIdempotency.js";
-import type { LambderContractEntry, LambderJsonOf } from "../shared/wire/LambderApiContract.js";
+import { apiModuleDeclarationsOf, type LambderPendingDeclarations } from "../api/LambderApiModules.js";
 import {
-    buildApiGroup,
-    buildLazyApiGroup,
+    apiModuleUsesOf,
     isRegistrableApiGroup,
-    type LambderActionNamesCheck,
-    type LambderApiDeclaration,
     type LambderApiDeclarationOptions,
-    type LambderApiDeclarations,
     type LambderApiGroup,
-    type LambderApiModeOf,
     type LambderAppTypes,
     type LambderContractOfGroups,
-    type LambderGroupNameCheck,
-    type LambderGroupPartsCheck,
-    type LambderMergedParts,
     type LambderLazyApiGroup,
     type LambderPlainAppTypes,
-    type LambderPublicSessionPolicyCheck,
     type LambderRegisteredGroupsCheck,
     type LambderRegistrableApiGroup,
-    type LambderSessionModeCheck,
 } from "../api/LambderApiDeclarations.js";
+import {
+    apiBuildersFor,
+    type LambderDefineApi,
+    type LambderDefineApiGroup,
+    type LambderDefineLazyApiGroup,
+} from "./LambderApiBuilders.js";
+import {
+    LambderApiModule,
+    type LambderApiModuleOptionChecks,
+    type LambderApiModuleOptions,
+    type LambderModuleAppTypes,
+} from "./LambderApiModule.js";
 import { splitApiName } from "../shared/wire/LambderApiNames.js";
 import {
     bindContextTools,
@@ -117,7 +104,7 @@ import {
     type LambderSessionRenderContext,
 } from "./LambderContext.js";
 import { COMPRESSED_PAYLOAD_GZ_FIELD, COMPRESSED_PAYLOAD_BR_FIELD, COMPRESSED_PAYLOAD_BYTES_FIELD } from "../shared/wire/LambderRequestPayload.js";
-import type { LambderReadonlyDeep, MaybePromise } from "../shared/util/LambderTypeUtilities.js";
+import type { LambderMaybePromise } from "../shared/util/LambderTypeUtilities.js";
 import { coerceToError } from "../shared/wire/LambderCrashDetail.js";
 import { LambderCrashHandling } from "./LambderCrashHandling.js";
 import { currentInvocation, runInvocation, type LambderInvocationRecord } from "./LambderInvocationScope.js";
@@ -147,9 +134,6 @@ import {
     type LambderHandler,
     type LambderNestedOptionChecks,
     type LambderNoExtraKeys,
-    type LambderObjectOutputCheck,
-    type LambderPayloadSliceCheck,
-    type LambderRequirableGuardsField,
     type LambderSessionEnabledInstance,
     type LambderSessionRouteHandler,
     type LambderActionHandler,
@@ -173,33 +157,20 @@ export type LambderInstanceBackendSwap = LambderPipelineBackendSwap & { files: b
  */
 export type LambderCreatedHook = (lambderInstance: Lambder<any, any>) => void | Promise<void>;
 
-/** The codes one API may refuse with, typed: its own refusals option's and its declared guards', as the vocabulary holds them. */
-type LambderApiRefusalCodes<TVocabulary, TGuards, TRefusalsOpt, TGuardsOpt> =
-    (LambderRefusalNamesIn<TRefusalsOpt> | LambderGuardRefusalNamesOf<TGuards, TGuardsOpt>) & keyof TVocabulary & string;
-
-/**
- * What an endpoint's handler is handed: the session context when one of its
- * guards needs a session (so ctx.session is typed present), the plain one
- * otherwise, with the payload, the guards' data and a refuse() typed to the
- * codes the endpoint may refuse with.
- */
-type LambderApiHandlerContext<TApp extends LambderAppTypes, TPayload, TGuardsOpt, TRefusalsOpt> =
-    (LambderApiModeOf<TApp["guards"], TGuardsOpt> extends "session"
-        ? LambderSessionRenderContext<TPayload, TApp["session"], Record<string, string>, LambderGuardDataOf<TApp["guards"], TGuardsOpt>, TApp["policies"]>
-        : LambderRenderContext<TPayload, Record<string, string>, LambderGuardDataOf<TApp["guards"], TGuardsOpt>, TApp["session"], TApp["policies"]>)
-    & { refuse: LambderDeclaredRefuse<LambderHandlerRefusalsOf<TApp["refusals"], LambderApiRefusalCodes<TApp["refusals"], TApp["guards"], TRefusalsOpt, TGuardsOpt>>, TApp["refusalCodesRequired"]> };
-
 /** One endpoint checked for registration, and not yet recorded (see Lambder.prepareApi and commitApi). */
 type LambderPreparedApi = {
     definition: LambderApiDefinition;
     refusalsOption: LambderRefusalsOptionValue | undefined;
     output: z.ZodType;
     compress: boolean | "auto";
-    handler: (ctx: never) => MaybePromise<unknown>;
+    handler: (ctx: never) => LambderMaybePromise<unknown>;
 };
 
 /** The refusals of a name no API is registered under: no code, and none required. */
 const NO_DECLARED_REFUSALS: LambderEndpointRefusals = { codes: new Map(), codeRequired: false };
+
+/** The instance's own declaration builders: no module, and nothing of any instance, so every instance hands out the same three functions, each typed on its own app types. */
+const INSTANCE_BUILDERS = apiBuildersFor<any>(null);
 
 /** Longest endpoint name a call summary carries: a page built before paths posts the name in its body, and a line is no place for a long one. */
 const MAX_SUMMARY_NAME_CHARS = 200;
@@ -235,7 +206,7 @@ const outcomeOfStatus = (status: number): LambderCallOutcomeHint =>
 // names the route by (null for the API's own action, whose calls are named
 // by their endpoint, and for a route with no name), and the non-HTTP twin.
 type ActionObject = { match: CompiledMatcher, name: string | null, actionFn: LambderRouteHandler };
-type EventActionObject = { match: (event: unknown) => boolean, actionFn: (event: unknown, lambdaContext: Context) => MaybePromise<unknown> };
+type EventActionObject = { match: (event: unknown) => boolean, actionFn: (event: unknown, lambdaContext: Context) => LambderMaybePromise<unknown> };
 
 /**
  * Main Lambder class for building type-safe serverless APIs. Create
@@ -309,15 +280,20 @@ export default class Lambder<
     /** Every registered API by name: what dispatch, apiSignatures() and apiOptionEntries() read. */
     private readonly apiDefinitions = new Map<string, LambderApiDefinition>();
     /** What answers each registered API: its output schema, compression setting and handler. */
-    private readonly apiHandlers = new Map<string, { output: z.ZodType; compress: boolean | "auto"; handler: (ctx: never) => MaybePromise<unknown> }>();
+    private readonly apiHandlers = new Map<string, { output: z.ZodType; compress: boolean | "auto"; handler: (ctx: never) => LambderMaybePromise<unknown> }>();
     /** Every group name registered, lazy or not: the duplicate-group check. */
     private readonly apiGroupNames = new Set<string>();
     /** The lazy groups not loaded yet, each with its load in progress, if one is. */
     private readonly lazyApiGroups = new Map<string, { group: LambderLazyApiGroup; loading: Promise<void> | null }>();
-    /** The guards given at creation, merged into one map, kept for apiSignatures(): a guard's schema is part of the signature of every endpoint declaring it. */
-    private readonly guards: LambderGuardsMap<TApp["session"]> | undefined;
-    /** The rate-limit policies given at creation, kept for apiOptionEntries(), which records each one less its key handler. */
-    private readonly rateLimitPolicies: Record<string, LambderApiRateLimitPolicyConfig> | undefined;
+    /**
+     * The guards given at creation merged into one map, and every registered
+     * module's beside them, kept for registration (a guard's session and
+     * refusal codes), apiSignatures() (a guard's schema is part of the
+     * signature of every endpoint declaring it) and apiOptionEntries().
+     */
+    private guards: LambderGuardsMap<TApp["session"]>;
+    /** The rate-limit policies given at creation, and every registered module's beside them, kept for apiOptionEntries(), which records each one less its key handler. */
+    private rateLimitPolicies: Record<string, LambderApiRateLimitPolicyConfig>;
     /** The refusal vocabulary given at creation: what each API's and each guard's refusal codes resolve against. Null without the option. */
     private readonly refusalVocabulary: ReadonlyMap<string, LambderRefusalDeclaration> | null;
     /** Every API's refusals option as written, for apiOptionEntries(); its definition holds the resolved set. */
@@ -363,7 +339,10 @@ export default class Lambder<
         const options: LambderMergedCreateOptions<TApp["session"]> = {
             ...given,
             guards: given.guards && mergeNamedMaps(given.guards, "guard"),
-            rateLimits: given.rateLimits && { ...given.rateLimits, policies: mergeNamedMaps(given.rateLimits.policies, "rate-limit policy") },
+            rateLimits: given.rateLimits && {
+                ...given.rateLimits,
+                policies: given.rateLimits.policies === undefined ? undefined : mergeNamedMaps(given.rateLimits.policies, "rate-limit policy"),
+            },
         };
         assertCreateOptions(options);
         this.files = options.files ? new LambderFiles(options.files) : null;
@@ -384,8 +363,8 @@ export default class Lambder<
         }
 
         const session = options.session;
-        this.guards = options.guards;
-        this.rateLimitPolicies = options.rateLimits?.policies;
+        this.guards = { ...options.guards };
+        this.rateLimitPolicies = { ...options.rateLimits?.policies };
         this.refusalVocabulary = readRefusalVocabulary(options.refusals);
         this.pipeline = new LambderApiPipeline<LambderRenderContext, TApp["session"]>({
             apiVersion: this.apiVersion,
@@ -515,10 +494,10 @@ export default class Lambder<
 
     addRoute<TPath extends LambderRoutePath>(
         condition: TPath,
-        actionFn: (ctx: LambderRenderContext<any, LambderPathParamsOf<TPath>, {}, TApp["session"], TApp["policies"]>, resolver: LambderResolver) => MaybePromise<LambderResponse>,
+        actionFn: (ctx: LambderRenderContext<any, LambderPathParamsOf<TPath>, {}, TApp["session"], TApp["policies"]>, resolver: LambderResolver) => LambderMaybePromise<LambderResponse>,
     ): this;
     addRoute(condition: RegExp | LambderRouteConditionFn | LambderRouteMatcher, actionFn: LambderRouteHandler): this;
-    addRoute(condition: LambderRouteCondition, actionFn: (ctx: any, resolver: LambderResolver) => MaybePromise<LambderResponse>): this {
+    addRoute(condition: LambderRouteCondition, actionFn: (ctx: any, resolver: LambderResolver) => LambderMaybePromise<LambderResponse>): this {
         this.actionList.push({
             match: compileRouteMatcher(condition),
             name: routeNameOf(condition),
@@ -529,10 +508,10 @@ export default class Lambder<
 
     addSessionRoute<TPath extends LambderRoutePath>(
         condition: TPath,
-        actionFn: ((ctx: LambderSessionRenderContext<any, TApp["session"], LambderPathParamsOf<TPath>, {}, TApp["policies"]>, resolver: LambderResolver) => MaybePromise<LambderResponse>) & LambderSessionEnabledInstance<TApp["sessions"]>,
+        actionFn: ((ctx: LambderSessionRenderContext<any, TApp["session"], LambderPathParamsOf<TPath>, {}, TApp["policies"]>, resolver: LambderResolver) => LambderMaybePromise<LambderResponse>) & LambderSessionEnabledInstance<TApp["sessions"]>,
     ): this;
     addSessionRoute(condition: RegExp | LambderRouteConditionFn | LambderRouteMatcher, actionFn: LambderSessionRouteHandler<TApp["session"]> & LambderSessionEnabledInstance<TApp["sessions"]>): this;
-    addSessionRoute(condition: LambderRouteCondition, actionFn: (ctx: any, resolver: LambderResolver) => MaybePromise<LambderResponse>): this {
+    addSessionRoute(condition: LambderRouteCondition, actionFn: (ctx: any, resolver: LambderResolver) => LambderMaybePromise<LambderResponse>): this {
         this.actionList.push({
             match: compileRouteMatcher(condition),
             name: routeNameOf(condition),
@@ -551,99 +530,61 @@ export default class Lambder<
     // Declared as values, gathered into named groups, registered in one call.
     // =====================================================================
     /**
-     * Declares one endpoint, typed on this instance's types: its input and
-     * output schemas, its guards, rate limits, idempotency and refusals, and
-     * its handler. Nothing is registered until the declaration is put in a
-     * group (defineApiGroup) and the group is registered (registerApiGroups).
+     * Declares one endpoint, typed on this instance's types (see
+     * LambderDefineApi). Nothing is registered until the declaration is put
+     * in a group (defineApiGroup) and the group is registered
+     * (registerApiGroups).
      *
-     * The guards say who may call it, and so its mode: an endpoint whose
-     * guards include one that needs a session (`session: true`) is a session
-     * endpoint, its session read before the guards run and a call without
-     * one answered sessionExpired, and its handler's ctx.session is typed
-     * present. Any other endpoint is public.
-     *
-     * An arrow property rather than a method, so an app can hand it out
-     * detached: `export const { defineApi, defineApiGroup } = lambderApp;`.
+     * An arrow property rather than a method, as are the two below, so an
+     * app can hand them out detached; handed out under the instance's name
+     * (`export const defineApi: AppLambder["defineApi"] = lambderApp.defineApi`),
+     * a declaration file names each by the instance's type rather than
+     * writing the app's types out again in each.
      */
-    public readonly defineApi = <
-        TInput extends z.ZodType,
-        TOutput extends z.ZodType,
-        const TAnswer extends LambderReadonlyDeep<z.input<TOutput>>,
-        const TRateOpt extends LambderRateLimitOption<TApp["policies"]> = never,
-        const TGuardsOpt extends LambderGuardsOption<TApp["guards"]> = never,
-        const TIdempotencyOpt extends LambderApiIdempotencyOption = never,
-        const TRefusalsOpt extends LambderRefusalsOption<TApp["refusals"]> = never,
-    >(
-        options: { input: TInput, output: TOutput } & {
-            /** Named rate limits, checked in declared order within their phase (per ip before the session read, per session before the guards, a custom key after the guards and input validation): a name, a list of names, or a { name: true | override } map (windows overridable on perApi budgets, refusal on any). The first exceeded one refuses (429 envelope + Retry-After); attempts count on every counter checked before it. A per-session policy needs one of the endpoint's guards to need a session. */
-            rateLimit?: TRateOpt;
-            /** Replay-protect this API per client idempotencyKey. Requires the idempotency option at creation. */
-            idempotency?: TApp["idempotency"] extends true ? TIdempotencyOpt : never;
-            /**
-             * The refusal codes this API may refuse with, from the vocabulary given at creation: one code or a
-             * non-empty list. Its guards' codes join them. The handler raises one with `ctx.refuse(content, { code, data })`,
-             * its callers narrow on them, and a refusal with any other code is a crash rather than an answer.
-             */
-            refusals?: TRefusalsOpt;
-            /**
-             * Whether this API's answers are compressed for a caller that accepts it: "auto" (the default) when the
-             * body is large enough to gain, false never, true always. false suits an answer of base64 bytes: once
-             * compressed it leaves the function base64-encoded again, so it is no smaller under Lambda's response
-             * cap or to a lambda caller, and a browser gets it only about a quarter smaller for the time spent at
-             * both ends. A transport setting of this server's, not part of the API's contract.
-             */
-            compress?: boolean | "auto";
-        } & LambderRequirableGuardsField<TApp["guardsRequired"], TGuardsOpt> & LambderObjectOutputCheck<TOutput>
-            & LambderPayloadSliceCheck<TApp["guards"], TApp["policies"], TGuardsOpt, TRateOpt, z.input<TInput>>
-            & LambderPublicSessionPolicyCheck<LambderApiModeOf<TApp["guards"], TGuardsOpt>, TApp["policies"], TRateOpt>
-            & LambderSessionModeCheck<LambderApiModeOf<TApp["guards"], TGuardsOpt>, TApp["sessions"]>,
-        /** Answers the call by returning its output (parsed through `output` before it is sent), or refuses it with ctx.refuse() or refuse(). */
-        handler: (ctx: LambderApiHandlerContext<TApp, z.infer<TInput>, TGuardsOpt, TRefusalsOpt>) => MaybePromise<TAnswer>,
-    ): LambderApiDeclaration<LambderContractEntry<
-        z.input<TInput>,
-        LambderJsonOf<z.output<TOutput>>,
-        LambderApiModeOf<TApp["guards"], TGuardsOpt>,
-        LambderGuardInputsOf<TApp["guards"], TGuardsOpt>,
-        TGuardsOpt,
-        TRateOpt,
-        TIdempotencyOpt,
-        LambderWireRefusalsOf<TApp["refusals"], LambderApiRefusalCodes<TApp["refusals"], TApp["guards"], TRefusalsOpt, TGuardsOpt>>>> =>
-        ({ kind: "lambderApi", options: options as LambderApiDeclarationOptions, handler: handler as never }) as never;
+    public readonly defineApi: LambderDefineApi<TApp> = INSTANCE_BUILDERS.defineApi;
+
+    /** Gathers endpoints into a named group (see LambderDefineApiGroup). */
+    public readonly defineApiGroup: LambderDefineApiGroup = INSTANCE_BUILDERS.defineApiGroup;
+
+    /** A group loaded on the first call to one of its endpoints (see LambderDefineLazyApiGroup). */
+    public readonly lazyApiGroup: LambderDefineLazyApiGroup = INSTANCE_BUILDERS.lazyApiGroup;
 
     /**
-     * Gathers endpoints into a named group: each is registered as
-     * `name.action` and called at `{apiPath}/{name}/{action}`, and every
-     * Lambder caller reaches it as `caller.name.action(input)`. A group's
-     * name and its actions are identifiers, and a group may not take a name
-     * a caller already answers for (see LAMBDER_RESERVED_GROUP_NAMES).
+     * Defines a module: guards and rate-limit policies a part of the app
+     * declares for its own endpoints, beside the ones this instance was
+     * created with. Returns the module's builders, whose endpoints may name
+     * the instance's guards and policies and the module's own, and nothing
+     * else; their groups are registered with registerApiGroups() as any
+     * are, and their registration adds the module's guards and policies to
+     * the instance that registers them.
      *
-     * A group declared across files takes each file's part:
-     * `defineApiGroup("orders", orderReadApis, orderWriteApis)`. An action
-     * two parts declare is refused, at compile time and at startup, rather
-     * than one silently replacing the other as an object spread would.
+     * ```typescript
+     * export const giftCardModule = storeApp.defineApiModule({
+     *     guards: { cardHolder },
+     *     rateLimitPolicies: { redeemPerCard: { perHour: 5, per: "session" } },
+     * });
+     * ```
+     *
+     * A name the instance declares is refused here, at compile time and at
+     * the call; a name two modules declare is refused when the second is
+     * registered, as create() refuses a name two maps declare. A module's
+     * rate-limit policies count on the instance's limiter, so they need the
+     * rateLimits option at creation, whose own policies may then be left out.
      */
-    public readonly defineApiGroup = <const TName extends string, const TParts extends readonly [LambderApiDeclarations, ...LambderApiDeclarations[]]>(
-        name: TName & LambderGroupNameCheck<TName>,
-        ...parts: TParts & LambderGroupPartsCheck<TParts> & { [TIndex in keyof TParts]: LambderActionNamesCheck<TParts[TIndex]> }
-    ): LambderApiGroup<TName, LambderMergedParts<TParts>> => buildApiGroup<TName, LambderMergedParts<TParts>>(name as TName, parts as readonly LambderApiDeclarations[]);
-
-    /**
-     * A group loaded on the first call to one of its endpoints:
-     * `lazyApiGroup("orders", () => import("./orders.js").then((m) => m.orderApis))`.
-     * A cold start then parses none of it, nor anything only it imports,
-     * until a request calls it; the contract is the loaded group's, read off
-     * its type. The group loaded must carry the same name, which the type
-     * checks and loading checks again. `loadApiGroups()` loads every group,
-     * for a build step or a boot check that has to see them all.
-     */
-    public readonly lazyApiGroup = <const TName extends string, TGroup extends LambderApiGroup<TName, any>>(
-        name: TName & LambderGroupNameCheck<TName>,
-        load: () => Promise<TGroup>,
-        // NoInfer: the group is read off the loader alone. Written where a
-        // type is expected (a `satisfies`, an annotated list), the expected
-        // LambderLazyApiGroup<string, any> would otherwise be inferred from
-        // first and make the loaded group any.
-    ): LambderLazyApiGroup<TName, NoInfer<TGroup>> => buildLazyApiGroup<TName, TGroup>(name as TName, load);
+    public defineApiModule<const TOptions extends LambderApiModuleOptions<TApp["session"]>>(
+        options: LambderNoExtraKeys<TOptions, LambderApiModuleOptions<TApp["session"]>> & LambderApiModuleOptionChecks<TApp, TOptions>,
+    ): LambderApiModule<LambderModuleAppTypes<TApp, LambderGivenOption<TOptions, "guards">, LambderGivenOption<TOptions, "rateLimitPolicies">>> {
+        const given = options as LambderApiModuleOptions<TApp["session"]>;
+        const declarations = apiModuleDeclarationsOf(given, "Lambder");
+        for(const [name, guard] of Object.entries(declarations.guards)){
+            assertRefusalCodesDeclared(`guard "${name}"`, (guard?.refusals ?? []) as readonly string[], this.refusalVocabulary);
+        }
+        // Checked against this instance now, so a name it declares fails
+        // where the module is defined; registration checks again against
+        // whichever instance takes the module, and against the other modules.
+        this.pipeline.modulesToAdd([{ module: declarations, usedBy: "being defined" }]);
+        return new LambderApiModule(declarations);
+    }
 
     /**
      * Registers groups of endpoints, as one contract: `typeof
@@ -681,7 +622,6 @@ export default class Lambder<
         // caller that catches the error and fixes the declaration is told the
         // real problem on its next try.
         const names = new Set<string>();
-        const prepared: LambderPreparedApi[] = [];
         for(const group of groups as readonly unknown[]){
             if(!isRegistrableApiGroup(group)){
                 throw new Error("Lambder: registerApiGroups takes groups built by defineApiGroup() or lazyApiGroup().");
@@ -690,9 +630,20 @@ export default class Lambder<
                 throw new Error(`Lambder: group "${group.name}" is registered twice. A group is one namespace, so its endpoints belong in one defineApiGroup().`);
             }
             names.add(group.name);
-            if(group.kind === "lambderApiGroup") prepared.push(...instance.prepareApiGroup(group));
         }
-        for(const group of groups as readonly LambderRegistrableApiGroup[]){
+        // The modules the groups bring, a lazy group's at once: checked
+        // against the instance and each other here, taken only after every
+        // endpoint passed against them.
+        const registrable = groups as readonly LambderRegistrableApiGroup[];
+        const added = instance.pipeline.modulesToAdd(registrable.flatMap(apiModuleUsesOf));
+        const prepared: LambderPreparedApi[] = [];
+        for(const group of registrable){
+            if(group.kind === "lambderApiGroup") prepared.push(...instance.prepareApiGroup(group, added));
+        }
+        instance.pipeline.addModules(added);
+        instance.guards = { ...instance.guards, ...added.guards };
+        instance.rateLimitPolicies = { ...instance.rateLimitPolicies, ...added.rateLimitPolicies };
+        for(const group of registrable){
             instance.apiGroupNames.add(group.name);
             if(group.kind === "lambderLazyApiGroup") instance.lazyApiGroups.set(group.name, { group, loading: null });
         }
@@ -746,10 +697,15 @@ export default class Lambder<
         return this.apiDefinitions.get(apiName);
     }
 
-    /** The endpoints of one group, each checked as `group.action`; nothing is registered until they are committed. */
-    private prepareApiGroup(group: LambderApiGroup): LambderPreparedApi[] {
+    /**
+     * The endpoints of one group, each checked as `group.action` against the
+     * instance's guards and policies and those `adding` holds, of the modules
+     * the same registration adds; nothing is registered until they are
+     * committed.
+     */
+    private prepareApiGroup(group: LambderApiGroup, adding?: LambderPendingDeclarations): LambderPreparedApi[] {
         return Object.entries(group.apis).map(([action, declaration]) =>
-            this.prepareApi(`${group.name}.${action}`, declaration.options, declaration.handler));
+            this.prepareApi(`${group.name}.${action}`, declaration.options, declaration.handler, adding));
     }
 
     /**
@@ -770,6 +726,18 @@ export default class Lambder<
                 if(loaded.name !== name){
                     throw new Error(`Lambder: lazy group "${name}" loaded the group "${loaded.name}". The loader must resolve to the group of the name it was registered under.`);
                 }
+                // A module's guards and policies are added when its group is
+                // registered, at startup, so a collision fails the boot and a
+                // route charging one of its policies finds it from the first
+                // request; one first met here would do neither.
+                for(const { module } of apiModuleUsesOf(loaded)){
+                    if(!this.pipeline.hasModule(module)){
+                        throw new Error(
+                            `Lambder: lazy group "${name}" loaded endpoints a module's builders declared, and was registered with a lazyApiGroup that does not carry that module. ` +
+                            `Register it with the module's own lazyApiGroup, so its guards and rate-limit policies are added at startup.`
+                        );
+                    }
+                }
                 for(const api of this.prepareApiGroup(loaded)) this.commitApi(api);
                 this.lazyApiGroups.delete(name);
             })();
@@ -788,11 +756,15 @@ export default class Lambder<
     private prepareApi(
         name: string,
         schema: LambderApiDeclarationOptions,
-        handler: (ctx: never) => MaybePromise<unknown>,
+        handler: (ctx: never) => LambderMaybePromise<unknown>,
+        adding?: LambderPendingDeclarations,
     ): LambderPreparedApi {
         const guardEntries = toGuardEntries(schema.guards);
-        const guardNeedsSession = (guard: string) =>
-            !!this.guards && Object.prototype.hasOwnProperty.call(this.guards, guard) && this.guards[guard]?.session === true;
+        const guardOf = (guard: string): LambderApiGuard<any, any, any> | undefined =>
+            Object.prototype.hasOwnProperty.call(this.guards, guard) ? this.guards[guard]
+            : adding && Object.prototype.hasOwnProperty.call(adding.guards, guard) ? adding.guards[guard]
+            : undefined;
+        const guardNeedsSession = (guard: string) => guardOf(guard)?.session === true;
         const mode: LambderApiMode = guardEntries.some(({ name: guard }) => guardNeedsSession(guard)) ? "session" : "public";
         if(mode === "session" && !this.pipeline.hasSessions){
             throw new Error(`Lambder: a guard of API "${name}" needs a session, and the instance was created without the session option.`);
@@ -813,14 +785,11 @@ export default class Lambder<
             name,
             this.refusalVocabulary,
             ownRefusals,
-            guardEntries.map(({ name: guard }) => ({
-                guard,
-                codes: (this.guards && Object.prototype.hasOwnProperty.call(this.guards, guard) ? this.guards[guard]?.refusals : undefined) ?? [],
-            })),
+            guardEntries.map(({ name: guard }) => ({ guard, codes: guardOf(guard)?.refusals ?? [] })),
         );
         const refusals: LambderEndpointRefusals = { codes: allowedCodes, codeRequired: this.requireRefusalCodes };
         const definition: LambderApiDefinition = { name, mode, guards: schema.guards, rateLimit: schema.rateLimit, idempotency: schema.idempotency, input: schema.input, output: schema.output, refusals };
-        this.pipeline.assertRegistration(definition);
+        this.pipeline.assertRegistration(definition, adding);
         return { definition, refusalsOption: schema.refusals, output: schema.output, compress: schema.compress ?? "auto", handler };
     }
 
@@ -867,11 +836,11 @@ export default class Lambder<
      */
     addAction<TEvent>(
         filter: (event: unknown, ctx: LambderRenderContext | null) => event is TEvent,
-        actionFn: (event: TEvent, tools: LambderActionTools) => MaybePromise<unknown>,
+        actionFn: (event: TEvent, tools: LambderActionTools) => LambderMaybePromise<unknown>,
     ): this;
     addAction(
         filter: (event: unknown, ctx: LambderRenderContext | null) => boolean,
-        actionFn: (event: unknown, tools: LambderActionTools) => MaybePromise<unknown>,
+        actionFn: (event: unknown, tools: LambderActionTools) => LambderMaybePromise<unknown>,
     ): this;
     addAction(
         filter: LambderActionFilter,
@@ -1027,8 +996,8 @@ export default class Lambder<
             apis[name] = entry;
         }
         const rateLimitPolicies: Record<string, LambderRateLimitPolicyEntry> = {};
-        for(const name of Object.keys(this.rateLimitPolicies ?? {}).sort()){
-            const { per, budget, chargeAt, refusal, ...windows } = this.rateLimitPolicies![name]!;
+        for(const name of Object.keys(this.rateLimitPolicies).sort()){
+            const { per, budget, chargeAt, refusal, ...windows } = this.rateLimitPolicies[name]!;
             const entry: LambderRateLimitPolicyEntry = {};
             for(const [window, limit] of Object.entries(windows)){
                 if(limit !== undefined) (entry as Record<string, unknown>)[window] = limit;
@@ -1043,8 +1012,8 @@ export default class Lambder<
             rateLimitPolicies[name] = entry;
         }
         const guards: Record<string, LambderGuardDeclarationEntry> = {};
-        for(const name of Object.keys(this.guards ?? {}).sort()){
-            const guard = this.guards![name]!;
+        for(const name of Object.keys(this.guards).sort()){
+            const guard = this.guards[name]!;
             guards[name] = {
                 input: guard.apiInput ? "apiInput" : guard.guardInput ? "guardInput" : "none",
                 session: guard.session === true,
@@ -1632,7 +1601,7 @@ export default class Lambder<
         definition: LambderApiDefinition,
         output: z.ZodType,
         compress: boolean | "auto",
-        handler: (ctx: never) => MaybePromise<unknown>,
+        handler: (ctx: never) => LambderMaybePromise<unknown>,
     ): Promise<LambderResponse> {
         const request = ctx.api;
         if(!request) throw new Error(`Lambder: API "${definition.name}" was matched by a request that is not an API call.`);

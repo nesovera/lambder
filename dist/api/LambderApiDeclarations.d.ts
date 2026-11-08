@@ -1,9 +1,10 @@
 import type { z } from "zod";
-import type { MaybePromise } from "../shared/util/LambderTypeUtilities.js";
+import type { LambderMaybePromise } from "../shared/util/LambderTypeUtilities.js";
 import type { LambderApiMode, LambderGuardNamesIn } from "../shared/wire/LambderApiContract.js";
 import type { LambderApiIdempotencyOption, LambderGuardsOptionValue, LambderRateLimitOptionValue, LambderRefusalsOptionValue } from "../shared/wire/LambderApiOptionValues.js";
 import type { LambderApiRateLimitPolicyConfig, LambderPolicyPerOf } from "./LambderApiRateLimits.js";
 import type { LambderRefusalVocabulary } from "./LambderApiRefusals.js";
+import type { LambderApiModuleDeclarations, LambderApiModuleUse } from "./LambderApiModules.js";
 import { type LambderReservedActionName, type LambderReservedGroupName } from "../shared/wire/LambderApiNames.js";
 /**
  * What an instance's declarations are typed against, fixed at create(): the
@@ -83,12 +84,14 @@ declare const LAMBDER_CONTRACT_ENTRY: unique symbol;
 /**
  * One endpoint, declared: its options and its handler, and in its type the
  * contract entry a client calls it by. Built by an instance's defineApi(),
- * registered by being put in a group.
+ * or a module's, registered by being put in a group.
  */
 export type LambderApiDeclaration<TEntry = unknown> = {
     readonly kind: "lambderApi";
     readonly options: LambderApiDeclarationOptions;
-    readonly handler: (ctx: never) => MaybePromise<unknown>;
+    readonly handler: (ctx: never) => LambderMaybePromise<unknown>;
+    /** The module whose builders declared it (defineApiModule), whose guards and policies its group's registration adds; absent on the instance's own. */
+    readonly module?: LambderApiModuleDeclarations;
     readonly [LAMBDER_CONTRACT_ENTRY]: TEntry;
 };
 /** A group's endpoints by action name. */
@@ -108,6 +111,12 @@ export type LambderLazyApiGroup<TName extends string = string, TGroup extends La
     readonly kind: "lambderLazyApiGroup";
     readonly name: TName;
     readonly load: () => Promise<TGroup>;
+    /**
+     * The module whose lazyApiGroup registered it, whose guards and policies
+     * its registration adds at once, before the group loads; absent on the
+     * instance's own.
+     */
+    readonly module?: LambderApiModuleDeclarations;
 };
 /** Either kind of group registerApiGroups() takes. */
 export type LambderRegistrableApiGroup = LambderApiGroup<string, any> | LambderLazyApiGroup<string, any>;
@@ -193,8 +202,15 @@ export type LambderActionNamesCheck<TApis> = [
  * usually one part; one declared across files gives each file's part.
  */
 export declare const buildApiGroup: <TName extends string, TApis extends LambderApiDeclarations>(name: TName, parts: readonly LambderApiDeclarations[]) => LambderApiGroup<TName, TApis>;
-/** Builds a lazy group; the name is checked here, the group it loads when it loads. */
-export declare const buildLazyApiGroup: <TName extends string, TGroup extends LambderApiGroup<TName, any>>(name: TName, load: () => Promise<TGroup>) => LambderLazyApiGroup<TName, TGroup>;
+/** Builds a lazy group, carrying the module that registers it, if one does; the name is checked here, the group it loads when it loads. */
+export declare const buildLazyApiGroup: <TName extends string, TGroup extends LambderApiGroup<TName, any>>(name: TName, load: () => Promise<TGroup>, module: LambderApiModuleDeclarations | null) => LambderLazyApiGroup<TName, TGroup>;
+/**
+ * The modules a group brings to its registration, each with where it was
+ * met: a lazy group's own (the module whose lazyApiGroup registered it), and
+ * a group's endpoints' (the modules whose builders declared them), each
+ * module once.
+ */
+export declare const apiModuleUsesOf: (group: LambderRegistrableApiGroup) => LambderApiModuleUse[];
 /** Whether a value is either kind of group registerApiGroups() takes. */
 export declare const isRegistrableApiGroup: (value: unknown) => value is LambderRegistrableApiGroup;
 export {};

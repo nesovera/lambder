@@ -707,6 +707,12 @@ export const orderWriteApis = {
 export const orderApis = defineApiGroup("orders", orderReadApis, orderWriteApis);
 ```
 
+A module's endpoints (see [Guards and policies a module
+declares](./api-policies.md#guards-and-policies-a-module-declares)) are
+registered as any are; a group of them registered lazily is registered with
+the module's own `lazyApiGroup`, which carries the module, so its guards and
+policies are added at registration rather than at the group's first call.
+
 A lazy group's contract is the loaded group's, read off its type, and the
 group it loads must carry the name it was registered under. Its registration
 runs when it loads, so a build step or a boot check that has to see every

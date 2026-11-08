@@ -572,19 +572,17 @@ describe('lambderMockPoliciesFrom', () => {
         });
         // Without the declarations, only what the contract says is asked: a
         // guardInput's shape, a public endpoint's guards needing no session,
-        // and a session endpoint naming a guard that needs one. It cannot see
-        // an input mode the server's guard does not have.
+        // and, of an entry, a session endpoint naming a guard that needs one.
+        // It cannot see an input mode the server's guard does not have.
         mock.create({
             sessions: true, idempotency: true, rateLimits: { policies },
             guards: { ...agreeing, owner: mock.guard({ apiInput: z.object({ userId: z.string() }), session: true, handler: () => {} }) },
         });
-        mock.create({
+        const ownerWithoutSession = mock.create({
             sessions: true, idempotency: true, rateLimits: { policies },
-            // @ts-expect-error owner is account.me's only guard, so without session: true the mock would run that session endpoint as public.
-            guards: {
-                ...agreeing,
-                owner: mock.guard({ handler: () => {} }),
-            },
+            guards: { ...agreeing, owner: mock.guard({ handler: () => {} }) },
         });
+        // @ts-expect-error owner is account.me's only guard, so without session: true the mock would run that session endpoint as public.
+        ownerWithoutSession.api('account.me', { guards: 'owner', idempotency: true, handler: async () => ({ userId: 'u' }) });
     });
 });

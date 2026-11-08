@@ -118,8 +118,12 @@ export type LambderApiRateLimitPolicyConfig<TCtx = any> = LambderRateLimitPolicy
 export type LambderApiRateLimitsConfig<TPolicies extends Record<string, LambderApiRateLimitPolicyConfig<any>>> = {
     /** Your limiter instance (LambderDdbRateLimiter, LambderMemoryRateLimiter, or your own); its table and keyPrefix apply as configured on it. */
     limiter: LambderRateLimiter;
-    /** Named policies referenced (typed) from defineApi. */
-    policies: TPolicies;
+    /**
+     * Named policies referenced (typed) from defineApi. Left out where every
+     * policy is declared by the app's modules (defineApiModule), which count
+     * on this limiter; an empty map is refused.
+     */
+    policies?: TPolicies;
     /**
      * Let the request through when the limiter itself fails (the table is
      * down, an IAM action is missing), instead of failing the request.
@@ -271,6 +275,14 @@ export type LambderRateLimitOption<TPolicies> = LambderAllowedPolicyNames<TPolic
  */
 type LambderRateLimitPhase = "beforeSession" | LambderRateLimitChargeAt;
 /**
+ * Refuses a policy that cannot be counted: a per that is no key, no window,
+ * a window no limiter can act on, a chargeAt on a policy that takes none, a
+ * message carrying a code or data, an unknown budget. What the policies
+ * given at creation and a module's policies (defineApiModule) are each held
+ * to, one rule for both.
+ */
+export declare const assertRateLimitPolicyDeclaration: (name: string, policy: LambderApiRateLimitPolicyConfig) => void;
+/**
  * Runtime side of the rate-limit subsystem: holds the limiter and its named
  * policies, asserts API registrations against them at startup, and checks an
  * API's declared policies during preflight. Composed into
@@ -299,15 +311,34 @@ export declare class LambderApiRateLimitsEngine {
     constructor(keyFieldDigest: LambderKeyFieldDigest);
     /** True once rateLimits were configured. */
     get isConfigured(): boolean;
+    /** Whether a policy of this name is declared, by the creation's policies or a module added since. */
+    has(name: string): boolean;
+    /**
+     * Takes the limiter and the policies given at creation. The policies may
+     * be left out when every policy is a module's (defineApiModule), which
+     * counts on this limiter; an empty map is refused, as an empty guards
+     * map is.
+     */
     configure(config: LambderApiRateLimitsConfig<Record<string, LambderApiRateLimitPolicyConfig>>): void;
+    /**
+     * Adds a module's policies beside the ones declared so far, counted on
+     * the limiter given at creation. Its names were checked against them
+     * before (LambderApiPipeline.modulesToAdd), so a name met again here is a
+     * caller that skipped that check.
+     */
+    add(policies: Readonly<Record<string, LambderApiRateLimitPolicyConfig>>): void;
     /**
      * Puts the engine over another limiter, for `lambder/testing`; the named
      * policies and failOpen stay as configured. False when rateLimits were
      * never configured: there is nothing for a limiter to sit under.
      */
     [LAMBDER_BACKEND_SWAP](limiter: LambderRateLimiter): boolean;
-    /** Startup validation of one API registration's rateLimit option. */
-    assertRegistration(apiName: string, mode: LambderApiMode, rateLimitOption?: LambderRateLimitOptionValue): void;
+    /**
+     * Startup validation of one API registration's rateLimit option.
+     * `adding` holds the policies of the modules the same registration adds,
+     * which the engine takes only once every endpoint of it passed.
+     */
+    assertRegistration(apiName: string, mode: LambderApiMode, rateLimitOption?: LambderRateLimitOptionValue, adding?: Readonly<Record<string, LambderApiRateLimitPolicyConfig>>): void;
     /**
      * Check the API's policies in declared order; the first exceeded one
      * refuses with a 429 envelope and a Retry-After header. Attempts count,

@@ -340,7 +340,10 @@ guards: {
 An app made of parts can give `guards` as a list of maps, one per part, and
 `rateLimits.policies` the same way: the instance declares every name in the
 list, and a name two maps declare is a compile error and a throw at creation.
-See [Configuration](./configuration.md#an-app-made-of-parts).
+See [Configuration](./configuration.md#an-app-made-of-parts). A part may
+instead declare its guards and policies itself, with its endpoints, so the
+instance is created knowing none of them: see [Guards and policies a module
+declares](#guards-and-policies-a-module-declares).
 
 A guard's handler is `(ctx, input, param)`: the render context (session-typed
 when `session: true`), its validated input slice or `undefined`, and the
@@ -510,6 +513,108 @@ guards and policies the app holds.
 An empty declaration (`guards: {}` or `guards: []`) is a compile error and a
 registration error: it normalizes to zero guards while looking like a
 declaration, which is exactly the ambiguity the option exists to remove.
+
+## Guards and policies a module declares
+
+A module is a part of an app with guards and rate-limit policies of its own,
+which only its endpoints name. `defineApiModule()` on the instance declares
+them and hands back the declaration builders typed on the instance's names
+and the module's together:
+
+```typescript
+// giftCards/giftCardModule.ts: imports the instance, never the reverse
+export const giftCardModule = storeApp.defineApiModule({
+    guards: {
+        cardHolder: storeInit.guard({
+            guardInput: z.object({ cardNumber: z.string() }),
+            handler: async (_ctx, { cardNumber }) => await requireCardOrRefuse(cardNumber),
+        }),
+    },
+    rateLimitPolicies: {
+        redeemPerCustomer: { perHour: 5, per: "session" },
+        balanceChecksPerCard: { perMin: 10 },
+    },
+});
+export type GiftCardModule = typeof giftCardModule;
+export const defineApi: GiftCardModule["defineApi"] = giftCardModule.defineApi;
+export const defineApiGroup: GiftCardModule["defineApiGroup"] = giftCardModule.defineApiGroup;
+export const lazyApiGroup: GiftCardModule["lazyApiGroup"] = giftCardModule.lazyApiGroup;
+
+// giftCards/giftCardApis.ts
+export const giftCardApis = defineApiGroup("giftCards", {
+    redeem: defineApi({
+        input, output,
+        guards: ["signedIn", "cardHolder"],             // the instance's and the module's
+        rateLimit: ["browsePerIp", "redeemPerCustomer"],
+    }, async (ctx) => {
+        await ctx.rateLimit("balanceChecksPerCard", ctx.guardData.cardHolder.cardNumber);
+        // ...
+    }),
+});
+
+// index.ts
+storeApp.registerApiGroups(orderApis, lazyApiGroup("giftCards", () => import("./giftCards/giftCardApis.js").then((m) => m.giftCardApis)));
+```
+
+So the instance's type carries its own guards and policies alone, and the
+file that creates it imports no module: each module brings what it declares.
+A module's endpoints name the instance's guards and policies and the
+module's own, and an unknown name is a compile error there as anywhere; the
+instance's own builders do not see a module's names, nor does one module
+see another's.
+
+`guards` and `rateLimitPolicies` each take one map or a list of maps, held
+to what `create()` holds its own to: the guard and policy shapes, surplus
+keys, a guard's refusal codes against the instance's vocabulary, a name two
+maps of the list declare. A module declaring neither is refused, since its
+builders would be the instance's own.
+
+**When a module is added.** Registering a group adds the modules its
+endpoints were declared with: their guards and policies join the instance's,
+for its endpoints to run and for code to charge (`ctx.rateLimit` in a route,
+too). A module's `lazyApiGroup` carries the module, so its group adds it when
+it is registered, at startup, rather than at its first call: a collision
+fails the boot, `apiOptionEntries()` lists the module's declarations, and a
+route charging one of its policies finds it from the first request. A lazy
+group registered with the instance's own `lazyApiGroup` whose loaded
+endpoints a module declared is refused when it loads, for that reason. A
+module's endpoint may sit in any group, the instance's `defineApiGroup`
+included; the same module brought by many groups, or registered on two
+instances configured alike (one per deployed function), is one module.
+
+A module reaches an instance only through its groups. An instance that
+registers none of a module's groups (one that serves routes alone) has none
+of its guards or policies, so a route there that charges one of the module's
+policies fails at its first request rather than at boot. A policy such a
+route charges is declared at creation, on every instance that charges it,
+or that instance registers one of the module's groups, a lazy one if a cold
+start should not load it, and so answers its calls too.
+
+**Names are the module's own.** A name the instance declares is refused
+where the module is defined, at compile time and at the call. A name two
+modules declare is refused when the second is registered, as `create()`
+refuses a name two maps declare, and the registration that is refused leaves
+the instance as it was. The second check is not a compile error: modules do
+not import each other, so no one place sees both their types.
+
+**Rate limits need the limiter.** A module's policies count on the
+instance's limiter, so a module declaring policies needs the `rateLimits`
+option at creation; its own `policies` may be left out when every policy is
+a module's (`rateLimits: { limiter }`). Guards need nothing at creation.
+
+A helper handed one of a module's handler contexts types it as
+`LambderRenderContextOf<typeof giftCardModule>`, with the module's policies
+chargeable by name. A route is registered on the instance, so a route
+matched by a path string names the instance's policies; one matched by a
+matcher object, a RegExp or a predicate names any policy, checked when it is
+charged, which is how a module's route charges the module's policies.
+
+An app that emits declaration files (a build split into project
+references) hands the builders out under the module's name, as above, so
+each declaration refers to the module's type rather than writing it out. The
+module's own declaration still writes the instance's types out once; to keep
+it small, annotate the module with its type,
+`LambderApiModule<LambderModuleAppTypes<StoreLambder["AppTypes"], typeof giftCardGuards, typeof giftCardPolicies>>`.
 
 ## Requiring an authorization declaration
 
@@ -753,10 +858,13 @@ these throw before a request is ever served:
 | An API referencing an unknown guard or policy | Names are resolved at registration, not per request. |
 | A `session`-keyed policy on an endpoint none of whose guards needs a session | A public call has no session to count against. |
 | A guard that needs a session on an instance created without the `session` option | There is no session to read. |
+| A module declaring a guard or policy name the instance declares, or another module declares | One name, one declaration; a module's names are its own. Refused where the module is defined (against the instance) or registered (against the other modules). |
+| A module declaring rate-limit policies on an instance created without `rateLimits` | There is no limiter to count them on. |
+| A lazy group whose loaded endpoints a module declared, registered with the instance's `lazyApiGroup` | The module's declarations would arrive only at the first call; register it with the module's `lazyApiGroup`. |
 
 Each of these throws where the endpoint is registered (`registerApiGroups`,
 or the first call to a lazy group, which a boot check forces with
-`loadApiGroups()`). A registration that throws does not consume the API
+`loadApiGroups()`), or, for a module, where it is defined. A registration that throws does not consume the API
 name, so catching one and fixing the declaration reports the real problem
 rather than a duplicate name.
 

@@ -8,6 +8,9 @@
  */
 
 export { LambderMockApp, initLambderMock } from "./mock/LambderMockApp.js";
+// A part of the mock app with mock guards of its own, declared with its entries.
+export { LambderMockApiModule } from "./mock/LambderMockApiModule.js";
+export type { LambderMockApiModuleOptions, LambderMockApiModuleChecks, LambderMockApiModuleDoor } from "./mock/LambderMockApiModule.js";
 // The four collaborators behind LambderMockApp (the entry registry, the call
 // recorder, the failure injector, the browser cookies) are deliberately not
 // exported: the runtime is reached through the app. Only the error a
@@ -25,7 +28,8 @@ export type {
     LambderMockEntryOptions,
     LambderMockEntryInput,
     LambderMockNotMockedInput,
-    LambderMockSessionGuardsCheck,
+    LambderMockEntryGuardsCheck,
+    LambderMockNotMockedGuardsCheck,
     LambderMockSlice,
     LambderMockRestEntry,
     LambderMockRegistryCheck,
@@ -81,6 +85,9 @@ export type { LambderSessionCrypto } from "./session/LambderSessionCrypto.js";
 export { LambderApiRefusal, refuse, LAMBDER_REFUSAL_CODES } from "./shared/wire/LambderApiRefusal.js";
 export type { LambderRefusalMessage, LambderDeclaredRefuse, LambderDeclaredRefuseOptions } from "./shared/wire/LambderApiRefusal.js";
 export { LambderApiRefusalValidationError } from "./api/LambderApiRefusals.js";
+// What the mock init's declareRefusals() holds its vocabulary to, which a
+// declaration file names wherever it writes the init out.
+export type { LambderRefusalVocabularyOption, LambderRefusalVocabularyOptionChecks } from "./api/LambderApiRefusals.js";
 // The outcome assertions a test over the mock app narrows with; the same
 // ones `lambder/testing` exports for a test over the real server.
 export { assertApiSuccess, assertApiFailure, assertApiRefusal } from "./shared/wire/LambderOutcomeAssertions.js";

@@ -9,5 +9,9 @@
   // tests/ sits outside the build's rootDir. Nothing is emitted here, so the
   // root only has to be wide enough to cover both trees.
   "compilerOptions": { "noEmit": true, "rootDir": "." },
-  "include": ["src/**/*", "tests/**/*", "examples/**/*"]
+  "include": ["src/**/*", "tests/**/*", "examples/**/*"],
+  // The sample app declaration-emit.test.ts compiles imports the package by
+  // name, so it reads the built dist; the test compiles it after the build,
+  // in a project of its own, where this typecheck would read a stale one.
+  "exclude": ["node_modules", "dist", "tests/fixtures/declaration-app"]
 }

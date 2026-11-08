@@ -36,6 +36,34 @@ export const toGuardEntries = (value) => {
  */
 const readGuardInput = (guardInputs, name) => guardInputs !== undefined && Object.prototype.hasOwnProperty.call(guardInputs, name) ? guardInputs[name] : undefined;
 /**
+ * Refuses a guard that cannot run: no handler, both input modes, a refusals
+ * option that is not a list of codes, an unknown runAt, a singleUseInput
+ * that is not a boolean or sits on a guard without a guardInput. What the
+ * guards option at creation and a module's guards (defineApiModule) are each
+ * held to, one rule for both.
+ */
+export const assertGuardDeclaration = (name, guardDef) => {
+    if (typeof guardDef?.handler !== "function")
+        throw new Error(`Lambder: guard "${name}" has no handler function.`);
+    if (guardDef.apiInput && guardDef.guardInput)
+        throw new Error(`Lambder: guard "${name}" declares both apiInput and guardInput; pick one.`);
+    const refusals = guardDef.refusals;
+    if (refusals !== undefined && (!Array.isArray(refusals) || refusals.some((code) => typeof code !== "string" || code === ""))) {
+        throw new Error(`Lambder: guard "${name}" has a refusals option that is not a list of refusal codes.`);
+    }
+    const runAt = guardDef.runAt;
+    if (runAt !== undefined && runAt !== "beforeInputValidation" && runAt !== "afterInputValidation") {
+        throw new Error(`Lambder: guard "${name}" has runAt "${String(runAt)}"; use "beforeInputValidation" (default) or "afterInputValidation".`);
+    }
+    const singleUseInput = guardDef.singleUseInput;
+    if (singleUseInput !== undefined && typeof singleUseInput !== "boolean") {
+        throw new Error(`Lambder: guard "${name}" has singleUseInput ${String(singleUseInput)}; write true for a value a retry carries fresh, or leave it off.`);
+    }
+    if (singleUseInput && !guardDef.guardInput) {
+        throw new Error(`Lambder: guard "${name}" declares singleUseInput without a guardInput. Only a value the client sends beside the payload can be left out of an idempotent request's fingerprint; a slice of the payload always counts.`);
+    }
+};
+/**
  * Runtime side of the guards subsystem: holds the defined guards, asserts
  * API registrations against them at startup, and executes an API's declared
  * guards during preflight. Held by LambderApiPipeline. Reads the
@@ -49,8 +77,10 @@ export class LambderApiGuardsEngine {
     // that typo and then fail on every request. It would also refuse to
     // register a guard legitimately named one of them.
     guards = new Map();
-    /** True once a guards map was configured. */
+    /** True once a guards map was configured, or a module added guards. */
     get isConfigured() { return this.guards.size > 0; }
+    /** Whether a guard of this name is declared, by the creation's map or a module added since. */
+    has(name) { return this.guards.has(name); }
     /** Take the guards map given at creation; named like the other two engines' configure(). */
     configure(guards) {
         // One configuration per instance, as in the rate-limit and idempotency
@@ -65,33 +95,28 @@ export class LambderApiGuardsEngine {
         if (Object.keys(guards).length === 0) {
             throw new Error("Lambder: the guards option was declared with no guards in it, which configures nothing. Name the guards APIs will declare, or leave the option off.");
         }
+        this.add(guards);
+    }
+    /**
+     * Adds a module's guards beside the ones declared so far. Its names were
+     * checked against them before (LambderApiPipeline.modulesToAdd), so a
+     * name met again here is a caller that skipped that check.
+     */
+    add(guards) {
         for (const [name, guardDef] of Object.entries(guards)) {
             if (this.guards.has(name))
                 throw new Error(`Lambder: guard "${name}" is already defined.`);
-            if (typeof guardDef?.handler !== "function")
-                throw new Error(`Lambder: guard "${name}" has no handler function.`);
-            if (guardDef.apiInput && guardDef.guardInput)
-                throw new Error(`Lambder: guard "${name}" declares both apiInput and guardInput; pick one.`);
-            const refusals = guardDef.refusals;
-            if (refusals !== undefined && (!Array.isArray(refusals) || refusals.some((code) => typeof code !== "string" || code === ""))) {
-                throw new Error(`Lambder: guard "${name}" has a refusals option that is not a list of refusal codes.`);
-            }
-            const runAt = guardDef.runAt;
-            if (runAt !== undefined && runAt !== "beforeInputValidation" && runAt !== "afterInputValidation") {
-                throw new Error(`Lambder: guard "${name}" has runAt "${String(runAt)}"; use "beforeInputValidation" (default) or "afterInputValidation".`);
-            }
-            const singleUseInput = guardDef.singleUseInput;
-            if (singleUseInput !== undefined && typeof singleUseInput !== "boolean") {
-                throw new Error(`Lambder: guard "${name}" has singleUseInput ${String(singleUseInput)}; write true for a value a retry carries fresh, or leave it off.`);
-            }
-            if (singleUseInput && !guardDef.guardInput) {
-                throw new Error(`Lambder: guard "${name}" declares singleUseInput without a guardInput. Only a value the client sends beside the payload can be left out of an idempotent request's fingerprint; a slice of the payload always counts.`);
-            }
-            this.guards.set(name, guardDef);
+            assertGuardDeclaration(name, guardDef);
         }
+        for (const [name, guardDef] of Object.entries(guards))
+            this.guards.set(name, guardDef);
     }
-    /** Startup validation of one API registration's guards option. */
-    assertRegistration(apiName, mode, guardsOption) {
+    /**
+     * Startup validation of one API registration's guards option. `adding`
+     * holds the guards of the modules the same registration adds, which the
+     * engine takes only once every endpoint of it passed.
+     */
+    assertRegistration(apiName, mode, guardsOption, adding) {
         const entries = toGuardEntries(guardsOption);
         // The runtime half of LambderNonEmptyOptionMap on the guards option.
         // `guards: {}` and `guards: []` would satisfy the require*ApiGuards
@@ -103,9 +128,9 @@ export class LambderApiGuardsEngine {
                 `Name the guard that authorizes it, or omit the option entirely.`);
         }
         for (const { name } of entries) {
-            const guardDef = this.guards.get(name);
+            const guardDef = this.guards.get(name) ?? (adding && Object.prototype.hasOwnProperty.call(adding, name) ? adding[name] : undefined);
             if (!guardDef) {
-                throw new Error(`Lambder: API "${apiName}" references unknown guard "${name}". Declare it in the guards option at creation.`);
+                throw new Error(`Lambder: API "${apiName}" references unknown guard "${name}". Declare it in the guards option at creation, or in the module the API is declared with (defineApiModule).`);
             }
             if (guardDef.session && mode !== "session") {
                 throw new Error(`Lambder: API "${apiName}" uses guard "${name}" (session: true) but is registered as public. An endpoint declaring a session guard is a session endpoint.`);

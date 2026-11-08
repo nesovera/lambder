@@ -36,14 +36,32 @@ export const buildApiGroup = (name, parts) => {
     }
     return { kind: "lambderApiGroup", name, apis: apis };
 };
-/** Builds a lazy group; the name is checked here, the group it loads when it loads. */
-export const buildLazyApiGroup = (name, load) => {
+/** Builds a lazy group, carrying the module that registers it, if one does; the name is checked here, the group it loads when it loads. */
+export const buildLazyApiGroup = (name, load, module) => {
     if (typeof name !== "string" || !isGroupName(name)) {
         throw new Error(`Lambder: ${describeName(name)} cannot name a group. A group is a letter then letters, digits or underscores, and not a name a caller already answers for.`);
     }
     if (typeof load !== "function")
         throw new Error(`Lambder: lazy group "${name}" has no loader. Pass a function that imports the group: () => import("./orders.js").then((m) => m.orderApis).`);
-    return { kind: "lambderLazyApiGroup", name, load };
+    return module ? { kind: "lambderLazyApiGroup", name, load, module } : { kind: "lambderLazyApiGroup", name, load };
+};
+/**
+ * The modules a group brings to its registration, each with where it was
+ * met: a lazy group's own (the module whose lazyApiGroup registered it), and
+ * a group's endpoints' (the modules whose builders declared them), each
+ * module once.
+ */
+export const apiModuleUsesOf = (group) => {
+    if (group.kind === "lambderLazyApiGroup") {
+        return group.module ? [{ module: group.module, usedBy: `registering lazy group "${group.name}"` }] : [];
+    }
+    const uses = [];
+    for (const [action, declaration] of Object.entries(group.apis)) {
+        const module = declaration.module;
+        if (module && !uses.some((use) => use.module === module))
+            uses.push({ module, usedBy: `declaring "${group.name}.${action}"` });
+    }
+    return uses;
 };
 /** Whether a value is either kind of group registerApiGroups() takes. */
 export const isRegistrableApiGroup = (value) => {

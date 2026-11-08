@@ -165,8 +165,12 @@ export type LambderApiRateLimitPolicyConfig<TCtx = any> = LambderRateLimitPolicy
 export type LambderApiRateLimitsConfig<TPolicies extends Record<string, LambderApiRateLimitPolicyConfig<any>>> = {
     /** Your limiter instance (LambderDdbRateLimiter, LambderMemoryRateLimiter, or your own); its table and keyPrefix apply as configured on it. */
     limiter: LambderRateLimiter;
-    /** Named policies referenced (typed) from defineApi. */
-    policies: TPolicies;
+    /**
+     * Named policies referenced (typed) from defineApi. Left out where every
+     * policy is declared by the app's modules (defineApiModule), which count
+     * on this limiter; an empty map is refused.
+     */
+    policies?: TPolicies;
     /**
      * Let the request through when the limiter itself fails (the table is
      * down, an IAM action is missing), instead of failing the request.
@@ -397,6 +401,38 @@ const trackerKeyOf = (name: string, policy: LambderApiRateLimitPolicyConfig, api
         : joinKeyFields("api", apiName, name, key);
 
 /**
+ * Refuses a policy that cannot be counted: a per that is no key, no window,
+ * a window no limiter can act on, a chargeAt on a policy that takes none, a
+ * message carrying a code or data, an unknown budget. What the policies
+ * given at creation and a module's policies (defineApiModule) are each held
+ * to, one rule for both.
+ */
+export const assertRateLimitPolicyDeclaration = (name: string, policy: LambderApiRateLimitPolicyConfig): void => {
+    const per = policy?.per as LambderRateLimitPer | undefined;
+    if(per !== undefined && per !== "ip" && per !== "session" && typeof per?.handler !== "function"){
+        throw new Error(`Lambder: rate-limit policy "${name}" has a per that is not "ip", "session", or a { apiInput?, handler } key. Leave per out for a policy the handler charges with its own key.`);
+    }
+    if(!RATE_LIMIT_WINDOW_KEYS.some((key) => policy[key])){
+        throw new Error(`Lambder: rate-limit policy "${name}" declares no window (${RATE_LIMIT_WINDOW_KEYS.join("/")}).`);
+    }
+    assertWindowLimits(`rate-limit policy "${name}"`, policy);
+    const chargeAt = policy.chargeAt as LambderRateLimitChargeAt | undefined;
+    if(chargeAt !== undefined){
+        if(chargeAt !== "beforeGuards" && chargeAt !== "afterGuards"){
+            throw new Error(`Lambder: rate-limit policy "${name}" has chargeAt "${String(chargeAt)}"; use "afterGuards" (default) or "beforeGuards".`);
+        }
+        if(per === undefined || per === "ip" || per === "session"){
+            throw new Error(`Lambder: rate-limit policy "${name}" sets chargeAt, which only a policy keyed by a { apiInput?, handler } key takes: per "ip" and per "session" each run at one fixed place, and a policy without per is charged by the code that names it.`);
+        }
+    }
+    assertRateLimitMessage(`rate-limit policy "${name}"`, policy.refusal);
+    const budget = policy.budget as LambderRateLimitBudget | undefined;
+    if(budget !== undefined && budget !== "perApi" && budget !== "perPolicy"){
+        throw new Error(`Lambder: rate-limit policy "${name}" has budget "${String(budget)}"; use "perApi" (default: each referencing API counts separately) or "perPolicy" (one counter shared by every referencing API).`);
+    }
+};
+
+/**
  * Runtime side of the rate-limit subsystem: holds the limiter and its named
  * policies, asserts API registrations against them at startup, and checks an
  * API's declared policies during preflight. Composed into
@@ -433,39 +469,26 @@ export class LambderApiRateLimitsEngine {
     /** True once rateLimits were configured. */
     get isConfigured(): boolean { return this.limiter !== null; }
 
+    /** Whether a policy of this name is declared, by the creation's policies or a module added since. */
+    has(name: string): boolean { return this.policies.has(name); }
+
+    /**
+     * Takes the limiter and the policies given at creation. The policies may
+     * be left out when every policy is a module's (defineApiModule), which
+     * counts on this limiter; an empty map is refused, as an empty guards
+     * map is.
+     */
     configure(config: LambderApiRateLimitsConfig<Record<string, LambderApiRateLimitPolicyConfig>>): void {
         if(this.limiter) throw new Error("Lambder: rateLimits were already configured.");
-        // Declaring the option is declaring a limit, as for the guards option
-        // and an API's own `rateLimit: {}`. An empty map would configure a
-        // limiter with nothing to enforce, and every API naming a policy would
-        // be reported as if the option were missing: the wrong line to fix.
-        if(Object.keys(config.policies).length === 0){
-            throw new Error("Lambder: the rateLimits option was declared with no policies in it, which configures nothing. Name the policies APIs will declare, or leave the option off.");
+        // Declaring the policies is declaring a limit, as for the guards
+        // option and an API's own `rateLimit: {}`. An empty map would
+        // configure a limiter with nothing to enforce, and every API naming a
+        // policy would be reported as if the option were missing: the wrong
+        // line to fix.
+        if(config.policies !== undefined && Object.keys(config.policies).length === 0){
+            throw new Error("Lambder: the rateLimits option was declared with no policies in it, which configures nothing. Name the policies APIs will declare, or leave the policies out where the app's modules declare them all.");
         }
-        for(const [name, policy] of Object.entries(config.policies)){
-            const per = policy.per as LambderRateLimitPer | undefined;
-            if(per !== undefined && per !== "ip" && per !== "session" && typeof per?.handler !== "function"){
-                throw new Error(`Lambder: rate-limit policy "${name}" has a per that is not "ip", "session", or a { apiInput?, handler } key. Leave per out for a policy the handler charges with its own key.`);
-            }
-            if(!RATE_LIMIT_WINDOW_KEYS.some((key) => policy[key])){
-                throw new Error(`Lambder: rate-limit policy "${name}" declares no window (${RATE_LIMIT_WINDOW_KEYS.join("/")}).`);
-            }
-            assertWindowLimits(`rate-limit policy "${name}"`, policy);
-            const chargeAt = policy.chargeAt as LambderRateLimitChargeAt | undefined;
-            if(chargeAt !== undefined){
-                if(chargeAt !== "beforeGuards" && chargeAt !== "afterGuards"){
-                    throw new Error(`Lambder: rate-limit policy "${name}" has chargeAt "${String(chargeAt)}"; use "afterGuards" (default) or "beforeGuards".`);
-                }
-                if(per === undefined || per === "ip" || per === "session"){
-                    throw new Error(`Lambder: rate-limit policy "${name}" sets chargeAt, which only a policy keyed by a { apiInput?, handler } key takes: per "ip" and per "session" each run at one fixed place, and a policy without per is charged by the code that names it.`);
-                }
-            }
-            assertRateLimitMessage(`rate-limit policy "${name}"`, policy.refusal);
-            const budget = policy.budget as LambderRateLimitBudget | undefined;
-            if(budget !== undefined && budget !== "perApi" && budget !== "perPolicy"){
-                throw new Error(`Lambder: rate-limit policy "${name}" has budget "${String(budget)}"; use "perApi" (default: each referencing API counts separately) or "perPolicy" (one counter shared by every referencing API).`);
-            }
-        }
+        for(const [name, policy] of Object.entries(config.policies ?? {})) assertRateLimitPolicyDeclaration(name, policy);
         const ipv6PrefixLength = config.ipv6PrefixLength ?? DEFAULT_IPV6_RATE_LIMIT_PREFIX;
         if(!Number.isInteger(ipv6PrefixLength) || ipv6PrefixLength < 1 || ipv6PrefixLength > 128){
             throw new Error(`Lambder: rateLimits.ipv6PrefixLength must be a whole number from 1 to 128, got ${String(ipv6PrefixLength)}.`);
@@ -473,7 +496,22 @@ export class LambderApiRateLimitsEngine {
         this.limiter = config.limiter;
         this.failOpen = config.failOpen ?? true;
         this.ipv6PrefixLength = ipv6PrefixLength;
-        this.policies = new Map(Object.entries(config.policies));
+        this.policies = new Map(Object.entries(config.policies ?? {}));
+    }
+
+    /**
+     * Adds a module's policies beside the ones declared so far, counted on
+     * the limiter given at creation. Its names were checked against them
+     * before (LambderApiPipeline.modulesToAdd), so a name met again here is a
+     * caller that skipped that check.
+     */
+    add(policies: Readonly<Record<string, LambderApiRateLimitPolicyConfig>>): void {
+        if(!this.limiter) throw new Error("Lambder: rate-limit policies were added before a limiter was configured.");
+        for(const [name, policy] of Object.entries(policies)){
+            if(this.policies.has(name)) throw new Error(`Lambder: rate-limit policy "${name}" is already defined.`);
+            assertRateLimitPolicyDeclaration(name, policy);
+        }
+        for(const [name, policy] of Object.entries(policies)) this.policies.set(name, policy);
     }
 
     /**
@@ -487,8 +525,12 @@ export class LambderApiRateLimitsEngine {
         return true;
     }
 
-    /** Startup validation of one API registration's rateLimit option. */
-    assertRegistration(apiName: string, mode: LambderApiMode, rateLimitOption?: LambderRateLimitOptionValue): void {
+    /**
+     * Startup validation of one API registration's rateLimit option.
+     * `adding` holds the policies of the modules the same registration adds,
+     * which the engine takes only once every endpoint of it passed.
+     */
+    assertRegistration(apiName: string, mode: LambderApiMode, rateLimitOption?: LambderRateLimitOptionValue, adding?: Readonly<Record<string, LambderApiRateLimitPolicyConfig>>): void {
         const entries = toRateLimitEntries(rateLimitOption);
         // Declaring the option is declaring a limit, as for guards: `{}`,
         // `[]` and `{ name: undefined }` would register an API that
@@ -500,9 +542,9 @@ export class LambderApiRateLimitsEngine {
             );
         }
         for(const { name, override } of entries){
-            const policy = this.policies.get(name);
+            const policy = this.policies.get(name) ?? (adding && Object.prototype.hasOwnProperty.call(adding, name) ? adding[name] : undefined);
             if(!policy){
-                throw new Error(`Lambder: API "${apiName}" references unknown rate-limit policy "${name}". Declare it in the rateLimits option at creation.`);
+                throw new Error(`Lambder: API "${apiName}" references unknown rate-limit policy "${name}". Declare it in the rateLimits option at creation, or, on a server, in the module the API is declared with (defineApiModule).`);
             }
             if(policy.per === undefined){
                 throw new Error(`Lambder: API "${apiName}" references rate-limit policy "${name}", which declares no per: its key is the one a handler passes to ctx.rateLimit("${name}", key), so the request alone cannot be counted against it.`);

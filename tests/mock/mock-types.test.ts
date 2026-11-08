@@ -400,16 +400,27 @@ describe('Mock registry types - slices and register()', () => {
 });
 
 describe('Mock registry types - the guard map', () => {
-    it('must name every guard the contract declares, with guardInput schemas that take what the server\'s contract says a client sends', () => {
+    it('holds every guard it names to the contract, with guardInput schemas that take what the server\'s contract says a client sends', () => {
         const { staffPermission, captcha, signedIn, open } = mockGuards;
         mock.create({ ...requiredOptions, guards: { staffPermission, captcha, signedIn, open } });
-        // @ts-expect-error captcha is declared by the contract and missing here
-        mock.create({ ...requiredOptions, guards: { staffPermission, signedIn, open } });
         mock.create({ ...requiredOptions, guards: {
             staffPermission, signedIn, open,
             // @ts-expect-error the server's captcha input is { token: string }, not { code: number }
             captcha: mock.guard({ guardInput: z.object({ code: z.number() }), handler: () => {} }),
         } });
+    });
+
+    it('need not name every guard the contract declares, and an entry needing one it leaves out is refused where it is built', () => {
+        // A part of the app may declare its own with its entries
+        // (defineApiModule), so the map at create() covers what the app's own
+        // entries need; an entry whose endpoint declares a guard the map it
+        // is built with lacks is the error, since that guard could not run.
+        const { staffPermission, signedIn, open } = mockGuards;
+        const withoutCaptcha = mock.create({ ...requiredOptions, guards: { staffPermission, signedIn, open } });
+        withoutCaptcha.api('user.get', { guards: { open: 'public profile' }, handler: async () => ({ id: '1', name: 'Ada' }) });
+        // @ts-expect-error captcha is feedback.submit's guard, and this map has no mock guard for it
+        expect(() => withoutCaptcha.api('feedback.submit', { guards: 'captcha', idempotency: true, handler: async () => ({ code: 'c' }) }))
+            .toThrow('Lambder: API "feedback.submit" references unknown guard "captcha".');
     });
 
     it('refuses a guard map written against the server contexts', () => {
@@ -533,15 +544,15 @@ describe('Mock rate-limit keys are bound to the mock context', () => {
 });
 
 describe('Mock app options - what a typo costs', () => {
-    it('requires the guard map whenever the contract declares a guard name', () => {
-        // The app-level twin of the entry's own guards field, and the same
-        // argument: a guard the map does not declare cannot run, so the mock
-        // answers 200 where the server answers notAuthorized. Left optional,
-        // it would be the droppable half of the check it exists for.
-        // @ts-expect-error the contract declares guards, so the map is required
-        mock.create({ ...requiredOptions });
-        // @ts-expect-error still required beside other options
-        mock.create({ ...requiredOptions, latency: 0 });
+    it('leaves the guard map optional, and holds each entry to the guards its endpoint declares instead', () => {
+        // A guard the mock does not declare cannot run, so the mock would
+        // answer 200 where the server answers notAuthorized. The guards may
+        // come from create() or from a module's map (defineApiModule), so the
+        // entry is where a missing one is known: each is refused there.
+        const noGuards = mock.create({ ...requiredOptions });
+        noGuards.api('status.health', async () => ({ ok: true }));
+        // @ts-expect-error account.me declares signedIn, and no map this entry is built with has it
+        expect(() => noGuards.api('account.me', { guards: 'signedIn', handler: async () => ({ userId: 'u' }) })).toThrow(/declares guards but no guards option was configured/);
         mock.create({ ...requiredOptions, guards: mockGuards });
     });
 
@@ -765,12 +776,13 @@ describe('Mock registry types - a session endpoint with several guards', () => {
     }));
     const reportsMock = initLambderMock<typeof _reports.ApiContract, SessionData>();
 
-    it('refuses a guard map in which none of its guards needs a session, and runs it as a session endpoint once one does', async () => {
-        reportsMock.create({
+    it('refuses an entry none of whose mock guards needs a session, and runs it as a session endpoint once one does', async () => {
+        const sessionless = reportsMock.create({
             sessions: true,
-            // @ts-expect-error reports.get names no mock guard declared session: true, so the mock would run it as public
             guards: { signedIn: reportsMock.guard({ handler: () => {} }), ownsReport: reportsMock.guard({ handler: () => {} }) },
         });
+        // @ts-expect-error reports.get names no mock guard declared session: true, so the mock would run it as public
+        expect(sessionless.api('reports.get', { guards: ['signedIn', 'ownsReport'], handler: async () => ({ userId: 'u' }) }).mode).toBe('public');
 
         const mockApp = reportsMock.create({
             sessions: true,

@@ -10,13 +10,14 @@ import { type LambderEndpointRefusals } from "./LambderApiRefusals.js";
 import { type LambderApiGuard } from "./LambderApiGuards.js";
 import { type LambderApiRateLimitPolicyConfig, type LambderApiRateLimitsConfig, type LambderRateLimitChargeResult, type LambderRateLimitChargeSubject } from "./LambderApiRateLimits.js";
 import { type LambderApiIdempotencyConfig } from "./LambderApiIdempotency.js";
+import type { LambderAddedApiModules, LambderApiModuleDeclarations, LambderApiModuleUse, LambderPendingDeclarations } from "./LambderApiModules.js";
 import type { LambderSessionRecord, LambderSessionStore } from "../shared/contracts/LambderSessionStore.js";
 import type { LambderRateLimiter } from "../shared/contracts/LambderRateLimiter.js";
 import type { LambderIdempotencyStore } from "../shared/contracts/LambderIdempotencyStore.js";
 import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
 import type LambderSessionManager from "../session/LambderSessionManager.js";
 import LambderSessionController, { type LambderSessionCookieOptions, type LambderSessionRequestInfo } from "../session/LambderSessionController.js";
-import type { MaybePromise } from "../shared/util/LambderTypeUtilities.js";
+import type { LambderMaybePromise } from "../shared/util/LambderTypeUtilities.js";
 /**
  * The app's own answer for a rejected input (setApiInputValidationErrorHandler
  * on the server). Returning null asks for the standard 422 body, which only
@@ -24,7 +25,7 @@ import type { MaybePromise } from "../shared/util/LambderTypeUtilities.js";
  * API's schema and every preflight slice (guard inputs, rate-limit keys)
  * answer through here, so one failure has one shape.
  */
-export type LambderApiInputRefusal<TCtx> = (zodError: z.ZodError, ctx: TCtx, request: LambderApiRequest) => MaybePromise<LambderApiAnswer | null>;
+export type LambderApiInputRefusal<TCtx> = (zodError: z.ZodError, ctx: TCtx, request: LambderApiRequest) => LambderMaybePromise<LambderApiAnswer | null>;
 /** The session subsystem as the pipeline runs it: the manager plus the cookie names and scope the controller writes. */
 export type LambderApiSessionsConfig<TSessionData> = {
     manager: LambderSessionManager<TSessionData>;
@@ -140,6 +141,8 @@ export declare class LambderApiPipeline<TCtx extends LambderApiCallContext<TSess
     private readonly onInvalidInput;
     private readonly sessions;
     private readonly apiSignatures;
+    /** The modules whose guards and rate-limit policies this pipeline took (addModules), each once. */
+    private readonly modules;
     constructor(options?: LambderApiPipelineOptions<TCtx, TSessionData>);
     /** True when a session manager was configured. */
     get hasSessions(): boolean;
@@ -165,8 +168,28 @@ export declare class LambderApiPipeline<TCtx extends LambderApiCallContext<TSess
      * being counted, since only it knows whether the request is an API call.
      */
     chargeRateLimit(name: string, subject: LambderRateLimitChargeSubject): Promise<LambderRateLimitChargeResult>;
-    /** Registration-time checks of one definition's declarative options; the same messages on the server and in the mock. */
-    assertRegistration(definition: LambderApiDefinition): void;
+    /** Whether this pipeline took the module's guards and rate-limit policies already. */
+    hasModule(module: LambderApiModuleDeclarations): boolean;
+    /**
+     * The modules among `uses` this pipeline has not taken yet, checked and
+     * merged, and nothing taken: a name one of them declares that this
+     * pipeline declares already (at creation, or by a module taken before)
+     * or that another of them declares is refused, as create() refuses a name
+     * two maps declare, and so are rate-limit policies on a pipeline with no
+     * limiter for them. A module met twice is one module. addModules() takes
+     * what this returns once every endpoint of the registration passed.
+     */
+    modulesToAdd(uses: readonly LambderApiModuleUse[]): LambderAddedApiModules;
+    /** Takes the guards and rate-limit policies of the modules modulesToAdd() checked: from here on its endpoints run them, and code may charge the policies. */
+    addModules(added: LambderAddedApiModules): void;
+    /**
+     * Registration-time checks of one definition's declarative options; the
+     * same messages on the server and in the mock. `adding` holds the guards
+     * and policies a registration is about to add beside this pipeline's own:
+     * those of the modules it brings (modulesToAdd), or of the module an
+     * entry is built with.
+     */
+    assertRegistration(definition: LambderApiDefinition, adding?: LambderPendingDeclarations): void;
     /**
      * The answer for a request naming no registered API: the apiNotFound
      * refusal, carrying whatever the call already wrote (a CORS header, a

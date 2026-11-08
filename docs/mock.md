@@ -59,14 +59,16 @@ bound to that too, as the server init's `guard` is: a mock guard's
 not hold is refused as the guard is built.
 
 Every option is off unless present, so `mock.create({})` answers calls from its
-registry and nothing else. Four options stop being optional once the contract
-needs them: `guards` when it declares guard names, `sessions` when it has a
-session endpoint, `idempotency` when an endpoint declares idempotency, and
-`rateLimits` when an endpoint references a policy. A guard the map leaves out
-cannot run, so the mock would answer 200 where the server answers
-`notAuthorized`; an entry that needs one of the other three cannot be
-registered, so leaving the option out is a compile error rather than a throw
-when the registry loads.
+registry and nothing else. Three options stop being optional once the contract
+needs them: `sessions` when it has a session endpoint, `idempotency` when an
+endpoint declares idempotency, and `rateLimits` when an endpoint references a
+policy. An entry that needs one of them cannot be registered, so leaving the
+option out is a compile error rather than a throw when the registry loads.
+The guards are held at the entry instead: each entry needs a mock guard for
+every guard its endpoint declares, in the map it is built with (`guards`, or
+a module's beside it, [below](#a-modules-mock-guards)), since a guard the mock
+does not declare cannot run, and the mock would answer 200 where the server
+answers `notAuthorized`.
 
 | Option | Default | Description |
 | --- | --- | --- |
@@ -77,7 +79,7 @@ when the registry loads.
 | `sessions` | off | Required when the contract has a session endpoint. `true`, or `{ store?, sessionSalt?, ttlSeconds?, crypto?, dataSchema?, dataRefresh?, enableSlidingExpiration?, slidingWriteIntervalSeconds?, tokenCookieKey?, csrfCookieKey?, cookieOptions? }` |
 | `rateLimits` | off | Required when an endpoint references a policy. `{ policies, limiter?, failOpen? }`: the same policies the server declares, over `LambderMemoryRateLimiter` unless a limiter is given, checked against the contract (below). `failOpen: false` refuses a call whose limiter threw instead of letting it through |
 | `idempotency` | off | Required when an endpoint declares idempotency. `true`, or `{ defaultTtlSeconds?, defaultPendingTtlSeconds?, failOpen?, store?, callerIdentity? }`: the server's own options, `callerIdentity` bound to the mock call context without its session, since it runs on public endpoints alone |
-| `guards` | none | The mock guard map; required whenever the contract declares a guard name, and checked against the contract (below) |
+| `guards` | none | The app's own mock guards, each checked against the contract (below); an entry needs one for every guard its endpoint declares, here or in the module it is built with |
 | `guardDeclarations` | none | The generated `guardDeclarations` table: each mock guard of a name it has is held to the server guard's input mode and session requirement, and its refusal codes join the entries declaring it ([below](#declarations-policies-and-guards-from-the-generated-options)) |
 | `apiOptions` | none | The generated `apiOptions` table: every entry's mode, guards, rate limit and idempotency are read off it rather than restated, and a `notMocked` entry and a rest answer run under the mode it gives the name ([below](#declarations-policies-and-guards-from-the-generated-options)) |
 | `apiSchemas` | none | The generated `apiSchemas` table, for development: the input of every call a handler answers is validated against the server's input schema and refused as the server refuses it, and every answer parsed through the server's output schema, dropping what it does not declare and filling its defaults ([below](#validating-against-the-servers-schemas)) |
@@ -96,12 +98,19 @@ control they name switched off.
 
 ### The guard map and the policies are checked against the contract
 
-`guards` must name every guard any endpoint of the contract declares, and for
-every guard the contract knows in `guardInput` mode its schema must parse to
-what the server inferred. A guard a public endpoint names may not require a
-session. A missing name, a schema that parses to something else, or a session
-guard where a public endpoint names it fails at the option. Guards the
-contract does not declare may be added freely.
+Every guard `guards` names that the contract declares is held to it: a
+`guardInput` mode guard's schema must parse to what the server inferred, and
+a guard a public endpoint names may not require a session. A schema that
+parses to something else, or a session guard where a public endpoint names
+it, fails at the option. Guards the contract does not declare may be added
+freely.
+
+An entry is held to the map it is built with: every guard its endpoint
+declares has a mock guard there, or the entry is a compile error on its name
+(and a throw, for a caller the compiler did not see). Without the `apiOptions`
+table, where the mock reads an entry's mode off the guards it restates, a
+session endpoint's entry must also name a mock guard declared `session: true`,
+or a signed-out call would reach a handler typed with its session present.
 
 `rateLimits.policies` is held to what the server's own policies were held to
 when it registered the same endpoints: it names every policy any endpoint of
@@ -111,6 +120,52 @@ the contract references, a policy a public endpoint names is not keyed
 mock copy that differs from the server's where it matters, fails at the
 option rather than when the registry loads. Policies the contract does not
 reference may be added freely.
+
+### A module's mock guards
+
+The server's modules declare guards their own endpoints alone name (see
+[Guards and policies a module
+declares](./api-policies.md#guards-and-policies-a-module-declares)). The mock
+declares a module's stand-ins with the module's entries, so the mock's own
+setup imports none of them:
+
+```typescript
+// giftCards/mocks.ts
+import { mock, mockApp } from "../mockApp";
+
+export const giftCardMocks = mockApp.defineApiModule({
+    guards: {
+        cardHolder: mock.guard({
+            guardInput: z.object({ cardNumber: z.string() }),
+            handler: (_ctx, { cardNumber }) => ({ cardNumber, balance: 25 }),
+        }),
+    },
+});
+
+// A mock given the apiOptions table, so an entry is its handler.
+export const giftCardSlice = giftCardMocks.apiSlice(
+    giftCardMocks.api("giftCards.redeem", async ({ guardData }) => ({ balance: guardData.cardHolder.balance })),
+);
+
+// mocks.ts
+mockApp.register(orderSlice, giftCardSlice);
+```
+
+`defineApiModule({ guards })` hands back `api`, `notMocked`, `apiSlice` and
+`override`, typed with the module's guards beside the app's: an entry built
+with it may name both, its handler's `guardData` typed by both. Registering
+its entries (`register`, `registerPartial`) adds the module's guards to the
+app. Each guard is held to what `create()`'s are held to: the contract, the
+generated `guardDeclarations` when the app was given it (input mode, session
+requirement, refusal codes), surplus keys. A name the app's `create()`
+declares is refused where the module is defined, at compile time and at the
+call, and a name two modules declare when the second is registered; a
+refused registration leaves the app as it was.
+
+A mock module takes guards alone. The mock takes every rate-limit policy at
+`create()`, the modules' among them, from the generated table
+([below](#declarations-policies-and-guards-from-the-generated-options)), so a
+module's policies are never restated by hand.
 
 ### Declarations, policies and guards from the generated options
 
@@ -316,9 +371,9 @@ session endpoint's session before its handler runs and answers
 decide it by the server's rule: an entry naming a guard that needs a session
 (`session: true` on the mock guard, or in the `guardDeclarations` table) is a
 session endpoint, so `order.create` above is one, through `staffPermission`.
-Every session endpoint in the contract has to name at least one mock guard
-declared `session: true`, a compile error at the `guards` option otherwise
-(`LambderMockSessionGuardsCheck`), so an entry restating its guards can never
+A session endpoint's entry has to name at least one mock guard declared
+`session: true`, a compile error on the entry's name otherwise
+(`LambderMockEntryGuardsCheck`), so an entry restating its guards can never
 run a session endpoint as a public one. On
 a mock created with the generated `apiOptions` table, every entry may be a
 bare handler. Without the table, an entry is a bare handler only where the

@@ -9,6 +9,98 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [16.0.1] - 2026-11-08
+
+A major. Modules: guards and rate-limit policies a part of an app declares
+for its own endpoints, so the file creating an instance imports no part's;
+the types an app's declaration files need, exported; and a mock's guards held
+at the entry rather than at `create()`. Every break is named under Changed.
+
+### Added
+
+- **`defineApiModule({ guards, rateLimitPolicies })`** on an instance, and
+  `LambderApiModule`, what it returns: `defineApi`, `defineApiGroup` and
+  `lazyApiGroup` typed on the instance's guards and policies with the
+  module's beside them, so a module's endpoints name either and an unknown
+  name is still a compile error, while the instance's own builders, and every
+  other module's, see none of the module's names. Registering a group adds
+  the modules its endpoints were declared with to the instance; a module's
+  `lazyApiGroup` carries the module, so its group adds it at registration,
+  before it loads, and `apiOptionEntries()`, `apiSignatures()`, the
+  generated tables and a route charging one of its policies all see it from
+  the start. A module reaches an instance only through its groups: on an
+  instance that registers none of them, a route charging one of its policies
+  fails at its first request. Each option takes one map or a list of maps,
+  held to what `create()` holds its own to. A name the instance declares is
+  refused where the module is defined, at compile time and at the call; a
+  name two modules declare is refused when the second is registered, and the
+  refused registration leaves the instance as it was. A module declaring
+  policies needs the instance's limiter. A lazy group registered with the
+  instance's own `lazyApiGroup` whose loaded endpoints a module declared is
+  refused when it loads. `LambderRenderContextOf<typeof module>` types a
+  helper handed one of its handlers' contexts.
+- **`defineApiModule({ guards })` on a mock app**, and `LambderMockApiModule`:
+  `api`, `notMocked`, `apiSlice` and `override` with a module's mock guards
+  beside the app's, added when its entries are registered, each guard held to
+  the contract and the generated `guardDeclarations` as `create()`'s are, and
+  the same rule for names. A mock module takes no policies: the mock takes
+  them all at `create()`, from the generated table.
+- **`rateLimits: { limiter }` with no policies**, for an instance whose
+  policies are all its modules'. An empty `policies: {}` is still refused.
+- **The types an app's declaration files name are exported**, so an app that
+  emits declaration files (`declaration`, `composite`) no longer stops at
+  TS2883 ("cannot be named without a reference to ... from lambder"). The
+  builders are named types, `LambderDefineApi`, `LambderDefineApiGroup` and
+  `LambderDefineLazyApiGroup`, so a builder handed out destructured or under
+  the instance's name is declared by that name. Exported with them: the
+  fourteen names seen missing on an app's own declarations
+  (`LambderObjectOutputCheck`, `LambderPolicyPerOf`,
+  `LambderPublicSessionPolicyCheck`, `LambderSessionModeCheck`,
+  `LambderMaybePromise`, which was `MaybePromise` and unexported,
+  `LambderActionNamesCheck`, `LambderGroupNameCheck`,
+  `LambderGroupPartsCheck`, `LambderMergedParts`, `LambderGivenOption`,
+  `LambderInitCreateOptions`, `LambderMergedNamedMaps`,
+  `LambderNamedMapsOption`, `LambderNestedOptionChecks`);
+  `LambderRefusalVocabularyOptionChecks`, from both entries; the module types;
+  and the types written directly into a builder's, a method's or a
+  constructor's parameters (`LambderPayloadSliceCheck`,
+  `LambderRequirableGuardsField`, `LambderSessionEnabledInstance`,
+  `LambderRegisteredGroupsCheck`, `LambderNoExtraKeys`,
+  `LambderApiHandlerContext`, `LambderApiModuleOptions`,
+  `LambderApiModuleOptionChecks`, `LambderApiModuleDeclarations`, and on the
+  mock entry `LambderMockApiModuleOptions`, `LambderMockApiModuleChecks`,
+  `LambderMockApiModuleDoor`, `LambderMockEntryGuardsCheck` and
+  `LambderMockNotMockedGuardsCheck`). A test emits the declarations of a
+  sample app against the built package and fails on any diagnostic: a server
+  (an exported init, create() in a factory, the builders destructured and
+  under the instance's name, groups, lazy groups, a module, a list of parts,
+  the entry, routes, a test app, an invoke caller) and a mock (the vocabulary
+  declared, the generated tables given to create(), entries as handlers,
+  `notMocked`, a mock module, `register()`). The other names are kept for the
+  shapes the sample does not reach.
+
+### Changed
+
+- **A mock's guards are held at the entry rather than at `create()`.** The
+  `guards` option need no longer name every guard the contract declares,
+  since a module may declare its own; each entry instead needs a mock guard
+  for every guard its endpoint declares in the map it is built with, and,
+  without the `apiOptions` table, a session endpoint's entry needs one
+  declared `session: true`. Both are compile errors on the entry's name. A
+  guard the map does name is still held to the contract.
+  `LambderMockSessionGuardsCheck` is removed, replaced by
+  `LambderMockEntryGuardsCheck` (and `LambderMockNotMockedGuardsCheck` for
+  `notMocked`). A `@ts-expect-error` on a `create()` that leaves out a guard
+  the contract declares is now unused (TS2578): the error is at the entry.
+- **`api()` and `notMocked()` take their name as
+  `K & LambderMockEntryGuardsCheck<...>` and
+  `K & LambderMockNotMockedGuardsCheck<...>`.** A wrapper generic over the
+  endpoint name that passes its own type parameter on no longer compiles
+  (TS2345); call them with a concrete name, or cast the name in the wrapper.
+- **`LambderApiRateLimitsConfig.policies` is optional**, matching the
+  `rateLimits` option above, so code reading `.policies` off one sees
+  `| undefined`.
+
 ## [15.1.1] - 2026-10-03
 
 A minor: every request a route answers writes a call summary line, named by

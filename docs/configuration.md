@@ -36,7 +36,7 @@ policy types; the curried creator is the canonical entry.
 | `originProof` | none | `{ header, secrets, proxyHeaders? }`: the trusted headers above are read only from a request carrying the secret the proxy in front of the app sets, taken off one that does not along with `proxyHeaders`, and `ctx.arrivedVia` says which it was (below) |
 | `callSummary` | one JSON line per call on stdout | What the summary of each API call, and of each request a route answered, goes to: a function, or `false` for none (below) |
 | `session` | none | Sessions over a store of your choosing; a guard that needs a session (`session: true`) and `addSessionRoute` are compile errors without it. See [Sessions](./sessions.md) |
-| `rateLimits` | none | A limiter (`LambderRateLimiter`: DynamoDB, memory, or your own) plus named policies APIs reference by name, in one map or a list of maps (below). See [API policies](./api-policies.md#rate-limits) |
+| `rateLimits` | none | A limiter (`LambderRateLimiter`: DynamoDB, memory, or your own) plus named policies APIs reference by name, in one map or a list of maps (below); the policies may be left out when the app's modules declare them all. See [API policies](./api-policies.md#rate-limits) |
 | `guards` | none | Named guards APIs reference by name; build each with `initLambder<SessionData>().guard()` (typed to the app's session) or `lambderGuard()`. One map or a list of maps (below). See [API policies](./api-policies.md#guards) |
 | `idempotency` | none | An idempotency store (`LambderIdempotencyStore`: DynamoDB, memory, or your own) plus replay defaults. See [API policies](./api-policies.md#idempotency) |
 | `requireApiGuards` | `false` | Make `guards` a required field of every endpoint (`defineApi`) |
@@ -360,6 +360,17 @@ builders, and the entry registers the groups they build after creation. The
 mock runtime's `create()` takes one map of each; its `declareRefusals()` takes
 the list the server's does.
 
+The file that creates the instance then imports every part's guards and
+policies, and the instance's type carries them all. A part whose guards and
+policies only its own endpoints name declares them itself instead, as a
+module: `lambderApp.defineApiModule({ guards, rateLimitPolicies })` hands back
+builders typed on the instance's names and the module's, and registering the
+groups they build adds the module to the instance. The instance is created
+knowing its own declarations alone, and imports no part. See [Guards and
+policies a module declares](./api-policies.md#guards-and-policies-a-module-declares);
+the mock app has the same, for a module's mock guards (see
+[the mock runtime](./mock.md#a-modules-mock-guards)).
+
 ## Declaring endpoints across files
 
 The instance's declaration builders are typed to it, so a module declares its
@@ -391,6 +402,24 @@ export const handler = lambder.getHandler();
 
 `AppLambder` is for code that takes the configured instance, such as a
 function that registers routes on it (`use()`).
+
+An app that emits declaration files (`declaration` or `composite`, as a
+build split into project references needs) hands the builders out under the
+instance's name instead of destructuring them:
+
+```typescript
+export const defineApi: AppLambder["defineApi"] = lambderApp.defineApi;
+export const defineApiGroup: AppLambder["defineApiGroup"] = lambderApp.defineApiGroup;
+export const lazyApiGroup: AppLambder["lazyApiGroup"] = lambderApp.lazyApiGroup;
+```
+
+Each builder's declaration then refers to the app's types through
+`AppLambder`. Destructured, each one's declaration writes the app's types out
+again in full, and a project reading those declarations compares the copies
+field by field. Either form names only types the package exports, so both
+emit; this one is the default the compiler cannot pick for you, since a
+declaration can refer to the app's types only through a name the app
+declares.
 
 ## Registration methods
 

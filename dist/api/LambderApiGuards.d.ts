@@ -391,6 +391,14 @@ export declare const toGuardEntries: (value?: LambderGuardsOptionValue) => {
     param: unknown;
 }[];
 /**
+ * Refuses a guard that cannot run: no handler, both input modes, a refusals
+ * option that is not a list of codes, an unknown runAt, a singleUseInput
+ * that is not a boolean or sits on a guard without a guardInput. What the
+ * guards option at creation and a module's guards (defineApiModule) are each
+ * held to, one rule for both.
+ */
+export declare const assertGuardDeclaration: (name: string, guardDef: LambderApiGuard<any, any, any>) => void;
+/**
  * Runtime side of the guards subsystem: holds the defined guards, asserts
  * API registrations against them at startup, and executes an API's declared
  * guards during preflight. Held by LambderApiPipeline. Reads the
@@ -399,12 +407,24 @@ export declare const toGuardEntries: (value?: LambderGuardsOptionValue) => {
  */
 export declare class LambderApiGuardsEngine {
     private guards;
-    /** True once a guards map was configured. */
+    /** True once a guards map was configured, or a module added guards. */
     get isConfigured(): boolean;
+    /** Whether a guard of this name is declared, by the creation's map or a module added since. */
+    has(name: string): boolean;
     /** Take the guards map given at creation; named like the other two engines' configure(). */
     configure(guards: Record<string, LambderApiGuard<any, any, any>>): void;
-    /** Startup validation of one API registration's guards option. */
-    assertRegistration(apiName: string, mode: LambderApiMode, guardsOption?: LambderGuardsOptionValue): void;
+    /**
+     * Adds a module's guards beside the ones declared so far. Its names were
+     * checked against them before (LambderApiPipeline.modulesToAdd), so a
+     * name met again here is a caller that skipped that check.
+     */
+    add(guards: Readonly<Record<string, LambderApiGuard<any, any, any>>>): void;
+    /**
+     * Startup validation of one API registration's guards option. `adding`
+     * holds the guards of the modules the same registration adds, which the
+     * engine takes only once every endpoint of it passed.
+     */
+    assertRegistration(apiName: string, mode: LambderApiMode, guardsOption?: LambderGuardsOptionValue, adding?: Readonly<Record<string, LambderApiGuard<any, any, any>>>): void;
     /**
      * The posted guard inputs an idempotency fingerprint holds for an API
      * declaring `guardsOption`: the value of each of its `guardInput` guards

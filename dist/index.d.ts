@@ -1,8 +1,12 @@
 import Lambder from './core/Lambder.js';
 export default Lambder;
 export { initLambder } from './core/Lambder.js';
-export type { LambderCreatedHook } from './core/Lambder.js';
-export type { LambderAppTypes, LambderPlainAppTypes, LambderApiDeclaration, LambderApiDeclarations, LambderApiGroup, LambderLazyApiGroup, LambderRegistrableApiGroup, LambderApiModeOf, LambderEntryOf, LambderContractOfGroups, } from './api/LambderApiDeclarations.js';
+export type { LambderCreatedHook, LambderInitCreateOptions } from './core/Lambder.js';
+export type { LambderDefineApi, LambderDefineApiGroup, LambderDefineLazyApiGroup, LambderApiHandlerContext, } from './core/LambderApiBuilders.js';
+export { LambderApiModule } from './core/LambderApiModule.js';
+export type { LambderApiModuleOptions, LambderApiModuleOptionChecks, LambderModuleAppTypes } from './core/LambderApiModule.js';
+export type { LambderApiModuleDeclarations } from './api/LambderApiModules.js';
+export type { LambderAppTypes, LambderPlainAppTypes, LambderApiDeclaration, LambderApiDeclarations, LambderApiGroup, LambderLazyApiGroup, LambderRegistrableApiGroup, LambderApiModeOf, LambderEntryOf, LambderContractOfGroups, LambderRegisteredGroupsCheck, LambderActionNamesCheck, LambderGroupNameCheck, LambderGroupPartsCheck, LambderMergedParts, LambderPublicSessionPolicyCheck, LambderSessionModeCheck, } from './api/LambderApiDeclarations.js';
 export { apiCallPath, apiNameOfCallPath, splitApiName, isGroupName, isActionName, LAMBDER_API_NAME_SEGMENT, LAMBDER_CALLER_MEMBER_NAMES, LAMBDER_RESERVED_GROUP_NAMES, LAMBDER_RESERVED_ACTION_NAMES, } from './shared/wire/LambderApiNames.js';
 export type { LambderReservedGroupName, LambderReservedActionName } from './shared/wire/LambderApiNames.js';
 export type { LambderContractGroupsOf, LambderContractNamesInGroup, LambderContractActionOf } from './shared/wire/LambderApiGroupCalls.js';
@@ -77,7 +81,7 @@ export type { LambderTemplateData, LambderTemplatingEngineOptions } from "./core
 export type { LambderResponseOptions, LambderRawResponseInit, LambderTemplateFileOptions, } from "./core/LambderResponseBuilder.js";
 export type { LambderRouteMatcher, LambderRouteConditionFn, LambderRouteCondition, LambderPathParamsOf, LambderRoutePath } from "./core/LambderRouting.js";
 export type { LambderCorsConfig } from "./core/LambderCors.js";
-export type { LambderCreateOptions, LambderSessionOptions, LambderActionTools, LambderHandler, } from "./core/LambderCreateOptions.js";
+export type { LambderCreateOptions, LambderSessionOptions, LambderActionTools, LambderHandler, LambderGivenOption, LambderNamedMapsOption, LambderMergedNamedMaps, LambderNestedOptionChecks, LambderObjectOutputCheck, LambderPayloadSliceCheck, LambderRequirableGuardsField, LambderSessionEnabledInstance, } from "./core/LambderCreateOptions.js";
 export type { LambderIndexHtmlOptions } from "./core/LambderIndexHtml.js";
 export type { LambderRouteHandler, LambderSessionRouteHandler, LambderActionHandler, LambderActionFilter, LambderHookEvent, LambderBeforeRenderHook, LambderAfterRenderHook, LambderFallbackHook, LambderGlobalErrorHandler, LambderFallbackHandler, LambderInputValidationHandler, LambderCrashOptions, LambderCrashReporter, LambderCrashSite, } from "./core/LambderCreateOptions.js";
 export type { LambderPublicFilesOptions } from "./core/LambderPublicFiles.js";
@@ -136,10 +140,11 @@ export { lambderGuard, lambderRateLimitKey } from "./core/LambderPolicyBuilders.
 export { lambderGuardBuilder } from "./api/LambderApiGuards.js";
 export type { LambderGuardBuilder, LambderApiGuard, LambderGuardMeta, LambderGuardMetaMap, LambderGuardRunAt, LambderAllowedGuardNames, LambderGuardNamesInputLacks, LambderParamlessGuardNames, LambderGuardsOption, LambderGuardDataOf, LambderGuardInputsOf, LambderGuardRefusals, LambderGuardRefusalNamesOf, } from "./api/LambderApiGuards.js";
 export { LambderApiRefusalValidationError } from "./api/LambderApiRefusals.js";
-export type { LambderRefusalDeclaration, LambderRefusalVocabulary, LambderRefusalVocabularyOption, LambderMergedRefusalVocabulary, LambderApiAllowedRefusal, LambderApiAllowedRefusals, LambderEndpointRefusals, LambderRefusalsOption, LambderRefusalNamesIn, LambderHandlerRefusalsOf, LambderWireRefusalsOf, } from "./api/LambderApiRefusals.js";
+export type { LambderRefusalDeclaration, LambderRefusalVocabulary, LambderRefusalVocabularyOption, LambderRefusalVocabularyOptionChecks, LambderMergedRefusalVocabulary, LambderApiAllowedRefusal, LambderApiAllowedRefusals, LambderEndpointRefusals, LambderRefusalsOption, LambderRefusalNamesIn, LambderHandlerRefusalsOf, LambderWireRefusalsOf, } from "./api/LambderApiRefusals.js";
 export { lambderRateLimitKeyBuilder, rateLimitRefusal, DEFAULT_RATE_LIMIT_REFUSAL } from "./api/LambderApiRateLimits.js";
 export type { LambderRateLimitKeyBuilder } from "./api/LambderApiRateLimits.js";
-export type { LambderContextRateLimit, LambderContextRateLimitCheck, LambderRateLimitCheckResult, LambderChargeablePolicyNames, LambderChargeKeyArgs, LambderRateLimitKeyFn, LambderRateLimitPer, LambderRateLimitBudget, LambderRateLimitChargeAt, LambderApiRateLimitPolicyConfig, LambderApiRateLimitsConfig, LambderAllowedPolicyNames, LambderPolicyNamesInputLacks, LambderRateLimitOption, } from "./api/LambderApiRateLimits.js";
+export type { LambderContextRateLimit, LambderContextRateLimitCheck, LambderRateLimitCheckResult, LambderChargeablePolicyNames, LambderChargeKeyArgs, LambderRateLimitKeyFn, LambderRateLimitPer, LambderRateLimitBudget, LambderRateLimitChargeAt, LambderApiRateLimitPolicyConfig, LambderApiRateLimitsConfig, LambderAllowedPolicyNames, LambderPolicyNamesInputLacks, LambderRateLimitOption, LambderPolicyPerOf, } from "./api/LambderApiRateLimits.js";
+export type { LambderMaybePromise, LambderNoExtraKeys } from "./shared/util/LambderTypeUtilities.js";
 export type { LambderApiIdempotencyConfig } from "./api/LambderApiIdempotency.js";
 export type { LambderGuardsOptionValue, LambderRateLimitMessage, LambderRateLimitOverride, LambderRateLimitOptionValue, LambderRefusalsOptionValue, LambderApiIdempotencyOption, } from "./shared/wire/LambderApiOptionValues.js";
 export { apiGuardParam, apiGuardParamExportName, apisWithGuard } from "./shared/wire/LambderApiOptionEntries.js";

@@ -11,7 +11,7 @@
  * writes the synchronous form when it has nothing to await, and the framework
  * awaits either.
  */
-export type MaybePromise<T> = T | Promise<T>;
+export type LambderMaybePromise<T> = T | Promise<T>;
 /**
  * T with every object and array readonly, all the way down: what an API
  * handler's returned answer is checked against.

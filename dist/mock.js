@@ -7,6 +7,8 @@
  * production bundle by construction: nothing else imports it.
  */
 export { LambderMockApp, initLambderMock } from "./mock/LambderMockApp.js";
+// A part of the mock app with mock guards of its own, declared with its entries.
+export { LambderMockApiModule } from "./mock/LambderMockApiModule.js";
 // The four collaborators behind LambderMockApp (the entry registry, the call
 // recorder, the failure injector, the browser cookies) are deliberately not
 // exported: the runtime is reached through the app. Only the error a

@@ -1,6 +1,8 @@
 import Lambder from './core/Lambder.js';
 export default Lambder;
 export { initLambder } from './core/Lambder.js';
+// Modules: guards and rate-limit policies a part of an app declares for its own endpoints.
+export { LambderApiModule } from './core/LambderApiModule.js';
 // How an endpoint is named, and where a call to it goes.
 export { apiCallPath, apiNameOfCallPath, splitApiName, isGroupName, isActionName, LAMBDER_API_NAME_SEGMENT, LAMBDER_CALLER_MEMBER_NAMES, LAMBDER_RESERVED_GROUP_NAMES, LAMBDER_RESERVED_ACTION_NAMES, } from './shared/wire/LambderApiNames.js';
 export { default as LambderCaller } from "./client/LambderCaller.js";
