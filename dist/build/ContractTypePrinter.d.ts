@@ -23,10 +23,18 @@ export declare class ContractTypePrinter {
     private readonly checker;
     private readonly style;
     private failures;
-    /** Every declaration by the type it stands for. */
+    /** Every declaration by what it stands for. */
     private declarations;
     /** The name each declaration is printed under, settled from all of them; empty on the pass that finds them. */
     private settledNames;
+    /** The literal lists the pass that finds declarations met, by their members' text: how often each is written, and under which properties. Null on the pass that prints. */
+    private literalLists;
+    /** The lists the app declares under a name of its own, by their members' text: the same list written elsewhere refers to that declaration. */
+    private readonly namedLists;
+    /** The property whose type is being printed, the innermost; undefined outside any, and in an entry's own members (input, output), which every entry has. */
+    private memberName;
+    /** The type of each of the contract's entries, whose own members name no list. */
+    private readonly entryTypes;
     /** Names a declaration may not take: the default library's, and the contract's own. */
     private readonly reservedNames;
     /** The anonymous types being printed: meeting one again inside itself is recursion, and it needs a name. */
@@ -43,7 +51,8 @@ export declare class ContractTypePrinter {
      * as the printer met them, two types wanting one name would trade it
      * whenever the APIs were registered in another order, or a union's
      * members created in another, and the file would move with no API
-     * changed.
+     * changed. The first pass also counts the literal lists, since a list
+     * earns a declaration by being written more than once.
      */
     printContract(contract: ts.Type): PrintedContract;
     /**
@@ -53,7 +62,9 @@ export declare class ContractTypePrinter {
      * type has claimed its own name, so a number never takes the name
      * another type is declared under. Types declared at one place (two
      * instantiations of a generic) keep the order the entries reached them
-     * in, by entry name.
+     * in, by entry name. A literal list comes after every declared type
+     * that wants its name, and two lists that want one name in the order of
+     * their members' text.
      */
     private settleNames;
     /**
@@ -65,7 +76,7 @@ export declare class ContractTypePrinter {
     private print;
     /** A union, an intersection or an object: printed in place, or as a reference to a declaration of its own. */
     private printComposite;
-    /** A type's declaration, under the name it is settled to once the first pass has settled them. */
+    /** A declaration of a type or of a literal list, under the name it is settled to once the first pass has settled them. */
     private declare;
     /** The name a type is declared under and where, when it is one to print as a declaration: non-generic, and not the default library's. */
     private ownDeclarationOf;
@@ -84,9 +95,30 @@ export declare class ContractTypePrinter {
      * arguments.
      */
     private recursiveDeclarationOf;
+    /** A type's structure. `ownDeclaration` says it is printed as the body of the declaration the app gave it. */
     private printStructure;
-    private printUnion;
+    /** A union of the types given. `declared` is the union itself where it is printed as the body of its own declaration. */
     private printUnionOf;
+    /** Union members on one line, or one a line where they are too long for it. */
+    private unionText;
+    /**
+     * A union's literal members as it prints them: themselves, or, for a
+     * list long enough to name, the one name that stands for them all. The
+     * pass that finds declarations counts each list and prints it whole; the
+     * pass that prints refers to the app's own declaration of the list where
+     * there is one, and otherwise to the list's declaration where the count
+     * gave it one.
+     */
+    private literalMembers;
+    /**
+     * The members of a list the app declares under a name of its own, which
+     * its declaration holds. Of two declarations of one list, the one that
+     * would keep a name both wanted is the one the list written elsewhere
+     * refers to.
+     */
+    private ownLiteralList;
+    /** The name a list is declared under: the property it most often sits under, the first of those that tie, with a capital. */
+    private literalListNameOf;
     private printIntersection;
     private printObject;
     private printMembers;

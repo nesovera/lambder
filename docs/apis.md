@@ -285,7 +285,14 @@ of its own that the entries refer to, which is also how a recursive type (a
 tree, a JSON value) refers to itself; any other type that recurses is named
 after what it instantiates (`Tree<string>` is `TreeString`). Two types that
 want one name (an interface `Row` in two modules) are told apart by a number,
-the one declared first, by file and then position, keeping the name.
+the one declared first, by file and then position, keeping the name. A list
+of literals a schema infers (an enum of currencies) has no name, and a
+contract can write one out hundreds of times: a list of sixteen or more
+members that the contract holds more than once is printed once as well, as a
+declaration named after the property it most often sits under (`Currency`
+for `currency`; an entry's own `input` and `output` name none), and a list
+the app declares under a name of its own is referred to by that name
+wherever it is written. A shorter list, or one written once, stays in place.
 Properties keep the order they are written in, and names do not follow the
 order APIs are registered in, so the file changes only when an API does. The
 module exports one type alias, `typeName` (default `ApiContractType`), of an

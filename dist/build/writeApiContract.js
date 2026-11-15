@@ -45,7 +45,10 @@ const DIAGNOSTIC_LIMIT = 20;
  * alias, `typeName`. Only the default library's interfaces (Date) are printed
  * by name. A non-generic named type is printed once, as a declaration of its
  * own that the entries refer to; two that want one name are numbered by where
- * each is declared, never by the order the APIs were registered in.
+ * each is declared, never by the order the APIs were registered in. A list of
+ * sixteen or more literals that the contract holds more than once (an enum of
+ * currencies, inferred wherever a schema uses it) is printed once as well,
+ * named after the property it most often sits under.
  *
  * Anything with no plain form fails the call and names where it sits: a
  * function, a symbol-keyed property, an enum, a class's private member, or a

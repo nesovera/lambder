@@ -86,6 +86,15 @@ const anonymousTree = { label: "root", children: nodes };
     "tree.copy": { input: {}; output: typeof anonymousTree; mode: "public" };
 }`);
 
+/** Sixteen literals as a union's source text: the fewest a list is named at. */
+const literalUnion = (members: readonly (string | number)[]) => members.map((member) => JSON.stringify(member)).join(' | ');
+const CURRENCY_CODES = ['AUD', 'BRL', 'CAD', 'CHF', 'CNY', 'DKK', 'EUR', 'GBP', 'HKD', 'INR', 'JPY', 'MXN', 'NOK', 'NZD', 'SEK', 'USD'];
+const CURRENCIES = literalUnion(CURRENCY_CODES);
+const AISLES = literalUnion(Array.from({ length: 16 }, (_, index) => index + 1));
+const CARRIERS = literalUnion(Array.from({ length: 16 }, (_, index) => `carrier-${String(index + 1).padStart(2, '0')}`));
+/** Seven: a list too short to name. */
+const WEEKDAYS = literalUnion(['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']);
+
 describe('writeApiContract', () => {
     it('prints every type as plain structure, verifies it, and writes a module that imports nothing', async () => {
         const { module, file } = projectWith(PRINTER_CASES);
@@ -270,6 +279,101 @@ describe('writeApiContract', () => {
         expect(printed).toContain('type Row = {\n    orderId: string;\n};');
         expect(printed).toContain('type Row2 = {\n    note: string;\n};');
         expect(printed).toContain('type Row3 = {\n    userId: string;\n};');
+    }, COMPILER_TIMEOUT_MS);
+
+    it('prints a long literal list the contract holds more than once as one declaration, named after the property it sits under', async () => {
+        const { module, file } = projectWith(contractModule('', `{
+            "orders.get": {
+                input: { currency: ${CURRENCIES} };
+                output: {
+                    currency: ${CURRENCIES} | null;
+                    lines: { currency: ${CURRENCIES}; priceCurrency: ${CURRENCIES} }[];
+                    accepted: (${CURRENCIES})[];
+                    aisle: ${AISLES};
+                    weekday: ${WEEKDAYS};
+                    carrier: ${CARRIERS};
+                };
+                mode: "public";
+            };
+            "orders.list": { input: {}; output: { aisle: ${AISLES}; weekday: ${WEEKDAYS} }; mode: "public" };
+        }`));
+
+        const result = await writeApiContract({ module, file });
+
+        expect(result).toMatchObject({ ok: true, written: true, count: 2 });
+        const printed = readFileSync(file, 'utf8');
+        // Written five times over, declared once, under the name of the
+        // property it sits under most often.
+        expect(printed.match(/"AUD"/g)).toHaveLength(1);
+        expect(printed).toContain(`type Currency =\n${CURRENCY_CODES.map((code) => `    | "${code}"`).join('\n')};`);
+        expect(printed).toContain('            currency: Currency;\n        };');
+        expect(printed).toContain('            currency: Currency | null;');
+        expect(printed).toContain('                currency: Currency;\n                priceCurrency: Currency;');
+        expect(printed).toContain('            accepted: Currency[];');
+        // Numbers are a list as well, and one that fits a line is declared on it.
+        expect(printed).toContain('type Aisle = 1 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;');
+        expect(printed.match(/aisle: Aisle;/g)).toHaveLength(2);
+        // A list under sixteen members stays where it is however often it
+        // is written, and so does a long one written once.
+        expect(printed.match(/weekday: "fri" \| "mon" \| "sat" \| "sun" \| "thu" \| "tue" \| "wed";/g)).toHaveLength(2);
+        expect(printed.match(/"carrier-01"/g)).toHaveLength(1);
+        expect(printed).not.toMatch(/^type (Weekday|Carrier)/m);
+        expect(diagnosticsOf([file])).toEqual([]);
+
+        // The same contract prints the same file, and a check of it passes.
+        expect(await writeApiContract({ module, file, check: true })).toMatchObject({ ok: true, written: false });
+    }, COMPILER_TIMEOUT_MS);
+
+    it('refers a list to the declaration the app gave it, and numbers one whose name a declared type holds', async () => {
+        const { module, file } = projectWith(contractModule(`
+            export type TenderCurrency = ${CURRENCIES};
+            export interface Aisle { label: string }
+        `, `{
+            "orders.get": {
+                input: {};
+                output: { tender: TenderCurrency; currency: ${CURRENCIES}; aisle: ${AISLES}; shelf: Aisle; code: ${CARRIERS} };
+                mode: "public";
+            };
+            "orders.list": { input: {}; output: { aisle: ${AISLES}; code: ${CARRIERS}; "ship-via": ${CARRIERS} }; mode: "public" };
+            "carriers.list": { input: {}; output: (${CARRIERS})[]; mode: "public" };
+        }`));
+
+        expect((await writeApiContract({ module, file })).ok).toBe(true);
+        const printed = readFileSync(file, 'utf8');
+        // The app's own name for the list is the one the list written out
+        // refers to, though it is written out once only.
+        expect(printed.match(/"AUD"/g)).toHaveLength(1);
+        expect(printed).toContain('type TenderCurrency =\n    | "AUD"');
+        expect(printed).toContain('tender: TenderCurrency;');
+        expect(printed).toContain('currency: TenderCurrency;');
+        // A declared type keeps the name a list wants as well.
+        expect(printed).toContain('type Aisle = {\n    label: string;\n};');
+        expect(printed).toContain('shelf: Aisle;');
+        expect(printed).toContain('type Aisle2 = 1 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;');
+        expect(printed.match(/aisle: Aisle2;/g)).toHaveLength(2);
+        // Named after the property it sits under most often, of those whose
+        // name is one to print; an entry's own type sits under none.
+        expect(printed).toContain('type Code =\n    | "carrier-01"');
+        expect(printed).toContain('"ship-via": Code;');
+        expect(printed).toContain('        output: Code[];');
+        expect(diagnosticsOf([file])).toEqual([]);
+    }, COMPILER_TIMEOUT_MS);
+
+    it('names a list that sits under no property whose name is one to print LiteralList', async () => {
+        const { module, file } = projectWith(contractModule('', `{
+            "carriers.list": { input: {}; output: { "ship-via": (${CARRIERS})[]; "sent-by": [${CARRIERS}] }; mode: "public" };
+            "carriers.all": { input: {}; output: (${CARRIERS})[]; mode: "public" };
+        }`));
+
+        expect((await writeApiContract({ module, file })).ok).toBe(true);
+        const printed = readFileSync(file, 'utf8');
+        expect(printed).toContain('type LiteralList =\n    | "carrier-01"');
+        expect(printed).toContain('"ship-via": LiteralList[];');
+        expect(printed).toContain('"sent-by": [LiteralList];');
+        // An entry's own output is a slot every entry has, not a name.
+        expect(printed).toContain('        output: LiteralList[];');
+        expect(printed).not.toMatch(/^type Output/m);
+        expect(diagnosticsOf([file])).toEqual([]);
     }, COMPILER_TIMEOUT_MS);
 
     it('escapes what a template literal holds, so its text prints back as the same text', async () => {

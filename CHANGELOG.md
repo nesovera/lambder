@@ -9,6 +9,31 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [16.1.1] - 2026-11-15
+
+A minor for an app whose contract repeats long enums: `writeApiContract`
+prints a list of literals once, under a name, wherever the contract would
+write it out more than once. The contract's types do not change.
+
+### Changed
+
+- **`writeApiContract` prints a long literal list once.** A list of literals
+  a schema infers (an enum of currencies, of countries, of time zones) has no
+  name of its own, so the contract wrote it out wherever a schema used it,
+  and a contract of a few hundred APIs could be mostly such lists. A list of
+  sixteen or more string, number or bigint literals that the contract holds
+  more than once is now printed once, as a declaration the entries refer to,
+  named after the property it most often sits under (`Currency` for
+  `currency`, a number after it where a declared type or another list holds
+  the name, `LiteralList` where no property's name is one to print; an
+  entry's own `input` and `output` name no list). A list
+  the app declares under a name of its own is referred to by that name
+  wherever the same members are written out. A shorter list, and one written
+  once, stays in place, and a union's other members stay beside the name
+  (`Currency | null`). The printed type is the same type, proved before a
+  write as before; the file's text changes, so a check reports a file written
+  by an earlier version stale until it is regenerated.
+
 ## [16.0.1] - 2026-11-08
 
 A major. Modules: guards and rate-limit policies a part of an app declares

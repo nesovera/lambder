@@ -18,6 +18,16 @@ import type ts from "typescript";
  * wanting one name (an interface Row in two modules) are told apart by a
  * number, given out by where each is declared (see printContract).
  *
+ * A list of literals has no name where a schema infers it (an enum of
+ * currencies), and a contract can write one out hundreds of times. One of
+ * sixteen or more members that the contract holds more than once is printed
+ * once too, as a declaration named after the property it most often sits
+ * under (`Currency` for `currency`), or `LiteralList` where it sits under
+ * none (an entry's own input and output name no list, every entry having
+ * them); where the app declares the same list under a name of its own, that
+ * declaration is the one referred to. A shorter list, or one written once,
+ * stays where it is, readable in place.
+ *
  * Whatever has no plain form (a function, a symbol key, an enum, a class's
  * private member, a type parameter the contract leaves open) is collected as
  * a failure naming where it sits, rather than printed as a name that only
@@ -51,10 +61,19 @@ type PrintedType = { text: string; compound: boolean };
  */
 type Declaration = { base: string; origin: string; name: string; text: string | null };
 
+/** What a declaration stands for: a type, or a literal list, by its members' text. */
+type Declared = ts.Type | string;
+
 const INDENT = "    ";
 const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
 /** How long a union may run on one line before each member goes on a line of its own. */
 const UNION_LINE_WIDTH = 80;
+/** How many literals make a list: one this long that the contract holds more than once is printed once, under a name. */
+const LITERAL_LIST_FLOOR = 16;
+/** The name of a list that sits under no property whose name is one to print. */
+const LITERAL_LIST_NAME = "LiteralList";
+/** What a list's origin starts with: it orders after every file's, so a type the app declares keeps a name both want. */
+const LITERAL_LIST_ORIGIN = "\uffff";
 
 const atom = (text: string): PrintedType => ({ text, compound: false });
 const indentFollowingLines = (text: string, indent: string) => text.replace(/\n/g, `\n${indent}`);
@@ -82,13 +101,23 @@ const bySourceOrder = (a: ts.Symbol, b: ts.Symbol): number => {
 };
 /** Union members in a stable order, with null and undefined last as they are usually written. */
 const unionMemberRank = (text: string) => text === "null" ? 1 : text === "undefined" ? 2 : 0;
+/** A literal list as the text of its members, in whatever order they came: what tells two lists apart, whatever types the compiler holds them as. */
+const literalListKey = (literals: readonly string[]) => [...literals].sort(byCodeUnits).join(" | ");
 
 export class ContractTypePrinter {
     private failures: string[] = [];
-    /** Every declaration by the type it stands for. */
-    private declarations = new Map<ts.Type, Declaration>();
+    /** Every declaration by what it stands for. */
+    private declarations = new Map<Declared, Declaration>();
     /** The name each declaration is printed under, settled from all of them; empty on the pass that finds them. */
-    private settledNames = new Map<ts.Type, string>();
+    private settledNames = new Map<Declared, string>();
+    /** The literal lists the pass that finds declarations met, by their members' text: how often each is written, and under which properties. Null on the pass that prints. */
+    private literalLists: Map<string, { uses: number; under: Map<string, number> }> | null = null;
+    /** The lists the app declares under a name of its own, by their members' text: the same list written elsewhere refers to that declaration. */
+    private readonly namedLists = new Map<string, { type: ts.Type; order: string }>();
+    /** The property whose type is being printed, the innermost; undefined outside any, and in an entry's own members (input, output), which every entry has. */
+    private memberName: string | undefined;
+    /** The type of each of the contract's entries, whose own members name no list. */
+    private readonly entryTypes = new Set<ts.Type>();
     /** Names a declaration may not take: the default library's, and the contract's own. */
     private readonly reservedNames = new Set<string>();
     /** The anonymous types being printed: meeting one again inside itself is recursion, and it needs a name. */
@@ -125,12 +154,19 @@ export class ContractTypePrinter {
      * as the printer met them, two types wanting one name would trade it
      * whenever the APIs were registered in another order, or a union's
      * members created in another, and the file would move with no API
-     * changed.
+     * changed. The first pass also counts the literal lists, since a list
+     * earns a declaration by being written more than once.
      */
     printContract(contract: ts.Type): PrintedContract {
         const members = [...this.checker.getPropertiesOfType(contract)].sort((a, b) => byCodeUnits(a.name, b.name));
+        for(const entry of members) this.entryTypes.add(this.checker.getTypeOfSymbol(entry));
         const printEntries = () => members.map((entry) => ({ name: entry.name, text: this.print(this.checker.getTypeOfSymbol(entry), this.keyOf(entry.name)).text }));
+        this.literalLists = new Map();
         printEntries();
+        for(const [key, { uses, under }] of this.literalLists){
+            if(uses > 1 && !this.namedLists.has(key)) this.declarations.set(key, { base: this.literalListNameOf(under), origin: LITERAL_LIST_ORIGIN + key, name: "", text: null });
+        }
+        this.literalLists = null;
         this.settledNames = this.settleNames();
         this.failures = [];
         this.declarations = new Map();
@@ -148,13 +184,15 @@ export class ContractTypePrinter {
      * type has claimed its own name, so a number never takes the name
      * another type is declared under. Types declared at one place (two
      * instantiations of a generic) keep the order the entries reached them
-     * in, by entry name.
+     * in, by entry name. A literal list comes after every declared type
+     * that wants its name, and two lists that want one name in the order of
+     * their members' text.
      */
-    private settleNames(): Map<ts.Type, string> {
+    private settleNames(): Map<Declared, string> {
         const wanting = [...this.declarations].sort(([, a], [, b]) => byCodeUnits(a.base, b.base) || byCodeUnits(a.origin, b.origin));
         const taken = new Set(this.reservedNames);
-        const settled = new Map<ts.Type, string>();
-        const numbered: [ts.Type, string][] = [];
+        const settled = new Map<Declared, string>();
+        const numbered: [Declared, string][] = [];
         for(const [type, { base }] of wanting){
             if(taken.has(base)){
                 numbered.push([type, base]);
@@ -228,7 +266,7 @@ export class ContractTypePrinter {
             // Registered before the body is printed, so a reference to itself
             // inside the body finds the name.
             const declaration = this.declare(type, own);
-            declaration.text = this.printStructure(type, path).text;
+            declaration.text = this.printStructure(type, path, true).text;
             return atom(declaration.name);
         }
         if(this.inProgress.has(type)) return atom(this.declare(type, this.recursiveDeclarationOf(type)).name);
@@ -242,10 +280,10 @@ export class ContractTypePrinter {
         return atom(recursive.name);
     }
 
-    /** A type's declaration, under the name it is settled to once the first pass has settled them. */
-    private declare(type: ts.Type, { base, origin }: { base: string; origin: string }): Declaration {
-        const declaration: Declaration = { base, origin, name: this.settledNames.get(type) ?? base, text: null };
-        this.declarations.set(type, declaration);
+    /** A declaration of a type or of a literal list, under the name it is settled to once the first pass has settled them. */
+    private declare(declared: Declared, { base, origin }: { base: string; origin: string }): Declaration {
+        const declaration: Declaration = { base, origin, name: this.settledNames.get(declared) ?? base, text: null };
+        this.declarations.set(declared, declaration);
         return declaration;
     }
 
@@ -314,32 +352,93 @@ export class ContractTypePrinter {
         };
     }
 
-    private printStructure(type: ts.Type, path: string): PrintedType {
+    /** A type's structure. `ownDeclaration` says it is printed as the body of the declaration the app gave it. */
+    private printStructure(type: ts.Type, path: string, ownDeclaration = false): PrintedType {
         const { TypeFlags } = this.ts;
-        if(type.flags & TypeFlags.Union) return this.printUnion(type as ts.UnionType, path);
+        if(type.flags & TypeFlags.Union) return this.printUnionOf((type as ts.UnionType).types, path, ownDeclaration ? type : undefined);
         if(type.flags & TypeFlags.Intersection) return this.printIntersection(type as ts.IntersectionType, path);
         return this.printObject(type as ts.ObjectType, path);
     }
 
-    private printUnion(type: ts.UnionType, path: string): PrintedType {
-        return this.printUnionOf(type.types, path);
-    }
-
-    private printUnionOf(types: readonly ts.Type[], path: string): PrintedType {
+    /** A union of the types given. `declared` is the union itself where it is printed as the body of its own declaration. */
+    private printUnionOf(types: readonly ts.Type[], path: string, declared?: ts.Type): PrintedType {
+        const { TypeFlags } = this.ts;
         const members: string[] = [];
+        const literals: string[] = [];
         // boolean is the union of its two literals, and a union holding it
         // holds them flattened in: they are put back together.
         const booleans = new Set<string>();
         for(const member of types){
-            if(member.flags & this.ts.TypeFlags.BooleanLiteral) booleans.add(this.checker.typeToString(member));
+            if(member.flags & TypeFlags.BooleanLiteral) booleans.add(this.checker.typeToString(member));
+            // An enum's member is a literal as well, and has no plain form.
+            else if(member.flags & (TypeFlags.StringLiteral | TypeFlags.NumberLiteral | TypeFlags.BigIntLiteral) && !(member.flags & TypeFlags.EnumLike)) literals.push(this.print(member, path).text);
             else members.push(this.print(member, path).text);
         }
+        // A declaration that is a list holds its members itself: it is what
+        // the same list written elsewhere refers to.
+        members.push(...(declared && literals.length === types.length ? this.ownLiteralList(literals, declared) : this.literalMembers(literals, path)));
         if(booleans.size === 2) members.push("boolean");
         else members.push(...booleans);
+        // A list under its name, or boolean put back together, alone.
+        if(members.length === 1) return atom(members[0]!);
         members.sort((a, b) => unionMemberRank(a) - unionMemberRank(b) || byCodeUnits(a, b));
+        return { text: this.unionText(members), compound: true };
+    }
+
+    /** Union members on one line, or one a line where they are too long for it. */
+    private unionText(members: readonly string[]): string {
         const oneLine = members.join(" | ");
-        if(oneLine.length <= UNION_LINE_WIDTH && !oneLine.includes("\n")) return { text: oneLine, compound: true };
-        return { text: members.map((member) => `| ${indentFollowingLines(member, "  ")}`).join("\n"), compound: true };
+        if(oneLine.length <= UNION_LINE_WIDTH && !oneLine.includes("\n")) return oneLine;
+        return members.map((member) => `| ${indentFollowingLines(member, "  ")}`).join("\n");
+    }
+
+    /**
+     * A union's literal members as it prints them: themselves, or, for a
+     * list long enough to name, the one name that stands for them all. The
+     * pass that finds declarations counts each list and prints it whole; the
+     * pass that prints refers to the app's own declaration of the list where
+     * there is one, and otherwise to the list's declaration where the count
+     * gave it one.
+     */
+    private literalMembers(literals: string[], path: string): string[] {
+        if(literals.length < LITERAL_LIST_FLOOR) return literals;
+        const inOrder = [...literals].sort(byCodeUnits);
+        const key = literalListKey(inOrder);
+        if(this.literalLists){
+            const list = this.literalLists.get(key) ?? { uses: 0, under: new Map<string, number>() };
+            list.uses++;
+            if(this.memberName !== undefined) list.under.set(this.memberName, (list.under.get(this.memberName) ?? 0) + 1);
+            this.literalLists.set(key, list);
+            return literals;
+        }
+        const named = this.namedLists.get(key);
+        if(named) return [this.printComposite(named.type, path).text];
+        if(!this.settledNames.has(key)) return literals;
+        const declaration = this.declarations.get(key) ?? this.declare(key, { base: LITERAL_LIST_NAME, origin: LITERAL_LIST_ORIGIN + key });
+        declaration.text ??= this.unionText(inOrder);
+        return [declaration.name];
+    }
+
+    /**
+     * The members of a list the app declares under a name of its own, which
+     * its declaration holds. Of two declarations of one list, the one that
+     * would keep a name both wanted is the one the list written elsewhere
+     * refers to.
+     */
+    private ownLiteralList(literals: string[], declared: ts.Type): string[] {
+        if(literals.length < LITERAL_LIST_FLOOR) return literals;
+        const key = literalListKey(literals);
+        const { base, origin } = this.declarations.get(declared)!;
+        const order = `${base}\n${origin}`;
+        const known = this.namedLists.get(key);
+        if(!known || byCodeUnits(order, known.order) < 0) this.namedLists.set(key, { type: declared, order });
+        return literals;
+    }
+
+    /** The name a list is declared under: the property it most often sits under, the first of those that tie, with a capital. */
+    private literalListNameOf(under: ReadonlyMap<string, number>): string {
+        const [name] = [...under].filter(([property]) => IDENTIFIER.test(property)).sort(([a, uses], [b, others]) => others - uses || byCodeUnits(a, b))[0] ?? [];
+        return name === undefined ? LITERAL_LIST_NAME : name[0]!.toUpperCase() + name.slice(1);
     }
 
     private printIntersection(type: ts.IntersectionType, path: string): PrintedType {
@@ -384,7 +483,10 @@ export class ContractTypePrinter {
                 continue;
             }
             const optional = !!(property.flags & ts.SymbolFlags.Optional);
+            const outer = this.memberName;
+            this.memberName = this.entryTypes.has(type) ? undefined : property.name;
             const printed = optional ? this.printOptionalMember(checker.getTypeOfSymbol(property), propertyPath) : this.print(checker.getTypeOfSymbol(property), propertyPath);
+            this.memberName = outer;
             lines.push(this.labeledValue(`${this.keyOf(property.name)}${optional ? "?" : ""}:`, printed.text));
         }
         if(!lines.length) return atom("{}");
