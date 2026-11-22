@@ -17,9 +17,10 @@
  * And what registering endpoints costs as an app grows: every endpoint is
  * typed on its own and the contract is one mapped type over the groups, so
  * eight hundred endpoints must cost what four times two hundred do, not the
- * square. And the checks that walk a registration's groups, or a group's
- * parts, one by one (a name given twice, an action two parts declare) must
- * hold for an app of many small groups as well as for one of a few large
+ * square. And the checks that walk a registration's groups, a group's parts,
+ * or the maps of guards, policies and refusal codes an app of many parts
+ * hands over, one by one (a name given twice, an action two parts declare),
+ * must hold for an app of many small parts as well as for one of a few large
  * ones, still naming what they refuse.
  */
 
@@ -243,6 +244,35 @@ const groupPartsSource = (parts: number, repeatedAction?: string): string => {
     return lines.join('\n');
 };
 
+/**
+ * An app of `parts` parts, each declaring one guard, one rate-limit policy
+ * and one refusal code in maps of its own, handed to declareRefusals() and
+ * create() as lists, and an endpoint declaring the last part's three, which
+ * only the merged maps hold. `repeatedGuard` names a guard the last part
+ * declares a second time.
+ */
+const namedMapsSource = (parts: number, repeatedGuard?: string): string => {
+    const indices = Array.from({ length: parts }, (_, part) => part);
+    const last = parts - 1;
+    const guard = `lambderGuard({ handler: async () => {} })`;
+    return [
+        `import { z } from "zod";`,
+        `import { initLambder, lambderGuard, LambderMemoryRateLimiter } from "../../../src/index.js";`,
+        ``,
+        `const app = initLambder()`,
+        `    .declareRefusals([${indices.map((part) => `{ "shop/c${part}": {} }`).join(', ')}])`,
+        `    .create({`,
+        `        apiPath: "/api",`,
+        `        guards: [${indices.map((part) => `{ g${part}: ${guard}${part === last && repeatedGuard ? `, ${repeatedGuard}: ${guard}` : ''} }`).join(', ')}],`,
+        `        rateLimits: { limiter: new LambderMemoryRateLimiter(), policies: [${indices.map((part) => `{ p${part}: { perMin: 5, per: "ip" } }`).join(', ')}] },`,
+        `    });`,
+        ``,
+        `const order = app.defineApi({ input: z.object({}), output: z.object({ ok: z.boolean() }), guards: "g${last}", rateLimit: "p${last}", refusals: ["shop/c${last}"] }, async () => ({ ok: true }));`,
+        `export const lambder = app.registerApiGroups(app.defineApiGroup("orders", { order }));`,
+        ``,
+    ].join('\n');
+};
+
 describe('What an app of many small groups costs: the checks over the groups run as loops, not as nested recursion', () => {
     it('registers a hundred and fifty groups of two endpoints in one call', () => {
         expect(checkFixture(registrationSource(300, { groupSize: 2 })).diagnostics).toEqual([]);
@@ -260,6 +290,17 @@ describe('What an app of many small groups costs: the checks over the groups run
     it('still refuses an action two of the parts declare, naming it', () => {
         const { diagnostics } = checkFixture(groupPartsSource(150, 'a12'));
         expect(diagnostics.join('\n')).toMatch(/lambder: these actions are declared by more than one part of the group[\s\S]*"a12"/);
+    }, COMPILER_TIMEOUT_MS);
+});
+
+describe('What an app of many parts costs: the checks over its lists of maps run as loops, not as nested recursion', () => {
+    it('takes a hundred and fifty maps each of guards, rate-limit policies and refusal codes, and an endpoint declares the last of each', () => {
+        expect(checkFixture(namedMapsSource(150)).diagnostics).toEqual([]);
+    }, COMPILER_TIMEOUT_MS);
+
+    it('still refuses a guard two of the maps declare, naming it', () => {
+        const { diagnostics } = checkFixture(namedMapsSource(150, 'g12'));
+        expect(diagnostics.join('\n')).toMatch(/lambder: a name is declared in more than one of these maps[\s\S]*"g12"/);
     }, COMPILER_TIMEOUT_MS);
 });
 

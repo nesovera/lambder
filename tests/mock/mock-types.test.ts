@@ -17,6 +17,7 @@ import { LambderMemoryRateLimiter } from '../../src/stores/LambderMemoryRateLimi
 import { initLambderMock } from '../../src/mock/LambderMockApp.js';
 import { lambderMockMswHandler, type LambderMswModule, type LambderMockMswTarget } from '../../src/mock/lambderMockMswHandler.js';
 import type { LambderSessionRecord } from '../../src/shared/contracts/LambderSessionStore.js';
+import type { LambderMockDuplicateNames, LambderMockRegistryCheck } from '../../src/mock/LambderMockTypes.js';
 import LambderCaller from '../../src/client/LambderCaller.js';
 import { assertApiFailure } from '../../src/shared/wire/LambderOutcomeAssertions.js';
 
@@ -385,6 +386,28 @@ describe('Mock registry types - slices and register()', () => {
         const partial = mock.create({ sessions: true, idempotency: true, guards: mockGuards, rateLimits: { policies: mockPolicies } });
         partial.registerPartial(loose);
         expect(partial.registeredNames).toEqual(['user.get']);
+    });
+
+    it('register() checks a list of sixty slices as it checks three: a duplicate at its end is named and a slice it cannot read there is refused', () => {
+        // The checks read the slices one by one. Recursion that nests one
+        // level deeper with every slice meets the compiler's depth limit
+        // near fifty, and from there every register() call of the app fails
+        // with "Type instantiation is excessively deep", whatever it holds.
+        type Slice<Name extends string> = { [K in Name]: true };
+        type Digit = '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9';
+        type Contract = Record<`e${'0' | '1' | '2' | '3' | '4' | '5'}${Digit}`, unknown>;
+        type Sixty = [
+            Slice<'e00'>, Slice<'e01'>, Slice<'e02'>, Slice<'e03'>, Slice<'e04'>, Slice<'e05'>, Slice<'e06'>, Slice<'e07'>, Slice<'e08'>, Slice<'e09'>,
+            Slice<'e10'>, Slice<'e11'>, Slice<'e12'>, Slice<'e13'>, Slice<'e14'>, Slice<'e15'>, Slice<'e16'>, Slice<'e17'>, Slice<'e18'>, Slice<'e19'>,
+            Slice<'e20'>, Slice<'e21'>, Slice<'e22'>, Slice<'e23'>, Slice<'e24'>, Slice<'e25'>, Slice<'e26'>, Slice<'e27'>, Slice<'e28'>, Slice<'e29'>,
+            Slice<'e30'>, Slice<'e31'>, Slice<'e32'>, Slice<'e33'>, Slice<'e34'>, Slice<'e35'>, Slice<'e36'>, Slice<'e37'>, Slice<'e38'>, Slice<'e39'>,
+            Slice<'e40'>, Slice<'e41'>, Slice<'e42'>, Slice<'e43'>, Slice<'e44'>, Slice<'e45'>, Slice<'e46'>, Slice<'e47'>, Slice<'e48'>, Slice<'e49'>,
+            Slice<'e50'>, Slice<'e51'>, Slice<'e52'>, Slice<'e53'>, Slice<'e54'>, Slice<'e55'>, Slice<'e56'>, Slice<'e57'>, Slice<'e58'>, Slice<'e59'>,
+        ];
+        expectTypeOf<LambderMockRegistryCheck<Contract, Sixty>>().toBeUnknown();
+        expectTypeOf<LambderMockDuplicateNames<[...Sixty, Slice<'e00'>]>>().toEqualTypeOf<'e00'>();
+        expectTypeOf<LambderMockRegistryCheck<Contract, [...Sixty, Slice<'e59'>]>>().not.toBeUnknown();
+        expectTypeOf<LambderMockRegistryCheck<Contract, [...Sixty, Record<string, true>]>>().not.toBeUnknown();
     });
 
     it('registerPartial() takes any subset', () => {

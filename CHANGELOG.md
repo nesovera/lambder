@@ -9,6 +9,25 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [16.1.2] - 2026-11-21
+
+A patch for an app of many parts: lists an app grows compile at any length.
+
+### Fixed
+
+- **A mock's `register()` compiles for a list of any length.** Its checks
+  for a slice typed with an index signature and for an endpoint mocked in two
+  slices nested one instantiation level deeper per slice, so from about fifty
+  slices every `register()` call of the app failed with TS2589 ("type
+  instantiation is excessively deep"), whatever the slices held. The checks
+  report the same names.
+- **A list of maps compiles at any length.** `create()`'s `guards` and
+  `rateLimits.policies`, `defineApiModule()`'s `guards` and
+  `rateLimitPolicies`, and `declareRefusals()` take a list of maps, and the
+  types merging the list and refusing a name two maps declare met the same
+  limit at about fifty maps. They now run as loops, and a repeated name is
+  still named.
+
 ## [16.1.1] - 2026-11-15
 
 A minor for an app whose contract repeats long enums: `writeApiContract`

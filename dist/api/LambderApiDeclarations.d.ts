@@ -1,5 +1,5 @@
 import type { z } from "zod";
-import type { LambderMaybePromise } from "../shared/util/LambderTypeUtilities.js";
+import type { LambderMaybePromise, LambderRepeatedMembers } from "../shared/util/LambderTypeUtilities.js";
 import type { LambderApiMode, LambderGuardNamesIn } from "../shared/wire/LambderApiContract.js";
 import type { LambderApiIdempotencyOption, LambderGuardsOptionValue, LambderRateLimitOptionValue, LambderRefusalsOptionValue } from "../shared/wire/LambderApiOptionValues.js";
 import type { LambderApiRateLimitPolicyConfig, LambderPolicyPerOf } from "./LambderApiRateLimits.js";
@@ -149,16 +149,6 @@ type LambderGroupTypedAny<TGroup> = 0 extends 1 & TGroup ? true : 0 extends 1 & 
     readonly apis: infer TApis;
 } ? (0 extends 1 & TApis ? true : string extends keyof TApis ? true : false) : false;
 /**
- * The group names one registerApiGroups() call names twice. Written as an
- * accumulator, the recursive reference standing alone in its branch, so the
- * compiler evaluates it as a loop: an app registers a group per feature,
- * and recursion nested in a union runs into the compiler's instantiation
- * depth limit at a group count a large app reaches.
- */
-type LambderRepeatedGroupNames<TGroups extends readonly unknown[], TSeen = never, TRepeated = never> = TGroups extends readonly [infer THead, ...infer TRest] ? THead extends {
-    name: infer TName;
-} ? LambderRepeatedGroupNames<TRest, TSeen | TName, TRepeated | ([TName] extends [TSeen] ? TName : never)> : TRepeated : TRepeated;
-/**
  * What registerApiGroups() asks of its receiver: the instance itself, unless
  * a group, what a lazy group loads or a group's endpoints is typed `any` (a
  * module whose types were lost would otherwise make its endpoints `any` to
@@ -171,21 +161,23 @@ export type LambderRegisteredGroupsCheck<TGroups extends readonly unknown[], TSe
     [TIndex in keyof TGroups]: LambderGroupTypedAny<TGroups[TIndex]>;
 }[number] ? {
     readonly "lambder: a group given to registerApiGroups, what a lazy group loads, or a group's endpoints is typed any, which would make its part of the contract any. Build it with defineApiGroup() and let its type through.": never;
-} : [LambderRepeatedGroupNames<TGroups>] extends [never] ? TSelf : {
-    readonly "lambder: these group names are registered twice": LambderRepeatedGroupNames<TGroups>;
-};
+} : LambderRepeatedMembers<{
+    [TIndex in keyof TGroups]: TGroups[TIndex] extends {
+        readonly name: infer TName;
+    } ? TName : never;
+}> extends infer TRepeated ? ([TRepeated] extends [never] ? TSelf : {
+    readonly "lambder: these group names are registered twice": TRepeated;
+}) : never;
 /** A group's name held to the rule a caller's properties need. */
 export type LambderGroupNameCheck<TName extends string> = TName extends LambderReservedGroupName ? {
     readonly "lambder: a caller already has a member of this name, so no group may take it": TName;
 } : unknown;
-/** The actions more than one of a group's parts declare; an accumulator, as LambderRepeatedGroupNames is, for the same reason. */
-type LambderRepeatedActions<TParts extends readonly unknown[], TSeen = never, TRepeated = never> = TParts extends readonly [infer THead, ...infer TRest] ? LambderRepeatedActions<TRest, TSeen | keyof THead, TRepeated | Extract<keyof THead, TSeen>> : TRepeated;
 /** A group's parts held to declaring each action once: a part would otherwise replace another's endpoint of the same name. */
-export type LambderGroupPartsCheck<TParts extends readonly unknown[]> = [
-    LambderRepeatedActions<TParts>
-] extends [never] ? unknown : {
-    readonly "lambder: these actions are declared by more than one part of the group": LambderRepeatedActions<TParts>;
-};
+export type LambderGroupPartsCheck<TParts extends readonly unknown[]> = LambderRepeatedMembers<{
+    [TIndex in keyof TParts]: keyof TParts[TIndex];
+}> extends infer TRepeated ? ([TRepeated] extends [never] ? unknown : {
+    readonly "lambder: these actions are declared by more than one part of the group": TRepeated;
+}) : never;
 /** One group's endpoints, from the parts it was declared in. */
 export type LambderMergedParts<TParts extends readonly unknown[]> = LambderUnionToIntersection<TParts[number]> extends infer TMerged ? {
     [TAction in keyof TMerged]: TMerged[TAction];

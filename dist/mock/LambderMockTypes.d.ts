@@ -21,6 +21,7 @@ import type { LambderHandlerRefusalsOf } from "../api/LambderApiRefusals.js";
 import type { LambderSessionRecord } from "../shared/contracts/LambderSessionStore.js";
 import type LambderSessionController from "../session/LambderSessionController.js";
 import type { LambderApiModuleDeclarations } from "../api/LambderApiModules.js";
+import type { LambderRepeatedMembers } from "../shared/util/LambderTypeUtilities.js";
 export type LambderMockInputOf<C, K extends keyof C> = C[K] extends {
     input: infer I;
 } ? I : never;
@@ -335,12 +336,15 @@ export type LambderMockRestEntry = {
 type LambderMockSliceNames<S> = S extends unknown ? (S extends LambderMockRestEntry ? never : (string extends keyof S ? never : keyof S & string)) : never;
 /**
  * Slices whose key set is an index signature rather than a finite list of
- * names. Walks the tuple rather than distributing over `Slices[number]`,
- * because the union loses which element held the index signature and the
- * error should name it; LambderMockUncountableSlices rejects the lists this
- * walk cannot cover.
+ * names. Mapped over the tuple, each slice read on its own, rather than read
+ * off `Slices[number]`: the keys of a union are only the ones every member
+ * shares, so the union would lose which element held the index signature,
+ * and the error should name it. LambderMockUncountableSlices rejects the
+ * lists a mapping over a tuple cannot cover.
  */
-type LambderMockUncheckableSlices<Slices extends readonly unknown[]> = Slices extends readonly [infer Head, ...infer Tail] ? (string extends keyof Head ? Head : never) | LambderMockUncheckableSlices<Tail> : never;
+type LambderMockUncheckableSlices<Slices extends readonly unknown[]> = {
+    [Index in keyof Slices]: string extends keyof Slices[Index] ? Slices[Index] : never;
+}[number];
 /** Endpoints of the contract no slice covers. */
 export type LambderMockMissingNames<C, Slices extends readonly unknown[]> = Exclude<keyof C & string, LambderMockSliceNames<Slices[number]>>;
 /** True when one of register()'s arguments is the rest entry. */
@@ -359,13 +363,15 @@ type LambderMockUncoveredNames<C, Slices extends readonly unknown[]> = LambderMo
 /** Names the slices carry that the contract does not declare. */
 export type LambderMockStrayNames<C, Slices extends readonly unknown[]> = Exclude<LambderMockSliceNames<Slices[number]>, keyof C & string>;
 /** Endpoints covered by more than one slice. */
-export type LambderMockDuplicateNames<Slices extends readonly unknown[]> = Slices extends readonly [infer Head, ...infer Tail] ? (LambderMockSliceNames<Head> & LambderMockSliceNames<Tail[number]>) | LambderMockDuplicateNames<Tail> : never;
+export type LambderMockDuplicateNames<Slices extends readonly unknown[]> = LambderRepeatedMembers<{
+    [Index in keyof Slices]: LambderMockSliceNames<Slices[Index]>;
+}>;
 /**
  * True for a slice list whose length the compiler does not know: an array
- * type rather than a tuple. Every check here walks a tuple, and an array
- * type quietly disables them all (completeness reduces to "the element type
- * mentions these names"), so the array form, such as a spread
- * `const slices = [userMocks, orderMocks]`, is refused.
+ * type rather than a tuple. Every check here reads a tuple element by
+ * element, and an array type quietly disables them all (completeness
+ * reduces to "the element type mentions these names"), so the array form,
+ * such as a spread `const slices = [userMocks, orderMocks]`, is refused.
  */
 type LambderMockUncountableSlices<Slices extends readonly unknown[]> = number extends Slices["length"] ? true : false;
 /**

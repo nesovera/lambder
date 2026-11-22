@@ -31,6 +31,22 @@ export type LambderReadonlyDeep<T, TDepth extends unknown[] = []> = TDepth["leng
     readonly [K in keyof T]: LambderReadonlyDeep<T[K], [...TDepth, unknown]>;
 } : T;
 /**
+ * The members more than one union of a list holds: given each declaration of
+ * a list read as the union of the names it declares, the names declared
+ * twice. Never for a list whose length the compiler does not know (an array
+ * type rather than a tuple).
+ *
+ * Every check over a list an app grows (its groups, a group's parts, its maps
+ * of guards or policies, its mock slices) finds repeats through this one walk,
+ * because of how it has to be written. The recursive reference stands alone
+ * in its branch, carrying what it has seen and found, so the compiler
+ * evaluates it as a loop. Written as `found here | walk the rest`, each step
+ * would nest one instantiation level deeper, and at about fifty members every
+ * use would fail with "Type instantiation is excessively deep", whatever the
+ * list held.
+ */
+export type LambderRepeatedMembers<TUnions extends readonly unknown[], TSeen = never, TRepeated = never> = TUnions extends readonly [infer THead, ...infer TRest] ? LambderRepeatedMembers<TRest, TSeen | THead, TRepeated | Extract<THead, TSeen>> : TRepeated;
+/**
  * A declaration map with AT LEAST ONE entry: the union, over every declarable
  * name, of "this one required and the rest optional".
  *
