@@ -23,6 +23,7 @@ import { describePayloadKind, isObjectPayload } from "../shared/wire/LambderObje
 import { LambderApiOutputValidationError } from "../api/LambderApiOutputValidationError.js";
 import { toGuardEntries } from "../api/LambderApiGuards.js";
 import { apiModuleDeclarationsOf } from "../api/LambderApiModules.js";
+import { apiFactNamesOf, readApiFactsSchema, resolveApiFacts, } from "../api/LambderApiFacts.js";
 import { apiModuleUsesOf, isRegistrableApiGroup, } from "../api/LambderApiDeclarations.js";
 import { apiBuildersFor, } from "./LambderApiBuilders.js";
 import { LambderApiModule, } from "./LambderApiModule.js";
@@ -142,6 +143,8 @@ export default class Lambder {
     guards;
     /** The rate-limit policies given at creation, and every registered module's beside them, kept for apiOptionEntries(), which records each one less its key handler. */
     rateLimitPolicies;
+    /** The facts vocabulary given at creation: what each API's facts option is held to, beside its module's own. Null without the option. */
+    apiFactsSchema;
     /** The refusal vocabulary given at creation: what each API's and each guard's refusal codes resolve against. Null without the option. */
     refusalVocabulary;
     /** Every API's refusals option as written, for apiOptionEntries(); its definition holds the resolved set. */
@@ -204,6 +207,7 @@ export default class Lambder {
         const session = options.session;
         this.guards = { ...options.guards };
         this.rateLimitPolicies = { ...options.rateLimits?.policies };
+        this.apiFactsSchema = options.apiFacts === undefined ? null : readApiFactsSchema(options.apiFacts, "the apiFacts option");
         this.refusalVocabulary = readRefusalVocabulary(options.refusals);
         this.pipeline = new LambderApiPipeline({
             apiVersion: this.apiVersion,
@@ -232,6 +236,8 @@ export default class Lambder {
                 : undefined,
             rateLimits: options.rateLimits,
             guards: options.guards,
+            sessionGuards: options.sessionGuards,
+            apiFactNames: apiFactNamesOf(this.apiFactsSchema),
             idempotency: options.idempotency,
             atRestSecret: session?.sessionSalt,
         });
@@ -371,13 +377,14 @@ export default class Lambder {
     /** A group loaded on the first call to one of its endpoints (see LambderDefineLazyApiGroup). */
     lazyApiGroup = INSTANCE_BUILDERS.lazyApiGroup;
     /**
-     * Defines a module: guards and rate-limit policies a part of the app
-     * declares for its own endpoints, beside the ones this instance was
-     * created with. Returns the module's builders, whose endpoints may name
-     * the instance's guards and policies and the module's own, and nothing
-     * else; their groups are registered with registerApiGroups() as any
-     * are, and their registration adds the module's guards and policies to
-     * the instance that registers them.
+     * Defines a module: guards, rate-limit policies and API facts a part of
+     * the app declares for its own endpoints, beside the ones this instance
+     * was created with. Returns the module's builders, whose endpoints may
+     * name the instance's guards and policies and the module's own, state
+     * the app's facts and the module's, and nothing else; their groups are
+     * registered with registerApiGroups() as any are, and their registration
+     * adds the module's guards and policies to the instance that registers
+     * them.
      *
      * ```typescript
      * export const giftCardModule = storeApp.defineApiModule({
@@ -388,7 +395,9 @@ export default class Lambder {
      *
      * A name the instance declares is refused here, at compile time and at
      * the call; a name two modules declare is refused when the second is
-     * registered, as create() refuses a name two maps declare. A module's
+     * registered, as create() refuses a name two maps declare. A fact is a
+     * name like a guard's: one the app declares, or another module does, is
+     * refused the same way. A module's
      * rate-limit policies count on the instance's limiter, so they need the
      * rateLimits option at creation, whose own policies may then be left out.
      */
@@ -518,7 +527,7 @@ export default class Lambder {
      * committed.
      */
     prepareApiGroup(group, adding) {
-        return Object.entries(group.apis).map(([action, declaration]) => this.prepareApi(`${group.name}.${action}`, declaration.options, declaration.handler, adding));
+        return Object.entries(group.apis).map(([action, declaration]) => this.prepareApi(`${group.name}.${action}`, declaration.options, declaration.handler, adding, declaration.module ?? null));
     }
     /**
      * A lazy group, loaded once: its import, checked to be the group it was
@@ -546,7 +555,7 @@ export default class Lambder {
                 for (const { module } of apiModuleUsesOf(loaded)) {
                     if (!this.pipeline.hasModule(module)) {
                         throw new Error(`Lambder: lazy group "${name}" loaded endpoints a module's builders declared, and was registered with a lazyApiGroup that does not carry that module. ` +
-                            `Register it with the module's own lazyApiGroup, so its guards and rate-limit policies are added at startup.`);
+                            `Register it with the module's own lazyApiGroup, so its guards, rate-limit policies and API facts are added at startup.`);
                     }
                 }
                 for (const api of this.prepareApiGroup(loaded))
@@ -564,8 +573,10 @@ export default class Lambder {
      * its mode read off its guards, into the definition apiSignatures()
      * digests, beside its handler. Nothing is recorded here (commitApi does
      * that), so a refusal anywhere in a registration leaves nothing behind.
+     * `module` is the module whose builders declared it, whose facts it may
+     * state beside the instance's.
      */
-    prepareApi(name, schema, handler, adding) {
+    prepareApi(name, schema, handler, adding, module = null) {
         const guardEntries = toGuardEntries(schema.guards);
         const guardOf = (guard) => Object.prototype.hasOwnProperty.call(this.guards, guard) ? this.guards[guard]
             : adding && Object.prototype.hasOwnProperty.call(adding.guards, guard) ? adding.guards[guard]
@@ -585,9 +596,13 @@ export default class Lambder {
         if (schema.refusals !== undefined && ownRefusals.length === 0) {
             throw new Error(`Lambder: API "${name}" declares an empty refusals option, which declares no code. Name the codes it refuses with, or omit the option entirely.`);
         }
-        const allowedCodes = resolveAllowedRefusals(name, this.refusalVocabulary, ownRefusals, guardEntries.map(({ name: guard }) => ({ guard, codes: guardOf(guard)?.refusals ?? [] })));
+        // A session endpoint runs the instance's session guards before its
+        // own, so it may refuse with their codes too.
+        const guardsRun = [...(mode === "session" ? this.pipeline.sessionGuardNames : []), ...guardEntries.map(({ name: guard }) => guard)];
+        const allowedCodes = resolveAllowedRefusals(name, this.refusalVocabulary, ownRefusals, guardsRun.map((guard) => ({ guard, codes: guardOf(guard)?.refusals ?? [] })));
         const refusals = { codes: allowedCodes, codeRequired: this.requireRefusalCodes };
-        const definition = { name, mode, guards: schema.guards, rateLimit: schema.rateLimit, idempotency: schema.idempotency, input: schema.input, output: schema.output, refusals };
+        const facts = resolveApiFacts(name, schema.facts, this.apiFactsSchema, module?.apiFacts ?? null);
+        const definition = { name, mode, guards: schema.guards, rateLimit: schema.rateLimit, idempotency: schema.idempotency, input: schema.input, output: schema.output, refusals, facts };
         this.pipeline.assertRegistration(definition, adding);
         return { definition, refusalsOption: schema.refusals, output: schema.output, compress: schema.compress ?? "auto", handler };
     }
@@ -724,16 +739,19 @@ export default class Lambder {
      * and guard name. A policy's key handler is never written: its `per`
      * says "custom" and no more. A guard's input schema is never written
      * either; its declaration says only which of the three input modes it
-     * has. The refusal vocabulary is not written at all: it is shared code
-     * (codes, zod schemas, statuses and flags), and the mock declares the
-     * same object. Every table is sorted by name, so the module diffs by
-     * endpoint and never moves when registrations are reordered.
+     * has, and whether the instance runs it on every session endpoint. An
+     * API's facts are written resolved, defaults filled in, which
+     * registration already held to plain data. The refusal vocabulary is not
+     * written at all: it is shared code (codes, zod schemas, statuses and
+     * flags), and the mock declares the same object. Every table is sorted
+     * by name, so the module diffs by endpoint and never moves when
+     * registrations are reordered.
      */
     async apiOptionEntries() {
         await this.loadApiGroups();
         const apis = {};
         for (const name of [...this.apiDefinitions.keys()].sort()) {
-            const { mode, guards, rateLimit, idempotency } = this.apiDefinitions.get(name);
+            const { mode, guards, rateLimit, idempotency, facts } = this.apiDefinitions.get(name);
             const refusals = this.refusalOptions.get(name);
             const entry = { mode };
             if (guards !== undefined) {
@@ -748,6 +766,10 @@ export default class Lambder {
                 entry.idempotency = idempotency;
             if (refusals !== undefined)
                 entry.refusals = refusals;
+            // Resolved, so a reader meets every fact the endpoint is declared
+            // under, a default included, and never has to know the default.
+            if (facts !== undefined && Object.keys(facts).length > 0)
+                entry.facts = { ...facts };
             apis[name] = entry;
         }
         const rateLimitPolicies = {};
@@ -778,6 +800,7 @@ export default class Lambder {
                 session: guard.session === true,
                 runAt: guard.runAt ?? "beforeInputValidation",
                 ...(guard.refusals?.length ? { refusals: guard.refusals } : {}),
+                ...(this.pipeline.sessionGuardNames.includes(name) ? { sessionGuardOrder: this.pipeline.sessionGuardNames.indexOf(name) + 1 } : {}),
             };
         }
         return { apis, rateLimitPolicies, guards };
@@ -1386,8 +1409,8 @@ export default class Lambder {
         return responseFromAnswer(await this.pipeline.answerRefusal(apiName, refusals, err, ctx));
     }
 }
-/** The init bound to one vocabulary (or none): the policy builders, refuse and create() that share it. */
-const lambderInitOf = (declared) => ({
+/** The init bound to one refusal vocabulary and one facts vocabulary (or neither): the policy builders, refuse and create() that share them. */
+const lambderInitOf = (declared, apiFacts) => ({
     ...policyBuildersFor(declared?.vocabulary ?? null),
     /**
      * refuse() typed to the app's whole vocabulary, for a shared helper or a
@@ -1399,10 +1422,24 @@ const lambderInitOf = (declared) => ({
      */
     refuse: refuse,
     create(options) {
-        const withRefusals = { ...options, refusals: declared?.refusals, requireRefusalCodes: declared?.requireCodes ?? false };
-        return new Lambder(withRefusals);
+        const declaredOptions = {
+            ...options,
+            refusals: declared?.refusals,
+            requireRefusalCodes: declared?.requireCodes ?? false,
+            ...(apiFacts ? { apiFacts } : {}),
+        };
+        return new Lambder(declaredOptions);
     },
 });
+/** A declared vocabulary as the init holds it: the codes, the map every check reads, and whether a refusal has to name one. */
+const refusalVocabularyDeclaredBy = (refusals, options) => {
+    const declared = declaredRefusalVocabulary(refusals, "Lambder");
+    return {
+        refusals: declared.refusals,
+        vocabulary: declared.vocabulary,
+        requireCodes: (options.requireCodes ?? false),
+    };
+};
 /**
  * The entry point of an app, and the canonical way to create an instance:
  * fix the session data type first, then create with the full configuration
@@ -1416,6 +1453,9 @@ const lambderInitOf = (declared) => ({
  * refusal vocabulary too, so a guard's ctx.refuse and the init's own refuse
  * are typed to it before any instance exists, and create() gives it to the
  * instance for every API's refusals option to name codes from.
+ * `declareApiFacts()` binds the facts endpoints state about themselves the
+ * same way: a guard's ctx.apiFacts is typed to them, and create() gives the
+ * schema to the instance for every API's facts option to be held to.
  *
  * ```typescript
  * // app.ts (imports no api modules, so modules can import from it)
@@ -1445,7 +1485,7 @@ const lambderInitOf = (declared) => ({
  * `new Lambder(options)` serves untyped or session-data-free instances.
  */
 export const initLambder = () => ({
-    ...lambderInitOf(null),
+    ...lambderInitOf(null, null),
     /**
      * Declares the app's refusal vocabulary: every code once, with the schema
      * of its data (`{ data: schema }`) or none (`{}`), the status every
@@ -1459,14 +1499,59 @@ export const initLambder = () => ({
      * typed to the whole vocabulary, and its create() hands the vocabulary to
      * the instance. With `requireCodes`, an uncoded refusal from an API
      * handler, a guard or a helper is a crash rather than an answer, so every
-     * "no" a client reads names a code.
+     * "no" a client reads names a code. The init it returns takes the app's
+     * API facts too (declareApiFacts), in either order.
      */
     declareRefusals(refusals, options = {}) {
-        const declared = declaredRefusalVocabulary(refusals, "Lambder");
-        return lambderInitOf({
-            refusals: declared.refusals,
-            vocabulary: declared.vocabulary,
-            requireCodes: (options.requireCodes ?? false),
-        });
+        const declared = refusalVocabularyDeclaredBy(refusals, options);
+        return {
+            ...lambderInitOf(declared, null),
+            /** Declares the app's API facts beside its refusal vocabulary: see initLambder().declareApiFacts(). */
+            declareApiFacts(apiFacts) {
+                return lambderInitOf(declared, readApiFactsSchema(apiFacts, "declareApiFacts()"));
+            },
+        };
+    },
+    /**
+     * Declares the facts the app's endpoints state about themselves: an
+     * object schema, one key per fact, each plain data (a flag, a label, a
+     * list). An endpoint writes its facts in its `facts` option; the instance
+     * holds them to the schema at registration, fills in the defaults, puts
+     * them on every call's context as `ctx.apiFacts`, and reports them in
+     * the generated options (writeApiOptions). A fact with a default may be
+     * left out, and the default is what an endpoint that says nothing is
+     * taken to state; one without has to be stated by every endpoint, a
+     * compile error otherwise. So every call reads every fact, and a fact
+     * that could be absent (an optional with no default) is refused here.
+     *
+     * The framework gives no fact a meaning: what one decides is the app's,
+     * usually in a guard. Returns the init bound to the facts: its guard()
+     * types ctx.apiFacts to them, so a guard reads the facts of whichever
+     * endpoint it is running for (one the instance runs on every session
+     * endpoint, create()'s sessionGuards, decides endpoint by endpoint this
+     * way), and its create() hands the schema to the instance. A module
+     * declares facts of its own for its own endpoints (defineApiModule). The
+     * init it returns takes the refusal vocabulary too (declareRefusals), in
+     * either order.
+     *
+     * ```typescript
+     * const init = initLambder<SessionData>().declareApiFacts(z.object({ readOnly: z.boolean().default(false) }));
+     * const writableSession = init.guard({
+     *     session: true,
+     *     handler: (ctx) => { if(ctx.session.data.readOnly && !ctx.apiFacts.readOnly) refuse("This session may only read."); },
+     * });
+     * export const storeApp = init.create({ session, guards: { signedIn, writableSession }, sessionGuards: ["writableSession"] });
+     * // an endpoint: storeApp.defineApi({ input, output, guards: "signedIn", facts: { readOnly: true } }, handler)
+     * ```
+     */
+    declareApiFacts(apiFacts) {
+        const schema = readApiFactsSchema(apiFacts, "declareApiFacts()");
+        return {
+            ...lambderInitOf(null, schema),
+            /** Declares the app's refusal vocabulary beside its API facts: see initLambder().declareRefusals(). */
+            declareRefusals(refusals, options = {}) {
+                return lambderInitOf(refusalVocabularyDeclaredBy(refusals, options), schema);
+            },
+        };
     },
 });

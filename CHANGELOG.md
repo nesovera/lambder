@@ -9,6 +9,83 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [16.2.1] - 2026-11-23
+
+A minor for an app with a rule that holds for every signed-in call: an
+endpoint states facts about itself in a vocabulary the app declares, and the
+instance runs named guards on every session endpoint, which read them.
+Nothing changes for an app that uses neither.
+
+### Added
+
+- **API facts.** `initLambder().declareApiFacts(schema)` declares what an
+  app's endpoints state about themselves beside what they take and answer:
+  an object schema, one key per fact, each plain data (a flag, a label, a
+  list). An endpoint writes its facts in a new `facts` option of
+  `defineApi`; registration holds them to the schema and fills in the
+  defaults; and every call's context carries the endpoint's as
+  `ctx.apiFacts`, one frozen object per endpoint, typed for a guard built
+  from the init that declared them and for the endpoint's handler. A fact
+  with a default may be left out; one without has to be stated by every
+  endpoint, a compile error and a registration error otherwise; and a fact
+  that could be absent (an optional with no default) is refused where the
+  vocabulary is declared, so every call reads every fact. An unknown
+  fact, a value its schema refuses, a value that is not plain data and a
+  `facts` option on an app that declared none are refused the same way. The
+  framework gives no fact a meaning. `declareApiFacts()` and
+  `declareRefusals()` are taken in either order, each once.
+  `ctx.apiFacts` is absent on a route and in a `beforeRender` hook, which
+  runs before the endpoint is looked up. Facts are no part of an endpoint's
+  signature.
+- **A module's own facts.** `defineApiModule({ apiFacts })` declares facts
+  for the module's endpoints beside the app's: they state either in one
+  `facts` option and their handlers read both. A fact the app declares, or
+  another module does, is refused, where the module is defined or
+  registered. A module may now declare facts alone.
+  `LambderModuleAppTypes` takes the module's facts schema as an optional
+  fourth argument.
+- **`sessionGuards` at `create()`**: the guards an instance runs on every
+  session endpoint, a module's included, before the endpoint's own and in
+  the order listed. Each is a guard of the `guards` option that needs a
+  session, reads the context alone (no input, no parameter) and returns
+  nothing, held to that at compile time, and at creation for what creation
+  can see (the name, the session, the input). A session endpoint is one
+  whose guards need a session: a public endpoint or a route that reads a
+  session itself is outside them. Their refusal codes
+  join those of every session endpoint, in its contract, its handler's
+  `ctx.refuse` and its signature. An endpoint that names one in its own
+  `guards` is refused at registration. With the endpoint's facts on its
+  context, one such guard decides for every signed-in call, endpoint by
+  endpoint.
+- **The generated options carry both.** An `apiOptions` entry records the
+  endpoint's facts resolved, a default filled in where it stated nothing
+  (`facts`), and a `guardDeclarations` entry marks a guard the instance runs
+  on every session endpoint with its place in that order, from 1
+  (`sessionGuardOrder`).
+- **The mock runs them.** A mock given the `guardDeclarations` table runs
+  its own guard of each marked name on every session entry, in the server's
+  order, and lets every session entry refuse with their codes; `create()`
+  throws without a mock guard of a marked name, or without sessions. An
+  entry's context carries the facts the `apiOptions` table records, as
+  `ctx.apiFacts`, a `notMocked` and a `restNotMocked` entry's included.
+- Exported types: `LambderApiFactsSchema`, `LambderApiFactsSchemaCheck`, `LambderApiFactsTypes`,
+  `LambderNoApiFacts`, `LambderApiFactsOf`, `LambderApiFactsWith`,
+  `LambderApiFactsField`, `LambderApiFactsContext`,
+  `LambderSessionGuardNames`, `LambderSessionGuardRefusalNamesOf`.
+
+### Changed
+
+- **`LambderAppTypes` has two more members**, `facts` and `sessionGuards`,
+  which `create()` and `defineApiModule()` fill in. An app that reads its
+  types off its instance (`typeof app`, `app.AppTypes`) is unaffected; one
+  that wrote a `LambderAppTypes` out by hand adds
+  `facts: LambderNoApiFacts; sessionGuards: never`.
+- **`LambderApiModuleDeclarations` has a required `apiFacts`**: the
+  module's facts schema, or `null` for a module that declares none.
+  `defineApiModule()` fills it in; only a value built by hand adds it.
+- `defineApiModule()` given nothing now says it was given no guard, no
+  rate-limit policy and no API facts.
+
 ## [16.1.2] - 2026-11-21
 
 A patch for an app of many parts: lists an app grows compile at any length.

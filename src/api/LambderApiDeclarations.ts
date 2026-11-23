@@ -5,6 +5,7 @@ import type { LambderApiMode, LambderGuardNamesIn } from "../shared/wire/Lambder
 import type { LambderApiIdempotencyOption, LambderGuardsOptionValue, LambderRateLimitOptionValue, LambderRefusalsOptionValue } from "../shared/wire/LambderApiOptionValues.js";
 import type { LambderApiRateLimitPolicyConfig, LambderPolicyPerOf } from "./LambderApiRateLimits.js";
 import type { LambderRefusalVocabulary } from "./LambderApiRefusals.js";
+import type { LambderApiFactsTypes, LambderNoApiFacts } from "./LambderApiFacts.js";
 import type { LambderApiModuleDeclarations, LambderApiModuleUse } from "./LambderApiModules.js";
 import { isActionName, isGroupName, LAMBDER_API_NAME_SEGMENT, type LambderReservedActionName, type LambderReservedGroupName } from "../shared/wire/LambderApiNames.js";
 
@@ -21,8 +22,10 @@ import { isActionName, isGroupName, LAMBDER_API_NAME_SEGMENT, type LambderReserv
  * What an instance's declarations are typed against, fixed at create(): the
  * session data, the rate-limit policies, the guards (as LambderGuardMetaMap
  * records them), whether idempotency is configured, whether every endpoint
- * must declare a guard, whether sessions are configured, and the refusal
- * vocabulary with whether every refusal must name a code.
+ * must declare a guard, whether sessions are configured, the refusal
+ * vocabulary with whether every refusal must name a code, the facts an
+ * endpoint states (LambderApiFactsTypes), and the names of the guards every
+ * session endpoint runs.
  */
 export type LambderAppTypes = {
     session: unknown;
@@ -33,9 +36,11 @@ export type LambderAppTypes = {
     sessions: boolean;
     refusals: LambderRefusalVocabulary;
     refusalCodesRequired: boolean;
+    facts: LambderApiFactsTypes;
+    sessionGuards: string;
 };
 
-/** The types of an instance built without create(): no policies, guards or vocabulary, sessions allowed. */
+/** The types of an instance built without create(): no policies, guards, vocabulary or facts, sessions allowed. */
 export type LambderPlainAppTypes<TSession = any> = {
     session: TSession;
     policies: {};
@@ -45,6 +50,8 @@ export type LambderPlainAppTypes<TSession = any> = {
     sessions: true;
     refusals: {};
     refusalCodesRequired: false;
+    facts: LambderNoApiFacts;
+    sessionGuards: never;
 };
 
 /** The guards among the names an endpoint declares that need a session (`session: true`). */
@@ -93,6 +100,7 @@ export type LambderApiDeclarationOptions = {
     rateLimit?: LambderRateLimitOptionValue;
     idempotency?: LambderApiIdempotencyOption;
     refusals?: LambderRefusalsOptionValue;
+    facts?: Readonly<Record<string, unknown>>;
     compress?: boolean | "auto";
 };
 

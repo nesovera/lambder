@@ -15,9 +15,11 @@ import {
 /*
  * The declared options of an app's APIs as a generated module of plain data:
  * every API's mode and its guards, rateLimit, idempotency and refusals
- * options as written, every rate-limit policy less its key handler, and
+ * options as written, with its facts resolved (a default filled in where the
+ * API stated nothing), every rate-limit policy less its key handler, and
  * every guard's input mode, session flag, place in the call and refusal
- * codes. The refusal vocabulary itself is not written: it is shared code,
+ * codes, with its place among the guards the instance runs on every session
+ * endpoint where it is one. The refusal vocabulary itself is not written: it is shared code,
  * which the mock declares as the server does. The contract already
  * carries the options as types; this is the same fact as a value, for the
  * code that decides something at runtime with it: a mock restating the
@@ -44,9 +46,9 @@ const DEFAULT_HEADER = [
 
 /** The three tables the module exports, in the order they are written. */
 const TABLES = [
-    { name: "apiOptions", key: "apis", type: "LambderApiOptionEntry", doc: "Every API the server registers: its mode and its guards, rateLimit, idempotency and refusals options as written." },
+    { name: "apiOptions", key: "apis", type: "LambderApiOptionEntry", doc: "Every API the server registers: its mode and its guards, rateLimit, idempotency and refusals options as written, and its facts resolved." },
     { name: "rateLimitPolicies", key: "rateLimitPolicies", type: "LambderRateLimitPolicyEntry", doc: "Every rate-limit policy the server declares, its key reduced to what it counts: an address, a session, or a key the app derives (\"custom\")." },
-    { name: "guardDeclarations", key: "guards", type: "LambderGuardDeclarationEntry", doc: "Every guard the server declares: how it is fed, whether it needs a session, when it runs, and the refusal codes it adds to the APIs declaring it." },
+    { name: "guardDeclarations", key: "guards", type: "LambderGuardDeclarationEntry", doc: "Every guard the server declares: how it is fed, whether it needs a session, when it runs, the refusal codes it adds to the APIs declaring it, and its place among the guards run on every session API where it is one." },
 ] as const satisfies readonly { name: string; key: keyof LambderApiOptionEntries; type: string; doc: string }[];
 
 type TableKey = keyof LambderApiOptionEntries;

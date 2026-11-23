@@ -271,6 +271,39 @@ error at the guard, whose message names the codes to declare, and `create()`
 throws for one the compiler could not compare (a list typed as any string, a
 caller in plain JavaScript).
 
+### Guards the server runs on every session endpoint
+
+A server may run some guards on every session endpoint, whatever the
+endpoint declares ([`sessionGuards`](./api-policies.md#guards-on-every-session-endpoint)).
+No entry of `apiOptions` names such a guard, so `guardDeclarations` marks it,
+with its place in the server's order (`"sessionGuardOrder": 1`). A mock given the
+table runs its own guard of each marked name on every session entry, before
+the entry's own guards and in that order, and lets every session entry
+refuse with the marked guards' codes, as the server's endpoint may. So a
+marked guard needs a mock guard of its name at `create()`, as every guard an
+entry runs does, and the `sessions` option; without either `create()` throws.
+
+What the server's guard reads to decide is usually the endpoint's
+[facts](./apis.md#facts-what-an-endpoint-states-about-itself), which
+`apiOptions` records resolved. A mock guard reads them typed off the table,
+by the name of the endpoint it is running for; the same values are on its
+context as `ctx.apiFacts`, untyped, since a mock is given the server's facts
+as data and not their schema:
+
+```typescript
+viewOnlySession: mock.guard({
+    session: true,
+    refusals: ["view-only-session"],
+    handler: (ctx) => {
+        const facts = apiOptions[ctx.apiName as keyof typeof apiOptions].facts;
+        if(ctx.session.data.viewOnly && !facts.readOnly) ctx.refuse("This session may only look.", { code: "view-only-session" });
+    },
+}),
+```
+
+A mock given no `guardDeclarations` table knows of no such guard and runs
+none.
+
 ### Validating against the server's schemas
 
 The server validates every input against its API's zod schema and parses
@@ -393,7 +426,9 @@ table's, and without the table the server's rule over its guards. A session
 endpoint on a mock created without the table restates them,
 `notMocked("admin.audit", { reason: "operator endpoint", guards: "signedIn" })`,
 a compile error otherwise, so a signed-out call answers `sessionExpired` as
-the server does; no guard runs. It goes through the same registration checks a mocked entry does, so a
+the server does; none of its own guards runs (the guards [the server runs
+on every session endpoint](#guards-the-server-runs-on-every-session-endpoint)
+do, with the endpoint's facts on their context). It goes through the same registration checks a mocked entry does, so a
 session endpoint left unmocked on a mock without the `sessions` option fails
 where it is written rather than 500ing at the first call.
 

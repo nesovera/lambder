@@ -353,7 +353,7 @@ describe('create(): option values checked at construction', () => {
         expect(initDoc).toMatch(/^The entry point of an app, and the canonical way to create an instance/);
         expect(initDoc).toContain('declareRefusals()');
         expect(initDoc).toContain('Curried because');
-        expect(documentationOf('LambderInitCreateOptions')).toBe("The options create() takes: the constructor's, less the two declareRefusals() supplies.");
+        expect(documentationOf('LambderInitCreateOptions')).toBe("The options create() takes: the constructor's, less the two declareRefusals() supplies and the one declareApiFacts() does.");
     }, 120_000);
 
     it('refuses a maxResponseBytes that is not a positive integer', () => {

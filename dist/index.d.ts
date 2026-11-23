@@ -138,7 +138,8 @@ export type { LambderDdbIdempotencyStoreOptions } from "./stores/LambderDdbIdemp
 export { LambderMemoryIdempotencyStore } from "./stores/LambderMemoryIdempotencyStore.js";
 export { lambderGuard, lambderRateLimitKey } from "./core/LambderPolicyBuilders.js";
 export { lambderGuardBuilder } from "./api/LambderApiGuards.js";
-export type { LambderGuardBuilder, LambderApiGuard, LambderGuardMeta, LambderGuardMetaMap, LambderGuardRunAt, LambderAllowedGuardNames, LambderGuardNamesInputLacks, LambderParamlessGuardNames, LambderGuardsOption, LambderGuardDataOf, LambderGuardInputsOf, LambderGuardRefusals, LambderGuardRefusalNamesOf, } from "./api/LambderApiGuards.js";
+export type { LambderGuardBuilder, LambderApiGuard, LambderGuardMeta, LambderGuardMetaMap, LambderGuardRunAt, LambderAllowedGuardNames, LambderGuardNamesInputLacks, LambderParamlessGuardNames, LambderGuardsOption, LambderGuardDataOf, LambderGuardInputsOf, LambderGuardRefusals, LambderGuardRefusalNamesOf, LambderSessionGuardNames, LambderSessionGuardRefusalNamesOf, } from "./api/LambderApiGuards.js";
+export type { LambderApiFactsSchema, LambderApiFactsSchemaCheck, LambderApiFactsTypes, LambderNoApiFacts, LambderApiFactsOf, LambderApiFactsWith, LambderApiFactsField, LambderApiFactsContext, } from "./api/LambderApiFacts.js";
 export { LambderApiRefusalValidationError } from "./api/LambderApiRefusals.js";
 export type { LambderRefusalDeclaration, LambderRefusalVocabulary, LambderRefusalVocabularyOption, LambderRefusalVocabularyOptionChecks, LambderMergedRefusalVocabulary, LambderApiAllowedRefusal, LambderApiAllowedRefusals, LambderEndpointRefusals, LambderRefusalsOption, LambderRefusalNamesIn, LambderHandlerRefusalsOf, LambderWireRefusalsOf, } from "./api/LambderApiRefusals.js";
 export { lambderRateLimitKeyBuilder, rateLimitRefusal, DEFAULT_RATE_LIMIT_REFUSAL } from "./api/LambderApiRateLimits.js";

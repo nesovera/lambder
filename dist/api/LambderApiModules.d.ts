@@ -1,13 +1,15 @@
 import { type LambderApiGuard } from "./LambderApiGuards.js";
 import { type LambderApiRateLimitPolicyConfig } from "./LambderApiRateLimits.js";
 import { type LambderNamedMapsOption } from "../shared/util/LambderNamedMaps.js";
+import { type LambderApiFactsSchema } from "./LambderApiFacts.js";
 /** One map of guards, of either adapter's contexts. */
 type LambderModuleGuards = Readonly<Record<string, LambderApiGuard<any, any, any, any, any>>>;
 /** One map of rate-limit policies, of either adapter's contexts. */
 type LambderModulePolicies = Readonly<Record<string, LambderApiRateLimitPolicyConfig<any>>>;
 /**
  * What a module declares, as registration adds it: its guards and its
- * rate-limit policies, merged into one map each. One object per module, made
+ * rate-limit policies, merged into one map each, and the vocabulary of the
+ * facts its endpoints state beside the app's own, or null. One object per module, made
  * once by defineApiModule() and carried by every endpoint its builders
  * declare and every lazy group its lazyApiGroup registers: the object is how
  * a registration finds a module and tells two apart.
@@ -15,6 +17,7 @@ type LambderModulePolicies = Readonly<Record<string, LambderApiRateLimitPolicyCo
 export type LambderApiModuleDeclarations = {
     readonly guards: LambderModuleGuards;
     readonly rateLimitPolicies: LambderModulePolicies;
+    readonly apiFacts: LambderApiFactsSchema | null;
 };
 /** A module a registration brings, and where it was met, for the error naming a name two declare. */
 export type LambderApiModuleUse = {
@@ -40,11 +43,13 @@ export type LambderPendingDeclarations = Pick<LambderAddedApiModules, "guards" |
  * A module's declarations from what defineApiModule() was given: each option
  * one map or a list of them, merged, a name two of a list's maps declare
  * refused; every guard and policy held to the rules the creation's are held
- * to. A module declaring nothing is refused, as an empty guards option is:
- * its builders would be the instance's own.
+ * to, and its facts to being an object schema with a key. A module
+ * declaring nothing is refused, as an empty guards option is: its builders
+ * would be the instance's own.
  */
 export declare const apiModuleDeclarationsOf: (options: {
     guards?: LambderNamedMapsOption<LambderModuleGuards>;
     rateLimitPolicies?: LambderNamedMapsOption<LambderModulePolicies>;
+    apiFacts?: LambderApiFactsSchema;
 }, owner: "Lambder" | "LambderMockApp") => LambderApiModuleDeclarations;
 export {};

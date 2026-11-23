@@ -105,6 +105,16 @@ export type LambderRenderContext<TApiPayload = any, TPathParams extends Record<s
      * guards option); void guards never do.
      */
     guardData: TGuardData;
+    /**
+     * What the endpoint being called states about itself (its `facts`
+     * option, held to the vocabularies it is declared under, defaults filled
+     * in): set as an API call is dispatched, so a guard, a rate-limit key,
+     * the handler and an afterRender hook read it. Absent on a route, and in
+     * a beforeRender hook, which runs before the endpoint is looked up.
+     * Untyped here: a guard built from an init that declared the facts
+     * (declareApiFacts) and an endpoint's handler read it typed and present.
+     */
+    apiFacts?: unknown;
     headers: APIGatewayProxyEventHeaders;
     /** Decoded request body, exactly as received (e.g. for webhook signature verification). */
     rawBody: string;

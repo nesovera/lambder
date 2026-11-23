@@ -386,7 +386,21 @@ export type {
     LambderGuardInputsOf,
     LambderGuardRefusals,
     LambderGuardRefusalNamesOf,
+    LambderSessionGuardNames,
+    LambderSessionGuardRefusalNamesOf,
 } from "./api/LambderApiGuards.js";
+
+// What an endpoint states about itself: API facts
+export type {
+    LambderApiFactsSchema,
+    LambderApiFactsSchemaCheck,
+    LambderApiFactsTypes,
+    LambderNoApiFacts,
+    LambderApiFactsOf,
+    LambderApiFactsWith,
+    LambderApiFactsField,
+    LambderApiFactsContext,
+} from "./api/LambderApiFacts.js";
 
 // Declarative per-API policies: declared refusals
 export { LambderApiRefusalValidationError } from "./api/LambderApiRefusals.js";

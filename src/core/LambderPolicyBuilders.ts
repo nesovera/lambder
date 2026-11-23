@@ -27,14 +27,16 @@ export const lambderRateLimitKey: LambderRateLimitKeyBuilder<LambderRenderContex
  * create(): a guard's `ctx.session.data` and `ctx.sessionController` are
  * SessionData where the standalone lambderGuard() leaves them `any`, and its
  * `ctx.refuse` is typed to the guard's refusals from the vocabulary
- * declareRefusals() gave (null: none declared, so a guard names no code).
+ * declareRefusals() gave (null: none declared, so a guard names no code),
+ * and its `ctx.apiFacts` to the facts declareApiFacts() gave (never: none
+ * declared, so the context's own untyped `apiFacts` stands).
  * The server's counterpart of the mock's `guard` and `rateLimitKey`.
  */
-export const policyBuildersFor = <TSessionData, TRefusals extends LambderRefusalVocabulary = {}, TCodesRequired extends boolean = false>(
+export const policyBuildersFor = <TSessionData, TRefusals extends LambderRefusalVocabulary = {}, TCodesRequired extends boolean = false, TApiFacts = never>(
     vocabulary: ReadonlyMap<string, LambderRefusalDeclaration> | null,
 ) => ({
-    /** Builds a guard whose handler sees this app's session type and, on ctx.refuse, the guard's own refusal codes. */
-    guard: lambderGuardBuilder<LambderRenderContext<any, Record<string, string>, {}, TSessionData>, LambderSessionRenderContext<any, TSessionData>, TRefusals, TCodesRequired>(vocabulary),
+    /** Builds a guard whose handler sees this app's session type, on ctx.refuse the guard's own refusal codes, and on ctx.apiFacts the facts the app declared. */
+    guard: lambderGuardBuilder<LambderRenderContext<any, Record<string, string>, {}, TSessionData>, LambderSessionRenderContext<any, TSessionData>, TRefusals, TCodesRequired, TApiFacts>(vocabulary),
     /** Builds a rate-limit key whose handler sees this app's session type; the counterpart of `guard`. */
     rateLimitKey: lambderRateLimitKeyBuilder<LambderRenderContext<any, Record<string, string>, {}, TSessionData>>(),
 });

@@ -77,6 +77,8 @@ export class LambderApiGuardsEngine {
     // that typo and then fail on every request. It would also refuse to
     // register a guard legitimately named one of them.
     guards = new Map();
+    /** The guards run on every session endpoint, in order, before the endpoint's own (configureSessionGuards). */
+    sessionGuards = [];
     /** True once a guards map was configured, or a module added guards. */
     get isConfigured() { return this.guards.size > 0; }
     /** Whether a guard of this name is declared, by the creation's map or a module added since. */
@@ -96,6 +98,47 @@ export class LambderApiGuardsEngine {
             throw new Error("Lambder: the guards option was declared with no guards in it, which configures nothing. Name the guards APIs will declare, or leave the option off.");
         }
         this.add(guards);
+    }
+    /** The guards run on every session endpoint, in the order they run. */
+    get sessionGuardNames() { return this.sessionGuards; }
+    /**
+     * Takes the names of the guards every session endpoint runs, before its
+     * own. Each is a guard of the map given at creation that needs a session
+     * and reads the context alone: no endpoint declares it, so there is no
+     * payload to hold an apiInput to, no caller that knows to send a
+     * guardInput, and no declaration to give it a parameter.
+     */
+    configureSessionGuards(names) {
+        if (this.sessionGuards.length > 0)
+            throw new Error("Lambder: session guards were already configured.");
+        if (!Array.isArray(names) || names.length === 0 || names.some((name) => typeof name !== "string" || name === "")) {
+            throw new Error("Lambder: the sessionGuards option is a non-empty list of guard names. Name the guards every session endpoint runs, or leave the option off.");
+        }
+        for (const [index, name] of names.entries()) {
+            if (names.indexOf(name) !== index)
+                throw new Error(`Lambder: the sessionGuards option names guard "${name}" twice. A guard runs once per call.`);
+            const guardDef = this.guards.get(name);
+            if (!guardDef) {
+                throw new Error(`Lambder: the sessionGuards option names "${name}", which is not a guard of the guards option given at creation. A module's guard is its own endpoints' to declare.`);
+            }
+            if (guardDef.session !== true) {
+                throw new Error(`Lambder: the sessionGuards option names guard "${name}", which does not need a session. A guard run on every session endpoint declares session: true.`);
+            }
+            if (guardDef.apiInput || guardDef.guardInput) {
+                throw new Error(`Lambder: the sessionGuards option names guard "${name}", which takes an input. A guard run on every session endpoint reads the context alone: no endpoint declares it, so no payload is held to an apiInput and no caller knows to send a guardInput.`);
+            }
+        }
+        this.sessionGuards = [...names];
+    }
+    /**
+     * The guards one call runs, in order: the session guards first on a
+     * session endpoint, then the endpoint's own.
+     */
+    entriesFor(mode, guardsOption) {
+        const own = toGuardEntries(guardsOption).map((entry) => ({ ...entry, sessionGuard: false }));
+        if (mode !== "session")
+            return own;
+        return [...this.sessionGuards.map((name) => ({ name, param: undefined, sessionGuard: true })), ...own];
     }
     /**
      * Adds a module's guards beside the ones declared so far. Its names were
@@ -128,6 +171,11 @@ export class LambderApiGuardsEngine {
                 `Name the guard that authorizes it, or omit the option entirely.`);
         }
         for (const { name } of entries) {
+            // Declared again by the endpoint, a session guard would run twice
+            // on every call of it.
+            if (this.sessionGuards.includes(name)) {
+                throw new Error(`Lambder: API "${apiName}" declares guard "${name}", which the sessionGuards option already runs on every session endpoint. Leave it out of the API's guards.`);
+            }
             const guardDef = this.guards.get(name) ?? (adding && Object.prototype.hasOwnProperty.call(adding, name) ? adding[name] : undefined);
             if (!guardDef) {
                 throw new Error(`Lambder: API "${apiName}" references unknown guard "${name}". Declare it in the guards option at creation, or in the module the API is declared with (defineApiModule).`);
@@ -158,12 +206,13 @@ export class LambderApiGuardsEngine {
         return inputs;
     }
     /**
-     * Run the API's guards that run at `runAt` (see LambderGuardRunAt) in
-     * declared order. Refusals throw; outputs land on ctx.guardData; the
-     * trace names every guard reached.
+     * Run the guards of one call that run at `runAt` (see LambderGuardRunAt):
+     * on a session endpoint the instance's session guards, in their listed
+     * order, then the API's own in declared order. Refusals throw; outputs
+     * land on ctx.guardData; the trace names every guard reached.
      */
-    async run(request, ctx, guardsOption, trace, runAt) {
-        for (const { name, param } of toGuardEntries(guardsOption)) {
+    async run(request, ctx, definition, trace, runAt) {
+        for (const { name, param, sessionGuard } of this.entriesFor(definition.mode, definition.guards)) {
             const guardDef = this.guards.get(name);
             if (!guardDef)
                 throw new Error(`Lambder: guard "${name}" is not configured. Declare it in the guards option at creation.`);
@@ -187,6 +236,12 @@ export class LambderApiGuardsEngine {
                 throw new Error(`Lambder: guard "${name}" returned a LambderResponse. A guard authorizes, it does not answer: ` +
                     `say no with refuse() or by throwing a LambderApiRefusal. Returning a response denies nothing, ` +
                     `because the value would be attached to ctx.guardData and the call would continue.`);
+            }
+            // No endpoint declared a session guard, so no handler's guardData
+            // is typed to hold what one returns: a value would sit there
+            // unseen by every type that reads it.
+            if (sessionGuard && output !== undefined) {
+                throw new Error(`Lambder: guard "${name}" runs on every session endpoint (sessionGuards) and returned a value. Such a guard authorizes and returns nothing: no endpoint declares it, so no handler's guardData is typed to hold its answer.`);
             }
             if (output !== undefined) {
                 ctx.guardData[name] = output;

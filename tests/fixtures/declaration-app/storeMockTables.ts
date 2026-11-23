@@ -5,11 +5,11 @@
  */
 
 export const apiOptions = {
-    "giftCards.redeem": { mode: "session", guards: ["signedIn", "cardHolder"], rateLimit: ["browsePerIp", "redeemPerCustomer"], idempotency: true },
-    "orders.get": { mode: "session", guards: { staff: "orders.read" }, rateLimit: "browsePerIp" },
-    "orders.receipt": { mode: "public", guards: ["orderToken"], rateLimit: ["browsePerIp", "receiptsPerEmail"] },
-    "orders.refund": { mode: "session", guards: { staff: "orders.refund", storeFront: true }, rateLimit: { writesPerCustomer: { perMin: 2 } }, idempotency: true, refusals: ["order-closed", "refund-too-large"] },
-    "reports.daily": { mode: "public", guards: { open: "The daily count is public." } },
+    "giftCards.redeem": { mode: "session", guards: ["signedIn", "cardHolder"], rateLimit: ["browsePerIp", "redeemPerCustomer"], idempotency: true, facts: { readOnly: false, movesBalance: true } },
+    "orders.get": { mode: "session", guards: { staff: "orders.read" }, rateLimit: "browsePerIp", facts: { readOnly: true } },
+    "orders.receipt": { mode: "public", guards: ["orderToken"], rateLimit: ["browsePerIp", "receiptsPerEmail"], facts: { readOnly: false } },
+    "orders.refund": { mode: "session", guards: { staff: "orders.refund", storeFront: true }, rateLimit: { writesPerCustomer: { perMin: 2 } }, idempotency: true, refusals: ["order-closed", "refund-too-large"], facts: { readOnly: false } },
+    "reports.daily": { mode: "public", guards: { open: "The daily count is public." }, facts: { readOnly: false } },
 } as const;
 
 export const guardDeclarations = {
@@ -19,6 +19,7 @@ export const guardDeclarations = {
     signedIn: { input: "none", session: true, runAt: "beforeInputValidation" },
     staff: { input: "none", session: true, runAt: "beforeInputValidation", refusals: ["not-staff"] },
     storeFront: { input: "guardInput", session: false, runAt: "beforeInputValidation" },
+    viewOnlySession: { input: "none", session: true, runAt: "beforeInputValidation", refusals: ["view-only-session"], sessionGuardOrder: 1 },
 } as const;
 
 export const rateLimitPolicies = {

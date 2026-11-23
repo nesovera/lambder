@@ -12,7 +12,8 @@ import type { LambderSessionDataRefreshConfig } from "../session/LambderSessionM
 import type { LambderSessionStore } from "../shared/contracts/LambderSessionStore.js";
 import type { LambderSessionCookieOptions } from "../session/LambderSessionController.js";
 import type { LambderSessionCrypto } from "../session/LambderSessionCrypto.js";
-import type { LambderApiGuard, LambderGuardNamesInputLacks } from "../api/LambderApiGuards.js";
+import type { LambderApiGuard, LambderGuardMetaMap, LambderGuardNamesInputLacks, LambderSessionGuardNames } from "../api/LambderApiGuards.js";
+import type { LambderApiFactsSchema } from "../api/LambderApiFacts.js";
 import type { LambderApiRateLimitPolicyConfig, LambderApiRateLimitsConfig, LambderPolicyNamesInputLacks } from "../api/LambderApiRateLimits.js";
 import type { LambderApiIdempotencyConfig } from "../api/LambderApiIdempotency.js";
 import { type LambderRefusalVocabulary } from "../api/LambderApiRefusals.js";
@@ -114,7 +115,7 @@ export type LambderHandler = {
     (event: unknown, context: Context): Promise<unknown>;
 };
 export { mergeNamedMaps, type LambderMergedNamedMaps, type LambderNamedMapsOption } from "../shared/util/LambderNamedMaps.js";
-import type { LambderNamedMapsOption, LambderNoRepeatedNames } from "../shared/util/LambderNamedMaps.js";
+import type { LambderMergedNamedMaps, LambderNamedMapsOption, LambderNoRepeatedNames } from "../shared/util/LambderNamedMaps.js";
 /** Session configuration (the `session` option of create/new): where sessions rest, and how their cookies are scoped. */
 export type LambderSessionOptions<TSessionData = any> = {
     /**
@@ -333,6 +334,36 @@ export type LambderCreateOptions<TSessionData = any> = {
      */
     guards?: LambderNamedMapsOption<LambderGuardsMap<TSessionData>>;
     /**
+     * The guards every session endpoint runs, before its own and in this
+     * order: names of the guards above, never a module's. What an app
+     * decides for every call of a session endpoint at once (a session that
+     * may only read, an account on hold) is written once here; repeated in
+     * each guard endpoints declare, the one that forgot it would let the
+     * call through. A session endpoint is one whose guards need a session:
+     * a public endpoint or a route that reads a session itself is not one,
+     * and these do not run for it.
+     * Such a guard needs a session (`session: true`), reads the context
+     * alone (no input, no parameter: no endpoint declares it) and returns
+     * nothing. Its refusal codes join those of every session endpoint, so
+     * each one's contract lists them and its callers narrow on them; an
+     * endpoint that names one in its own `guards` is refused. Its context
+     * carries the endpoint's `apiFacts`, which is how one guard decides
+     * endpoint by endpoint. Needs the guards and session options.
+     */
+    sessionGuards?: readonly string[];
+    /**
+     * The facts the app's endpoints state about themselves, as an object
+     * schema with one key per fact: plain data an endpoint writes in its
+     * `facts` option, a guard reads as `ctx.apiFacts`, and the generated
+     * options record. A fact with a default may be left out; one without
+     * has to be stated by every endpoint.
+     *
+     * An app declares it with `initLambder().declareApiFacts()`, which hands
+     * it here and types the init's guard() to it; it is written here only
+     * when the class is constructed directly.
+     */
+    apiFacts?: LambderApiFactsSchema;
+    /**
      * The app's refusal vocabulary: every code an API or a guard may refuse
      * with, each declared once with the schema of its data (`{ data: schema }`
      * or none), the status every refusal with it leaves with and whether it
@@ -495,6 +526,13 @@ export type LambderGuardChecks<TSessionData, TGuards, TRefusals> = TGuards exten
     [TGuard in keyof TGuards]: LambderNoExtraKeys<TGuards[TGuard], LambderGuardsMap<TSessionData>[string]> & LambderGuardRefusalsKnown<TGuards[TGuard], TRefusals>;
 };
 /**
+ * The names create()'s sessionGuards may hold, read off the guards given
+ * beside it. Guards read through their wide shape (a separately typed
+ * options object, whose guard names are any string) say nothing to check,
+ * so any name passes and creation checks it.
+ */
+type LambderSessionGuardsCheck<TGuards> = LambderMergedNamedMaps<TGuards> extends infer TMerged ? string extends keyof TMerged ? readonly string[] : readonly LambderSessionGuardNames<LambderGuardMetaMap<TMerged>>[] : never;
+/**
  * The surplus-key rule one level down, over the option objects a typo is
  * worst on. Excess-property checking is off for the WHOLE literal under
  * `const TOptions`, nested objects included, and the top-level rule does not
@@ -517,6 +555,7 @@ export type LambderNestedOptionChecks<TSessionData, TOptions extends LambderCrea
         policies?: LambderRateLimitPolicyChecks<NonNullable<NonNullable<TOptions["rateLimits"]>["policies"]>>;
     };
     guards?: LambderGuardChecks<TSessionData, NonNullable<TOptions["guards"]>, TRefusals>;
+    sessionGuards?: LambderSessionGuardsCheck<NonNullable<TOptions["guards"]>>;
     files?: TOptions["files"] extends {
         source: unknown;
     } ? LambderNoExtraKeys<TOptions["files"], Extract<LambderFilesOption, {

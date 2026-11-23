@@ -141,7 +141,9 @@ export declare class LambderMockApp<C extends LambderApiContractShape, S = any, 
     private modeOf;
     /**
      * The codes an entry may refuse with, read off the generated tables (its
-     * own from apiOptions, its guards' from guardDeclarations), each resolved
+     * own from apiOptions, its guards' from guardDeclarations, and on a
+     * session entry those of the guards the server runs on every session
+     * endpoint, which that table marks), each resolved
      * through the vocabulary the init declared, exactly as the server
      * resolves its own: schema, status and flag. An entry that declares
      * guards needs the guardDeclarations table, and one with any code needs
@@ -178,7 +180,9 @@ export declare class LambderMockApp<C extends LambderApiContractShape, S = any, 
      * among them, under the server's mode (see modeOf): a signed-out call to
      * a session endpoint answers sessionExpired as on the server. Without the
      * apiOptions table a session endpoint restates its guards to say so,
-     * `notMocked(name, { reason, guards })`; no guard runs.
+     * `notMocked(name, { reason, guards })`. None of its own guards runs;
+     * the guards the server runs on every session endpoint do, on a session
+     * entry, as they run before any guard of an endpoint's own.
      */
     notMocked<K extends keyof C & string>(name: K & LambderMockNotMockedGuardsCheck<C, K, G, TDerived>, input: LambderMockNotMockedInput<C, K, TDerived>): LambderMockEntry<C, K>;
     /** A notMocked entry, by the app's notMocked() or by a module's, whose guards give its mode beside the app's own. */
@@ -408,7 +412,7 @@ export declare const initLambderMock: <C extends LambderApiContractShape, S = an
          * vocabulary does not hold is refused as the guard is built. A mock that
          * declared none checks nothing here.
          */
-        guard: import("../api/LambderApiGuards.js").LambderGuardBuilder<LambderMockCallContext<S>, LambderMockSessionCallContext<S>, LambderMergedRefusalVocabulary<TVocabulary>, TRequireCodes>;
+        guard: import("../api/LambderApiGuards.js").LambderGuardBuilder<LambderMockCallContext<S>, LambderMockSessionCallContext<S>, LambderMergedRefusalVocabulary<TVocabulary>, TRequireCodes, never>;
         /**
          * Builds a mock rate-limit key, the counterpart of `guard`. Bound to the
          * mock's own call context, because the server's lambderRateLimitKey() is
@@ -444,7 +448,7 @@ export declare const initLambderMock: <C extends LambderApiContractShape, S = an
      * vocabulary does not hold is refused as the guard is built. A mock that
      * declared none checks nothing here.
      */
-    guard: import("../api/LambderApiGuards.js").LambderGuardBuilder<LambderMockCallContext<S>, LambderMockSessionCallContext<S>, never, false>;
+    guard: import("../api/LambderApiGuards.js").LambderGuardBuilder<LambderMockCallContext<S>, LambderMockSessionCallContext<S>, never, false, never>;
     /**
      * Builds a mock rate-limit key, the counterpart of `guard`. Bound to the
      * mock's own call context, because the server's lambderRateLimitKey() is

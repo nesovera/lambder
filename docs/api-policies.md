@@ -25,9 +25,10 @@ version floor → signature gate → payload restore
   → idempotency replay lookup
   → rate limits keyed per session (per: "session"), and custom keys
     charged before the guards (chargeAt: "beforeGuards")
-  → guards
+  → guards (on a session endpoint the instance's session guards, then its own)
   → zod validation
-  → guards placed after validation (runAt: "afterInputValidation")
+  → guards placed after validation (runAt: "afterInputValidation"), in the
+    same order
   → rate limits keyed by a custom key (a payload field), by default
   → idempotency claim
   → handler
@@ -514,10 +515,79 @@ An empty declaration (`guards: {}` or `guards: []`) is a compile error and a
 registration error: it normalizes to zero guards while looking like a
 declaration, which is exactly the ambiguity the option exists to remove.
 
+### Guards on every session endpoint
+
+Some rules hold for every signed-in call at once: a session that may only
+read, an account on hold, a password that has to be changed first. Written
+into each guard endpoints declare, such a rule is repeated as many times as
+there are session guards, and the one that forgot it lets the call through.
+`sessionGuards` at creation names the guards the instance runs on every
+session endpoint, before the endpoint's own, in the order listed:
+
+```typescript
+const storeInit = initLambder<SessionData>()
+    .declareRefusals({ "view-only-session": {} })
+    .declareApiFacts(z.object({ readOnly: z.boolean().default(false) }));
+
+const viewOnlySession = storeInit.guard({
+    session: true,
+    refusals: ["view-only-session"],
+    handler: (ctx) => {
+        if(ctx.session.data.viewOnly && !ctx.apiFacts.readOnly){
+            ctx.refuse("This session may only look.", { code: "view-only-session" });
+        }
+    },
+});
+
+export const storeApp = storeInit.create({
+    session,
+    guards: { signedIn, staff, viewOnlySession },
+    sessionGuards: ["viewOnlySession"],
+});
+```
+
+The guard above decides endpoint by endpoint from the
+[facts](./apis.md#facts-what-an-endpoint-states-about-itself) each one
+states: an endpoint that says `facts: { readOnly: true }` is open to a
+view-only session, and every other one, a new one included, is closed to it
+until somebody says otherwise.
+
+- **Which endpoints.** Every endpoint one of whose guards needs a session,
+  a module's included: the endpoints whose session the pipeline reads.
+  Nothing here meets a public endpoint, or a route. One that reads a session
+  itself (`ctx.sessionController`) and acts for it is outside the rule, so
+  an endpoint that acts for a signed-in caller declares a guard that needs
+  the session, which is what brings it under these.
+- **Which guards.** Names of the guards given at creation, never a
+  module's. Each needs a session (`session: true`), reads the context alone
+  and returns nothing: no endpoint declares it, so there is no payload to
+  hold an `apiInput` to, no caller that knows to send a `guardInput`, no
+  declaration to give it a parameter, and no handler whose `guardData` is
+  typed to hold its answer. A name that fits none of this is a compile
+  error on the name. Creation refuses again what it can see (a name that is
+  no guard, a guard that needs no session or takes an input); a parameter
+  and a return value are the compiler's alone to catch, and a session guard
+  that returns a value crashes the call it ran for.
+- **Their refusal codes** join those of every session endpoint: each one's
+  contract lists them, its callers narrow on them, and its
+  [signature](./apis.md#signatures-when-a-client-must-update) covers them,
+  as for a guard the endpoint declares itself.
+- **Not declared twice.** An endpoint that names a session guard in its own
+  `guards` is refused at registration: it would run twice.
+- **The same steps.** A session guard runs where its `runAt` places it, as
+  any guard does, first among the guards of that step. A completed
+  idempotent request is replayed before any guard, these included.
+
+The [generated options](./apis.md#the-options-as-a-generated-file) mark each
+one in `guardDeclarations` with its place in the order, and the
+[mock](./mock.md#guards-the-server-runs-on-every-session-endpoint) runs its
+own guards of those names the same way.
+
 ## Guards and policies a module declares
 
 A module is a part of an app with guards and rate-limit policies of its own,
-which only its endpoints name. `defineApiModule()` on the instance declares
+which only its endpoints name, and [facts](./apis.md#facts-what-an-endpoint-states-about-itself)
+of its own, which only its endpoints state (`apiFacts`). `defineApiModule()` on the instance declares
 them and hands back the declaration builders typed on the instance's names
 and the module's together:
 
@@ -614,7 +684,8 @@ references) hands the builders out under the module's name, as above, so
 each declaration refers to the module's type rather than writing it out. The
 module's own declaration still writes the instance's types out once; to keep
 it small, annotate the module with its type,
-`LambderApiModule<LambderModuleAppTypes<StoreLambder["AppTypes"], typeof giftCardGuards, typeof giftCardPolicies>>`.
+`LambderApiModule<LambderModuleAppTypes<StoreLambder["AppTypes"], typeof giftCardGuards, typeof giftCardPolicies>>`
+(with the module's facts schema as a fourth argument when it declares one).
 
 ## Requiring an authorization declaration
 
@@ -858,7 +929,14 @@ these throw before a request is ever served:
 | An API referencing an unknown guard or policy | Names are resolved at registration, not per request. |
 | A `session`-keyed policy on an endpoint none of whose guards needs a session | A public call has no session to count against. |
 | A guard that needs a session on an instance created without the `session` option | There is no session to read. |
-| A module declaring a guard or policy name the instance declares, or another module declares | One name, one declaration; a module's names are its own. Refused where the module is defined (against the instance) or registered (against the other modules). |
+| A module declaring a guard or policy name, or an API fact, the instance declares, or another module declares | One name, one declaration; a module's names are its own. Refused where the module is defined (against the instance) or registered (against the other modules). |
+| `sessionGuards` naming something that is not a guard given at creation, a guard that needs no session, or one that takes an input | A guard run on every session endpoint reads the context alone: no endpoint declares it, so nothing could feed it. |
+| `sessionGuards: []`, a name listed twice, or the option without `guards` or `session` | Declaring the option is naming a guard, each runs once per call, and without sessions there is no session endpoint to run them on. |
+| An API naming a session guard in its own `guards` | It already runs on every session endpoint, and would run twice. |
+| An API stating a fact no vocabulary it is declared under holds, a value the fact's schema refuses, or leaving out a fact that has no default | A fact is declared before it is stated, and one without a default is every endpoint's to state. |
+| An API stating facts on an app that declared none | There is no vocabulary to hold them to. |
+| A fact whose value is not plain data | The generated options write an endpoint's facts as the values they are. |
+| `declareApiFacts()` or a module's `apiFacts` given anything but an object schema with a key | The vocabulary is one key per fact. |
 | A module declaring rate-limit policies on an instance created without `rateLimits` | There is no limiter to count them on. |
 | A lazy group whose loaded endpoints a module declared, registered with the instance's `lazyApiGroup` | The module's declarations would arrive only at the first call; register it with the module's `lazyApiGroup`. |
 

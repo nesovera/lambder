@@ -25,6 +25,16 @@ export const storeMockApp = storeMock.create({
     },
     guards: {
         signedIn: storeMock.guard({ session: true, handler: () => {} }),
+        // The server runs this one on every session endpoint (guardDeclarations
+        // marks it), so the mock does too; it reads the endpoint's facts off
+        // the generated table, where they are typed.
+        viewOnlySession: storeMock.guard({
+            session: true,
+            refusals: ["view-only-session"],
+            handler: (ctx) => {
+                if(ctx.session.data.viewOnly && !apiOptions[ctx.apiName as keyof typeof apiOptions].facts.readOnly) ctx.refuse("This session may only look.", { code: "view-only-session" });
+            },
+        }),
         open: storeMock.guard({ handler: (_ctx, _input, _reason: string) => {} }),
         staff: storeMock.guard({ session: true, refusals: ["not-staff"], handler: (_ctx, _input, permission: "orders.read" | "orders.refund") => ({ permission, customerId: "c-1" }) }),
         storeFront: storeMock.guard({ guardInput: z.object({ storeId: z.string() }), handler: (_ctx, { storeId }) => ({ storeId }) }),

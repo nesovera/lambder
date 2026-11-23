@@ -11,6 +11,12 @@ import { serializeCookie, serializeClearCookie, type LambderCookieOptions, type 
  * - `session` is set by the pipeline on session APIs (and by the session
  *   controller when a handler creates or ends one).
  * - `guardData` receives the return values of the guards that ran.
+ * - `apiFacts` is set by the pipeline as an API call starts: the facts the
+ *   endpoint being called states about itself (see LambderApiFacts). Absent
+ *   where there is no registered endpoint to state any (a route, a hook
+ *   before the call is dispatched, a mock entry with no generated options).
+ *   Untyped here; a guard built from an init that declared the facts, and
+ *   an endpoint's handler, read it typed and present.
  * - `responseHeaders` collects headers written during the call, applied
  *   onto the answer by the pipeline.
  * - `logList` collects entries for the envelope's logList channel
@@ -19,6 +25,7 @@ import { serializeCookie, serializeClearCookie, type LambderCookieOptions, type 
 export type LambderApiCallContext<TSessionData = any> = {
     session: LambderSessionRecord<TSessionData> | null;
     guardData: Record<string, unknown>;
+    apiFacts?: unknown;
     responseHeaders: LambderAnswerHeaders;
     logList: unknown[];
 };

@@ -9,8 +9,11 @@ export const giftCardApis = defineApiGroup("giftCards", {
         guards: ["signedIn", "cardHolder"],
         rateLimit: ["browsePerIp", "redeemPerCustomer"],
         idempotency: true,
+        facts: { movesBalance: true },
     }, async (ctx) => {
         await ctx.rateLimit("refundsPerStore", ctx.guardData.cardHolder.cardNumber);
-        return { balance: ctx.guardData.cardHolder.balance - ctx.apiPayload.amount };
+        // The store's fact and the module's own, both typed and present.
+        const spent = ctx.apiFacts.movesBalance && !ctx.apiFacts.readOnly ? ctx.apiPayload.amount : 0;
+        return { balance: ctx.guardData.cardHolder.balance - spent };
     }),
 });

@@ -132,10 +132,10 @@ describe('A module', () => {
 
     it('declares something, and holds its guards and policies to what create() holds its own to', () => {
         const app = createStoreApp();
-        // @ts-expect-error a module needs a guard or a policy to declare
-        expect(() => app.defineApiModule({})).toThrow(/defineApiModule\(\) was given no guard and no rate-limit policy/);
+        // @ts-expect-error a module needs a guard, a policy or facts to declare
+        expect(() => app.defineApiModule({})).toThrow(/defineApiModule\(\) was given no guard, no rate-limit policy and no API facts/);
         // @ts-expect-error policies is not an option of defineApiModule; rateLimitPolicies is
-        expect(() => app.defineApiModule({ policies: { a: { perMin: 1 } } })).toThrow(/no guard and no rate-limit policy/);
+        expect(() => app.defineApiModule({ policies: { a: { perMin: 1 } } })).toThrow(/no guard, no rate-limit policy and no API facts/);
         expect(() => app.defineApiModule({ rateLimitPolicies: { never: {} } })).toThrow('Lambder: rate-limit policy "never" declares no window (perMin/per10Min/perHour/perDay/perWeek/perMonth).');
         // @ts-expect-error perMinute is not a window
         expect(() => app.defineApiModule({ rateLimitPolicies: { typo: { perMin: 1, perMinute: 2 } } })).not.toThrow();
@@ -217,7 +217,7 @@ describe('A module', () => {
         const other = createStoreApp();
         const late = other.registerApiGroups(other.lazyApiGroup('counter', async () => other.defineApiGroup('counter', { redeem })));
         await expect(late.loadApiGroups()).rejects.toThrow(
-            'Lambder: lazy group "counter" loaded endpoints a module\'s builders declared, and was registered with a lazyApiGroup that does not carry that module. Register it with the module\'s own lazyApiGroup, so its guards and rate-limit policies are added at startup.',
+            'Lambder: lazy group "counter" loaded endpoints a module\'s builders declared, and was registered with a lazyApiGroup that does not carry that module. Register it with the module\'s own lazyApiGroup, so its guards, rate-limit policies and API facts are added at startup.',
         );
     });
 

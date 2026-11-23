@@ -29,6 +29,7 @@ import {
     type LambderRateLimitChargeSubject,
 } from "./LambderApiRateLimits.js";
 import { LambderApiIdempotencyEngine, type LambderApiIdempotencyConfig } from "./LambderApiIdempotency.js";
+import { apiFactNamesOf } from "./LambderApiFacts.js";
 import type { LambderAddedApiModules, LambderApiModuleDeclarations, LambderApiModuleUse, LambderPendingDeclarations } from "./LambderApiModules.js";
 import type { LambderApiIdempotencyOption } from "../shared/wire/LambderApiOptionValues.js";
 import type { LambderSessionRecord, LambderSessionStore } from "../shared/contracts/LambderSessionStore.js";
@@ -97,6 +98,21 @@ export type LambderApiPipelineOptions<TCtx extends LambderApiCallContext<TSessio
     // define it so), so nothing is left at `any` and no adapter has to name
     // its session context type here.
     guards?: Record<string, LambderApiGuard<any, any, any, TCtx, TCtx & { session: LambderSessionRecord<TSessionData> }>>;
+    /**
+     * The guards every session endpoint runs, before its own, in this order:
+     * names of the guards above, each needing a session and reading the
+     * context alone. What an app decides for every call of a session
+     * endpoint at once (a session that may only read, an account on hold) is
+     * written once here rather than repeated in each guard an endpoint
+     * declares, where a guard that forgot it would let the call through.
+     */
+    sessionGuards?: readonly string[];
+    /**
+     * The facts the app declared for every endpoint, by name: what a
+     * module's own facts are refused against, so a fact has one meaning on
+     * the instance. The definitions carry each endpoint's resolved facts.
+     */
+    apiFactNames?: readonly string[];
     idempotency?: LambderApiIdempotencyConfig;
     /**
      * The app's at-rest secret: the session salt, which both adapters pass
@@ -154,6 +170,10 @@ const usesIdempotency = (definition: LambderApiDefinition): definition is Lambde
  * key → exec, inside the idempotency claim → drain response headers → answer
  * ```
  *
+ * The call's context holds the endpoint's facts from the first step on. At
+ * each of the two guard steps a session endpoint runs the instance's session
+ * guards first, then its own.
+ *
  * Each policy subsystem (rate limits, guards, idempotency) is its own
  * engine, held here and called at its step, so the order above can be read
  * directly off execute().
@@ -187,6 +207,8 @@ export class LambderApiPipeline<TCtx extends LambderApiCallContext<TSessionData>
     private readonly apiSignatures: LambderApiSignatureMap | null;
     /** The modules whose guards and rate-limit policies this pipeline took (addModules), each once. */
     private readonly modules = new Set<LambderApiModuleDeclarations>();
+    /** Every API fact declared so far, the app's own and each taken module's: a fact has one meaning on the instance. */
+    private readonly apiFactNames = new Set<string>();
 
     constructor(options: LambderApiPipelineOptions<TCtx, TSessionData> = {}){
         this.apiVersion = options.apiVersion ?? null;
@@ -233,8 +255,18 @@ export class LambderApiPipeline<TCtx extends LambderApiCallContext<TSessionData>
         if(this.sessions) assertSessionCookiePrefixes(this.sessions);
         if(options.rateLimits) this.rateLimits.configure(options.rateLimits);
         if(options.guards) this.guards.configure(options.guards);
+        if(options.sessionGuards !== undefined){
+            // Checked before the names are: without sessions no endpoint is a
+            // session endpoint, and the guards would never run.
+            if(!this.sessions) throw new Error("Lambder: the sessionGuards option needs the session option at creation: its guards run on session endpoints, and without sessions there are none.");
+            this.guards.configureSessionGuards(options.sessionGuards);
+        }
+        for(const name of options.apiFactNames ?? []) this.apiFactNames.add(name);
         if(options.idempotency) this.idempotency.configure(options.idempotency);
     }
+
+    /** The guards every session endpoint runs before its own, in order. */
+    get sessionGuardNames(): readonly string[] { return this.guards.sessionGuardNames; }
 
     /** True when a session manager was configured. */
     get hasSessions(): boolean { return this.sessions !== null; }
@@ -300,8 +332,8 @@ export class LambderApiPipeline<TCtx extends LambderApiCallContext<TSessionData>
      * merged, and nothing taken: a name one of them declares that this
      * pipeline declares already (at creation, or by a module taken before)
      * or that another of them declares is refused, as create() refuses a name
-     * two maps declare, and so are rate-limit policies on a pipeline with no
-     * limiter for them. A module met twice is one module. addModules() takes
+     * two maps declare, a guard's, a policy's or an API fact's alike, and so
+     * are rate-limit policies on a pipeline with no limiter for them. A module met twice is one module. addModules() takes
      * what this returns once every endpoint of the registration passed.
      */
     modulesToAdd(uses: readonly LambderApiModuleUse[]): LambderAddedApiModules {
@@ -310,7 +342,8 @@ export class LambderApiPipeline<TCtx extends LambderApiCallContext<TSessionData>
         const rateLimitPolicies = Object.create(null) as Record<string, LambderApiRateLimitPolicyConfig<any>>;
         const guardModules = new Map<string, string>();
         const policyModules = new Map<string, string>();
-        const claim = (what: "guard" | "rate-limit policy", name: string, usedBy: string, declaredHere: boolean, claimed: Map<string, string>) => {
+        const factModules = new Map<string, string>();
+        const claim = (what: "guard" | "rate-limit policy" | "API fact", name: string, usedBy: string, declaredHere: boolean, claimed: Map<string, string>) => {
             if(declaredHere){
                 throw new Error(
                     `Lambder: the ${what} "${name}" of the module ${usedBy} is declared already, at creation or by a module registered before. ` +
@@ -340,16 +373,20 @@ export class LambderApiPipeline<TCtx extends LambderApiCallContext<TSessionData>
                 claim("rate-limit policy", name, usedBy, this.rateLimits.has(name), policyModules);
                 rateLimitPolicies[name] = policy;
             }
+            for(const name of apiFactNamesOf(module.apiFacts)) claim("API fact", name, usedBy, this.apiFactNames.has(name), factModules);
             modules.push(module);
         }
         return { modules, guards, rateLimitPolicies };
     }
 
-    /** Takes the guards and rate-limit policies of the modules modulesToAdd() checked: from here on its endpoints run them, and code may charge the policies. */
+    /** Takes the guards, rate-limit policies and API fact names of the modules modulesToAdd() checked: from here on its endpoints run them, and code may charge the policies. */
     addModules(added: LambderAddedApiModules): void {
         this.guards.add(added.guards);
         if(Object.keys(added.rateLimitPolicies).length > 0) this.rateLimits.add(added.rateLimitPolicies);
-        for(const module of added.modules) this.modules.add(module);
+        for(const module of added.modules){
+            this.modules.add(module);
+            for(const name of apiFactNamesOf(module.apiFacts)) this.apiFactNames.add(name);
+        }
     }
 
     /**
@@ -512,6 +549,10 @@ export class LambderApiPipeline<TCtx extends LambderApiCallContext<TSessionData>
         exec: LambderApiExec<TCtx>,
         trace: LambderApiCallTrace,
     ): Promise<LambderApiAnswer> {
+        // The endpoint's facts, before any step that may decide something
+        // with them: a rate-limit key, a guard, the handler.
+        if(definition.facts !== undefined) ctx.apiFacts = definition.facts;
+
         const unprepared = await this.prepare(request);
         if(unprepared) return unprepared;
 
@@ -551,7 +592,7 @@ export class LambderApiPipeline<TCtx extends LambderApiCallContext<TSessionData>
         // captcha spend a victim's budget. Refusals throw; the trace records
         // each guard as it runs.
         await this.rateLimits.run(definition.name, request, ctx, definition.rateLimit, "beforeGuards");
-        await this.guards.run(request, ctx, definition.guards, trace, "beforeInputValidation");
+        await this.guards.run(request, ctx, definition, trace, "beforeInputValidation");
 
         // Asynchronously, so an input schema with an async refinement
         // validates instead of making zod throw on every call. The parse is
@@ -560,7 +601,7 @@ export class LambderApiPipeline<TCtx extends LambderApiCallContext<TSessionData>
         const parsed = definition.input ? await definition.input.safeParseAsync(request.payload) : null;
         if(parsed && !parsed.success) throw new LambderApiValidationRefusal(parsed.error);
 
-        await this.guards.run(request, ctx, definition.guards, trace, "afterInputValidation");
+        await this.guards.run(request, ctx, definition, trace, "afterInputValidation");
         await this.rateLimits.run(definition.name, request, ctx, definition.rateLimit, "afterGuards");
         if(parsed) request.payload = parsed.data;
 

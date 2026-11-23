@@ -11,6 +11,7 @@ export const createStoreApp = () => storeInit.create({
     session: { store: new LambderMemorySessionStore(), sessionSalt: "a-salt-for-the-sample-store", dataSchema: StoreSessionSchema },
     rateLimits: { limiter: new LambderMemoryRateLimiter(), policies: storeRateLimitPolicies, failOpen: true },
     guards: storeGuards,
+    sessionGuards: ["viewOnlySession"],
     requireApiGuards: true,
     idempotency: { store: new LambderMemoryIdempotencyStore() },
 });

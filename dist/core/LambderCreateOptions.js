@@ -46,6 +46,9 @@ export const assertCreateOptions = (options) => {
     if (options.requireApiGuards && !options.guards) {
         throw new Error("Lambder: requireApiGuards needs a guards map at creation for APIs to declare from.");
     }
+    if (options.sessionGuards !== undefined && !options.guards) {
+        throw new Error("Lambder: sessionGuards needs a guards map at creation to name guards from.");
+    }
     if (options.originProof !== undefined)
         assertOriginProof(options);
     if (options.callSummary !== undefined && options.callSummary !== false && typeof options.callSummary !== "function") {

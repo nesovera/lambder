@@ -249,6 +249,22 @@ export class LambderMockApp<
         const memoryLimiter = rateLimits && !rateLimits.limiter ? new LambderMemoryRateLimiter() : null;
         this.rateLimiter = memoryLimiter;
 
+        // The guards the server runs on every session endpoint, in its order:
+        // the mock runs its own guards of those names the same way, so a call
+        // the server would refuse for every signed-in caller is refused here.
+        const sessionGuards = Object.entries(this.guardDeclarations ?? {})
+            .filter(([, declaration]) => declaration.sessionGuardOrder !== undefined)
+            .sort(([, a], [, b]) => a.sessionGuardOrder! - b.sessionGuardOrder!)
+            .map(([name]) => name);
+        for(const name of sessionGuards){
+            if(!Object.prototype.hasOwnProperty.call(this.mockGuards, name)){
+                throw new Error(`LambderMockApp: the server runs guard "${name}" on every session endpoint by the guardDeclarations table, and create() was given no mock guard of that name. Declare it in the guards option, as every guard an entry runs is.`);
+            }
+        }
+        if(sessionGuards.length && !sessionOptions){
+            throw new Error("LambderMockApp: the guardDeclarations table names guards the server runs on every session endpoint, which needs the sessions option at creation.");
+        }
+
         const idempotencyOptions: LambderMockIdempotencyOptions<S> | null = options.idempotency === true ? {} : options.idempotency || null;
         const memoryIdempotency = idempotencyOptions && !idempotencyOptions.store ? new LambderMemoryIdempotencyStore() : null;
         this.idempotencyStore = memoryIdempotency;
@@ -303,6 +319,7 @@ export class LambderMockApp<
                 ? { limiter: rateLimits.limiter ?? memoryLimiter!, policies: rateLimits.policies, failOpen: rateLimits.failOpen }
                 : undefined,
             guards: options.guards,
+            sessionGuards: sessionGuards.length ? sessionGuards : undefined,
             idempotency: idempotencyOptions
                 ? {
                     store: idempotencyOptions.store ?? memoryIdempotency!,
@@ -398,7 +415,9 @@ export class LambderMockApp<
 
     /**
      * The codes an entry may refuse with, read off the generated tables (its
-     * own from apiOptions, its guards' from guardDeclarations), each resolved
+     * own from apiOptions, its guards' from guardDeclarations, and on a
+     * session entry those of the guards the server runs on every session
+     * endpoint, which that table marks), each resolved
      * through the vocabulary the init declared, exactly as the server
      * resolves its own: schema, status and flag. An entry that declares
      * guards needs the guardDeclarations table, and one with any code needs
@@ -407,7 +426,10 @@ export class LambderMockApp<
      */
     private declaredRefusalsOf(name: string, declared: LambderApiOptionEntry): LambderApiAllowedRefusals {
         const codes = new Set(toRefusalCodes(declared.refusals));
-        const guards = toGuardEntries(declared.guards);
+        const guards = [
+            ...toGuardEntries(declared.guards),
+            ...(declared.mode === "session" ? this.pipeline.sessionGuardNames.map((name) => ({ name })) : []),
+        ];
         if(guards.length && !this.guardDeclarations){
             throw new Error(`LambderMockApp: "${name}" declares guards in the apiOptions table, and create() was not given the guardDeclarations table, which holds the refusal codes they add. Pass both from the generated options module.`);
         }
@@ -474,6 +496,9 @@ export class LambderMockApp<
             rateLimit: declarations.rateLimit as LambderApiDefinition["rateLimit"],
             idempotency: declarations.idempotency as LambderApiDefinition["idempotency"],
             refusals: declared ? { codes: this.declaredRefusalsOf(name, declared), codeRequired: this.requireRefusalCodes } satisfies LambderEndpointRefusals : undefined,
+            // The server's own resolution, as the table records it: what a
+            // mock guard reads as ctx.apiFacts.
+            facts: declared?.facts,
             // No cast: the entry's schema is a z.ZodType, the same type the
             // definition holds. A structural { safeParse } here would let a
             // validator that is not a zod schema reach the 422 body as
@@ -506,7 +531,9 @@ export class LambderMockApp<
      * among them, under the server's mode (see modeOf): a signed-out call to
      * a session endpoint answers sessionExpired as on the server. Without the
      * apiOptions table a session endpoint restates its guards to say so,
-     * `notMocked(name, { reason, guards })`; no guard runs.
+     * `notMocked(name, { reason, guards })`. None of its own guards runs;
+     * the guards the server runs on every session endpoint do, on a session
+     * entry, as they run before any guard of an endpoint's own.
      */
     notMocked<K extends keyof C & string>(name: K & LambderMockNotMockedGuardsCheck<C, K, G, TDerived>, input: LambderMockNotMockedInput<C, K, TDerived>): LambderMockEntry<C, K> {
         return this.buildNotMockedEntry(name, input, null);
@@ -520,7 +547,9 @@ export class LambderMockApp<
             throw new Error(`LambderMockApp: "${name}" restates its guards option, which the apiOptions table given to create() already declares. Leave it out of the entry.`);
         }
         const mode = this.modeOf(declared, guards, module);
-        const definition: LambderApiDefinition = { name, mode };
+        // The facts with the mode: a guard run on every session entry reads
+        // them here as on a mocked one.
+        const definition: LambderApiDefinition = { name, mode, facts: declared?.facts };
         this.assertEntryRegistration(definition, module);
         return { name, mode, definition, handler: null, notMockedReason: reason };
     }
@@ -695,7 +724,9 @@ export class LambderMockApp<
         const reason = this.registry.restNotMockedReason;
         if(reason === null) return null;
         const mode = this.declaredModeOf(apiName) ?? "public";
-        return { name: apiName, mode, definition: { name: apiName, mode }, handler: null, notMockedReason: reason };
+        // The facts with the mode, off the same table, for a name it holds.
+        const facts = this.apiOptions && Object.prototype.hasOwnProperty.call(this.apiOptions, apiName) ? this.apiOptions[apiName]!.facts : undefined;
+        return { name: apiName, mode, definition: { name: apiName, mode, facts }, handler: null, notMockedReason: reason };
     }
 
     // -----------------------------------------------------------------------

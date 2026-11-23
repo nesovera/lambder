@@ -268,7 +268,19 @@ Types: guards, `LambderApiGuard`, `LambderGuardBuilder`, `LambderGuardMeta`, `La
 `LambderGuardNamesInputLacks` (the apiInput guards among some names whose
 fields an input does not carry), `LambderParamlessGuardNames`, `LambderGuardDataOf`, `LambderGuardInputsOf`,
 `LambderGuardRefusals` (a guard's `refusals` option), `LambderGuardRefusalNamesOf`
-(the codes an API's guards add to its own);
+(the codes an API's guards add to its own), `LambderSessionGuardNames` (the
+guards `create()` may be told to run on every session endpoint) and
+`LambderSessionGuardRefusalNamesOf` (the codes those guards add to every
+session API's own);
+API facts, `LambderApiFactsSchema` (a vocabulary of facts: an object schema),
+`LambderApiFactsSchemaCheck` (what a vocabulary is held to: no fact that
+could be absent),
+`LambderApiFactsTypes` (an app's facts as its types carry them, as an
+endpoint writes them and as a call reads them), `LambderNoApiFacts`,
+`LambderApiFactsOf` and `LambderApiFactsWith` (one schema's facts, and an
+app's with a module's beside them), `LambderApiFactsField` (the `facts`
+field of an endpoint's options) and `LambderApiFactsContext` (the typed
+`apiFacts` of a guard's and a handler's context);
 declared refusals, `LambderRefusalDeclaration` (one code of the vocabulary) and
 `LambderRefusalVocabulary` (all of them in one map),
 `LambderRefusalVocabularyOption` (one map or a list of maps, as

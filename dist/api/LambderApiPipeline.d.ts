@@ -59,6 +59,21 @@ export type LambderApiPipelineOptions<TCtx extends LambderApiCallContext<TSessio
     guards?: Record<string, LambderApiGuard<any, any, any, TCtx, TCtx & {
         session: LambderSessionRecord<TSessionData>;
     }>>;
+    /**
+     * The guards every session endpoint runs, before its own, in this order:
+     * names of the guards above, each needing a session and reading the
+     * context alone. What an app decides for every call of a session
+     * endpoint at once (a session that may only read, an account on hold) is
+     * written once here rather than repeated in each guard an endpoint
+     * declares, where a guard that forgot it would let the call through.
+     */
+    sessionGuards?: readonly string[];
+    /**
+     * The facts the app declared for every endpoint, by name: what a
+     * module's own facts are refused against, so a fact has one meaning on
+     * the instance. The definitions carry each endpoint's resolved facts.
+     */
+    apiFactNames?: readonly string[];
     idempotency?: LambderApiIdempotencyConfig;
     /**
      * The app's at-rest secret: the session salt, which both adapters pass
@@ -110,6 +125,10 @@ export type LambderApiExec<TCtx> = (ctx: TCtx) => Promise<LambderApiAnswer>;
  * key → exec, inside the idempotency claim → drain response headers → answer
  * ```
  *
+ * The call's context holds the endpoint's facts from the first step on. At
+ * each of the two guard steps a session endpoint runs the instance's session
+ * guards first, then its own.
+ *
  * Each policy subsystem (rate limits, guards, idempotency) is its own
  * engine, held here and called at its step, so the order above can be read
  * directly off execute().
@@ -143,7 +162,11 @@ export declare class LambderApiPipeline<TCtx extends LambderApiCallContext<TSess
     private readonly apiSignatures;
     /** The modules whose guards and rate-limit policies this pipeline took (addModules), each once. */
     private readonly modules;
+    /** Every API fact declared so far, the app's own and each taken module's: a fact has one meaning on the instance. */
+    private readonly apiFactNames;
     constructor(options?: LambderApiPipelineOptions<TCtx, TSessionData>);
+    /** The guards every session endpoint runs before its own, in order. */
+    get sessionGuardNames(): readonly string[];
     /** True when a session manager was configured. */
     get hasSessions(): boolean;
     /** The session manager, for adapters that hand it out; throws when sessions are not configured. */
@@ -175,12 +198,12 @@ export declare class LambderApiPipeline<TCtx extends LambderApiCallContext<TSess
      * merged, and nothing taken: a name one of them declares that this
      * pipeline declares already (at creation, or by a module taken before)
      * or that another of them declares is refused, as create() refuses a name
-     * two maps declare, and so are rate-limit policies on a pipeline with no
-     * limiter for them. A module met twice is one module. addModules() takes
+     * two maps declare, a guard's, a policy's or an API fact's alike, and so
+     * are rate-limit policies on a pipeline with no limiter for them. A module met twice is one module. addModules() takes
      * what this returns once every endpoint of the registration passed.
      */
     modulesToAdd(uses: readonly LambderApiModuleUse[]): LambderAddedApiModules;
-    /** Takes the guards and rate-limit policies of the modules modulesToAdd() checked: from here on its endpoints run them, and code may charge the policies. */
+    /** Takes the guards, rate-limit policies and API fact names of the modules modulesToAdd() checked: from here on its endpoints run them, and code may charge the policies. */
     addModules(added: LambderAddedApiModules): void;
     /**
      * Registration-time checks of one definition's declarative options; the

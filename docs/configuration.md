@@ -38,6 +38,7 @@ policy types; the curried creator is the canonical entry.
 | `session` | none | Sessions over a store of your choosing; a guard that needs a session (`session: true`) and `addSessionRoute` are compile errors without it. See [Sessions](./sessions.md) |
 | `rateLimits` | none | A limiter (`LambderRateLimiter`: DynamoDB, memory, or your own) plus named policies APIs reference by name, in one map or a list of maps (below); the policies may be left out when the app's modules declare them all. See [API policies](./api-policies.md#rate-limits) |
 | `guards` | none | Named guards APIs reference by name; build each with `initLambder<SessionData>().guard()` (typed to the app's session) or `lambderGuard()`. One map or a list of maps (below). See [API policies](./api-policies.md#guards) |
+| `sessionGuards` | none | The guards, named from `guards`, that every session endpoint runs before its own, in this order. See [API policies](./api-policies.md#guards-on-every-session-endpoint) |
 | `idempotency` | none | An idempotency store (`LambderIdempotencyStore`: DynamoDB, memory, or your own) plus replay defaults. See [API policies](./api-policies.md#idempotency) |
 | `requireApiGuards` | `false` | Make `guards` a required field of every endpoint (`defineApi`) |
 | `crashes` | none | `{ report, reportTimeoutMs, reveal }`: a reporter told every crash on every path (API, route, event, startup) and waited for up to `reportTimeoutMs` (default 3000, a positive integer), and who may read a crash in the framework's 500. Without a reporter, a crash nothing answered is logged to the console. See [Routing](./routing.md#crashes) |
@@ -48,6 +49,12 @@ init, `initLambder<SessionData>().declareRefusals(vocabulary, { requireCodes? })
 init's `guard()` and `refuse` are typed to it and its `create()` hands it to
 the instance; `declareRefusals()` checks each code of the vocabulary the way
 the table below is checked. See [Declared refusals](./apis.md#declared-refusals).
+
+The facts an app's endpoints state about themselves are declared on the init
+too, `declareApiFacts(schema)`, before or after the vocabulary and for the
+same reason: the init's `guard()` reads them typed as `ctx.apiFacts`, and its
+`create()` hands the schema to the instance. See
+[Facts](./apis.md#facts-what-an-endpoint-states-about-itself).
 
 A key the options type does not have is a compile error, one level down as
 well: `session` (and `session.cookie`), `idempotency`, `crashes`, `rateLimits` and each

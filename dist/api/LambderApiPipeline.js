@@ -10,6 +10,7 @@ import { compareDottedVersions, isDottedVersion } from "../shared/wire/LambderVe
 import { LambderApiGuardsEngine } from "./LambderApiGuards.js";
 import { LambderApiRateLimitsEngine, } from "./LambderApiRateLimits.js";
 import { LambderApiIdempotencyEngine } from "./LambderApiIdempotency.js";
+import { apiFactNamesOf } from "./LambderApiFacts.js";
 import { LAMBDER_BACKEND_SWAP } from "../shared/util/LambderTestingDoors.js";
 import { LambderKeyFieldDigest } from "../shared/util/LambderKeyFieldDigest.js";
 import LambderSessionController, { assertSessionCookiePrefixes, LambderSessionNotFoundError, } from "../session/LambderSessionController.js";
@@ -28,6 +29,10 @@ const usesIdempotency = (definition) => definition.idempotency !== undefined && 
  * input validation → guards placed after it → rate limits keyed by a custom
  * key → exec, inside the idempotency claim → drain response headers → answer
  * ```
+ *
+ * The call's context holds the endpoint's facts from the first step on. At
+ * each of the two guard steps a session endpoint runs the instance's session
+ * guards first, then its own.
  *
  * Each policy subsystem (rate limits, guards, idempotency) is its own
  * engine, held here and called at its step, so the order above can be read
@@ -62,6 +67,8 @@ export class LambderApiPipeline {
     apiSignatures;
     /** The modules whose guards and rate-limit policies this pipeline took (addModules), each once. */
     modules = new Set();
+    /** Every API fact declared so far, the app's own and each taken module's: a fact has one meaning on the instance. */
+    apiFactNames = new Set();
     constructor(options = {}) {
         this.apiVersion = options.apiVersion ?? null;
         // Dotted, always, whether or not a floor is set today: the floor reads
@@ -108,9 +115,20 @@ export class LambderApiPipeline {
             this.rateLimits.configure(options.rateLimits);
         if (options.guards)
             this.guards.configure(options.guards);
+        if (options.sessionGuards !== undefined) {
+            // Checked before the names are: without sessions no endpoint is a
+            // session endpoint, and the guards would never run.
+            if (!this.sessions)
+                throw new Error("Lambder: the sessionGuards option needs the session option at creation: its guards run on session endpoints, and without sessions there are none.");
+            this.guards.configureSessionGuards(options.sessionGuards);
+        }
+        for (const name of options.apiFactNames ?? [])
+            this.apiFactNames.add(name);
         if (options.idempotency)
             this.idempotency.configure(options.idempotency);
     }
+    /** The guards every session endpoint runs before its own, in order. */
+    get sessionGuardNames() { return this.guards.sessionGuardNames; }
     /** True when a session manager was configured. */
     get hasSessions() { return this.sessions !== null; }
     /** The session manager, for adapters that hand it out; throws when sessions are not configured. */
@@ -171,8 +189,8 @@ export class LambderApiPipeline {
      * merged, and nothing taken: a name one of them declares that this
      * pipeline declares already (at creation, or by a module taken before)
      * or that another of them declares is refused, as create() refuses a name
-     * two maps declare, and so are rate-limit policies on a pipeline with no
-     * limiter for them. A module met twice is one module. addModules() takes
+     * two maps declare, a guard's, a policy's or an API fact's alike, and so
+     * are rate-limit policies on a pipeline with no limiter for them. A module met twice is one module. addModules() takes
      * what this returns once every endpoint of the registration passed.
      */
     modulesToAdd(uses) {
@@ -181,6 +199,7 @@ export class LambderApiPipeline {
         const rateLimitPolicies = Object.create(null);
         const guardModules = new Map();
         const policyModules = new Map();
+        const factModules = new Map();
         const claim = (what, name, usedBy, declaredHere, claimed) => {
             if (declaredHere) {
                 throw new Error(`Lambder: the ${what} "${name}" of the module ${usedBy} is declared already, at creation or by a module registered before. ` +
@@ -208,17 +227,22 @@ export class LambderApiPipeline {
                 claim("rate-limit policy", name, usedBy, this.rateLimits.has(name), policyModules);
                 rateLimitPolicies[name] = policy;
             }
+            for (const name of apiFactNamesOf(module.apiFacts))
+                claim("API fact", name, usedBy, this.apiFactNames.has(name), factModules);
             modules.push(module);
         }
         return { modules, guards, rateLimitPolicies };
     }
-    /** Takes the guards and rate-limit policies of the modules modulesToAdd() checked: from here on its endpoints run them, and code may charge the policies. */
+    /** Takes the guards, rate-limit policies and API fact names of the modules modulesToAdd() checked: from here on its endpoints run them, and code may charge the policies. */
     addModules(added) {
         this.guards.add(added.guards);
         if (Object.keys(added.rateLimitPolicies).length > 0)
             this.rateLimits.add(added.rateLimitPolicies);
-        for (const module of added.modules)
+        for (const module of added.modules) {
             this.modules.add(module);
+            for (const name of apiFactNamesOf(module.apiFacts))
+                this.apiFactNames.add(name);
+        }
     }
     /**
      * Registration-time checks of one definition's declarative options; the
@@ -376,6 +400,10 @@ export class LambderApiPipeline {
         return { answer, ...trace };
     }
     async execute(request, ctx, definition, exec, trace) {
+        // The endpoint's facts, before any step that may decide something
+        // with them: a rate-limit key, a guard, the handler.
+        if (definition.facts !== undefined)
+            ctx.apiFacts = definition.facts;
         const unprepared = await this.prepare(request);
         if (unprepared)
             return unprepared;
@@ -415,7 +443,7 @@ export class LambderApiPipeline {
         // captcha spend a victim's budget. Refusals throw; the trace records
         // each guard as it runs.
         await this.rateLimits.run(definition.name, request, ctx, definition.rateLimit, "beforeGuards");
-        await this.guards.run(request, ctx, definition.guards, trace, "beforeInputValidation");
+        await this.guards.run(request, ctx, definition, trace, "beforeInputValidation");
         // Asynchronously, so an input schema with an async refinement
         // validates instead of making zod throw on every call. The parse is
         // handed to the handler only after the late guards and the custom
@@ -423,7 +451,7 @@ export class LambderApiPipeline {
         const parsed = definition.input ? await definition.input.safeParseAsync(request.payload) : null;
         if (parsed && !parsed.success)
             throw new LambderApiValidationRefusal(parsed.error);
-        await this.guards.run(request, ctx, definition.guards, trace, "afterInputValidation");
+        await this.guards.run(request, ctx, definition, trace, "afterInputValidation");
         await this.rateLimits.run(definition.name, request, ctx, definition.rateLimit, "afterGuards");
         if (parsed)
             request.payload = parsed.data;

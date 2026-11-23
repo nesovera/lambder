@@ -1,8 +1,9 @@
 import { apiBuildersFor, } from "./LambderApiBuilders.js";
 /**
- * A part of an app with guards and rate-limit policies of its own, for its
- * own endpoints: the declaration builders typed on its instance's types with
- * the module's guards and policies beside the instance's. Made by an
+ * A part of an app with guards, rate-limit policies and API facts of its
+ * own, for its own endpoints: the declaration builders typed on its
+ * instance's types with the module's guards, policies and facts beside the
+ * instance's. Made by an
  * instance's defineApiModule(); its endpoints are registered on the instance
  * as any are (registerApiGroups), and their registration adds the module's
  * guards and policies to the instance, refusing a name the instance or

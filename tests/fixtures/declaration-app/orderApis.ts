@@ -8,6 +8,7 @@ export const orderApis = defineApiGroup("orders", {
         output: z.object({ orderId: z.string(), total: z.number(), placedAt: z.date() }),
         guards: { staff: "orders.read" },
         rateLimit: "browsePerIp",
+        facts: { readOnly: true },
     }, async (ctx) => ({ orderId: ctx.apiPayload.orderId, total: 12, placedAt: new Date(0) })),
     refund: defineApi({
         input: z.object({ orderId: z.string(), amount: z.number() }),

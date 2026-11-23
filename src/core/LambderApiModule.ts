@@ -3,6 +3,7 @@ import type { LambderApiModuleDeclarations } from "../api/LambderApiModules.js";
 import type { LambderGuardMetaMap } from "../api/LambderApiGuards.js";
 import type { LambderApiRateLimitPolicyConfig } from "../api/LambderApiRateLimits.js";
 import type { LambderMergedNamedMaps, LambderNamedMapsOption } from "../shared/util/LambderNamedMaps.js";
+import type { LambderApiFactsSchema, LambderApiFactsSchemaCheck, LambderApiFactsWith } from "../api/LambderApiFacts.js";
 import {
     apiBuildersFor,
     type LambderDefineApi,
@@ -20,14 +21,23 @@ import type {
 /**
  * What defineApiModule() takes: the guards and the rate-limit policies a
  * module declares for its own endpoints, each one map or a list of maps, as
- * create() takes its own. The guards are pinned to the app's session type,
- * as create()'s are.
+ * create() takes its own, and the facts its endpoints state beside the
+ * app's. The guards are pinned to the app's session type, as create()'s are.
  */
 export type LambderApiModuleOptions<TSessionData = any> = {
     /** The module's guards, which its endpoints name beside the instance's: one map, or a list of maps merged in order. */
     guards?: LambderNamedMapsOption<LambderGuardsMap<TSessionData>>;
     /** The module's rate-limit policies, counted on the instance's limiter, which its endpoints name beside the instance's: one map, or a list of maps merged in order. */
     rateLimitPolicies?: LambderNamedMapsOption<LambderRateLimitPoliciesMap>;
+    /**
+     * The facts the module's endpoints state beside the app's own
+     * (declareApiFacts): an object schema, one key per fact, held to what the
+     * app's is. Its endpoints write either in their `facts` option and their
+     * handlers read both on `ctx.apiFacts`; the generated options record
+     * them. A guard built from the app's init reads the app's facts typed,
+     * not a module's.
+     */
+    apiFacts?: LambderApiFactsSchema;
 };
 
 /** Every name a map, or each map of a list, declares. */
@@ -52,16 +62,26 @@ export type LambderApiModuleOptionChecks<TApp extends LambderAppTypes, TOptions 
         & LambderModuleNamesCheck<NonNullable<LambderGivenOption<TOptions, "guards">>, keyof TApp["guards"]>;
     rateLimitPolicies?: LambderRateLimitPolicyChecks<NonNullable<LambderGivenOption<TOptions, "rateLimitPolicies">>>
         & LambderModuleNamesCheck<NonNullable<LambderGivenOption<TOptions, "rateLimitPolicies">>, keyof TApp["policies"]>;
+    apiFacts?: LambderModuleFactNamesCheck<LambderGivenOption<TOptions, "apiFacts">, keyof TApp["facts"]["resolved"]>
+        & LambderApiFactsSchemaCheck<LambderGivenOption<TOptions, "apiFacts">>;
 } & LambderModuleDeclaresSomething<TOptions>;
 
+/** A module's facts held to declaring names of its own: a fact the app declares is a compile error, and the property name is the message. */
+type LambderModuleFactNamesCheck<TSchema, TInstanceNames> =
+    TSchema extends { shape: infer TShape }
+        ? ([Extract<keyof TShape, TInstanceNames>] extends [never]
+            ? unknown
+            : { readonly "lambder: the app declares these API facts already; a module declares facts of its own": Extract<keyof TShape, TInstanceNames> })
+        : unknown;
+
 /**
- * A module declaring neither guards nor policies, refused as an empty guards
- * option is: its builders would be the instance's own. The property name is
- * the message.
+ * A module declaring no guards, policies or facts, refused as an empty
+ * guards option is: its builders would be the instance's own. The property
+ * name is the message.
  */
 type LambderModuleDeclaresSomething<TOptions> =
-    [LambderGivenOption<TOptions, "guards"> | LambderGivenOption<TOptions, "rateLimitPolicies">] extends [undefined]
-        ? { readonly "lambder: a module declares guards or rate-limit policies of its own; one with neither declares its endpoints with the instance's builders": never }
+    [LambderGivenOption<TOptions, "guards"> | LambderGivenOption<TOptions, "rateLimitPolicies"> | LambderGivenOption<TOptions, "apiFacts">] extends [undefined]
+        ? { readonly "lambder: a module declares guards, rate-limit policies or API facts of its own; one with none declares its endpoints with the instance's builders": never }
         : unknown;
 
 /** One map from what a module option was given: a list merged, a lone map as it is, nothing for an option left out. */
@@ -69,10 +89,10 @@ type LambderModuleMap<TOption> = [TOption] extends [undefined] ? {} : LambderMer
 
 /**
  * The app types a module's builders are typed on: the instance's, with the
- * module's guards and rate-limit policies beside the instance's own. Its
- * endpoints name either, and nothing else.
+ * module's guards, rate-limit policies and facts beside the instance's own.
+ * Its endpoints name either, and nothing else.
  */
-export type LambderModuleAppTypes<TApp extends LambderAppTypes, TGuards, TPolicies> = {
+export type LambderModuleAppTypes<TApp extends LambderAppTypes, TGuards, TPolicies, TFactsSchema = undefined> = {
     session: TApp["session"];
     policies: TApp["policies"] & (LambderModuleMap<TPolicies> extends infer TMerged extends Record<string, LambderApiRateLimitPolicyConfig> ? TMerged : {});
     guards: TApp["guards"] & LambderGuardMetaMap<LambderModuleMap<TGuards>>;
@@ -81,12 +101,15 @@ export type LambderModuleAppTypes<TApp extends LambderAppTypes, TGuards, TPolici
     sessions: TApp["sessions"];
     refusals: TApp["refusals"];
     refusalCodesRequired: TApp["refusalCodesRequired"];
+    facts: LambderApiFactsWith<TApp["facts"], TFactsSchema>;
+    sessionGuards: TApp["sessionGuards"];
 };
 
 /**
- * A part of an app with guards and rate-limit policies of its own, for its
- * own endpoints: the declaration builders typed on its instance's types with
- * the module's guards and policies beside the instance's. Made by an
+ * A part of an app with guards, rate-limit policies and API facts of its
+ * own, for its own endpoints: the declaration builders typed on its
+ * instance's types with the module's guards, policies and facts beside the
+ * instance's. Made by an
  * instance's defineApiModule(); its endpoints are registered on the instance
  * as any are (registerApiGroups), and their registration adds the module's
  * guards and policies to the instance, refusing a name the instance or

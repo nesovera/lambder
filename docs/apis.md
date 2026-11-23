@@ -164,6 +164,90 @@ is refused where it is written: a public call carries no session to count
 against. A guard that needs a session on an instance created without the
 `session` option is refused the same way.
 
+A session endpoint also runs the guards the instance runs on every one,
+before its own: see [Guards on every session
+endpoint](./api-policies.md#guards-on-every-session-endpoint).
+
+## Facts: what an endpoint states about itself
+
+An endpoint's input, output and guards say what it takes, what it answers
+and who may call it. Some things an app wants to know about an endpoint are
+none of those: whether it only reads, which part of the business owns it,
+whether it stays open while the app is under maintenance. Kept in a list of
+endpoint names somewhere else, such a fact is one a new endpoint forgets.
+Facts put it on the endpoint.
+
+The app declares the vocabulary once, on its init, as an object schema with
+one key per fact:
+
+```typescript
+export const storeInit = initLambder<SessionData>()
+    .declareRefusals(storeRefusals)
+    .declareApiFacts(z.object({
+        readOnly: z.boolean().default(false),
+        owner: z.enum(["orders", "billing"]),
+    }));
+```
+
+and each endpoint states its facts where it is declared:
+
+```typescript
+list: defineApi({
+    input, output,
+    guards: "signedIn",
+    facts: { readOnly: true, owner: "orders" },
+}, async (ctx) => ...),
+```
+
+- **A fact with a default may be left out**, and the default is what an
+  endpoint that says nothing is taken to state. Choose the default that is
+  safe to assume: `readOnly` above defaults to `false`, so a new endpoint is
+  treated as writing until somebody says otherwise.
+- **A fact without a default has to be stated by every endpoint.** Leaving
+  `owner` out above is a compile error, and a registration error for a
+  caller the compiler did not see.
+- **Every call reads every fact.** A vocabulary may not hold a fact that
+  could be absent (an `.optional()` with no default): an endpoint that said
+  nothing would state no value for it, and a guard deciding by it would
+  decide by a value nobody stated. It is refused where the vocabulary is
+  declared, at compile time and at the call. A fact that may be "none" is
+  nullable with a default of null.
+- **A fact is plain data**: a flag, a label, a list. It is parsed once, at
+  registration, and written into the generated options as the value it is,
+  so a value that is not plain data (a `Date`, a class instance) is refused
+  there, and so is an unknown fact, a value its schema refuses, and a
+  `facts` option on an app that declared no vocabulary.
+- **The framework gives no fact a meaning.** What one decides is the app's.
+
+Three places read them:
+
+- **A guard**, as `ctx.apiFacts`: the facts of whichever endpoint it is
+  running for, every one present, defaults filled in. A guard built from
+  the init that declared the facts (`storeInit.guard()`) reads them typed.
+  This is how one guard decides endpoint by endpoint, and with [a guard run
+  on every session endpoint](./api-policies.md#guards-on-every-session-endpoint)
+  how an app writes a rule for every signed-in call once.
+- **The endpoint's handler**, as the same `ctx.apiFacts`, typed.
+- **A test, a mock or a build step**, off [the generated
+  options](#the-options-as-a-generated-file), which record every endpoint's
+  facts resolved, a default included.
+
+`ctx.apiFacts` is one frozen object per endpoint, set as a call is
+dispatched: a rate-limit key handler and an `afterRender` hook read it too.
+It is absent on a route, and in a `beforeRender` hook, which runs before the
+endpoint is looked up (and before a lazy group loads). Facts are no part of
+an endpoint's [signature](#signatures-when-a-client-must-update): one changes
+what the server decides, never what a client sends or reads.
+
+A [module](./api-policies.md#guards-and-policies-a-module-declares) declares
+facts of its own for its own endpoints, `defineApiModule({ apiFacts:
+z.object({ ... }) })`. Its endpoints state the app's facts and the module's
+in one `facts` option, and their handlers read both. A fact is a name like a
+guard's: one the app declares, or another module does, is refused. A guard
+built from the app's init reads the app's facts typed and not a module's,
+which it was built before; a module's facts are for its handlers and for the
+generated options.
+
 ## The inferred contract
 
 ```typescript
@@ -394,9 +478,13 @@ export const guardDeclarations = {
 
 The tables come from `lambder.apiOptionEntries()`, which the generator calls
 on the instance the module exports: every API's mode and its declarative
-options exactly as written, every rate-limit policy less its key handler, and
+options exactly as written (and its [facts](#facts-what-an-endpoint-states-about-itself)
+resolved, as `"facts": { ... }`, a default filled in where the API stated
+nothing), every rate-limit policy less its key handler, and
 every guard's input mode, session requirement, place in the call and refusal
-codes, each table sorted by name so the file diffs by endpoint and never
+codes (and, for a guard the instance runs on [every session
+endpoint](./api-policies.md#guards-on-every-session-endpoint), its place in
+that order as `"sessionGuardOrder": 1`), each table sorted by name so the file diffs by endpoint and never
 moves when registrations are reordered. The refusal vocabulary itself is not
 written: it is shared code, and the mock declares the same object (see
 [the mock runtime](./mock.md#declarations-policies-and-guards-from-the-generated-options)).

@@ -1,10 +1,12 @@
 import { assertGuardDeclaration, type LambderApiGuard } from "./LambderApiGuards.js";
 import { assertRateLimitPolicyDeclaration, type LambderApiRateLimitPolicyConfig } from "./LambderApiRateLimits.js";
 import { mergeNamedMaps, type LambderNamedMapsOption } from "../shared/util/LambderNamedMaps.js";
+import { readApiFactsSchema, type LambderApiFactsSchema } from "./LambderApiFacts.js";
 
 // -----------------------------------------------------------------------------
-// Modules: the guards and rate-limit policies a part of an app declares for
-// its own endpoints, beside the ones its instance was created with. An app
+// Modules: the guards, rate-limit policies and API facts a part of an app
+// declares for its own endpoints, beside the ones its instance was created
+// with. An app
 // defines a module on its instance (defineApiModule), declares the module's
 // endpoints with the builders it hands back, and registers their groups as
 // any other; registration finds the module on them and adds what it declares
@@ -21,7 +23,8 @@ type LambderModulePolicies = Readonly<Record<string, LambderApiRateLimitPolicyCo
 
 /**
  * What a module declares, as registration adds it: its guards and its
- * rate-limit policies, merged into one map each. One object per module, made
+ * rate-limit policies, merged into one map each, and the vocabulary of the
+ * facts its endpoints state beside the app's own, or null. One object per module, made
  * once by defineApiModule() and carried by every endpoint its builders
  * declare and every lazy group its lazyApiGroup registers: the object is how
  * a registration finds a module and tells two apart.
@@ -29,6 +32,7 @@ type LambderModulePolicies = Readonly<Record<string, LambderApiRateLimitPolicyCo
 export type LambderApiModuleDeclarations = {
     readonly guards: LambderModuleGuards;
     readonly rateLimitPolicies: LambderModulePolicies;
+    readonly apiFacts: LambderApiFactsSchema | null;
 };
 
 /** A module a registration brings, and where it was met, for the error naming a name two declare. */
@@ -61,12 +65,14 @@ const bareRecord = <TValue>(): Record<string, TValue> => Object.create(null) as 
  * A module's declarations from what defineApiModule() was given: each option
  * one map or a list of them, merged, a name two of a list's maps declare
  * refused; every guard and policy held to the rules the creation's are held
- * to. A module declaring nothing is refused, as an empty guards option is:
- * its builders would be the instance's own.
+ * to, and its facts to being an object schema with a key. A module
+ * declaring nothing is refused, as an empty guards option is: its builders
+ * would be the instance's own.
  */
 export const apiModuleDeclarationsOf = (options: {
     guards?: LambderNamedMapsOption<LambderModuleGuards>;
     rateLimitPolicies?: LambderNamedMapsOption<LambderModulePolicies>;
+    apiFacts?: LambderApiFactsSchema;
 }, owner: "Lambder" | "LambderMockApp"): LambderApiModuleDeclarations => {
     const guards = bareRecord<LambderApiGuard<any, any, any, any, any>>();
     const rateLimitPolicies = bareRecord<LambderApiRateLimitPolicyConfig<any>>();
@@ -82,12 +88,13 @@ export const apiModuleDeclarationsOf = (options: {
             rateLimitPolicies[name] = policy;
         }
     }
-    if(Object.keys(guards).length === 0 && Object.keys(rateLimitPolicies).length === 0){
+    const apiFacts = options.apiFacts === undefined ? null : readApiFactsSchema(options.apiFacts, "defineApiModule()");
+    if(Object.keys(guards).length === 0 && Object.keys(rateLimitPolicies).length === 0 && apiFacts === null){
         throw new Error(owner === "Lambder"
-            ? "Lambder: defineApiModule() was given no guard and no rate-limit policy, which declares nothing a module's endpoints could name " +
-                "beyond the instance's own. Declare the module's guards or rate-limit policies, or declare its endpoints with the instance's builders."
+            ? "Lambder: defineApiModule() was given no guard, no rate-limit policy and no API facts, which declares nothing a module's endpoints could name " +
+                "beyond the instance's own. Declare the module's guards, rate-limit policies or API facts, or declare its endpoints with the instance's builders."
             : "LambderMockApp: defineApiModule() was given no guard, which declares nothing a module's entries could name beyond the app's own. " +
                 "Declare the module's mock guards, or build its entries with the app's own builders.");
     }
-    return Object.freeze({ guards: Object.freeze(guards), rateLimitPolicies: Object.freeze(rateLimitPolicies) });
+    return Object.freeze({ guards: Object.freeze(guards), rateLimitPolicies: Object.freeze(rateLimitPolicies), apiFacts });
 };

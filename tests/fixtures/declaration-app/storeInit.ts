@@ -7,7 +7,7 @@ import { initLambder, lambderRateLimitKey, type LambderApiRateLimitPolicyConfig 
  * exports them for its other parts to import.
  */
 
-export const StoreSessionSchema = z.object({ customerId: z.string(), staff: z.boolean() });
+export const StoreSessionSchema = z.object({ customerId: z.string(), staff: z.boolean(), viewOnly: z.boolean().optional() });
 export type StoreSession = z.infer<typeof StoreSessionSchema>;
 
 /** The refusal vocabulary, shared code: the server's init declares it, and the mock declares the same object. */
@@ -16,12 +16,25 @@ export const storeRefusals = {
     "order-closed": { status: 409 },
     "refund-too-large": { data: z.object({ refundable: z.number() }) },
     "card-empty": {},
+    "view-only-session": {},
 } as const;
 
-export const storeInit = initLambder<StoreSession>().declareRefusals(storeRefusals, { requireCodes: true });
+/** The facts every endpoint of the store states about itself: whether it only reads. */
+export const storeApiFacts = z.object({ readOnly: z.boolean().default(false) });
+
+export const storeInit = initLambder<StoreSession>().declareRefusals(storeRefusals, { requireCodes: true }).declareApiFacts(storeApiFacts);
 
 export const storeGuards = {
     signedIn: storeInit.guard({ session: true, handler: () => {} }),
+    // Run on every session endpoint (create()'s sessionGuards): it reads the
+    // facts of whichever endpoint the call is for.
+    viewOnlySession: storeInit.guard({
+        session: true,
+        refusals: ["view-only-session"],
+        handler: (ctx) => {
+            if(ctx.session.data.viewOnly && !ctx.apiFacts.readOnly) ctx.refuse("This session may only look.", { code: "view-only-session" });
+        },
+    }),
     open: storeInit.guard({ handler: (_ctx, _input, _reason: string) => {} }),
     staff: storeInit.guard({
         session: true,
@@ -55,3 +68,6 @@ export const storeRateLimitPolicies = {
 
 /** An init exported before its vocabulary is declared, as a shared package exports one for its apps to declare theirs on. */
 export const plainStoreInit = initLambder<StoreSession>();
+
+/** An init that declares its facts first and its vocabulary after: the two are taken in either order. */
+export const factsFirstStoreInit = initLambder<StoreSession>().declareApiFacts(storeApiFacts).declareRefusals(storeRefusals);

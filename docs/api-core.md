@@ -239,7 +239,9 @@ calls the mock handler and wraps its return in the envelope. Either way the
 handler answers by returning and refuses by throwing, so an `exec` hands the
 pipeline an answer or throws.
 
-The steps, in the order `run` executes them:
+The steps, in the order `run` executes them. Before the first, the call's
+context is given the endpoint's [facts](./apis.md#facts-what-an-endpoint-states-about-itself)
+as `apiFacts`, so every step below that decides something may read them:
 
 1. **Envelope check, version floor and signature gate**: a body that is no
    envelope (`invalidEnvelope`) answers `lambder/invalid-request-payload`
@@ -264,11 +266,15 @@ The steps, in the order `run` executes them:
 5. **Idempotency replay**: a completed record answers its stored answer
    without burning the remaining rate-limit quota or re-running guards.
 6. **The session-keyed rate limits** (`per: "session"`), with the custom-key
-   limits whose policy says `chargeAt: "beforeGuards"`, then **guards**, in
-   declared order; a guard's return lands on `ctx.guardData`.
+   limits whose policy says `chargeAt: "beforeGuards"`, then **guards**: on
+   a session endpoint the guards the instance runs on every one
+   ([`sessionGuards`](./api-policies.md#guards-on-every-session-endpoint)),
+   in their listed order, then the endpoint's own in declared order. A
+   guard's return lands on `ctx.guardData`.
 7. **Input validation**, when the definition carries a schema, then the
    guards placed after it (`runAt: "afterInputValidation"`, for a guard that
-   spends something such as a captcha token), then the **custom-key rate
+   spends something such as a captcha token; the session guards placed there
+   first), then the **custom-key rate
    limits** (by default), which may read `ctx.session` and are charged only
    once everything that refuses for free has passed. The handler gets the parsed
    input after these, which read their slices from the payload as sent.
@@ -293,9 +299,10 @@ adapters run `prepare(request)` on the way in, so a signed request for a name
 the map does not hold has already been answered by then.
 
 `assertRegistration(definition)` runs the registration-time checks (unknown
-policy or guard names, session guards on public endpoints, empty guard and
-rateLimit options, and a subsystem an API references that was never
-configured) with the same messages on the server and in the mock.
+policy or guard names, session guards on public endpoints, an endpoint
+naming a guard the instance already runs on every session endpoint, empty
+guard and rateLimit options, and a subsystem an API references that was
+never configured) with the same messages on the server and in the mock.
 
 ## The call context
 
@@ -306,6 +313,7 @@ on a context beyond `LambderApiCallContext`:
 type LambderApiCallContext<S> = {
     session: LambderSessionRecord<S> | null;
     guardData: Record<string, unknown>;
+    apiFacts?: unknown;                      // the endpoint's facts, set as the call starts
     responseHeaders: LambderAnswerHeaders;   // set()/add(), drained onto the answer
     logList: unknown[];                      // the envelope's logList channel
 };

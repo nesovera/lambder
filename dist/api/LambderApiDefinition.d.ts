@@ -19,6 +19,13 @@ import type { LambderApiIdempotencyOption, LambderGuardsOptionValue, LambderRate
  * (checkedRefusal); the codes are part of its signature. Undefined where the
  * codes are not known (a mock without generated options), which checks
  * nothing.
+ *
+ * `facts` is what the endpoint states about itself, resolved against the
+ * vocabularies it is declared under and frozen (resolveApiFacts): what the
+ * pipeline puts on the call's context as `apiFacts`. Not part of the
+ * signature: a fact changes what the server decides, never what a client
+ * sends or reads. Undefined where the facts are not known (a mock without
+ * generated options), and the context then carries none.
  */
 export type LambderApiDefinition = {
     name: string;
@@ -29,4 +36,5 @@ export type LambderApiDefinition = {
     input?: z.ZodType;
     output?: z.ZodType;
     refusals?: LambderEndpointRefusals;
+    facts?: Readonly<Record<string, unknown>>;
 };

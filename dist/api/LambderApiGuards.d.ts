@@ -2,11 +2,13 @@ import type { LambderNonEmptyOptionMap } from "../shared/util/LambderTypeUtiliti
 import type { z } from "zod";
 import type { LambderApiRequest } from "./LambderApiRequest.js";
 import type { LambderApiCallContext, LambderApiCallTrace } from "./LambderApiCallContext.js";
+import type { LambderApiDefinition } from "./LambderApiDefinition.js";
 import type { LambderApiMode, LambderGuardNamesIn } from "../shared/wire/LambderApiContract.js";
 import type { LambderDeclaredRefuse } from "../shared/wire/LambderApiRefusal.js";
 import { type LambderHandlerRefusalsOf, type LambderRefusalDeclaration } from "./LambderApiRefusals.js";
 import type { LambderGuardsOptionValue } from "../shared/wire/LambderApiOptionValues.js";
 import { LAMBDER_RESPONSE_BRAND } from "../shared/util/LambderResponseBrand.js";
+import type { LambderApiFactsContext } from "./LambderApiFacts.js";
 /**
  * What lambderGuard() returns for a handler that answers instead of
  * authorizing. Nothing accepts it, so the guards map is where the mistake
@@ -171,6 +173,14 @@ type LambderGuardRefuse<TVocabulary, TRefusals extends readonly string[], TCodes
     refuse: LambderDeclaredRefuse<LambderHandlerRefusalsOf<TVocabulary, TRefusals[number] & keyof TVocabulary & string>, TCodesRequired>;
 };
 /**
+ * The facts a guard's handler context carries when the guard is built from
+ * an init that declared a facts vocabulary (declareApiFacts): the facts of
+ * the endpoint being called, typed, every one present. A builder with no
+ * vocabulary of facts adds nothing, and the context's own `apiFacts` stays
+ * untyped.
+ */
+type LambderGuardFacts<TApiFacts> = [TApiFacts] extends [never] ? unknown : LambderApiFactsContext<TApiFacts>;
+/**
  * A guard's refusals against the vocabulary of the init that builds it: a
  * code the vocabulary does not hold is refused on the `refusals` option, and
  * an init that declared no vocabulary refuses every code. A builder with no
@@ -190,13 +200,17 @@ type LambderGuardRefusalsKnownIn<TVocabulary, TRefusals extends readonly string[
  * output) works downstream. The param type is inferred from the handler's
  * 3rd argument annotation; the output from its return type. TVocabulary is
  * the app's refusal vocabulary where the init declared one, which types the
- * handler's ctx.refuse and checks the guard's refusals option.
+ * handler's ctx.refuse and checks the guard's refusals option. TApiFacts is
+ * the app's facts where the init declared them, which types the handler's
+ * ctx.apiFacts. Both sit on the handler's own context alone, never on the
+ * guard the builder returns, so a guard still fits the guards map of its
+ * adapter whatever its init declared.
  */
-export type LambderGuardBuilder<TCtx, TSessionCtx, TVocabulary = never, TCodesRequired extends boolean = false> = {
+export type LambderGuardBuilder<TCtx, TSessionCtx, TVocabulary = never, TCodesRequired extends boolean = false, TApiFacts = never> = {
     <TInput extends z.ZodType, TParam = undefined, TOutput = void, const TRefusals extends readonly string[] = readonly []>(guard: {
         apiInput: TInput;
         session: true;
-        handler: (ctx: TSessionCtx & LambderGuardRefuse<TVocabulary, TRefusals, TCodesRequired>, payload: z.output<TInput>, param: TParam) => TOutput | Promise<TOutput>;
+        handler: (ctx: TSessionCtx & LambderGuardRefuse<TVocabulary, TRefusals, TCodesRequired> & LambderGuardFacts<TApiFacts>, payload: z.output<TInput>, param: TParam) => TOutput | Promise<TOutput>;
     } & LambderGuardPlacement & LambderGuardRefusals<TRefusals> & LambderGuardRefusalsKnownIn<TVocabulary, TRefusals> & LambderGuardAnswerCheck<TOutput>): LambderGuardOf<TOutput, {
         refusals?: NoInfer<TRefusals>;
         apiInput: TInput;
@@ -206,7 +220,7 @@ export type LambderGuardBuilder<TCtx, TSessionCtx, TVocabulary = never, TCodesRe
     }>;
     <TInput extends z.ZodType, TParam = undefined, TOutput = void, const TRefusals extends readonly string[] = readonly []>(guard: {
         apiInput: TInput;
-        handler: (ctx: TCtx & LambderGuardRefuse<TVocabulary, TRefusals, TCodesRequired>, payload: z.output<TInput>, param: TParam) => TOutput | Promise<TOutput>;
+        handler: (ctx: TCtx & LambderGuardRefuse<TVocabulary, TRefusals, TCodesRequired> & LambderGuardFacts<TApiFacts>, payload: z.output<TInput>, param: TParam) => TOutput | Promise<TOutput>;
     } & LambderGuardPlacement & LambderGuardRefusals<TRefusals> & LambderGuardRefusalsKnownIn<TVocabulary, TRefusals> & LambderGuardAnswerCheck<TOutput>): LambderGuardOf<TOutput, {
         refusals?: NoInfer<TRefusals>;
         apiInput: TInput;
@@ -217,7 +231,7 @@ export type LambderGuardBuilder<TCtx, TSessionCtx, TVocabulary = never, TCodesRe
     <TInput extends z.ZodType, TParam = undefined, TOutput = void, const TRefusals extends readonly string[] = readonly []>(guard: {
         guardInput: TInput;
         session: true;
-        handler: (ctx: TSessionCtx & LambderGuardRefuse<TVocabulary, TRefusals, TCodesRequired>, payload: z.output<TInput>, param: TParam) => TOutput | Promise<TOutput>;
+        handler: (ctx: TSessionCtx & LambderGuardRefuse<TVocabulary, TRefusals, TCodesRequired> & LambderGuardFacts<TApiFacts>, payload: z.output<TInput>, param: TParam) => TOutput | Promise<TOutput>;
     } & LambderGuardInputUse & LambderGuardPlacement & LambderGuardRefusals<TRefusals> & LambderGuardRefusalsKnownIn<TVocabulary, TRefusals> & LambderGuardAnswerCheck<TOutput>): LambderGuardOf<TOutput, {
         refusals?: NoInfer<TRefusals>;
         guardInput: TInput;
@@ -228,7 +242,7 @@ export type LambderGuardBuilder<TCtx, TSessionCtx, TVocabulary = never, TCodesRe
     }>;
     <TInput extends z.ZodType, TParam = undefined, TOutput = void, const TRefusals extends readonly string[] = readonly []>(guard: {
         guardInput: TInput;
-        handler: (ctx: TCtx & LambderGuardRefuse<TVocabulary, TRefusals, TCodesRequired>, payload: z.output<TInput>, param: TParam) => TOutput | Promise<TOutput>;
+        handler: (ctx: TCtx & LambderGuardRefuse<TVocabulary, TRefusals, TCodesRequired> & LambderGuardFacts<TApiFacts>, payload: z.output<TInput>, param: TParam) => TOutput | Promise<TOutput>;
     } & LambderGuardInputUse & LambderGuardPlacement & LambderGuardRefusals<TRefusals> & LambderGuardRefusalsKnownIn<TVocabulary, TRefusals> & LambderGuardAnswerCheck<TOutput>): LambderGuardOf<TOutput, {
         refusals?: NoInfer<TRefusals>;
         guardInput: TInput;
@@ -239,7 +253,7 @@ export type LambderGuardBuilder<TCtx, TSessionCtx, TVocabulary = never, TCodesRe
     }>;
     <TParam = undefined, TOutput = void, const TRefusals extends readonly string[] = readonly []>(guard: {
         session: true;
-        handler: (ctx: TSessionCtx & LambderGuardRefuse<TVocabulary, TRefusals, TCodesRequired>, payload: undefined, param: TParam) => TOutput | Promise<TOutput>;
+        handler: (ctx: TSessionCtx & LambderGuardRefuse<TVocabulary, TRefusals, TCodesRequired> & LambderGuardFacts<TApiFacts>, payload: undefined, param: TParam) => TOutput | Promise<TOutput>;
     } & LambderGuardPlacement & LambderGuardRefusals<TRefusals> & LambderGuardRefusalsKnownIn<TVocabulary, TRefusals> & LambderGuardAnswerCheck<TOutput>): LambderGuardOf<TOutput, {
         refusals?: NoInfer<TRefusals>;
         apiInput?: undefined;
@@ -248,7 +262,7 @@ export type LambderGuardBuilder<TCtx, TSessionCtx, TVocabulary = never, TCodesRe
         handler: (ctx: TSessionCtx, payload: undefined, param: TParam) => TOutput | Promise<TOutput>;
     }>;
     <TParam = undefined, TOutput = void, const TRefusals extends readonly string[] = readonly []>(guard: {
-        handler: (ctx: TCtx & LambderGuardRefuse<TVocabulary, TRefusals, TCodesRequired>, payload: undefined, param: TParam) => TOutput | Promise<TOutput>;
+        handler: (ctx: TCtx & LambderGuardRefuse<TVocabulary, TRefusals, TCodesRequired> & LambderGuardFacts<TApiFacts>, payload: undefined, param: TParam) => TOutput | Promise<TOutput>;
     } & LambderGuardPlacement & LambderGuardRefusals<TRefusals> & LambderGuardRefusalsKnownIn<TVocabulary, TRefusals> & LambderGuardAnswerCheck<TOutput>): LambderGuardOf<TOutput, {
         refusals?: NoInfer<TRefusals>;
         apiInput?: undefined;
@@ -263,7 +277,7 @@ export type LambderGuardBuilder<TCtx, TSessionCtx, TVocabulary = never, TCodesRe
  * binds it to its own handler contexts, so mock guards are the same shape
  * as server guards and run through the same engine.
  */
-export declare const lambderGuardBuilder: <TCtx, TSessionCtx, TVocabulary = never, TCodesRequired extends boolean = false>(vocabulary?: ReadonlyMap<string, LambderRefusalDeclaration> | null) => LambderGuardBuilder<TCtx, TSessionCtx, TVocabulary, TCodesRequired>;
+export declare const lambderGuardBuilder: <TCtx, TSessionCtx, TVocabulary = never, TCodesRequired extends boolean = false, TApiFacts = never>(vocabulary?: ReadonlyMap<string, LambderRefusalDeclaration> | null) => LambderGuardBuilder<TCtx, TSessionCtx, TVocabulary, TCodesRequired, TApiFacts>;
 /** The param type a guard's handler declares as its 3rd argument; undefined for paramless guards. */
 type LambderGuardParamOf<G> = G extends {
     handler: (...args: infer A) => any;
@@ -332,6 +346,31 @@ export type LambderParamlessGuardNames<TGuards> = {
         param: undefined;
     } ? K & string : never;
 }[LambderAllowedGuardNames<TGuards> & keyof TGuards];
+/**
+ * The guards an instance may run on every session endpoint (create()'s
+ * sessionGuards): those that need a session, read the context alone (no
+ * input of either kind, no parameter) and return nothing. No endpoint
+ * declares such a guard, so there is no payload it could be held to, no
+ * declaration to give it a parameter, and no handler whose guardData is
+ * typed to hold its answer.
+ */
+export type LambderSessionGuardNames<TGuards> = {
+    [K in keyof TGuards]: TGuards[K] extends {
+        apiInput: any;
+    } | {
+        guardInput: any;
+    } ? never : TGuards[K] extends {
+        session: true;
+        param: undefined;
+        output: infer O;
+    } ? ([O] extends [void] ? K & string : never) : never;
+}[keyof TGuards];
+/** The refusal codes an instance's session guards add to every session endpoint's own: a union of code names, never when none of them declares any. */
+export type LambderSessionGuardRefusalNamesOf<TGuards, TSessionGuards> = {
+    [K in TSessionGuards & keyof TGuards]: TGuards[K] extends {
+        refusals: infer R;
+    } ? R : never;
+}[TSessionGuards & keyof TGuards];
 /** The map form's full shape: every declarable guard name, each carrying its own param type. */
 type LambderGuardsMap<TGuards> = {
     readonly [K in LambderAllowedGuardNames<TGuards> & keyof TGuards]?: TGuards[K] extends {
@@ -407,12 +446,29 @@ export declare const assertGuardDeclaration: (name: string, guardDef: LambderApi
  */
 export declare class LambderApiGuardsEngine {
     private guards;
+    /** The guards run on every session endpoint, in order, before the endpoint's own (configureSessionGuards). */
+    private sessionGuards;
     /** True once a guards map was configured, or a module added guards. */
     get isConfigured(): boolean;
     /** Whether a guard of this name is declared, by the creation's map or a module added since. */
     has(name: string): boolean;
     /** Take the guards map given at creation; named like the other two engines' configure(). */
     configure(guards: Record<string, LambderApiGuard<any, any, any>>): void;
+    /** The guards run on every session endpoint, in the order they run. */
+    get sessionGuardNames(): readonly string[];
+    /**
+     * Takes the names of the guards every session endpoint runs, before its
+     * own. Each is a guard of the map given at creation that needs a session
+     * and reads the context alone: no endpoint declares it, so there is no
+     * payload to hold an apiInput to, no caller that knows to send a
+     * guardInput, and no declaration to give it a parameter.
+     */
+    configureSessionGuards(names: readonly string[]): void;
+    /**
+     * The guards one call runs, in order: the session guards first on a
+     * session endpoint, then the endpoint's own.
+     */
+    private entriesFor;
     /**
      * Adds a module's guards beside the ones declared so far. Its names were
      * checked against them before (LambderApiPipeline.modulesToAdd), so a
@@ -435,9 +491,10 @@ export declare class LambderApiGuardsEngine {
      */
     fingerprintedInputsOf(request: LambderApiRequest, guardsOption: LambderGuardsOptionValue | undefined): Record<string, unknown>;
     /**
-     * Run the API's guards that run at `runAt` (see LambderGuardRunAt) in
-     * declared order. Refusals throw; outputs land on ctx.guardData; the
-     * trace names every guard reached.
+     * Run the guards of one call that run at `runAt` (see LambderGuardRunAt):
+     * on a session endpoint the instance's session guards, in their listed
+     * order, then the API's own in declared order. Refusals throw; outputs
+     * land on ctx.guardData; the trace names every guard reached.
      */
-    run(request: LambderApiRequest, ctx: LambderApiCallContext, guardsOption: LambderGuardsOptionValue | undefined, trace: LambderApiCallTrace, runAt: LambderGuardRunAt): Promise<void>;
+    run(request: LambderApiRequest, ctx: LambderApiCallContext, definition: Pick<LambderApiDefinition, "mode" | "guards">, trace: LambderApiCallTrace, runAt: LambderGuardRunAt): Promise<void>;
 }

@@ -68,7 +68,11 @@ export type LambderRateLimitChargeAt = "beforeGuards" | "afterGuards";
  * as the JSON it is (a permission string, a list of them, a reason), which is
  * what makes the module plain data: a parameter that is code or a class
  * instance fails the write and names the API. `refusals` is the API's own
- * option; the codes its guards add are on their declarations.
+ * option; the codes its guards add are on their declarations. `facts` is
+ * the one option written resolved rather than as written: every fact of the
+ * vocabularies the API is declared under, a default filled in where the API
+ * stated nothing, so a reader never has to know the default. Absent for an
+ * API declared under no facts vocabulary.
  */
 export type LambderApiOptionEntry = {
     mode: LambderApiMode;
@@ -76,6 +80,7 @@ export type LambderApiOptionEntry = {
     rateLimit?: LambderRateLimitOptionValue;
     idempotency?: LambderApiIdempotencyOption;
     refusals?: LambderRefusalsOptionValue;
+    facts?: Readonly<Record<string, unknown>>;
 };
 /**
  * One rate-limit policy as the generated module records it: its windows,
@@ -96,13 +101,17 @@ export type LambderRateLimitPolicyEntry = LambderRateLimitPolicy & {
  * whether it needs a session, when it runs, and the refusal codes it
  * declares, which join those of every API declaring it. The schema behind an
  * input mode is never written; the mode alone is what a mock guard standing
- * in for it has to match.
+ * in for it has to match. `sessionGuardOrder` marks a guard the instance runs
+ * on every session endpoint (create()'s sessionGuards) with its place in that
+ * order, from 1: no API's guards option names it, and its refusal codes join
+ * those of every session API.
  */
 export type LambderGuardDeclarationEntry = {
     input: "apiInput" | "guardInput" | "none";
     session: boolean;
     runAt: LambderGuardRunAt;
     refusals?: readonly string[];
+    sessionGuardOrder?: number;
 };
 /**
  * Everything `lambder.apiOptionEntries()` reports, and the three tables the

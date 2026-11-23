@@ -5,25 +5,32 @@ import type { LambderReadonlyDeep, LambderMaybePromise } from "../shared/util/La
 import type { LambderDeclaredRefuse } from "../shared/wire/LambderApiRefusal.js";
 import type { LambderApiIdempotencyOption } from "../shared/wire/LambderApiOptionValues.js";
 import type { LambderContractEntry, LambderJsonOf } from "../shared/wire/LambderApiContract.js";
-import type { LambderGuardDataOf, LambderGuardInputsOf, LambderGuardRefusalNamesOf, LambderGuardsOption } from "../api/LambderApiGuards.js";
+import type { LambderGuardDataOf, LambderGuardInputsOf, LambderGuardRefusalNamesOf, LambderGuardsOption, LambderSessionGuardRefusalNamesOf } from "../api/LambderApiGuards.js";
+import type { LambderApiFactsContext, LambderApiFactsField } from "../api/LambderApiFacts.js";
 import type { LambderRateLimitOption } from "../api/LambderApiRateLimits.js";
 import type { LambderHandlerRefusalsOf, LambderRefusalNamesIn, LambderRefusalsOption, LambderWireRefusalsOf } from "../api/LambderApiRefusals.js";
 import type { LambderApiModuleDeclarations } from "../api/LambderApiModules.js";
 import { type LambderActionNamesCheck, type LambderApiDeclaration, type LambderApiDeclarations, type LambderApiGroup, type LambderApiModeOf, type LambderAppTypes, type LambderGroupNameCheck, type LambderGroupPartsCheck, type LambderLazyApiGroup, type LambderMergedParts, type LambderPublicSessionPolicyCheck, type LambderSessionModeCheck } from "../api/LambderApiDeclarations.js";
-/** The codes one API may refuse with, typed: its own refusals option's and its declared guards', as the vocabulary holds them. */
-export type LambderApiRefusalCodes<TVocabulary, TGuards, TRefusalsOpt, TGuardsOpt> = (LambderRefusalNamesIn<TRefusalsOpt> | LambderGuardRefusalNamesOf<TGuards, TGuardsOpt>) & keyof TVocabulary & string;
+/**
+ * The codes one API may refuse with, typed: its own refusals option's and
+ * its declared guards', and on a session endpoint those of the guards the
+ * instance runs on every one (TSessionGuards, create()'s sessionGuards), as
+ * the vocabulary holds them.
+ */
+export type LambderApiRefusalCodes<TVocabulary, TGuards, TRefusalsOpt, TGuardsOpt, TSessionGuards = never> = (LambderRefusalNamesIn<TRefusalsOpt> | LambderGuardRefusalNamesOf<TGuards, TGuardsOpt> | ([TSessionGuards] extends [never] ? never : LambderApiModeOf<TGuards, TGuardsOpt> extends "session" ? LambderSessionGuardRefusalNamesOf<TGuards, TSessionGuards> : never)) & keyof TVocabulary & string;
 /**
  * What an endpoint's handler is handed: the session context when one of its
  * guards needs a session (so ctx.session is typed present), the plain one
- * otherwise, with the payload, the guards' data and a refuse() typed to the
- * codes the endpoint may refuse with.
+ * otherwise, with the payload, the guards' data, the facts the endpoint
+ * states (every declared one, defaults filled in) and a refuse() typed to
+ * the codes the endpoint may refuse with.
  */
-export type LambderApiHandlerContext<TApp extends LambderAppTypes, TPayload, TGuardsOpt, TRefusalsOpt> = (LambderApiModeOf<TApp["guards"], TGuardsOpt> extends "session" ? LambderSessionRenderContext<TPayload, TApp["session"], Record<string, string>, LambderGuardDataOf<TApp["guards"], TGuardsOpt>, TApp["policies"]> : LambderRenderContext<TPayload, Record<string, string>, LambderGuardDataOf<TApp["guards"], TGuardsOpt>, TApp["session"], TApp["policies"]>) & {
-    refuse: LambderDeclaredRefuse<LambderHandlerRefusalsOf<TApp["refusals"], LambderApiRefusalCodes<TApp["refusals"], TApp["guards"], TRefusalsOpt, TGuardsOpt>>, TApp["refusalCodesRequired"]>;
+export type LambderApiHandlerContext<TApp extends LambderAppTypes, TPayload, TGuardsOpt, TRefusalsOpt> = (LambderApiModeOf<TApp["guards"], TGuardsOpt> extends "session" ? LambderSessionRenderContext<TPayload, TApp["session"], Record<string, string>, LambderGuardDataOf<TApp["guards"], TGuardsOpt>, TApp["policies"]> : LambderRenderContext<TPayload, Record<string, string>, LambderGuardDataOf<TApp["guards"], TGuardsOpt>, TApp["session"], TApp["policies"]>) & LambderApiFactsContext<TApp["facts"]["resolved"]> & {
+    refuse: LambderDeclaredRefuse<LambderHandlerRefusalsOf<TApp["refusals"], LambderApiRefusalCodes<TApp["refusals"], TApp["guards"], TRefusalsOpt, TGuardsOpt, TApp["sessionGuards"]>>, TApp["refusalCodesRequired"]>;
 };
 /**
  * Declares one endpoint, typed on one set of app types: its input and output
- * schemas, its guards, rate limits, idempotency and refusals, and its
+ * schemas, its guards, rate limits, idempotency, refusals and facts, and its
  * handler. Nothing is registered until the declaration is put in a group
  * (defineApiGroup) and the group is registered (registerApiGroups).
  *
@@ -31,7 +38,9 @@ export type LambderApiHandlerContext<TApp extends LambderAppTypes, TPayload, TGu
  * include one that needs a session (`session: true`) is a session endpoint,
  * its session read before the guards run and a call without one answered
  * sessionExpired, and its handler's ctx.session is typed present. Any other
- * endpoint is public.
+ * endpoint is public. A session endpoint also runs the guards the instance
+ * runs on every one (create()'s sessionGuards), before its own, and may
+ * refuse with their codes.
  */
 export type LambderDefineApi<TApp extends LambderAppTypes> = <TInput extends z.ZodType, TOutput extends z.ZodType, const TAnswer extends LambderReadonlyDeep<z.input<TOutput>>, const TRateOpt extends LambderRateLimitOption<TApp["policies"]> = never, const TGuardsOpt extends LambderGuardsOption<TApp["guards"]> = never, const TIdempotencyOpt extends LambderApiIdempotencyOption = never, const TRefusalsOpt extends LambderRefusalsOption<TApp["refusals"]> = never>(options: {
     input: TInput;
@@ -55,9 +64,9 @@ export type LambderDefineApi<TApp extends LambderAppTypes> = <TInput extends z.Z
      * both ends. A transport setting of this server's, not part of the API's contract.
      */
     compress?: boolean | "auto";
-} & LambderRequirableGuardsField<TApp["guardsRequired"], TGuardsOpt> & LambderObjectOutputCheck<TOutput> & LambderPayloadSliceCheck<TApp["guards"], TApp["policies"], TGuardsOpt, TRateOpt, z.input<TInput>> & LambderPublicSessionPolicyCheck<LambderApiModeOf<TApp["guards"], TGuardsOpt>, TApp["policies"], TRateOpt> & LambderSessionModeCheck<LambderApiModeOf<TApp["guards"], TGuardsOpt>, TApp["sessions"]>, 
+} & LambderRequirableGuardsField<TApp["guardsRequired"], TGuardsOpt> & LambderApiFactsField<TApp["facts"]> & LambderObjectOutputCheck<TOutput> & LambderPayloadSliceCheck<TApp["guards"], TApp["policies"], TGuardsOpt, TRateOpt, z.input<TInput>> & LambderPublicSessionPolicyCheck<LambderApiModeOf<TApp["guards"], TGuardsOpt>, TApp["policies"], TRateOpt> & LambderSessionModeCheck<LambderApiModeOf<TApp["guards"], TGuardsOpt>, TApp["sessions"]>, 
 /** Answers the call by returning its output (parsed through `output` before it is sent), or refuses it with ctx.refuse() or refuse(). */
-handler: (ctx: LambderApiHandlerContext<TApp, z.infer<TInput>, TGuardsOpt, TRefusalsOpt>) => LambderMaybePromise<TAnswer>) => LambderApiDeclaration<LambderContractEntry<z.input<TInput>, LambderJsonOf<z.output<TOutput>>, LambderApiModeOf<TApp["guards"], TGuardsOpt>, LambderGuardInputsOf<TApp["guards"], TGuardsOpt>, TGuardsOpt, TRateOpt, TIdempotencyOpt, LambderWireRefusalsOf<TApp["refusals"], LambderApiRefusalCodes<TApp["refusals"], TApp["guards"], TRefusalsOpt, TGuardsOpt>>>>;
+handler: (ctx: LambderApiHandlerContext<TApp, z.infer<TInput>, TGuardsOpt, TRefusalsOpt>) => LambderMaybePromise<TAnswer>) => LambderApiDeclaration<LambderContractEntry<z.input<TInput>, LambderJsonOf<z.output<TOutput>>, LambderApiModeOf<TApp["guards"], TGuardsOpt>, LambderGuardInputsOf<TApp["guards"], TGuardsOpt>, TGuardsOpt, TRateOpt, TIdempotencyOpt, LambderWireRefusalsOf<TApp["refusals"], LambderApiRefusalCodes<TApp["refusals"], TApp["guards"], TRefusalsOpt, TGuardsOpt, TApp["sessionGuards"]>>>>;
 /**
  * Gathers endpoints into a named group: each is registered as `name.action`
  * and called at `{apiPath}/{name}/{action}`, and every Lambder caller
