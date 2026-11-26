@@ -71,11 +71,12 @@ in the frontend's type check. In a large app, import it instead from the file
 | `errorHandler` | none | `(error, failure)`: every failure no other handler takes (see [Failure semantics](#failure-semantics)), with the error to report and the failure outcome it came from. Never told of a call its own `signal` aborted |
 | `apiInputValidationErrorHandler` | none | The server rejected the input (422), with the Zod issues |
 | `logListHandler` | `console.log` | Receives each answer's `logList`, with the API name; the browser twin of `LambderInvokeCaller`'s `onLogList` |
-| `fetchStartedHandler` / `fetchEndedHandler` | none | Call lifecycle, for global loading state. `fetchEndedHandler` is told of every call that started, however it ended, with its outcome as `fetchResult` |
+| `fetchStartedHandler` / `fetchEndedHandler` | none | Call lifecycle, for global loading state. `fetchEndedHandler` is told of every call that started, however it ended, with its outcome as `fetchResult`. Both are handed the calls in flight as `activeFetchList` (every call) and `globalFetchList` (the ones the global loading shows); see [Standalone loading](#standalone-loading) |
 
 `setSessionCookieKey(tokenKey, csrfKey)` mirrors non-default server cookie
 names. `caller.fetchTrackerList` is the calls currently in flight, in the order
-they started, and `caller.isLoading` is derived from it, so neither holds
+they started, and `caller.isLoading` is derived from it (any call in flight
+but a [standalone loading](#standalone-loading) one), so neither holds
 anything about a call that has already settled.
 
 ## The signature map
@@ -145,6 +146,43 @@ Every constructor handler can be overridden in the options of a single call
 | `compressRequest` | `false` sends the payload plainly, `true` compresses regardless of the threshold |
 | `guardInputs` | Values for the API's guardInput-mode guards, keyed by guard name |
 | `idempotencyKey` | Replay-protection key for APIs declared idempotent on the server. The typed contract makes it mandatory for those APIs, as it does `guardInputs` |
+| `standaloneLoading` | This call's loading stands apart from the app's: see [Standalone loading](#standalone-loading). Default `false` |
+
+### Standalone loading
+
+An app usually shows one global loading state for every call: a bar along
+the top, a spinner on the button that sent it, a form that holds still until
+the answer comes. A call that stands on its own does not belong in it: a
+status line that reads itself in a corner of the screen and shows a skeleton
+in its own place while it does. Mark that call `standaloneLoading` and the
+global loading leaves it out:
+
+```typescript
+const outcome = await caller.weather.current.outcome({ city: "New York" }, { standaloneLoading: true });
+```
+
+The lifecycle handlers are handed the calls in flight twice, as copies taken
+when they are called: `activeFetchList` is every call, and `globalFetchList`
+the ones the global loading shows, every call but a standalone loading one.
+An indicator follows the second; whatever needs every call (a debug panel, a
+"leave the page?" prompt while anything is being sent) reads the first:
+
+```typescript
+const caller = new LambderCaller<ApiContractType>({
+    fetchStartedHandler: ({ globalFetchList }) => { topBar.visible = globalFetchList.length > 0; },
+    fetchEndedHandler: ({ globalFetchList }) => { topBar.visible = globalFetchList.length > 0; },
+});
+```
+
+`caller.isLoading` counts the same way, and each entry of both lists, like
+`fetchParams`, carries the call's `standaloneLoading`. `caller.fetchTrackerList`
+stays every call in flight.
+
+Using it accepts that nothing waiting on the global loading waits on the
+call: the top bar stays off, and a button that spins or disables while the
+app is busy stays usable while it runs. The screen shows the call's loading
+itself, and a call a button waits on never takes it. Nothing else about the
+call changes: its failures reach the same handlers as any other's.
 
 ## Failure semantics
 

@@ -9,6 +9,33 @@ sit on its first published patch, and later patches list only what they changed.
 Releases up to 3.2.6 carry git tags; the ones after it were published without
 one, so versions are not cross-linked to tag comparisons here.
 
+## [16.3.1] - 2026-11-26
+
+A minor for an app whose screens show some calls' loading in their own
+place: such a call stays out of the app's global loading. Nothing changes for
+an app that marks no call.
+
+### Added
+
+- **Standalone loading.** A new call option, `standaloneLoading`, says the
+  call's loading stands apart from the app's: its screen shows its own (a
+  skeleton in place), and the global loading (a top bar, the buttons and
+  forms that wait while the app is busy) leaves it out. `fetchStartedHandler`
+  and `fetchEndedHandler` are handed a second list beside `activeFetchList`,
+  `globalFetchList`, which holds the calls the global loading shows, every
+  one but a standalone loading one, so an indicator follows
+  `globalFetchList.length > 0` while `activeFetchList` stays every call in
+  flight. `caller.isLoading` counts the same way. Each list entry and
+  `fetchParams` carry the call's `standaloneLoading`. Its failures reach the
+  same handlers as any other call's. See
+  [Standalone loading](./docs/client.md#standalone-loading).
+
+### Changed
+
+- **`caller.isLoading` leaves out a standalone loading call.** It is true
+  while a call the global loading shows is in flight, which is every call for
+  an app that marks none.
+
 ## [16.2.1] - 2026-11-23
 
 A minor for an app with a rule that holds for every signed-in call: an

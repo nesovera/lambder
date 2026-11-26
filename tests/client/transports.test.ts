@@ -484,6 +484,46 @@ describe('LambderCaller in-flight state', () => {
         expect(activeCounts).toEqual([1, 2, 1, 1, 1, 1, 1]);
     });
 
+    it('keeps a standaloneLoading call out of the global list and isLoading, and in the active list', async () => {
+        // A screen that shows its own loading for a call takes it out of the
+        // app's global loading: the handlers' globalFetchList and isLoading
+        // leave it out, and activeFetchList, every call in flight, keeps it.
+        type Told = { standaloneLoading: boolean, active: boolean[], global: boolean[] };
+        const toldOf = (fetchParams: { standaloneLoading: boolean }, lists: { activeFetchList: Array<{ standaloneLoading: boolean }>, globalFetchList: Array<{ standaloneLoading: boolean }> }): Told => ({
+            standaloneLoading: fetchParams.standaloneLoading,
+            active: lists.activeFetchList.map((call) => call.standaloneLoading),
+            global: lists.globalFetchList.map((call) => call.standaloneLoading),
+        });
+        const started: Told[] = [];
+        const ended: Told[] = [];
+        const caller = new LambderCaller<Contract>({
+            apiPath: '/api', isCorsEnabled: false,
+            transport: lambderHandlerTransport(server.getHandler()),
+            fetchStartedHandler: ({ fetchParams, ...lists }) => { started.push(toldOf(fetchParams, lists)); },
+            fetchEndedHandler: ({ fetchParams, ...lists }) => { ended.push(toldOf(fetchParams, lists)); },
+        });
+
+        const standalone = caller.apiOutcome('test.slow', {}, { standaloneLoading: true });
+        expect(caller.fetchTrackerList).toEqual([{ apiName: 'test.slow', standaloneLoading: true }]);
+        expect(caller.isLoading).toBe(false);
+
+        const shown = caller.apiOutcome('test.slow', {});
+        expect(caller.isLoading).toBe(true);
+        await Promise.all([standalone, shown]);
+        expect(caller.isLoading).toBe(false);
+
+        expect(started).toEqual([
+            { standaloneLoading: true, active: [true], global: [] },
+            { standaloneLoading: false, active: [true, false], global: [false] },
+        ]);
+        // Each call is gone from the lists by the time its end is told, so
+        // the first to end sees only the other, whichever of the two it is.
+        const [first, second] = ended;
+        const other = !first!.standaloneLoading;
+        expect(first).toEqual({ standaloneLoading: !other, active: [other], global: other ? [] : [false] });
+        expect(second).toEqual({ standaloneLoading: other, active: [], global: [] });
+    });
+
     it('does not report success for an answer that arrived after its own timeout', async () => {
         // Honouring request.signal is the transport's obligation, but the
         // caller cannot assume every transport does: believing a late answer

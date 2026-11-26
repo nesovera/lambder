@@ -46,16 +46,36 @@ export type { LambderProvidedGuardInputs, LambderGuardInputsProvider } from '../
 /** A handler told that something happened, with nothing to hand it. */
 type NotifyHandler = ()=>void|Promise<void>;
 /** One call in flight: pushed when it starts, removed when it settles, so the list holds only calls in flight. */
-type FetchTracker = { apiName: string };
+type FetchTracker = { apiName: string, standaloneLoading: boolean };
+
+/**
+ * Whether the app's global loading shows the call: every call but one whose
+ * loading stands alone (the standaloneLoading call option). The one rule
+ * behind isLoading and the handlers' globalFetchList.
+ */
+const showsInGlobalLoading = (tracker: FetchTracker): boolean => !tracker.standaloneLoading;
+
 type EventHandlerFetchParams = {
     apiName: string,
     payload?: any,
-    headers?: Record<string, string>
+    headers?: Record<string, string>,
+    /** The call's standaloneLoading option; false when it was left out. */
+    standaloneLoading: boolean,
 };
 
-type FetchStartEventHandler = (params: {
-    fetchParams: EventHandlerFetchParams,
+/**
+ * The calls in flight as a lifecycle handler is told of them, both lists
+ * copies taken as it is called: every call, and the ones the app's global
+ * loading shows (all but the standaloneLoading ones), for a top bar or a
+ * busy flag to follow.
+ */
+type FetchListParams = {
     activeFetchList: FetchTracker[],
+    globalFetchList: FetchTracker[],
+};
+
+type FetchStartEventHandler = (params: FetchListParams & {
+    fetchParams: EventHandlerFetchParams,
 })=>void|Promise<void>;
 
 /**
@@ -63,10 +83,9 @@ type FetchStartEventHandler = (params: {
  * resolves to. TMessage is what the calls it hears can refuse with, as for
  * RefusalHandler.
  */
-type FetchEndEventHandler<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = (params: {
+type FetchEndEventHandler<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = (params: FetchListParams & {
     fetchParams: EventHandlerFetchParams,
     fetchResult: LambderApiOutcome<unknown, TMessage>,
-    activeFetchList: FetchTracker[],
 })=>void|Promise<void>;
 
 /**
@@ -104,6 +123,15 @@ export type LambderCallOptions<TMessage extends LambderUncheckedRefusalMessage =
     logListHandler?: LambderLogListHandler;
     fetchStartedHandler?: FetchStartEventHandler;
     fetchEndedHandler?: FetchEndEventHandler<TMessage>;
+    /**
+     * This call's loading stands apart from the app's: its caller shows its
+     * own (a skeleton in place), and the app's global loading leaves it out,
+     * along with whatever waits on it. caller.isLoading does not count it,
+     * and the lifecycle handlers' globalFetchList does not hold it, while
+     * activeFetchList still does. For a call nothing else waits on.
+     * Default: false.
+     */
+    standaloneLoading?: boolean;
 };
 
 type LambderCallerBaseOptions<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = {
@@ -195,8 +223,20 @@ class LambderCallerCore<TContract extends LambderApiContractShape = any, TProvid
 
     /** The calls currently in flight, in the order they started. */
     fetchTrackerList: FetchTracker[] = [];
-    /** Whether any call is in flight. Derived from the list, so the two cannot drift apart. */
-    get isLoading(): boolean { return this.fetchTrackerList.length > 0; }
+    /**
+     * Whether a call is in flight that the app's global loading shows: any
+     * but a standaloneLoading one. Derived from the list, so the two cannot
+     * drift apart.
+     */
+    get isLoading(): boolean { return this.fetchTrackerList.some(showsInGlobalLoading); }
+
+    /** The lists a lifecycle handler is handed, copies of the calls in flight now. */
+    #fetchListParams(): FetchListParams {
+        return {
+            activeFetchList: [...this.fetchTrackerList],
+            globalFetchList: this.fetchTrackerList.filter(showsInGlobalLoading),
+        };
+    }
 
     #versionExpiredHandler?: NotifyHandler;
     #sessionExpiredHandler?: NotifyHandler;
@@ -312,7 +352,8 @@ class LambderCallerCore<TContract extends LambderApiContractShape = any, TProvid
         const fetchEndedHandler = options?.fetchEndedHandler ?? this.#fetchEndedHandler;
 
         const headers = options?.headers;
-        const fetchTracker: FetchTracker = { apiName };
+        const standaloneLoading = options?.standaloneLoading ?? false;
+        const fetchTracker: FetchTracker = { apiName, standaloneLoading };
         // A key scope sends its current key and is told how the attempt
         // ended, before any handler runs: a handler that throws must not
         // leave an unanswered attempt untold. A plain key is sent as it is.
@@ -336,9 +377,9 @@ class LambderCallerCore<TContract extends LambderApiContractShape = any, TProvid
             if(fetchEndCalled || !fetchEndedHandler) return;
             fetchEndCalled = true;
             await fetchEndedHandler({
-                fetchParams: { apiName, payload, headers },
+                fetchParams: { apiName, payload, headers, standaloneLoading },
                 fetchResult: outcome,
-                activeFetchList: [...this.fetchTrackerList],
+                ...this.#fetchListParams(),
             });
         };
 
@@ -390,8 +431,8 @@ class LambderCallerCore<TContract extends LambderApiContractShape = any, TProvid
             }
             this.fetchTrackerList.push(fetchTracker);
             if(fetchStartedHandler) await fetchStartedHandler({
-                fetchParams: { apiName, payload, headers, },
-                activeFetchList: [...this.fetchTrackerList],
+                fetchParams: { apiName, payload, headers, standaloneLoading },
+                ...this.#fetchListParams(),
             });
             const version = this.#apiVersion;
             // The server's signature for this endpoint, when this build

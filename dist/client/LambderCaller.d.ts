@@ -13,25 +13,36 @@ type NotifyHandler = () => void | Promise<void>;
 /** One call in flight: pushed when it starts, removed when it settles, so the list holds only calls in flight. */
 type FetchTracker = {
     apiName: string;
+    standaloneLoading: boolean;
 };
 type EventHandlerFetchParams = {
     apiName: string;
     payload?: any;
     headers?: Record<string, string>;
+    /** The call's standaloneLoading option; false when it was left out. */
+    standaloneLoading: boolean;
 };
-type FetchStartEventHandler = (params: {
-    fetchParams: EventHandlerFetchParams;
+/**
+ * The calls in flight as a lifecycle handler is told of them, both lists
+ * copies taken as it is called: every call, and the ones the app's global
+ * loading shows (all but the standaloneLoading ones), for a top bar or a
+ * busy flag to follow.
+ */
+type FetchListParams = {
     activeFetchList: FetchTracker[];
+    globalFetchList: FetchTracker[];
+};
+type FetchStartEventHandler = (params: FetchListParams & {
+    fetchParams: EventHandlerFetchParams;
 }) => void | Promise<void>;
 /**
  * Told that a call ended, however it ended, with the outcome apiOutcome()
  * resolves to. TMessage is what the calls it hears can refuse with, as for
  * RefusalHandler.
  */
-type FetchEndEventHandler<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = (params: {
+type FetchEndEventHandler<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = (params: FetchListParams & {
     fetchParams: EventHandlerFetchParams;
     fetchResult: LambderApiOutcome<unknown, TMessage>;
-    activeFetchList: FetchTracker[];
 }) => void | Promise<void>;
 /**
  * Told a failure no other handler takes, with the error to report and the
@@ -66,6 +77,15 @@ export type LambderCallOptions<TMessage extends LambderUncheckedRefusalMessage =
     logListHandler?: LambderLogListHandler;
     fetchStartedHandler?: FetchStartEventHandler;
     fetchEndedHandler?: FetchEndEventHandler<TMessage>;
+    /**
+     * This call's loading stands apart from the app's: its caller shows its
+     * own (a skeleton in place), and the app's global loading leaves it out,
+     * along with whatever waits on it. caller.isLoading does not count it,
+     * and the lifecycle handlers' globalFetchList does not hold it, while
+     * activeFetchList still does. For a call nothing else waits on.
+     * Default: false.
+     */
+    standaloneLoading?: boolean;
 };
 type LambderCallerBaseOptions<TMessage extends LambderUncheckedRefusalMessage = LambderUncheckedRefusalMessage> = {
     /** Must match the server's apiPath. Default: "/api", the server's own default. */
@@ -135,7 +155,11 @@ declare class LambderCallerCore<TContract extends LambderApiContractShape = any,
     #private;
     /** The calls currently in flight, in the order they started. */
     fetchTrackerList: FetchTracker[];
-    /** Whether any call is in flight. Derived from the list, so the two cannot drift apart. */
+    /**
+     * Whether a call is in flight that the app's global loading shows: any
+     * but a standaloneLoading one. Derived from the list, so the two cannot
+     * drift apart.
+     */
     get isLoading(): boolean;
     constructor(options: LambderCallerOptions<TContract, TProvidedGuards>);
     setSessionCookieKey(sessionTokenCookieKey: string, sessionCsrfCookieKey: string): void;

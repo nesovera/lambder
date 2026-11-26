@@ -15,6 +15,12 @@ import { withApiGroupCalls } from '../shared/wire/LambderApiGroupCalls.js';
 import { splitApiName } from '../shared/wire/LambderApiNames.js';
 import { DEFAULT_API_PATH } from '../shared/wire/LambderDefaultApiPath.js';
 /**
+ * Whether the app's global loading shows the call: every call but one whose
+ * loading stands alone (the standaloneLoading call option). The one rule
+ * behind isLoading and the handlers' globalFetchList.
+ */
+const showsInGlobalLoading = (tracker) => !tracker.standaloneLoading;
+/**
  * What keeps a stale bundle from reloading itself forever (see the class):
  * one for the page, shared by every caller it builds, since a reload is the
  * page's. Held per caller, two callers would each run an ask of their own at
@@ -36,8 +42,19 @@ class LambderCallerCore {
     #timeoutMs;
     /** The calls currently in flight, in the order they started. */
     fetchTrackerList = [];
-    /** Whether any call is in flight. Derived from the list, so the two cannot drift apart. */
-    get isLoading() { return this.fetchTrackerList.length > 0; }
+    /**
+     * Whether a call is in flight that the app's global loading shows: any
+     * but a standaloneLoading one. Derived from the list, so the two cannot
+     * drift apart.
+     */
+    get isLoading() { return this.fetchTrackerList.some(showsInGlobalLoading); }
+    /** The lists a lifecycle handler is handed, copies of the calls in flight now. */
+    #fetchListParams() {
+        return {
+            activeFetchList: [...this.fetchTrackerList],
+            globalFetchList: this.fetchTrackerList.filter(showsInGlobalLoading),
+        };
+    }
     #versionExpiredHandler;
     #sessionExpiredHandler;
     // These three hear every endpoint's calls, so they are held at the widest
@@ -121,7 +138,8 @@ class LambderCallerCore {
         const fetchStartedHandler = options?.fetchStartedHandler ?? this.#fetchStartedHandler;
         const fetchEndedHandler = options?.fetchEndedHandler ?? this.#fetchEndedHandler;
         const headers = options?.headers;
-        const fetchTracker = { apiName };
+        const standaloneLoading = options?.standaloneLoading ?? false;
+        const fetchTracker = { apiName, standaloneLoading };
         // A key scope sends its current key and is told how the attempt
         // ended, before any handler runs: a handler that throws must not
         // leave an unanswered attempt untold. A plain key is sent as it is.
@@ -145,9 +163,9 @@ class LambderCallerCore {
                 return;
             fetchEndCalled = true;
             await fetchEndedHandler({
-                fetchParams: { apiName, payload, headers },
+                fetchParams: { apiName, payload, headers, standaloneLoading },
                 fetchResult: outcome,
-                activeFetchList: [...this.fetchTrackerList],
+                ...this.#fetchListParams(),
             });
         };
         let errorHandlerCalled = false;
@@ -198,8 +216,8 @@ class LambderCallerCore {
             this.fetchTrackerList.push(fetchTracker);
             if (fetchStartedHandler)
                 await fetchStartedHandler({
-                    fetchParams: { apiName, payload, headers, },
-                    activeFetchList: [...this.fetchTrackerList],
+                    fetchParams: { apiName, payload, headers, standaloneLoading },
+                    ...this.#fetchListParams(),
                 });
             const version = this.#apiVersion;
             // The server's signature for this endpoint, when this build
